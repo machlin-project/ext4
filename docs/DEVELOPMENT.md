@@ -18,6 +18,26 @@ shared workspace these tools are prepared under the lab's ignored `vendor/`
 directory. Standalone users can point the fixture generator at their installed
 tools. Images, dependency downloads and generated reports are ignored.
 
+Generate the initial image profile with e2fsprogs tools on PATH:
+
+```sh
+python3 tests/generate_fixtures.py
+make test
+make check-style
+```
+
+For an out-of-tree e2fsprogs build, use
+`--tools-root /absolute/path/to/e2fsprogs/build`. To retain previous evidence,
+choose a new `--output` directory; the generator refuses to overwrite images.
+`cmake -S . -B .build -DEXT4_FIXTURES=/absolute/path/to/fixtures` selects that
+directory for tests. ASan/UBSan are enabled by default and can be disabled for
+an adapter build with `-DEXT4_SANITIZERS=OFF`.
+
+The selected Xcode clang compiles a second, optimized freestanding object target
+with the same source and a 2048-byte frame-size check. This is a portability
+check, not a linked or boot-tested kernel artifact. Kernel stack-protector symbols
+remain enabled; XNU supplies them. Core code has no libc I/O or allocation imports.
+
 Development proceeds through a portable reader and image tests, a stock FSKit
 read-only mount, an early read-only kernel adapter, then transactional writes,
 recovery and complete platform integration. Keep cheap userspace tests in the

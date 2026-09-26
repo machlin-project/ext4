@@ -1,0 +1,165 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
+#include "internal.h"
+
+static enum ext4_result
+ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super)
+{
+	uint32_t logarithm;
+	uint32_t revision;
+	uint32_t incompat;
+	uint32_t checksum;
+	uint64_t group_count;
+	uint64_t inode_groups;
+	uint16_t state;
+
+	if (ext4_le16(&super->magic) != EXT4_SUPER_MAGIC) {
+		return EXT4_NOT_EXT4;
+	}
+	revision = ext4_le32(&super->revision);
+	if (revision > EXT4_DYNAMIC_REV || ext4_le32(&super->creator_os) != EXT4_CREATOR_LINUX) {
+		return EXT4_UNSUPPORTED;
+	}
+	fs->info.feature_compat = ext4_le32(&super->feature_compat);
+	fs->info.feature_incompat = incompat = ext4_le32(&super->feature_incompat);
+	fs->info.feature_ro_compat = ext4_le32(&super->feature_ro_compat);
+	fs->metadata_checksum = (fs->info.feature_ro_compat & EXT4_FEATURE_RO_METADATA_CSUM) != 0;
+	if (fs->metadata_checksum) {
+		if (super->checksum_type != EXT4_CHECKSUM_CRC32C) {
+			return EXT4_UNSUPPORTED;
+		}
+		checksum =
+		    ext4_crc32c(UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum));
+		if (checksum != ext4_le32(&super->checksum)) {
+			return EXT4_CORRUPT;
+		}
+	}
+	if (incompat & EXT4_FEATURE_INCOMPAT_RECOVER) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
+	if (incompat & ~EXT4_SUPPORTED_INCOMPAT) {
+		return EXT4_UNSUPPORTED;
+	}
+	/* Cluster allocation changes geometry even for reads. GDT CRC16 requires
+	 * its own verifier and is not silently accepted in its absence. */
+	if ((fs->info.feature_ro_compat & EXT4_FEATURE_RO_BIGALLOC) ||
+	    ((fs->info.feature_ro_compat & EXT4_FEATURE_RO_GDT_CSUM) && !fs->metadata_checksum)) {
+		return EXT4_UNSUPPORTED;
+	}
+	state = ext4_le16(&super->state);
+	if (!(state & EXT4_VALID_FS) || (state & EXT4_ERROR_FS) ||
+	    ext4_le32(&super->last_orphan) != 0) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
+	logarithm = ext4_le32(&super->log_block_size);
+	if (logarithm > 6 || ext4_le32(&super->log_cluster_size) != logarithm) {
+		return EXT4_UNSUPPORTED;
+	}
+	fs->info.block_size = EXT4_MIN_BLOCK_SIZE << logarithm;
+	fs->info.blocks = ext4_le32(&super->blocks_count_lo);
+	fs->info.free_blocks = ext4_le32(&super->free_blocks_lo);
+	if (incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
+		fs->info.blocks |= (uint64_t)ext4_le32(&super->blocks_count_hi) << 32;
+		fs->info.free_blocks |= (uint64_t)ext4_le32(&super->free_blocks_hi) << 32;
+	}
+	fs->info.inodes = ext4_le32(&super->inodes_count);
+	fs->info.free_inodes = ext4_le32(&super->free_inodes);
+	fs->first_data_block = ext4_le32(&super->first_data_block);
+	fs->blocks_per_group = ext4_le32(&super->blocks_per_group);
+	fs->inodes_per_group = ext4_le32(&super->inodes_per_group);
+	fs->inode_size = revision == 0 ? EXT4_INODE_BASE_SIZE : ext4_le16(&super->inode_size);
+	fs->descriptor_size = (incompat & EXT4_FEATURE_INCOMPAT_64BIT)
+	    ? ext4_le16(&super->descriptor_size)
+	    : EXT4_GROUP_BASE_SIZE;
+	if (fs->info.blocks <= fs->first_data_block ||
+	    fs->info.blocks > fs->environment.size_bytes / fs->info.block_size ||
+	    fs->first_data_block != (fs->info.block_size == EXT4_MIN_BLOCK_SIZE ? 1U : 0U) ||
+	    fs->blocks_per_group == 0 || fs->blocks_per_group > fs->info.block_size * 8U ||
+	    fs->inodes_per_group == 0 || fs->inodes_per_group > fs->info.block_size * 8U ||
+	    fs->info.inodes < EXT4_ROOT_INODE || fs->info.free_inodes > fs->info.inodes ||
+	    fs->info.free_blocks > fs->info.blocks || fs->inode_size < EXT4_INODE_BASE_SIZE ||
+	    fs->inode_size > fs->info.block_size || (fs->inode_size & (fs->inode_size - 1)) != 0 ||
+	    fs->descriptor_size < EXT4_GROUP_BASE_SIZE ||
+	    fs->descriptor_size > EXT4_GROUP_MAX_SIZE ||
+	    fs->descriptor_size > fs->info.block_size ||
+	    (fs->descriptor_size & (fs->descriptor_size - 1)) != 0 ||
+	    ((incompat & EXT4_FEATURE_INCOMPAT_64BIT) &&
+		fs->descriptor_size < EXT4_GROUP_64_SIZE)) {
+		return EXT4_CORRUPT;
+	}
+	group_count = (fs->info.blocks - fs->first_data_block - 1) / fs->blocks_per_group + 1;
+	inode_groups = ((uint64_t)fs->info.inodes - 1) / fs->inodes_per_group + 1;
+	if (group_count > UINT32_MAX || group_count != inode_groups ||
+	    group_count * fs->descriptor_size >
+		(fs->info.blocks - fs->first_data_block - 1) * fs->info.block_size) {
+		return EXT4_CORRUPT;
+	}
+	fs->info.groups = (uint32_t)group_count;
+	ext4_copy(fs->info.uuid, super->uuid, sizeof(fs->info.uuid));
+	ext4_copy(fs->info.volume_name, super->volume_name, EXT4_VOLUME_NAME_SIZE);
+	fs->info.volume_name[EXT4_VOLUME_NAME_SIZE] = '\0';
+	fs->checksum_seed = (incompat & EXT4_FEATURE_INCOMPAT_CSUM_SEED)
+	    ? ext4_le32(&super->checksum_seed)
+	    : ext4_crc32c(UINT32_MAX, super->uuid, sizeof(super->uuid));
+	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_mount(const struct ext4_environment *environment, struct ext4_fs **result)
+{
+	struct ext4_super_disk super;
+	struct ext4_inode root;
+	struct ext4_fs *fs;
+	enum ext4_result error;
+
+	if (result == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	*result = NULL;
+	if (environment == NULL || environment->read == NULL || environment->allocate == NULL ||
+	    environment->release == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if (environment->size_bytes < EXT4_SUPER_OFFSET + EXT4_SUPER_SIZE) {
+		return EXT4_NOT_EXT4;
+	}
+	fs = environment->allocate(environment->context, sizeof(*fs));
+	if (fs == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	ext4_zero(fs, sizeof(*fs));
+	fs->environment = *environment;
+	error = ext4_device_read(fs, EXT4_SUPER_OFFSET, &super, sizeof(super));
+	if (error == EXT4_OK) {
+		error = ext4_super_validate(fs, &super);
+	}
+	if (error == EXT4_OK) {
+		error = ext4_get_inode(fs, EXT4_ROOT_INODE, &root);
+	}
+	if (error == EXT4_OK && (root.mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
+		error = EXT4_CORRUPT;
+	}
+	if (error != EXT4_OK) {
+		ext4_unmount(fs);
+		return error;
+	}
+	*result = fs;
+	return EXT4_OK;
+}
+
+void
+ext4_unmount(struct ext4_fs *fs)
+{
+	struct ext4_environment environment;
+
+	if (fs == NULL) {
+		return;
+	}
+	environment = fs->environment;
+	environment.release(environment.context, fs, sizeof(*fs));
+}
+
+void
+ext4_get_info(const struct ext4_fs *fs, struct ext4_info *info)
+{
+	*info = fs->info;
+}

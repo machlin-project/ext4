@@ -10,8 +10,12 @@ the Machlin lab owns combined kernel and VM acceptance.
 
 ## Status
 
-Implementation has started. No mounted filesystem, writable filesystem, kernel
-extension or Linux capability contract is accepted yet. Read
+The portable read-only core passes image tests for 1 KiB and 4 KiB filesystems,
+including checksummed metadata, extent trees, indexed directories, links and
+sparse files. Malformed-image and mount failure tests pass under ASan/UBSan.
+An optimized freestanding compilation checks a 2 KiB stack-frame budget.
+No mounted filesystem, writable filesystem, kernel extension or Linux capability
+contract is accepted yet. Read
 [the acceptance matrix](docs/ACCEPTANCE.md) before using an image with this code.
 Generated disk images and reports are not source artifacts.
 
