@@ -19,6 +19,44 @@ The exact guest device must be verified before mounting. Run `ext4-mounted-test`
 against that mount and verify clean unmount and unchanged image bytes afterward.
 These installed steps have not yet passed; signing is deferred.
 
+## Kernel extension
+
+`make kext` builds the same C core plus `adapters/xnu/` using the selected Xcode
+kernel headers. Outputs live in `artifacts/kext/arm64e/`, including the unsigned
+`MachlinExt4.kext` and a read-only `mount_machlin_ext4 DEVICE MOUNTPOINT` helper.
+Use `python3 scripts/build_kext.py --arch x86_64` for the Intel compilation check.
+Neither command installs or loads the extension.
+
+Loading and mounting must use a separate disposable kernel-development guest,
+with its actual kernel and device identified in the report. The stock FSKit
+guest remains separate. The lab's ordinary collection builder validates the
+stock kext inventory; do not alter that invariant or silently inject this kext
+into existing acceptance artifacts. The read-only arm64e profile has separate
+custom-kernel evidence in the acceptance document.
+
+After verifying the loaded module and exact disposable device, use the built
+`mount_machlin_ext4 DEVICE MOUNTPOINT`, then run `ext4-mounted-test MOUNTPOINT`
+as an ordinary user. Unmount normally and compare the raw image bytes. The
+privileged `ext4-mounted-lifetime-test MOUNTPOINT` additionally checks busy
+unmount with a retained descriptor or mapping; it unmounts the volume on success.
+Run these tools only against the dedicated fixture mounts. Device identifiers
+can change on every guest boot and must not be inferred from an earlier report.
+
+## Metadata fuzzing
+
+`EXT4_BUILD_FUZZER=ON` builds `ext4-image-fuzzer` using Clang's libFuzzer runtime,
+ASan and UBSan. Use an LLVM installation that includes libFuzzer; the selected
+Xcode installation currently lacks `libclang_rt.fuzzer_osx.a`. A separate build
+directory under `artifacts/` keeps this compiler isolated from the driver builds.
+
+Pass `--image=ABSOLUTE_PATH` to a generated `ext4-4k.img` and a corpus directory.
+The fuzzer maps the reference image read-only. Its small inputs describe in-memory
+metadata mutations and optional checksum repair, allowing malformed structure
+tests to reach checks after CRC validation. Each iteration limits resource reads
+and allocations. Start with a single worker, `-max_total_time=60 -timeout=5
+-max_len=512 -rss_limit_mb=512`, and preserve findings under ignored artifacts.
+This is a bounded mutation test, not complete disk-format or concurrency coverage.
+
 Use the selected Xcode C compiler and formatter on macOS. The portable core and
 image tests must also compile with Clang on Linux. FSKit builds target a declared
 macOS baseline; do not use newer SDK APIs without availability handling.
@@ -51,6 +89,13 @@ choose a new `--output` directory; the generator refuses to overwrite images.
 `cmake -S . -B .build -DEXT4_FIXTURES=/absolute/path/to/fixtures` selects that
 directory for tests. ASan/UBSan are enabled by default and can be disabled for
 an adapter build with `-DEXT4_SANITIZERS=OFF`.
+
+For the extended read profile, add `--extended` to the fixture generator and
+configure `-DEXT4_EXTENDED_TESTS=ON` along with the generated directory in
+`EXT4_FIXTURES`. This requires all eleven images rather than skipping absent
+variations. It covers block sizes from 1 through 64 KiB, 32-bit group descriptors
+with indirect mapping, metadata without checksums and an explicit checksum seed.
+The 64 KiB image omits the journal to keep its total size at 64 MiB.
 
 The selected Xcode clang compiles a second, optimized freestanding object target
 with the same source and a 2048-byte frame-size check. This is a portability

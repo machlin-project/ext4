@@ -33,6 +33,23 @@ and cached metadata paths must not access the same ranges incoherently. XNU file
 data uses the native UBC owner; the core must not introduce another file-page
 cache. Journal buffers and metadata transaction snapshots have explicit ownership.
 
+The initial kernel reader uses a fixed device-sector buffer-cache key for
+metadata. Regular file reads and page-in use `cluster_read`/`cluster_pagein`,
+with validated byte mappings from the C core and `buf_strategy` device dispatch.
+The mapping API may include padding up to the last filesystem block; the native
+page-cache caller owns EOF zeroing. Read-only mappings remain immutable for the
+mount lifetime. Writable support must replace that assumption with explicit
+mapping lifetime protection coordinated with truncate, allocation and UBC.
+The adapter registers local mount arguments so XNU resolves, authorizes, opens
+and closes the backing block device at its existing mount boundary.
+
+The kernel inode index serializes vnode creation independently of its lookup
+lock, so vnode creation can reclaim another inode without recursively taking
+the index lock. Cached vnode references are checked with XNU's vnode identity
+before use. FSKit uses a weak item identity table, retaining one item while any
+concurrent framework operation owns it. Neither identity table is a file-data
+cache.
+
 ## Linux operation policy
 
 The independent driver has no mandatory imports from LXNU. A separate integration

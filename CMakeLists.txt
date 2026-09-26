@@ -5,6 +5,8 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 option(EXT4_SANITIZERS "Instrument userspace code with ASan and UBSan" ON)
+option(EXT4_BUILD_FUZZER "Build the bounded metadata mutation fuzzer with Clang" OFF)
+option(EXT4_EXTENDED_TESTS "Require the extended generated image profile" OFF)
 
 set(EXT4_CORE_SOURCES
     core/support.c core/mount.c core/inode.c core/read.c core/directory.c)
@@ -41,10 +43,14 @@ add_executable(ext4-reader-test tests/reader.c)
 target_link_libraries(ext4-reader-test PRIVATE ext4_posix)
 target_compile_options(ext4-reader-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
 set(EXT4_FIXTURES "${CMAKE_SOURCE_DIR}/artifacts/fixtures" CACHE PATH "Generated fixture directory")
-add_test(NAME image-reader COMMAND ext4-reader-test
-    "${EXT4_FIXTURES}/ext4-4k.img"
-    "${EXT4_FIXTURES}/ext4-1k.img"
-    "${EXT4_FIXTURES}/ext4-indexed.img")
+set(EXT4_READER_IMAGES ext4-4k.img ext4-1k.img ext4-indexed.img)
+if(EXT4_EXTENDED_TESTS)
+    list(APPEND EXT4_READER_IMAGES
+        ext4-2k.img ext4-8k.img ext4-16k.img ext4-32k.img ext4-64k.img
+        ext4-indirect-1k.img ext4-no-checksum.img ext4-checksum-seed.img)
+endif()
+list(TRANSFORM EXT4_READER_IMAGES PREPEND "${EXT4_FIXTURES}/")
+add_test(NAME image-reader COMMAND ext4-reader-test ${EXT4_READER_IMAGES})
 
 add_executable(ext4-corruption-test tests/corruption.c)
 target_include_directories(ext4-corruption-test PRIVATE core)
@@ -56,3 +62,18 @@ find_package(Threads REQUIRED)
 add_executable(ext4-mounted-test tests/mounted.c)
 target_link_libraries(ext4-mounted-test PRIVATE Threads::Threads)
 target_compile_options(ext4-mounted-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
+
+if(APPLE)
+    add_executable(ext4-mounted-lifetime-test tests/mounted_lifetime.c)
+    target_compile_options(ext4-mounted-lifetime-test PRIVATE
+        -Wall -Wextra -Werror -Wdeclaration-after-statement)
+endif()
+
+if(EXT4_BUILD_FUZZER)
+    add_executable(ext4-image-fuzzer tests/fuzz_image.c ${EXT4_CORE_SOURCES})
+    target_include_directories(ext4-image-fuzzer PRIVATE core include)
+    target_compile_options(ext4-image-fuzzer PRIVATE
+        -Wall -Wextra -Werror -Wdeclaration-after-statement
+        -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer)
+    target_link_options(ext4-image-fuzzer PRIVATE -fsanitize=fuzzer,address,undefined)
+endif()

@@ -1,8 +1,11 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #define _DARWIN_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -105,6 +108,7 @@ check_mounted(const char *path)
 	uint8_t *sparse = NULL;
 	char link[128];
 	char bytes[64];
+	char directory_name[NAME_MAX + 1];
 	char trailing;
 	unsigned int count = 0;
 	unsigned int number;
@@ -112,6 +116,9 @@ check_mounted(const char *path)
 	unsigned int joined = 0;
 	size_t index;
 	size_t extent;
+	size_t mapping_length = 0;
+	long page_size;
+	long position;
 	uint8_t expected;
 	int root = -1;
 	int fd = -1;
@@ -125,6 +132,23 @@ check_mounted(const char *path)
 	CHECK(fstatat(root, "hello-hardlink", &hardlink, 0) == 0);
 	CHECK(S_ISREG(hello.st_mode) && hello.st_size == 13);
 	CHECK(hello.st_ino == hardlink.st_ino && hello.st_nlink == 2);
+	CHECK(fstatat(root, "metadata.txt", &metadata, 0) == 0);
+	CHECK(S_ISREG(metadata.st_mode) && (metadata.st_mode & 07777) == 0640);
+	CHECK(metadata.st_uid == 70001 && metadata.st_gid == 80002);
+#ifdef __APPLE__
+	CHECK(metadata.st_atimespec.tv_sec == -1 && metadata.st_atimespec.tv_nsec == 123456789);
+	CHECK(metadata.st_mtimespec.tv_sec == INT64_C(2147483648) &&
+	    metadata.st_mtimespec.tv_nsec == 987654321);
+	CHECK(metadata.st_ctimespec.tv_sec == INT64_C(4294967296) &&
+	    metadata.st_ctimespec.tv_nsec == 42);
+	CHECK(metadata.st_birthtimespec.tv_sec == 1700000000 &&
+	    metadata.st_birthtimespec.tv_nsec == 999999999);
+#else
+	CHECK(metadata.st_atim.tv_sec == -1 && metadata.st_atim.tv_nsec == 123456789);
+	CHECK(metadata.st_mtim.tv_sec == INT64_C(2147483648) &&
+	    metadata.st_mtim.tv_nsec == 987654321);
+	CHECK(metadata.st_ctim.tv_sec == INT64_C(4294967296) && metadata.st_ctim.tv_nsec == 42);
+#endif
 	fd = openat(root, "hello-link", O_RDONLY);
 	CHECK(fd >= 0);
 	CHECK(read(fd, bytes, sizeof(bytes)) == 13);
@@ -151,12 +175,28 @@ check_mounted(const char *path)
 	CHECK(close(fd) == 0);
 	fd = openat(root, "payload.bin", O_RDONLY);
 	CHECK(fd >= 0);
-	mapping = mmap(NULL, PAYLOAD_SIZE, PROT_READ, MAP_PRIVATE, fd, 0);
+	page_size = sysconf(_SC_PAGESIZE);
+	CHECK(page_size > 0);
+	mapping_length =
+	    (PAYLOAD_SIZE + (size_t)page_size - 1) / (size_t)page_size * (size_t)page_size;
+	mapping = mmap(NULL, mapping_length, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
 	CHECK(mapping != MAP_FAILED);
+	CHECK(close(fd) == 0);
+	fd = -1;
 	for (index = 0; index < PAYLOAD_SIZE; index++) {
 		CHECK(mapping[index] == payload_byte(index));
 	}
-	CHECK(munmap(mapping, PAYLOAD_SIZE) == 0);
+	for (index = PAYLOAD_SIZE; index < mapping_length; index++) {
+		CHECK(mapping[index] == 0);
+	}
+	mapping[0] ^= 0xff;
+	mapping[PAYLOAD_SIZE - 1] ^= 0xff;
+	fd = openat(root, "payload.bin", O_RDONLY);
+	CHECK(fd >= 0);
+	CHECK(pread(fd, bytes, 1, 0) == 1 && (uint8_t)bytes[0] == payload_byte(0));
+	CHECK(pread(fd, bytes, 1, PAYLOAD_SIZE - 1) == 1 &&
+	    (uint8_t)bytes[0] == payload_byte(PAYLOAD_SIZE - 1));
+	CHECK(munmap(mapping, mapping_length) == 0);
 	mapping = MAP_FAILED;
 	CHECK(close(fd) == 0);
 	fd = openat(root, "sparse.bin", O_RDONLY);
@@ -189,6 +229,16 @@ check_mounted(const char *path)
 		count++;
 	}
 	CHECK(errno == 0 && count == DIRECTORY_COUNT);
+	rewinddir(directory);
+	CHECK(readdir(directory) != NULL);
+	position = telldir(directory);
+	CHECK(position >= 0);
+	entry = readdir(directory);
+	CHECK(entry != NULL && strlen(entry->d_name) < sizeof(directory_name));
+	strcpy(directory_name, entry->d_name);
+	seekdir(directory, position);
+	entry = readdir(directory);
+	CHECK(entry != NULL && strcmp(entry->d_name, directory_name) == 0);
 	CHECK(closedir(directory) == 0);
 	directory = NULL;
 	for (index = 0; index < WORKER_COUNT; index++) {
@@ -227,7 +277,7 @@ out:
 		close(root);
 	}
 	if (mapping != MAP_FAILED) {
-		munmap(mapping, PAYLOAD_SIZE);
+		munmap(mapping, mapping_length);
 	}
 	free(sparse);
 }

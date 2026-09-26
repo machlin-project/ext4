@@ -1,6 +1,41 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
 
+enum ext4_result
+ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, size_t length,
+    struct ext4_mapping *mapping)
+{
+	uint64_t block;
+	uint64_t logical;
+	size_t within;
+	enum ext4_result error;
+
+	if (fs == NULL || inode == NULL || mapping == NULL || length == 0 ||
+	    (inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if (offset >= inode->size) {
+		return EXT4_NOT_FOUND;
+	}
+	logical = offset / fs->info.block_size;
+	if (logical > UINT32_MAX) {
+		return EXT4_RANGE;
+	}
+	error = ext4_map_block(fs, inode, (uint32_t)logical, &block);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	within = (size_t)(offset % fs->info.block_size);
+	mapping->hole = block == 0;
+	mapping->device_offset = block == 0 ? 0 : block * fs->info.block_size + within;
+	mapping->length = fs->info.block_size - within;
+	if (mapping->length > length) {
+		mapping->length = length;
+	}
+	/* The mapped block includes EOF padding for native page-cache I/O. */
+	return EXT4_OK;
+}
+
 static enum ext4_result
 ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
     uint8_t *scratch, uint64_t *physical)

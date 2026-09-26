@@ -105,12 +105,21 @@ struct ext4_dir_entry {
 	uint8_t name[EXT4_NAME_MAX + 1];
 };
 
+/* Immutable read mapping; an adapter must not reuse it across future mutations. */
+struct ext4_mapping {
+	uint64_t device_offset;
+	size_t length;
+	bool hole;
+};
+
 enum ext4_result ext4_mount(const struct ext4_environment *environment, struct ext4_fs **result);
 void ext4_unmount(struct ext4_fs *fs);
 void ext4_get_info(const struct ext4_fs *fs, struct ext4_info *info);
 enum ext4_result ext4_get_inode(struct ext4_fs *fs, uint32_t number, struct ext4_inode *inode);
 enum ext4_result ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset,
     void *buffer, size_t length, size_t *completed);
+enum ext4_result ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset,
+    size_t length, struct ext4_mapping *mapping);
 /* EXT4_NOT_FOUND means end-of-directory; cookie is an opaque resumable offset. */
 enum ext4_result ext4_next_dir(struct ext4_fs *fs, const struct ext4_inode *directory,
     uint64_t *cookie, struct ext4_dir_entry *entry);

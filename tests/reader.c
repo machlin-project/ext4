@@ -61,6 +61,45 @@ out:
 }
 
 static void
+check_mappings(struct ext4_fs *fs, struct ext4_posix_image *image, const struct ext4_inode *inode,
+    const uint8_t *expected, size_t size)
+{
+	struct ext4_mapping mapping;
+	uint8_t buffer[8193];
+	size_t offset;
+	size_t start;
+	size_t index;
+	size_t compare;
+
+	/* Exercise native block mappings independently through the raw resource. */
+	for (start = 0; start <= 37; start += 37) {
+		for (offset = start; offset < size; offset += mapping.length) {
+			CHECK(
+			    ext4_map_read(fs, inode, offset, sizeof(buffer), &mapping) == EXT4_OK);
+			CHECK(mapping.length > 0 && mapping.length <= sizeof(buffer));
+			compare = mapping.length;
+			if (compare > size - offset) {
+				compare = size - offset;
+			}
+			if (mapping.hole) {
+				for (index = 0; index < compare; index++) {
+					CHECK(expected[offset + index] == 0);
+				}
+			} else {
+				CHECK(image->environment.read(image, mapping.device_offset, buffer,
+					  mapping.length) == EXT4_OK);
+				CHECK(memcmp(buffer, expected + offset, compare) == 0);
+			}
+		}
+	}
+	CHECK(ext4_map_read(fs, inode, size, 1, &mapping) == EXT4_NOT_FOUND);
+	CHECK(ext4_map_read(fs, inode, UINT64_MAX, 1, &mapping) == EXT4_NOT_FOUND);
+	CHECK(ext4_map_read(fs, inode, 0, 0, &mapping) == EXT4_INVALID_ARGUMENT);
+out:
+	return;
+}
+
+static void
 check_reader(const char *path)
 {
 	struct ext4_posix_image image;
@@ -90,7 +129,8 @@ check_reader(const char *path)
 	CHECK(error == EXT4_OK);
 	ext4_get_info(fs, &info);
 	CHECK(info.blocks * info.block_size == 64U * 1024U * 1024U);
-	CHECK(info.block_size == 1024 || info.block_size == 4096);
+	CHECK(info.block_size >= 1024 && info.block_size <= 65536 &&
+	    (info.block_size & (info.block_size - 1)) == 0);
 	CHECK(ext4_get_inode(fs, EXT4_ROOT_INODE, &root) == EXT4_OK);
 	CHECK(lookup(fs, &root, "hello.txt", &inode) == EXT4_OK);
 	check_contents(fs, &inode, (const uint8_t *)"Machlin ext4\n", 13);
@@ -124,12 +164,14 @@ check_reader(const char *path)
 		expected[index] = (uint8_t)((index * 17 + 23) & 255U);
 	}
 	check_contents(fs, &inode, expected, 200000);
+	check_mappings(fs, &image, &inode, expected, 200000);
 	CHECK(lookup(fs, &root, "sparse.bin", &inode) == EXT4_OK);
 	memset(expected, 0, 2U * 1024U * 1024U);
 	for (extent_index = 0; extent_index < 12; extent_index++) {
 		memset(expected + extent_index * 65536, (int)extent_index + 1, 4096);
 	}
 	check_contents(fs, &inode, expected, 2U * 1024U * 1024U);
+	check_mappings(fs, &image, &inode, expected, 2U * 1024U * 1024U);
 	CHECK(lookup(fs, &root, "many", &directory) == EXT4_OK);
 	cookie = 0;
 	while ((error = ext4_next_dir(fs, &directory, &cookie, &entry)) == EXT4_OK) {

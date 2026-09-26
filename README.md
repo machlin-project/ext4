@@ -10,14 +10,17 @@ the Machlin lab owns combined kernel and VM acceptance.
 
 ## Status
 
-The portable read-only core passes image tests for 1 KiB and 4 KiB filesystems,
-including checksummed metadata, extent trees, indexed directories, links and
-sparse files. Malformed-image and mount failure tests pass under ASan/UBSan.
+The portable read-only core passes eleven image profiles with 1 through 64 KiB
+blocks, extent and indirect mapping, checksum variations, indexed directories,
+links and sparse files. Malformed-image and mount failure tests pass under ASan/UBSan.
 An optimized freestanding compilation checks a 2 KiB stack-frame budget.
 The read-only FSKit adapter builds for macOS 26.4. Its installed mount tests
-await an Apple signing profile with the FSKit Module capability.
-No mounted filesystem, writable filesystem, kernel extension or Linux capability
-contract is accepted yet. Read
+await an Apple signing profile with the FSKit Module capability. The XNU adapter
+also builds as an unsigned arm64e or x86_64 kext. The arm64e kext passes mounted
+read-only tests for all eleven profiles in a dedicated custom-kernel VM, including
+mmap, concurrent reads, repeated mounts and open-file/mapping lifetime.
+Writable operations, journal recovery, ACLs/xattrs and Linux capability policy
+remain unimplemented. The FSKit adapter has not been mounted. Read
 [the acceptance matrix](docs/ACCEPTANCE.md) before using an image with this code.
 Generated disk images and reports are not source artifacts.
 

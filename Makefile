@@ -1,7 +1,7 @@
 PYTHON ?= python3
 BUILD_DIR ?= .build
 
-.PHONY: all configure build test fskit format check-style clean
+.PHONY: all configure build test fskit kext format check-style clean
 
 all: build
 
@@ -16,6 +16,9 @@ test: build
 
 fskit:
 	$(PYTHON) scripts/build_fskit.py
+
+kext:
+	$(PYTHON) scripts/build_kext.py
 
 format:
 	$(PYTHON) scripts/format.py

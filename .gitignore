@@ -6,3 +6,5 @@
 *.xcodeproj/
 *.xcuserstate
 xcuserdata/
+__pycache__/
+*.py[cod]

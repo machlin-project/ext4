@@ -60,6 +60,10 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_OUTPUT,
         help=f"output directory (default: {DEFAULT_OUTPUT})",
     )
+    parser.add_argument(
+        "--extended", action="store_true",
+        help="also generate block-size, indirect-map and checksum-feature variations",
+    )
     return parser.parse_args()
 
 
@@ -227,7 +231,9 @@ def create_image(
     block_size: int,
     tools: dict[str, Path],
     versions: dict[str, str],
+    features: set[str] | None = None,
 ) -> None:
+    selected_features = EXPECTED_FEATURES if features is None else features
     blocks = (64 * 1024 * 1024) // block_size
     run_logged(
         output,
@@ -240,7 +246,7 @@ def create_image(
             "-b",
             str(block_size),
             "-O",
-            f"none,{FEATURE_LIST}",
+            "none," + ",".join(sorted(selected_features)),
             "-U",
             UUID,
             "-E",
@@ -343,16 +349,39 @@ def main() -> None:
         versions,
     )
 
+    expected_by_image = {
+        image_4k: EXPECTED_FEATURES,
+        image_1k: EXPECTED_FEATURES,
+        indexed_image: EXPECTED_FEATURES,
+    }
+    if args.extended:
+        profiles = [
+            ("ext4-2k", 2048, EXPECTED_FEATURES),
+            ("ext4-8k", 8192, EXPECTED_FEATURES),
+            ("ext4-16k", 16384, EXPECTED_FEATURES),
+            ("ext4-32k", 32768, EXPECTED_FEATURES),
+            ("ext4-64k", 65536, EXPECTED_FEATURES - {"has_journal"}),
+            ("ext4-indirect-1k", 1024, EXPECTED_FEATURES - {"extent", "64bit"}),
+            ("ext4-no-checksum", 4096, EXPECTED_FEATURES - {"metadata_csum"}),
+            ("ext4-checksum-seed", 4096, EXPECTED_FEATURES | {"metadata_csum_seed"}),
+        ]
+        for name, block_size, features in profiles:
+            image = output / (name + ".img")
+            if image.exists():
+                raise FileExistsError(f"Refusing to overwrite existing fixture image: {image}")
+            create_image(output, root, image, block_size, tools, versions, features)
+            expected_by_image[image] = features
+
     report_lines = []
     feature_mismatch = False
-    for image in (image_4k, image_1k, indexed_image):
+    for image, expected_features in expected_by_image.items():
         actual, line = record_features(output, image, tools, versions)
-        extra = sorted(actual - EXPECTED_FEATURES)
-        missing = sorted(EXPECTED_FEATURES - actual)
+        extra = sorted(actual - expected_features)
+        missing = sorted(expected_features - actual)
         report_lines.append(f"{image.name}: {line}")
         report_lines.append(f"  extra: {', '.join(extra) if extra else '(none)'}")
         report_lines.append(f"  missing: {', '.join(missing) if missing else '(none)'}")
-        feature_mismatch |= actual != EXPECTED_FEATURES
+        feature_mismatch |= actual != expected_features
     with (output / "features.txt").open("x", encoding="utf-8") as report:
         report.write("\n".join(report_lines) + "\n")
     if feature_mismatch:
