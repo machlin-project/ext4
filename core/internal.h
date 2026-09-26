@@ -14,7 +14,11 @@ struct ext4_fs {
 	uint16_t inode_size;
 	uint16_t descriptor_size;
 	bool metadata_checksum;
+	bool writer_attached;
 };
+
+enum ext4_result ext4_load(
+    const struct ext4_environment *environment, bool recovery, struct ext4_fs **result);
 
 uint16_t ext4_le16(const struct ext4_le16 *value);
 uint32_t ext4_le32(const struct ext4_le32 *value);

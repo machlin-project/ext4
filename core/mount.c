@@ -2,7 +2,7 @@
 #include "internal.h"
 
 static enum ext4_result
-ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super)
+ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, bool recovery)
 {
 	uint32_t logarithm;
 	uint32_t revision;
@@ -33,10 +33,10 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super)
 			return EXT4_CORRUPT;
 		}
 	}
-	if (incompat & EXT4_FEATURE_INCOMPAT_RECOVER) {
+	if (!recovery && (incompat & EXT4_FEATURE_INCOMPAT_RECOVER)) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
-	if (incompat & ~EXT4_SUPPORTED_INCOMPAT) {
+	if (incompat & ~(EXT4_SUPPORTED_INCOMPAT | EXT4_FEATURE_INCOMPAT_RECOVER)) {
 		return EXT4_UNSUPPORTED;
 	}
 	/* Cluster allocation changes geometry even for reads. GDT CRC16 requires
@@ -46,8 +46,8 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super)
 		return EXT4_UNSUPPORTED;
 	}
 	state = ext4_le16(&super->state);
-	if (!(state & EXT4_VALID_FS) || (state & EXT4_ERROR_FS) ||
-	    ext4_le32(&super->last_orphan) != 0) {
+	if ((state & EXT4_ERROR_FS) ||
+	    (!recovery && (!(state & EXT4_VALID_FS) || ext4_le32(&super->last_orphan) != 0))) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
 	logarithm = ext4_le32(&super->log_block_size);
@@ -104,7 +104,7 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super)
 }
 
 enum ext4_result
-ext4_mount(const struct ext4_environment *environment, struct ext4_fs **result)
+ext4_load(const struct ext4_environment *environment, bool recovery, struct ext4_fs **result)
 {
 	struct ext4_super_disk super;
 	struct ext4_inode root;
@@ -130,13 +130,14 @@ ext4_mount(const struct ext4_environment *environment, struct ext4_fs **result)
 	fs->environment = *environment;
 	error = ext4_device_read(fs, EXT4_SUPER_OFFSET, &super, sizeof(super));
 	if (error == EXT4_OK) {
-		error = ext4_super_validate(fs, &super);
+		error = ext4_super_validate(fs, &super, recovery);
 	}
-	if (error == EXT4_OK) {
+	/* During recovery the home copy of the root may be partially checkpointed. */
+	if (error == EXT4_OK && !recovery) {
 		error = ext4_get_inode(fs, EXT4_ROOT_INODE, &root);
-	}
-	if (error == EXT4_OK && (root.mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
-		error = EXT4_CORRUPT;
+		if (error == EXT4_OK && (root.mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
+			error = EXT4_CORRUPT;
+		}
 	}
 	if (error != EXT4_OK) {
 		ext4_unmount(fs);
@@ -144,6 +145,12 @@ ext4_mount(const struct ext4_environment *environment, struct ext4_fs **result)
 	}
 	*result = fs;
 	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_mount(const struct ext4_environment *environment, struct ext4_fs **result)
+{
+	return ext4_load(environment, false, result);
 }
 
 void

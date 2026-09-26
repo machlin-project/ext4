@@ -60,6 +60,27 @@ struct ext4_environment {
 	void (*release)(void *context, void *allocation, size_t size);
 };
 
+/* A separate capability: supplying read callbacks never authorizes writes.
+ * write completes exactly length bytes; errors may have changed any part of the
+ * requested range. flush must persist every preceding successful write through
+ * all volatile caches before returning success. Read-after-write must be coherent.
+ * The caller exclusively owns the resource throughout recovery or mutation.
+ * A failed write/flush makes the outcome uncertain: stop mutations and reopen
+ * through recovery. Checksummed control-block damage requires offline repair. */
+struct ext4_write_environment {
+	void *context;
+	enum ext4_result (*write)(
+	    void *context, uint64_t offset, const void *buffer, size_t length);
+	enum ext4_result (*flush)(void *context);
+};
+
+struct ext4_recovery_report {
+	uint32_t transactions;
+	uint32_t replayed_blocks;
+	uint32_t revoked_blocks;
+	bool discarded_tail;
+};
+
 struct ext4_info {
 	uint64_t blocks;
 	uint64_t free_blocks;
@@ -113,6 +134,10 @@ struct ext4_mapping {
 };
 
 enum ext4_result ext4_mount(const struct ext4_environment *environment, struct ext4_fs **result);
+/* Offline recovery only. A read-only mount never invokes this operation.
+ * On error the resource remains unmounted and must not be used for mutations. */
+enum ext4_result ext4_recover(const struct ext4_environment *environment,
+    const struct ext4_write_environment *writer, struct ext4_recovery_report *report);
 void ext4_unmount(struct ext4_fs *fs);
 void ext4_get_info(const struct ext4_fs *fs, struct ext4_info *info);
 enum ext4_result ext4_get_inode(struct ext4_fs *fs, uint32_t number, struct ext4_inode *inode);

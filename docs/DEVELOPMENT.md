@@ -57,6 +57,52 @@ and allocations. Start with a single worker, `-max_total_time=60 -timeout=5
 -max_len=512 -rss_limit_mb=512`, and preserve findings under ignored artifacts.
 This is a bounded mutation test, not complete disk-format or concurrency coverage.
 
+## Journal tests and offline recovery
+
+`make test` also runs the journal durability suites for the selected 1 KiB and
+4 KiB images. See [TESTING.md](TESTING.md) for the fault and interoperability
+matrix. To retain pending journal images for an independent replayer, create a
+new empty export directory and pass it as the second argument:
+
+```sh
+mkdir artifacts/journal-writer-exports
+.build/ext4-journal-test artifacts/fixtures/ext4-4k.img artifacts/journal-writer-exports
+.build/ext4-journal-test artifacts/fixtures/ext4-1k.img artifacts/journal-writer-exports
+```
+
+The test opens its input read-only and exports ten independent images and their
+block/feature metadata. Export files must not already exist. The offline utility
+`.build/ext4-recover --write IMAGE` explicitly opens an unmounted regular image for
+recovery, obtains an advisory exclusive lock, and uses `F_FULLFSYNC` on macOS or
+`fsync` on Linux for durability. Use independent copies for destructive tests;
+the caller must exclude mounted or other noncooperating users of the image.
+
+Generate and check independent logs using the same prepared e2fsprogs build:
+
+```sh
+python3 tests/generate_journal_fixtures.py --tools-root /path/to/e2fsprogs/build \
+  --source artifacts/fixtures/ext4-4k.img --output artifacts/journal-fixtures
+python3 tests/check_journal_recovery.py --fixtures artifacts/journal-fixtures \
+  --recover .build/ext4-recover --e2fsck /path/to/e2fsprogs/build/e2fsck/e2fsck \
+  --output artifacts/journal-recovery
+```
+
+The Linux roundtrip harness is an optional Machlin lab acceptance command. Run
+`tests/run_linux_journal.py` by absolute path with the lab as the working directory.
+It takes `--lab`, `--exports`, `--module-report` and a new `--output` directory.
+It uses the prepared musl compiler/linker, pinned Linux kernel, signed ephemeral
+VZ runner, and matching modules from the verified module report. The report needs
+`kernel_release` and a `modules` object containing each module's lab-relative
+`path` and `sha256`, including the dynamically selected `crc32c_generic` provider.
+Sol prepares that environment; Luna executes the bounded sequential VM runs.
+The harness creates a separate writable copy for every case, with no network.
+It requires guest kernel and success markers, actual pending Linux-authored
+transactions, independent content/metadata comparison, and e2fsck.
+
+The filesystem adapters do not enable writes or invoke offline recovery yet.
+In particular, FSKit metadata-flush completion has not been established as a
+durable device-cache barrier; it cannot satisfy the write capability by assumption.
+
 Use the selected Xcode C compiler and formatter on macOS. The portable core and
 image tests must also compile with Clang on Linux. FSKit builds target a declared
 macOS baseline; do not use newer SDK APIs without availability handling.

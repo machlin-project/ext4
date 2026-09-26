@@ -32,7 +32,8 @@ def main() -> None:
         "-mkernel", "-std=c11", "-O2", "-g", "-DKERNEL", "-DKERNEL_EXTENSION",
         "-isystem", str(headers), "-I", str(ROOT / "include"),
         "-ffreestanding", "-fno-builtin", "-fno-common", "-fno-asynchronous-unwind-tables",
-        "-Wall", "-Wextra", "-Werror", "-Wdeclaration-after-statement", "-Wframe-larger-than=2048",
+        "-Wall", "-Wextra", "-Werror", "-Werror=conditional-uninitialized",
+        "-Wdeclaration-after-statement", "-Wframe-larger-than=2048",
     ]
     sources = sorted((ROOT / "core").glob("*.c")) + sorted((ROOT / "adapters/xnu").glob("*.c"))
     object_paths = []

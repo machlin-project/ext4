@@ -12,7 +12,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Not implemented |
-| Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Not implemented |
+| Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine passes the portable fault matrix, debugfs replay and Linux roundtrips; advanced journal formats, orphans and platform write integration remain pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Not implemented |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
@@ -70,6 +70,57 @@ the superblock, group descriptor, root inode and root directory, optionally
 repairing checksums to exercise structural validation. Reports are in
 `artifacts/checks/fuzzer-llvm-build.log` and `artifacts/checks/fuzzer-run.log`.
 This run does not cover every disk feature, recovery, writes or concurrency.
+
+## Journal evidence
+
+`ext4-journal-test` exercises 1 KiB and 4 KiB media with five tag/feature
+combinations: legacy checksums absent, checksum v2/v3, and v2/v3 with 64-bit tags.
+The independent volatile/stable storage model interrupts every write and flush
+in a two-block transaction, retains none/all/alternating pending blocks, and
+also tests partial writes. Across 1,020 cases, 990 recover to consistent old or
+new contents and 30 deliberately torn primary-superblock cases reject recovery
+with a checksum error. Those 30 are fail-closed tests, not successful repairs.
+
+The same suites check interrupted recovery and repeat recovery, ownership and
+credit limits, canceled transactions, allocation/read errors, balanced resources,
+escaped records, ring and sequence wrap, and 128-block transactions spanning
+multiple descriptors. Corrupted committed payloads/descriptors reject writes;
+invalid commits discard the incomplete tail. Structural cases with repaired
+checksums cover protected/out-of-range targets, unterminated tag lists, invalid
+flags/features and journal geometry. The parser must not lose a valid commit
+merely because malformed tag counts consumed it as apparent data.
+
+`tests/generate_journal_fixtures.py` independently creates six pending journals
+with debugfs: plain, checksum v2/v3, an unfinished tail after a committed prefix,
+revocation, and later reuse of a revoked block. All six passed exact recovered
+block comparison, unchanged repeated recovery and e2fsck. Reports and untouched
+fixtures are in `artifacts/journal-debugfs-recovery-validated/` and
+`artifacts/journal-fixtures-debugfs-tail/`.
+
+`tests/run_linux_journal.py` passed ten isolated VM roundtrips, covering the five
+writer profiles at both block sizes. The actual Linux kernel identified itself
+in every guest, mounted and recovered our pending log, and checked the file bytes.
+It then changed the file's UID/GID, mode and data, committed with fsync, and powered
+off without unmounting. The portable core replayed one Linux-authored transaction
+in every returned image; full file bytes, ownership, permissions and e2fsck passed.
+Only independent image copies were attached. Lab reports are under
+`artifacts/ext4-journal/linux-reference/roundtrip-complete/` and
+`logs/ext4-journal-linux-roundtrip-complete.log`. Earlier preparation failures
+remain separate from this successful run.
+
+This establishes the bounded journal engine, not general read/write filesystem
+operations. Allocation, directory mutation, orphan handling, writable UBC/FSKit
+coherence, and durable platform device barriers still need implementation and
+acceptance. Internal journals with external devices, old checksum v1, async or
+fast commits are unsupported; configured resource bounds are explicit in
+[ARCHITECTURE.md](ARCHITECTURE.md). Arbitrary media corruption and physical-device
+power-loss protection are not established by the modeled crash tests.
+
+Final source checks passed in `artifacts/checks/journal-validated-*`: four CTest
+suites under ASan/UBSan, the freestanding stack check, clang-format, unsigned
+arm64e/x86_64 kext builds, and the unsigned universal FSKit app/extension build.
+These new kernel and FSKit binaries have compilation evidence only; the mounted
+read-only kernel evidence below belongs to the preceding verified reader build.
 
 ## FSKit build evidence
 

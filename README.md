@@ -19,8 +19,10 @@ await an Apple signing profile with the FSKit Module capability. The XNU adapter
 also builds as an unsigned arm64e or x86_64 kext. The arm64e kext passes mounted
 read-only tests for all eleven profiles in a dedicated custom-kernel VM, including
 mmap, concurrent reads, repeated mounts and open-file/mapping lifetime.
-Writable operations, journal recovery, ACLs/xattrs and Linux capability policy
-remain unimplemented. The FSKit adapter has not been mounted. Read
+Portable journal transactions and offline recovery pass interrupted-I/O tests,
+independent debugfs journals and roundtrips through a real Linux kernel. General
+writable filesystem operations, ACLs/xattrs and Linux capability policy remain
+unimplemented. Both platform adapters remain read-only; FSKit has not been mounted. Read
 [the acceptance matrix](docs/ACCEPTANCE.md) before using an image with this code.
 Generated disk images and reports are not source artifacts.
 
@@ -38,6 +40,8 @@ Generated disk images and reports are not source artifacts.
 ## Development
 
 See [development](docs/DEVELOPMENT.md) and [architecture](docs/ARCHITECTURE.md).
+The [automated test matrix](docs/TESTING.md) separates format, crash recovery,
+platform behavior and remaining concurrency coverage.
 Use the ongoing `development` branch. A future `main` baseline must reflect
 explicitly verified behavior; a development checkpoint is not full acceptance.
 

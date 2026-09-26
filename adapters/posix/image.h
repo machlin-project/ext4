@@ -7,14 +7,21 @@
 struct ext4_posix_image {
 	int fd;
 	struct ext4_environment environment;
+	struct ext4_write_environment writer;
 	uint64_t read_calls;
+	uint64_t write_calls;
+	uint64_t flush_calls;
 	uint64_t allocation_calls;
 	uint64_t fail_read_at;
+	uint64_t fail_write_at;
+	uint64_t fail_flush_at;
 	uint64_t fail_allocation_at;
 	uint64_t live_allocations;
 };
 
 enum ext4_result ext4_posix_open(struct ext4_posix_image *image, const char *path);
+/* Offline regular images only; obtains an exclusive advisory lock. */
+enum ext4_result ext4_posix_open_writable(struct ext4_posix_image *image, const char *path);
 void ext4_posix_close(struct ext4_posix_image *image);
 
 #endif
