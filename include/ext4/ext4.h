@@ -8,6 +8,7 @@
 
 #define EXT4_ROOT_INODE 2U
 #define EXT4_NAME_MAX 255U
+#define EXT4_LINK_MAX 65000U
 #define EXT4_UUID_SIZE 16U
 #define EXT4_VOLUME_NAME_SIZE 16U
 #define EXT4_INODE_BLOCK_BYTES 60U
@@ -73,6 +74,11 @@ struct ext4_info {
 	char volume_name[EXT4_VOLUME_NAME_SIZE + 1];
 };
 
+struct ext4_timestamp {
+	int64_t seconds;
+	uint32_t nanoseconds;
+};
+
 struct ext4_inode {
 	uint64_t size;
 	uint64_t blocks_512;
@@ -81,13 +87,15 @@ struct ext4_inode {
 	uint32_t uid;
 	uint32_t gid;
 	uint32_t flags;
-	uint32_t access_time;
-	uint32_t change_time;
-	uint32_t modify_time;
+	struct ext4_timestamp access_time;
+	struct ext4_timestamp change_time;
+	struct ext4_timestamp modify_time;
+	struct ext4_timestamp birth_time;
 	uint16_t mode;
 	uint16_t links;
 	uint8_t block_data[EXT4_INODE_BLOCK_BYTES];
 	bool fast_symlink;
+	bool birth_time_valid;
 };
 
 struct ext4_dir_entry {

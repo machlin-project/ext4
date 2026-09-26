@@ -219,6 +219,13 @@ struct ext4_inode_disk {
 	struct ext4_le16 reserved;
 	struct ext4_le16 extra_size;
 	struct ext4_le16 checksum_hi;
+	struct ext4_le32 change_time_extra;
+	struct ext4_le32 modify_time_extra;
+	struct ext4_le32 access_time_extra;
+	struct ext4_le32 birth_time;
+	struct ext4_le32 birth_time_extra;
+	struct ext4_le32 version_hi;
+	struct ext4_le32 project_id;
 };
 
 struct ext4_extent_header_disk {
@@ -283,7 +290,7 @@ struct ext4_dx_tail_disk {
 
 _Static_assert(sizeof(struct ext4_super_disk) == EXT4_SUPER_SIZE, "superblock wire size");
 _Static_assert(sizeof(struct ext4_group_disk) == EXT4_GROUP_64_SIZE, "group descriptor wire size");
-_Static_assert(sizeof(struct ext4_inode_disk) == EXT4_INODE_BASE_SIZE + 4, "inode wire prefix");
+_Static_assert(sizeof(struct ext4_inode_disk) == EXT4_INODE_BASE_SIZE + 32, "inode wire prefix");
 _Static_assert(sizeof(struct ext4_extent_disk) == 12, "extent wire size");
 _Static_assert(sizeof(struct ext4_dir_tail_disk) == 12, "directory tail wire size");
 

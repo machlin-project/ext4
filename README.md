@@ -14,6 +14,8 @@ The portable read-only core passes image tests for 1 KiB and 4 KiB filesystems,
 including checksummed metadata, extent trees, indexed directories, links and
 sparse files. Malformed-image and mount failure tests pass under ASan/UBSan.
 An optimized freestanding compilation checks a 2 KiB stack-frame budget.
+The read-only FSKit adapter builds for macOS 26.4. Its installed mount tests
+await an Apple signing profile with the FSKit Module capability.
 No mounted filesystem, writable filesystem, kernel extension or Linux capability
 contract is accepted yet. Read
 [the acceptance matrix](docs/ACCEPTANCE.md) before using an image with this code.

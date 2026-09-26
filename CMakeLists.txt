@@ -51,3 +51,8 @@ target_include_directories(ext4-corruption-test PRIVATE core)
 target_link_libraries(ext4-corruption-test PRIVATE ext4_posix)
 target_compile_options(ext4-corruption-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
 add_test(NAME malformed-images COMMAND ext4-corruption-test "${EXT4_FIXTURES}/ext4-4k.img")
+
+find_package(Threads REQUIRED)
+add_executable(ext4-mounted-test tests/mounted.c)
+target_link_libraries(ext4-mounted-test PRIVATE Threads::Threads)
+target_compile_options(ext4-mounted-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)

@@ -1,5 +1,24 @@
 # Development
 
+## FSKit app
+
+`make fskit` uses XcodeGen and the selected Xcode toolchain to build an unsigned
+app under `artifacts/fskit/DerivedData/Build/Products/Debug/Machlin ext4.app`.
+XcodeGen generates its project from `adapters/fskit/project.yml`; the generated
+project and build outputs stay ignored. macOS 26.4 is the deployment target.
+
+For a signed build, run `python3 scripts/build_fskit.py --team PERSONAL_TEAM_ID`.
+Add `--provision` to let Xcode retrieve profiles using its configured account.
+The extension needs a profile with the FSKit Module capability. An unsigned build
+does not establish that macOS will load the extension.
+
+Install and enable the app only in the dedicated disposable guest for development
+acceptance. Use the platform's File System Extensions controls, then mount the
+identified fixture device read-only with `mount -F -t machlin_ext4 -o rdonly`.
+The exact guest device must be verified before mounting. Run `ext4-mounted-test`
+against that mount and verify clean unmount and unchanged image bytes afterward.
+These installed steps have not yet passed; signing is deferred.
+
 Use the selected Xcode C compiler and formatter on macOS. The portable core and
 image tests must also compile with Clang on Linux. FSKit builds target a declared
 macOS baseline; do not use newer SDK APIs without availability handling.

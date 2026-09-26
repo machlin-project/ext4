@@ -15,6 +15,13 @@ ext4_le32(const struct ext4_le32 *value)
 }
 
 void
+ext4_encode16(struct ext4_le16 *output, uint16_t value)
+{
+	output->bytes[0] = (uint8_t)value;
+	output->bytes[1] = (uint8_t)(value >> 8);
+}
+
+void
 ext4_encode32(struct ext4_le32 *output, uint32_t value)
 {
 	unsigned int index;

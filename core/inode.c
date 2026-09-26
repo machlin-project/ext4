@@ -1,6 +1,67 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
 
+#define EXT4_TIME_EPOCH_MASK 3U
+#define EXT4_TIME_NANOSECOND_SHIFT 2U
+#define EXT4_NANOSECONDS_PER_SECOND 1000000000U
+
+#define EXT4_INODE_HAS_FIELD(extra_size, field)                                                    \
+	(EXT4_INODE_BASE_SIZE + (size_t)(extra_size) >= offsetof(struct ext4_inode_disk, field) +  \
+		sizeof(((struct ext4_inode_disk *)0)->field))
+
+static enum ext4_result
+ext4_decode_time(uint32_t seconds, uint32_t extra, struct ext4_timestamp *time)
+{
+	time->seconds = seconds;
+	if (seconds > INT32_MAX) {
+		time->seconds -= INT64_C(1) << 32;
+	}
+	time->seconds += (int64_t)(extra & EXT4_TIME_EPOCH_MASK) << 32;
+	time->nanoseconds = extra >> EXT4_TIME_NANOSECOND_SHIFT;
+	return time->nanoseconds < EXT4_NANOSECONDS_PER_SECOND ? EXT4_OK : EXT4_CORRUPT;
+}
+
+static enum ext4_result
+ext4_inode_times(const struct ext4_inode_disk *disk, uint16_t extra_size, struct ext4_inode *inode)
+{
+	uint32_t access_extra = 0;
+	uint32_t change_extra = 0;
+	uint32_t modify_extra = 0;
+	uint32_t birth_extra = 0;
+	enum ext4_result error;
+
+	if (EXT4_INODE_HAS_FIELD(extra_size, access_time_extra)) {
+		access_extra = ext4_le32(&disk->access_time_extra);
+	}
+	if (EXT4_INODE_HAS_FIELD(extra_size, change_time_extra)) {
+		change_extra = ext4_le32(&disk->change_time_extra);
+	}
+	if (EXT4_INODE_HAS_FIELD(extra_size, modify_time_extra)) {
+		modify_extra = ext4_le32(&disk->modify_time_extra);
+	}
+	error = ext4_decode_time(ext4_le32(&disk->access_time), access_extra, &inode->access_time);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	error = ext4_decode_time(ext4_le32(&disk->change_time), change_extra, &inode->change_time);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	error = ext4_decode_time(ext4_le32(&disk->modify_time), modify_extra, &inode->modify_time);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	inode->birth_time_valid = EXT4_INODE_HAS_FIELD(extra_size, birth_time);
+	if (inode->birth_time_valid) {
+		if (EXT4_INODE_HAS_FIELD(extra_size, birth_time_extra)) {
+			birth_extra = ext4_le32(&disk->birth_time_extra);
+		}
+		error =
+		    ext4_decode_time(ext4_le32(&disk->birth_time), birth_extra, &inode->birth_time);
+	}
+	return error;
+}
+
 static enum ext4_result
 ext4_inode_table(struct ext4_fs *fs, uint32_t group, uint64_t *table)
 {
@@ -125,9 +186,10 @@ ext4_get_inode(struct ext4_fs *fs, uint32_t number, struct ext4_inode *inode)
 			decoded.blocks_512 *= fs->info.block_size / 512U;
 		}
 	}
-	decoded.access_time = ext4_le32(&disk->access_time);
-	decoded.change_time = ext4_le32(&disk->change_time);
-	decoded.modify_time = ext4_le32(&disk->modify_time);
+	error = ext4_inode_times(disk, extra_size, &decoded);
+	if (error != EXT4_OK) {
+		goto out;
+	}
 	ext4_copy(decoded.block_data, disk->block_data, sizeof(decoded.block_data));
 	xattr_block =
 	    ext4_le32(&disk->xattr_block_lo) | ((uint64_t)ext4_le16(&disk->xattr_block_hi) << 32);

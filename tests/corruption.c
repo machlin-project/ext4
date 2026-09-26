@@ -15,6 +15,8 @@ enum corruption {
 	BAD_GROUP_CHECKSUM,
 	BAD_ROOT_INODE_CHECKSUM,
 	BAD_DIRECTORY_CHECKSUM,
+	BAD_INODE_EXTRA_SIZE,
+	BAD_TIMESTAMP,
 	CORRUPTION_COUNT
 };
 
@@ -27,6 +29,7 @@ struct corrupt_resource {
 	uint64_t inode_offset;
 	uint64_t directory_offset;
 	uint32_t block_size;
+	uint32_t root_checksum_seed;
 	bool changed;
 };
 
@@ -84,6 +87,23 @@ corrupt_read(void *context, uint64_t offset, void *buffer, size_t length)
 	    resource->corruption == BAD_ROOT_INODE_CHECKSUM) {
 		inode = buffer;
 		inode->checksum_lo.bytes[0] ^= 1;
+		resource->changed = true;
+	} else if (offset == resource->inode_offset &&
+	    (resource->corruption == BAD_INODE_EXTRA_SIZE ||
+		resource->corruption == BAD_TIMESTAMP)) {
+		inode = buffer;
+		if (resource->corruption == BAD_INODE_EXTRA_SIZE) {
+			ext4_encode16(&inode->extra_size, UINT16_MAX & ~3U);
+		} else {
+			/* Valid checksum, invalid nanoseconds: semantic validation must reject it.
+			 */
+			ext4_encode32(&inode->modify_time_extra, 1000000000U << 2);
+		}
+		ext4_zero(&inode->checksum_lo, sizeof(inode->checksum_lo));
+		ext4_zero(&inode->checksum_hi, sizeof(inode->checksum_hi));
+		checksum = ext4_crc32c(resource->root_checksum_seed, buffer, length);
+		ext4_encode16(&inode->checksum_lo, (uint16_t)checksum);
+		ext4_encode16(&inode->checksum_hi, (uint16_t)(checksum >> 16));
 		resource->changed = true;
 	} else if (offset == resource->directory_offset && length == resource->block_size &&
 	    resource->corruption == BAD_DIRECTORY_CHECKSUM) {
@@ -154,6 +174,7 @@ main(int argc, char **argv)
 		resource.block_size +
 	    (EXT4_ROOT_INODE - 1) * ext4_le16(&super.inode_size);
 	resource.directory_offset = block * resource.block_size;
+	resource.root_checksum_seed = ext4_inode_seed(fs, &root);
 	ext4_unmount(fs);
 	fs = NULL;
 	environment = resource.image.environment;

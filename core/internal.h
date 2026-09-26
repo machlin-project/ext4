@@ -18,6 +18,7 @@ struct ext4_fs {
 
 uint16_t ext4_le16(const struct ext4_le16 *value);
 uint32_t ext4_le32(const struct ext4_le32 *value);
+void ext4_encode16(struct ext4_le16 *output, uint16_t value);
 void ext4_encode32(struct ext4_le32 *output, uint32_t value);
 void ext4_copy(void *destination, const void *source, size_t length);
 void ext4_zero(void *destination, size_t length);

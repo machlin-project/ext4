@@ -96,6 +96,15 @@ check_reader(const char *path)
 	check_contents(fs, &inode, (const uint8_t *)"Machlin ext4\n", 13);
 	CHECK(lookup(fs, &root, "hello-hardlink", &other) == EXT4_OK);
 	CHECK(other.number == inode.number && inode.links == 2);
+	CHECK(lookup(fs, &root, "metadata.txt", &inode) == EXT4_OK);
+	CHECK(inode.uid == 70001 && inode.gid == 80002 && inode.mode == (EXT4_MODE_REGULAR | 0640));
+	CHECK(inode.access_time.seconds == -1 && inode.access_time.nanoseconds == 123456789);
+	CHECK(inode.modify_time.seconds == INT64_C(2147483648) &&
+	    inode.modify_time.nanoseconds == 987654321);
+	CHECK(inode.change_time.seconds == INT64_C(4294967296) &&
+	    inode.change_time.nanoseconds == 42);
+	CHECK(inode.birth_time_valid && inode.birth_time.seconds == 1700000000 &&
+	    inode.birth_time.nanoseconds == 999999999);
 	CHECK(lookup(fs, &root, "empty", &inode) == EXT4_OK);
 	check_contents(fs, &inode, (const uint8_t *)"", 0);
 	CHECK(lookup(fs, &root, "hello-link", &inode) == EXT4_OK);

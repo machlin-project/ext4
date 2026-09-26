@@ -14,11 +14,11 @@ safe rejection of a feature is recorded separately from supporting it.
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Not implemented |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Not implemented |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Not implemented |
-| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Not implemented |
+| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Not implemented |
 | LXNU policy | CAP_FSETID and privilege removal, xattrs, mixed-ABI races, inherited descriptions and attachment restrictions | Not implemented |
 | Compatibility and regression | Shared Linux/LXNU fixtures, native controls and identified stock/custom boots | Not run |
-| Distribution | Reproducible standalone build, packaged FSKit extension, documented installation and supported versions | Not implemented |
+| Distribution | Reproducible standalone build, packaged FSKit extension, documented installation and supported versions | Unsigned app with embedded extension builds; signing and installation pending |
 
 Each accepted row must identify its test command and generated evidence location.
 Raw identities, hashes and logs stay in ignored artifacts; source revisions stay
@@ -45,3 +45,27 @@ under `artifacts/checks/`. Independently regenerated images under
 The freestanding compilation is not a loaded kernel driver. Its only non-core
 undefined symbols are compiler stack-protector support, which XNU exports through
 Libkern. The sanitizer build has a different frame layout and is tested separately.
+
+The metadata fixture also covers 32-bit UID/GID, signed pre-epoch time, dates
+beyond 2038 and 2106, birth time and nanosecond precision. A malformed timestamp
+with a valid inode checksum is rejected. Current regenerated images are in
+`artifacts/fixtures-metadata/`; the CMake `EXT4_FIXTURES` setting selects them.
+
+## FSKit build evidence
+
+The app and embedded extension compile using the macOS 27 SDK with deployment
+target macOS 26.4. The adapter maps resource I/O, inode identity, attributes,
+lookup, directory cookies, links and reads to the same C library. Mutations return
+`EROFS`; its requested mount options include read-only. Only a quick clean-volume
+check is implemented; it is not a full consistency checker or repair utility.
+
+Unsigned build reports are in `artifacts/checks/fskit-unsigned-build.log` and
+`artifacts/checks/fskit-timestamp-build.log`. Automatic signing found no Xcode
+account or provisioning profile for `org.machlin.ext4.filesystem`. Signing is
+deferred by the user. No extension has been installed or mounted.
+
+`ext4-mounted-test MOUNTPOINT` is built, but its runtime results remain pending.
+It checks ordinary reads, metadata, hard links and symlinks, indexed directory
+enumeration, sparse data, mmap, concurrent opens/reads/closes and read-only
+enforcement. The disposable stock macOS guest was booted and its actual loaded
+Apple kernel identified, then shut down. This proves guest readiness only.

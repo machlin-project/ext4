@@ -29,6 +29,18 @@ FEATURE_LIST = (
     "flex_bg,sparse_super,large_file,huge_file,dir_nlink,extra_isize,metadata_csum"
 )
 EXPECTED_FEATURES = set(FEATURE_LIST.split(","))
+NANOSECONDS_PER_SECOND = 1_000_000_000
+LOW_SECONDS_BITS = 32
+LOW_SECONDS_MODULUS = 1 << LOW_SECONDS_BITS
+LOW_SECONDS_SIGN_BIT = 1 << (LOW_SECONDS_BITS - 1)
+EPOCH_BITS = 2
+EPOCH_MASK = (1 << EPOCH_BITS) - 1
+METADATA_TIMES = {
+    "atime": (-1, 123456789),
+    "mtime": (2147483648, 987654321),
+    "ctime": (4294967296, 42),
+    "crtime": (1700000000, 999999999),
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,6 +111,7 @@ def make_tree(root: Path) -> None:
     write_new(root / "hello.txt", b"Machlin ext4\n")
     write_new(root / "nested" / "child.txt", b"nested data\n")
     write_new(root / "empty", b"")
+    write_new(root / "metadata.txt", b"metadata\n")
     os.link(root / "hello.txt", root / "hello-hardlink")
     os.symlink("hello.txt", root / "hello-link")
     os.symlink("L" * 100, root / "long-link")
@@ -156,6 +169,57 @@ def run_logged(
     return completed.stdout
 
 
+def encoded_inode_time(seconds: int, nanoseconds: int) -> tuple[int, int]:
+    if not 0 <= nanoseconds < NANOSECONDS_PER_SECOND:
+        raise ValueError(f"Invalid nanosecond value: {nanoseconds}")
+    low_seconds = seconds & (LOW_SECONDS_MODULUS - 1)
+    signed_low_seconds = (
+        low_seconds
+        if low_seconds < LOW_SECONDS_SIGN_BIT
+        else low_seconds - LOW_SECONDS_MODULUS
+    )
+    epoch = ((seconds - signed_low_seconds) // LOW_SECONDS_MODULUS) & EPOCH_MASK
+    extra = (nanoseconds << EPOCH_BITS) | epoch
+    return low_seconds, extra
+
+
+def set_metadata_inode(
+    output: Path,
+    image: Path,
+    tools: dict[str, Path],
+    versions: dict[str, str],
+) -> None:
+    fields = [
+        ("uid", "70001"),
+        ("gid", "80002"),
+        ("mode", "0100640"),
+    ]
+    for name, (seconds, nanoseconds) in METADATA_TIMES.items():
+        low_seconds, extra = encoded_inode_time(seconds, nanoseconds)
+        fields.extend(
+            [
+                (f"{name}_lo", str(low_seconds)),
+                (f"{name}_hi", str(extra)),
+            ]
+        )
+
+    for field, value in fields:
+        command = f"set_inode_field /metadata.txt {field} {value}"
+        run_logged(
+            output,
+            f"debugfs-metadata-{image.stem}-{field}",
+            [str(tools["debugfs"]), "-w", "-R", command, str(image)],
+            versions,
+        )
+
+    run_logged(
+        output,
+        f"debugfs-metadata-stat-{image.stem}",
+        [str(tools["debugfs"]), "-R", "stat /metadata.txt", str(image)],
+        versions,
+    )
+
+
 def create_image(
     output: Path,
     root: Path,
@@ -188,6 +252,7 @@ def create_image(
         ],
         versions,
     )
+    set_metadata_inode(output, image, tools, versions)
     run_logged(
         output,
         f"e2fsck-{image.stem}",

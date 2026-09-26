@@ -1,7 +1,7 @@
 PYTHON ?= python3
 BUILD_DIR ?= .build
 
-.PHONY: all configure build test format check-style clean
+.PHONY: all configure build test fskit format check-style clean
 
 all: build
 
@@ -13,6 +13,9 @@ build: configure
 
 test: build
 	ctest --test-dir $(BUILD_DIR) --output-on-failure
+
+fskit:
+	$(PYTHON) scripts/build_fskit.py
 
 format:
 	$(PYTHON) scripts/format.py
