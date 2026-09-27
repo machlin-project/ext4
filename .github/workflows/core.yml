@@ -40,7 +40,27 @@ jobs:
       - name: Install test tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y clang cmake ninja-build e2fsprogs
+          sudo apt-get install --no-install-recommends -y clang cmake ninja-build build-essential pkg-config
+      # Older journal-only recovery leaves orphan_present set after cleanup.
+      # Keep the independent oracle on the same fixed upstream release as the lab.
+      - name: Check out e2fsprogs
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tytso/e2fsprogs
+          ref: da631e117dcf8797bfda0f48bdaa05ac0fbcf7af # v1.47.3
+          path: vendor/e2fsprogs
+          persist-credentials: false
+      - name: Build independent filesystem tools
+        run: |
+          mkdir -p artifacts/checks vendor/e2fsprogs/build
+          (
+            cd vendor/e2fsprogs/build
+            ../configure --disable-nls --disable-fuse2fs --disable-libarchive
+            make --jobs=2
+          ) 2>&1 | tee artifacts/checks/e2fsprogs-build.log
+          for directory in misc e2fsck debugfs; do
+            echo "$PWD/vendor/e2fsprogs/build/$directory" >> "$GITHUB_PATH"
+          done
       - name: Generate independent images
         run: |
           mkdir -p artifacts/checks

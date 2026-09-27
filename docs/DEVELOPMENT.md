@@ -79,6 +79,14 @@ the caller must exclude mounted or other noncooperating users of the image.
 
 Generate and check independent logs using the same prepared e2fsprogs build:
 
+The modern orphan-file journal-only oracle requires e2fsprogs 1.47.2 or newer.
+Earlier versions leave `orphan_present` set after successful journal replay and
+cleanup; the following strict read-only check correctly reports that unfinished
+state. See the [upstream fix](https://github.com/tytso/e2fsprogs/blob/v1.47.2/doc/RelNotes/v1.47.2.txt).
+CI builds the pinned 1.47.3 release, matching the lab, rather than using the
+runner's older system package. Oracle checks still require clean metadata and
+do not repair consistency errors after journal replay.
+
 ```sh
 python3 tests/generate_journal_fixtures.py --tools-root /path/to/e2fsprogs/build \
   --source artifacts/fixtures/ext4-4k.img --output artifacts/journal-fixtures
