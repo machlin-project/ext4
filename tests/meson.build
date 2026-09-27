@@ -24,6 +24,13 @@ if paths['xattr_fixtures'] != ''
       args: ['--edges', stem + '.img'], timeout: 300, suite: 'core')
     test('xattr-lifetime-' + profile, programs['xattr-lifetime'],
       args: stem + '.img', timeout: 600, suite: 'core')
+    test('inode-flags-' + profile, programs['inode-flags'],
+      args: stem + '.img', timeout: 300, suite: 'core')
+  endforeach
+  foreach profile : ['1k', 'inode128']
+    test('inode-flags-faults-' + profile, programs['inode-flags'],
+      args: ['--faults', paths['xattr_fixtures'] / ('xattr-' + profile + '.img')],
+      timeout: 300, suite: 'core')
   endforeach
 endif
 if paths['xattr_enable_fixtures'] != ''

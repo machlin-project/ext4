@@ -278,6 +278,35 @@ changes. Explicit recovery reconstructs those totals from the validated, replaye
 group descriptors in a journal transaction before cleanup. This is restricted to
 recovery; ordinary clean writable mounts still reject inconsistent summaries.
 
+## Persistent inode flags
+
+`ext4_set_inode_flags` changes selected policy bits and captured ctime in one
+inode transaction. It preserves mapping flags, data, allocation and xattrs.
+The admitted bits are SYNC, IMMUTABLE, APPEND, NODUMP, NOATIME, JOURNAL_DATA,
+NOTAIL, DIRSYNC and TOPDIR. The last two require directories; symlinks and special
+inodes accept only NODUMP and NOATIME. Changing other flags while retaining an
+existing IMMUTABLE bit is rejected. The separate flag operation can clear protection.
+
+Mutation boundaries resolve the current flags under the exclusive owner.
+Immutable inodes reject data and attribute changes. Append-only regular files
+accept writes at current EOF and reservation, but reject overwrite, truncate,
+punching, hardlinks and removal. Append-only directories accept new entries,
+including an absent rename destination, while rejecting removal and replacement.
+Immutable directories reject additions as well. Orphan cleanup finishes a deletion
+already accepted before a held inode acquired protection flags.
+
+The adapter still owns credentials, descriptor append mode, explicit timestamp
+authorization, automatic atime policy, pending I/O and mapping revocation. An
+append write must be admitted as such before the core verifies its exact EOF.
+Append-only timestamp-only updates represent admitted automatic/touch behavior;
+the owner must reject unauthorized explicit timestamp changes. All portable commits
+already synchronously journal data, so SYNC/DIRSYNC/JOURNAL_DATA do not weaken the
+write ordering contract. NODUMP and TOPDIR remain platform/allocation hints.
+The contract follows the Linux [flag operation](https://github.com/torvalds/linux/blob/v6.12/fs/ext4/ioctl.c),
+[namespace checks](https://github.com/torvalds/linux/blob/v6.12/fs/namei.c) and
+[range-operation checks](https://github.com/torvalds/linux/blob/v6.12/fs/open.c);
+the implementation shares no Linux source code.
+
 ## Extended attributes
 
 `ext4_get_xattr` and `ext4_list_xattrs` resolve the allocated inode and generation

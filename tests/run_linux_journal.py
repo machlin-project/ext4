@@ -313,6 +313,8 @@ def main():
             print(f"PASS {source.name}: Linux attributes/ACLs, core/oracle replay, core mutation and Linux return", flush=True)
             continue
         if args.namespace:
+            if case.get("verified_flags") and "LINUX_EXT4_INODE_FLAGS_PASS" not in console:
+                raise RuntimeError("Missing Linux inode flag policy evidence")
             if case.get("capacity_state") and any(message in console for message in (
                     "Delayed block allocation failed", "Data will be lost", "EXT4-fs error")):
                 raise RuntimeError("Linux reported a full-disk allocation or write failure")

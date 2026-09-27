@@ -34,7 +34,8 @@ enum ext4_result {
 	EXT4_NO_SPACE,
 	EXT4_EXISTS,
 	EXT4_TOO_MANY_LINKS,
-	EXT4_NOT_EMPTY
+	EXT4_NOT_EMPTY,
+	EXT4_PERMISSION_DENIED
 };
 
 enum ext4_file_type {
@@ -58,6 +59,25 @@ enum ext4_mode {
 	EXT4_MODE_FIFO = 0010000,
 	EXT4_MODE_SOCKET = 0140000
 };
+
+/* Persistent ext4 policy bits. Layout/mapping bits in inode.flags are retained
+ * by the core and cannot be changed through ext4_set_inode_flags. */
+enum ext4_inode_flag {
+	EXT4_INODE_SYNC = 0x00000008U,
+	EXT4_INODE_IMMUTABLE = 0x00000010U,
+	EXT4_INODE_APPEND = 0x00000020U,
+	EXT4_INODE_NODUMP = 0x00000040U,
+	EXT4_INODE_NOATIME = 0x00000080U,
+	EXT4_INODE_JOURNAL_DATA = 0x00004000U,
+	EXT4_INODE_NOTAIL = 0x00008000U,
+	EXT4_INODE_DIRSYNC = 0x00010000U,
+	EXT4_INODE_TOPDIR = 0x00020000U
+};
+
+#define EXT4_INODE_MODIFIABLE_FLAGS                                                                \
+	((uint32_t)(EXT4_INODE_SYNC | EXT4_INODE_IMMUTABLE | EXT4_INODE_APPEND |                   \
+	    EXT4_INODE_NODUMP | EXT4_INODE_NOATIME | EXT4_INODE_JOURNAL_DATA | EXT4_INODE_NOTAIL | \
+	    EXT4_INODE_DIRSYNC | EXT4_INODE_TOPDIR))
 
 struct ext4_fs;
 struct ext4_inode_hold;
@@ -262,6 +282,20 @@ enum ext4_result ext4_list_xattrs(struct ext4_fs *fs, uint32_t number, uint32_t 
     struct ext4_xattr_key *keys, size_t capacity, size_t *count);
 enum ext4_result ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     const struct ext4_inode_update *update, struct ext4_inode *result);
+
+/* Atomically replace selected policy bits and ctime, preserving every other
+ * field. mask must be nonzero and contain only MODIFIABLE_FLAGS; flags must be
+ * a subset of mask. DIRSYNC/TOPDIR require a directory; other nonregular types
+ * admit only NODUMP/NOATIME. The exclusive owner authorizes the flag transition
+ * (including protected-bit and journal-mode privileges), drains pending writes
+ * and revokes incompatible mappings before calling. This operation can clear
+ * IMMUTABLE/APPEND; changing other flags on an immutable inode must also clear
+ * IMMUTABLE. Ordinary mutation APIs cannot bypass their restrictions.
+ * All core commits are synchronous and journal data. NOATIME governs automatic
+ * platform updates, not an explicitly admitted timestamp change. */
+enum ext4_result ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint32_t generation,
+    uint32_t mask, uint32_t flags, const struct ext4_timestamp *change_time,
+    struct ext4_inode *result);
 /* Writes regular files, allocating holes, converting unwritten extents and
  * extending EOF in a bounded atomic transaction. Newly exposed bytes are zeroed.
  * Requests exceeding transaction capacity reject without writes. Ordinary
@@ -346,7 +380,9 @@ enum ext4_result ext4_fallocate(struct ext4_fs *fs, uint32_t number, uint32_t ge
  * Existing names and dot/dotdot are rejected before writes. Linear and bounded
  * indexed directories use the same transaction and admitted attribute contract.
  * Allocation, directory records, link counts and timestamps commit atomically.
- * Outputs change only on success; uncertain commits require explicit recovery. */
+ * Outputs change only on success; uncertain commits require explicit recovery.
+ * Immutable parents reject additions; append-only parents accept additions but
+ * reject removal/replacement. Protected targets reject linking or removal. */
 enum ext4_result ext4_create(struct ext4_fs *fs, uint32_t directory, uint32_t generation,
     const uint8_t *name, size_t name_length, const struct ext4_inode_update *attributes,
     const struct ext4_timestamp *directory_time, struct ext4_inode *result);

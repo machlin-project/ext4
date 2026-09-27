@@ -965,12 +965,12 @@ malformed(struct device *device)
 			break;
 		case IMMUTABLE_PARENT:
 			ext4_encode32(&parent_disk->flags, root.flags | EXT4_INODE_IMMUTABLE);
-			expected = EXT4_UNSUPPORTED;
+			expected = EXT4_PERMISSION_DENIED;
 			break;
 		case IMMUTABLE_TARGET:
 			ext4_encode32(&target_disk->flags, target.flags | EXT4_INODE_IMMUTABLE);
 			operation = CREATE_LINK;
-			expected = EXT4_UNSUPPORTED;
+			expected = EXT4_PERMISSION_DENIED;
 			break;
 		case TARGET_LINK_LIMIT:
 			ext4_encode16(&target_disk->links, EXT4_LINK_MAX);

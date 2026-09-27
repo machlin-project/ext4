@@ -780,9 +780,11 @@ metadata_guards(struct device *device)
 		ext4_inode_checksum_set(fs, inode.number, disk);
 		EXPECT(
 		    ext4_write(fs, inode.number, inode.generation, 0, "a", 1, &update, &completed),
-		    EXT4_UNSUPPORTED);
+		    flags[index] == TEST_UNKNOWN_INODE_FLAG ? EXT4_UNSUPPORTED
+							    : EXT4_PERMISSION_DENIED);
 		EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after),
-		    EXT4_UNSUPPORTED);
+		    flags[index] == TEST_UNKNOWN_INODE_FLAG ? EXT4_UNSUPPORTED
+							    : EXT4_PERMISSION_DENIED);
 	}
 	ext4_encode32(&disk->flags, original_flags);
 	ext4_encode32(&disk->xattr_block_lo, 1);

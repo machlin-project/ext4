@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define TEST_UNKNOWN_INODE_FLAG 0x80000000U
 #define TEST_IMAGE_LIMIT (128U * 1024U * 1024U)
 #define TEST_LINKED_ORPHANS 2U
 #define TEST_PAYLOAD_SIZE 200000U
@@ -348,7 +349,7 @@ enum malformed_kind {
 	TAIL_CYCLE,
 	ZERO_MODE,
 	LINKED_DIRECTORY,
-	IMMUTABLE_ORPHAN,
+	UNKNOWN_FLAGS_ORPHAN,
 	INLINE_ORPHAN,
 	EXTERNAL_XATTR,
 	WRONG_BLOCK_COUNT,
@@ -425,8 +426,8 @@ malformed_cases(struct device *device)
 			ext4_encode16(&disk->mode, EXT4_MODE_DIRECTORY | 0700);
 			expected = EXT4_UNSUPPORTED;
 			break;
-		case IMMUTABLE_ORPHAN:
-			ext4_encode32(&disk->flags, payload.flags | EXT4_INODE_IMMUTABLE);
+		case UNKNOWN_FLAGS_ORPHAN:
+			ext4_encode32(&disk->flags, payload.flags | TEST_UNKNOWN_INODE_FLAG);
 			expected = EXT4_UNSUPPORTED;
 			break;
 		case INLINE_ORPHAN:

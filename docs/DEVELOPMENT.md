@@ -396,6 +396,16 @@ fixtures need to be generated. Linux capacity checks change a byte while free bl
 remain zero and require that exact change after independent and core journal replay;
 a same-byte write cannot establish that the write survived.
 
+Persistent flag tests reuse the xattr fixtures: `ext4-inode-flags-test IMAGE...`
+runs operations/protection/inheritance, `--faults` injects set/clear failures, and
+`--export DIRECTORY` writes clean and interrupted states. Check exports using
+`tests/check_inode_flags.py --fixtures XATTR_FIXTURES --exports DIRECTORY
+--output NEW_DIRECTORY --recover .build/ext4-recover`; `--tools-root` selects
+the e2fsprogs build. The namespace Linux harness accepts these checked records,
+including `--pending` flag journals, and verifies actual flag ioctls and denied
+operations before authoring its reverse journal. `ext4-inode-flags-test --linux-read`
+checks the returned core-recovered images.
+
 Generate deliberately nonzero unwritten backing data with
 `tests/generate_allocation_fixtures.py --fixtures EXTENDED_FIXTURE_DIRECTORY
 --tools-root E2FSPROGS_BUILD --output NEW_DIRECTORY`. Enable its Meson suite with

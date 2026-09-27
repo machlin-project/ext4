@@ -14,7 +14,7 @@ core_sources = files(
   'core/directory_lookup.c',
   'core/journal.c', 'core/recovery.c', 'core/group.c', 'core/system.c',
   'core/allocate.c', 'core/map_write.c', 'core/write.c', 'core/orphan.c',
-  'core/inode_allocate.c', 'core/namespace.c', 'core/lifetime.c',
+  'core/inode_allocate.c', 'core/inode_flags.c', 'core/namespace.c', 'core/lifetime.c',
   'core/directory_hash.c', 'core/directory_index.c', 'core/directory_write.c',
   'core/xattr.c', 'core/xattr_write.c',
 )
@@ -53,7 +53,7 @@ foreach name, source : {
   'directory-index': 'directory_index', 'directory-lookup': 'directory_lookup', 'index-write': 'index_write',
   'reader': 'reader', 'read-ranges': 'read_ranges', 'corruption': 'corruption', 'journal': 'journal',
   'write': 'write', 'write-partial': 'write_partial', 'write-growth': 'write_growth',
-  'file-range': 'file_range',
+  'file-range': 'file_range', 'inode-flags': 'inode_flags',
   'namespace': 'namespace', 'removal': 'removal',
   'rename': 'rename', 'orphan': 'orphan',
 }

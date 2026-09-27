@@ -271,6 +271,10 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		error = EXT4_NOT_FOUND;
 		goto cancel;
 	}
+	if (parent.flags & EXT4_INODE_IMMUTABLE) {
+		error = EXT4_PERMISSION_DENIED;
+		goto cancel;
+	}
 	if (!ext4_directory_links_valid(fs, &parent, false)) {
 		error = EXT4_CORRUPT;
 		goto cancel;
@@ -291,6 +295,10 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		}
 		if (child.links == 0) {
 			error = EXT4_NOT_FOUND;
+			goto cancel;
+		}
+		if (child.flags & EXT4_INODE_RESTRICTED_FLAGS) {
+			error = EXT4_PERMISSION_DENIED;
 			goto cancel;
 		}
 		if (child.links >= EXT4_LINK_MAX) {
@@ -561,6 +569,10 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 		error = EXT4_NOT_FOUND;
 		goto cancel;
 	}
+	if (parent.flags & EXT4_INODE_RESTRICTED_FLAGS) {
+		error = EXT4_PERMISSION_DENIED;
+		goto cancel;
+	}
 	if (!ext4_directory_links_valid(fs, &parent, false)) {
 		error = EXT4_CORRUPT;
 		goto cancel;
@@ -585,6 +597,10 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 	}
 	error = ext4_edit_inode(fs, transaction, target, target_generation, &child_disk, &child);
 	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	if (child.flags & EXT4_INODE_RESTRICTED_FLAGS) {
+		error = EXT4_PERMISSION_DENIED;
 		goto cancel;
 	}
 	type = child.mode & EXT4_MODE_TYPE;
@@ -898,6 +914,16 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 	}
 	if (state->objects[0].number == state->objects[1].number) {
 		*result = state->objects[0];
+		goto cancel;
+	}
+	/* Moving out removes a name; an absent destination only adds one. An
+	 * append-only destination can accept that addition but not replacement. */
+	if ((state->parents[0].flags & EXT4_INODE_RESTRICTED_FLAGS) ||
+	    (state->parents[1].flags & EXT4_INODE_IMMUTABLE) ||
+	    (exists && (state->parents[1].flags & EXT4_INODE_APPEND)) ||
+	    (state->objects[0].flags & EXT4_INODE_RESTRICTED_FLAGS) ||
+	    (exists && (state->objects[1].flags & EXT4_INODE_RESTRICTED_FLAGS))) {
+		error = EXT4_PERMISSION_DENIED;
 		goto cancel;
 	}
 	if (exists && !exchange && directory[0] != directory[1]) {

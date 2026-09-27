@@ -158,8 +158,9 @@ ext4_orphan_file_prepare(struct ext4_fs *fs)
 		error = EXT4_NO_MEMORY;
 		goto out;
 	}
-	error = ext4_inode_has_xattrs(fs, disk) ? EXT4_UNSUPPORTED
-						: ext4_inode_writable(fs, disk, &file->inode);
+	error = ext4_inode_has_xattrs(fs, disk) || (file->inode.flags & EXT4_INODE_RESTRICTED_FLAGS)
+	    ? EXT4_UNSUPPORTED
+	    : ext4_inode_writable(fs, disk, &file->inode);
 	if (error == EXT4_OK) {
 		error = ext4_transaction_begin(fs->journal, 1, &transaction);
 	}

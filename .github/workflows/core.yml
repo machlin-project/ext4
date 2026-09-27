@@ -161,6 +161,19 @@ jobs:
             2>&1 | tee artifacts/checks/xattr-independent.log
           find artifacts/xattr-exports artifacts/xattr-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Independently verify persistent inode flags and recovery
+        if: matrix.suite == 'core'
+        run: |
+          mkdir artifacts/inode-flags-exports
+          .build/ext4-inode-flags-test --export artifacts/inode-flags-exports \
+            artifacts/xattr-fixtures/xattr-1k.img artifacts/xattr-fixtures/xattr-indirect.img \
+            artifacts/xattr-fixtures/xattr-inode128.img \
+            2>&1 | tee artifacts/checks/inode-flags-exports.log
+          python3 tests/check_inode_flags.py --fixtures artifacts/xattr-fixtures \
+            --exports artifacts/inode-flags-exports --output artifacts/inode-flags-independent \
+            --recover .build/ext4-recover 2>&1 | tee artifacts/checks/inode-flags-independent.log
+          find artifacts/inode-flags-exports artifacts/inode-flags-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Independently verify extended attribute transactions and capacity
         if: matrix.suite == 'core'
         run: |

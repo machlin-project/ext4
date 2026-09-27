@@ -69,9 +69,12 @@ independent image checks and nine Linux recovery roundtrips. Full CI acceptance
 remains pending after correcting a second stale index-flag expectation in the
 full-space checker; its eight profiles now pass independent checks. Bounded preallocation and hole punching also pass
 focused tests, eighteen independent image checks and five Linux roundtrips.
-Preallocation requires extents; punching also supports indirect files. Persistent
-inode flags and the future-write space guarantee for KEEP_SIZE growth under
-exhaustion remain open. Writes into preallocation within the current file size
+Preallocation requires extents; punching also supports indirect files. Atomic
+policy-flag changes, immutable/append-only operation checks and type-specific
+inheritance pass focused, independent and six Linux roundtrip checks; the expanded
+full regression remains pending.
+The future-write space guarantee for KEEP_SIZE growth under exhaustion remains
+open. Writes into preallocation within the current file size
 now pass full-disk tests for full extent roots, external leaves and bounded
 zeroing across transactions, including interrupted preparation and data commits.
 Generated disk images and reports are not source artifacts.

@@ -212,6 +212,16 @@ ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	error = update->fields & EXT4_ATTR_XATTRS
 	    ? ext4_edit_inode_record(fs, transaction, number, generation, &disk, &inode)
 	    : ext4_edit_inode(fs, transaction, number, generation, &disk, &inode);
+	/* The owner distinguishes admitted automatic/touch times from explicit
+	 * timestamp-setting policy. Append writes may still update captured times. */
+	if (error == EXT4_OK && update->fields != 0 &&
+	    ((inode.flags & EXT4_INODE_IMMUTABLE) ||
+		((inode.flags & EXT4_INODE_APPEND) &&
+		    (update->fields &
+			~(uint32_t)(EXT4_ATTR_ACCESS_TIME | EXT4_ATTR_MODIFY_TIME |
+			    EXT4_ATTR_CHANGE_TIME))))) {
+		error = EXT4_PERMISSION_DENIED;
+	}
 	if (error == EXT4_OK) {
 		error = ext4_update_admitted(fs, disk, update);
 	}
@@ -802,6 +812,11 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 									     : EXT4_UNSUPPORTED;
 		goto cancel;
 	}
+	if ((inode.flags & EXT4_INODE_IMMUTABLE) ||
+	    ((inode.flags & EXT4_INODE_APPEND) && offset != inode.size)) {
+		error = EXT4_PERMISSION_DENIED;
+		goto cancel;
+	}
 	if (length == 0) {
 		goto cancel;
 	}
@@ -1075,6 +1090,10 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 	if ((inode.mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR) {
 		error = (inode.mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY ? EXT4_IS_DIRECTORY
 									     : EXT4_UNSUPPORTED;
+		goto cancel;
+	}
+	if (inode.flags & EXT4_INODE_RESTRICTED_FLAGS) {
+		error = EXT4_PERMISSION_DENIED;
 		goto cancel;
 	}
 	error = ext4_file_size_valid(fs, &inode, size);
@@ -1428,6 +1447,11 @@ ext4_fallocate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_
 	}
 	end = offset + length;
 	error = ext4_growth_check(fs, number, generation, end, update, &inode);
+	if (error == EXT4_OK &&
+	    ((inode.flags & EXT4_INODE_IMMUTABLE) ||
+		((inode.flags & EXT4_INODE_APPEND) && (flags & EXT4_FALLOC_PUNCH_HOLE)))) {
+		error = EXT4_PERMISSION_DENIED;
+	}
 	if (error == EXT4_OK && !(flags & EXT4_FALLOC_PUNCH_HOLE) &&
 	    !(inode.flags & EXT4_INODE_EXTENTS)) {
 		error = EXT4_UNSUPPORTED;

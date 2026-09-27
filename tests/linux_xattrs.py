@@ -87,6 +87,8 @@ def namespace(name):
 
 
 def tool(root, name):
+    if isinstance(root, dict):
+        return root[name]
     return root / ("misc" if name == "dumpe2fs" else name) / name
 
 
@@ -167,7 +169,7 @@ def snapshot(image, output, tools, run, *, allow_summary_lag=False):
             if not value.is_file() or value.stat().st_size != inode["size"]:
                 raise RuntimeError("Independent file length differs")
             item["data"] = value.read_bytes().hex()
-        else:
+        elif inode["type"] not in ("character", "block", "FIFO", "socket"):
             raise RuntimeError("Unsupported inode type in the attribute roundtrip fixture")
     return dict(objects=objects, accounting=counts, oracle_summary_lag=lag)
 

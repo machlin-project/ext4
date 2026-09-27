@@ -446,6 +446,8 @@ ext4_result_string(enum ext4_result result)
 		return "too many hard links";
 	case EXT4_NOT_EMPTY:
 		return "directory not empty";
+	case EXT4_PERMISSION_DENIED:
+		return "inode policy forbids this operation";
 	}
 	return "unknown filesystem error";
 }

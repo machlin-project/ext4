@@ -40,7 +40,7 @@ counted as portable-core implementation.
 
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
-| Ordinary filesystem operations | Admitted persistent inode flags; metadata-space guarantee for future KEEP_SIZE growth under allocator exhaustion | Open; bounded preallocation/hole punching, special files, atomic whiteout, automatic index creation and DIR_NLINK pass focused, independent and Linux acceptance; full-disk writes within existing EOF pass targeted faults and independent inspection |
+| Ordinary filesystem operations | Full regression of admitted persistent inode flags; metadata-space guarantee for future KEEP_SIZE growth under allocator exhaustion | Open; flag mutation/protection passes focused, independent and Linux checks; bounded preallocation/hole punching, special files, atomic whiteout, automatic index creation and DIR_NLINK pass focused, independent and Linux acceptance; full-disk writes within existing EOF also pass Linux roundtrips |
 | Format compatibility | META_BG and SPARSE_SUPER2 geometry; EA_INODE and INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open |
 | Journal compatibility | Checksum v1, asynchronous commit, fast commit and external journals, including interrupted replay and cross-implementation recovery | Open |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
@@ -59,6 +59,41 @@ create/link/symlink/mkdir/mknod/unlink/rmdir/rename and atomic whiteout; raw xat
 internal-journal recovery and both orphan representations; HTree creation, lookup
 and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
 the remaining blocks have equal size or that the full core is accepted.
+
+## Persistent inode flags
+
+The atomic flag API updates selected policy bits and ctime while preserving
+mapping, allocation, bytes and xattrs. It validates type-specific flag masks and
+prevents changing other flags while retaining immutable protection. Public write,
+truncate, range and namespace operations enforce immutable and append-only state;
+creation inherits the supported flags by inode type. Protected held-unlinked inodes
+still finish their already-admitted deletion. Native credentials, descriptor append
+mode, cache/mapping revocation and timestamp policy remain adapter responsibilities.
+
+All twelve focused tests pass across ten profiles, together with five existing
+write/range/namespace controls. Setting and clearing flags each cover allocation,
+read and interrupted-write failures on checksummed and 128-byte-inode images:
+40 allocation failures, 32 read failures and 312 write/flush cuts. Of those cuts,
+304 recover complete old/new states and eight torn primary superblocks reject
+explicitly. Builds include sanitizers and the freestanding stack-frame check.
+Evidence is under `artifacts/checks/inode-flags-development-evidence/`.
+
+Twelve independent records on extent, indirect and 128-byte-inode profiles pass
+exact whole-namespace, inode, data, xattr and allocation comparison. All 54
+nonrepairing e2fsck checks and twelve journal-only replays pass; core replay and
+idempotence agree for both committed and uncommitted journals. Thirty source
+exports remain unchanged. Evidence is in
+`artifacts/inode-flags-independent-retry1/report.json`.
+
+Six actual Linux roundtrips pass, including pending set/clear transactions. Linux
+reads the exact core-created flags, enforces protected file/directory operations,
+clears protection, appends a distinct byte and commits new protection and inherited
+flags. Core and independent recovery agree on every inode, byte, attribute and
+allocation count; all twelve nonrepairing checks and six journal-only replays pass.
+The portable reader accepts all six returned images. No guest warnings occur.
+Evidence is in `artifacts/checks/inode-flags-linux-summary.json` and the lab's
+`artifacts/ext4-journal/linux-reference/inode-flags-{functional,pending}-linux/`.
+The expanded 373-test full regression is pending.
 
 ## Preallocation and hole punching
 

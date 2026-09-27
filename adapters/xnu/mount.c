@@ -45,6 +45,8 @@ ext4_xnu_error(enum ext4_result result)
 		return EMLINK;
 	case EXT4_NOT_EMPTY:
 		return ENOTEMPTY;
+	case EXT4_PERMISSION_DENIED:
+		return EPERM;
 	default:
 		return EIO;
 	}

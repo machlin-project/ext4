@@ -90,7 +90,13 @@ def prepare(case, tree, tools):
     link_lines = []
     expected = tree / "expected"
     expected.mkdir()
-    if full_blocks:
+    if case.get("verified_flags"):
+        objects = case["verified_flags"]["objects"]
+        paths = [path for path, value in objects.items() if value["inode"]["type"] in ("regular", "directory")]
+        data_paths = [path for path in paths if objects[path]["inode"]["type"] == "regular"]
+        (tree / "namespace-flags").write_text("".join(
+            f"{path} {objects[path]['inode']['flags']:x}\n" for path in paths))
+    elif full_blocks:
         paths = linux_space.paths(case)
         data_paths = [path for path, item in case["verified_space"]["objects"].items()
                       if item["inode"]["type"] == "regular"]
@@ -178,6 +184,9 @@ def prepare(case, tree, tools):
 
 
 def verify(case, image, output, tools, recover, run):
+    if case.get("verified_flags"):
+        import linux_inode_flags
+        return linux_inode_flags.verify(case, image, output, tools, recover, run)
     oracle = output / f"oracle-{image.name}"
     shutil.copyfile(image, oracle)
     replay = run([recover, "--write", image])

@@ -577,11 +577,11 @@ malformed(struct device *device)
 			break;
 		case IMMUTABLE_PARENT:
 			ext4_encode32(&parent_disk->flags, root.flags | EXT4_INODE_IMMUTABLE);
-			expected = EXT4_UNSUPPORTED;
+			expected = EXT4_PERMISSION_DENIED;
 			break;
 		case IMMUTABLE_TARGET:
 			ext4_encode32(&child_disk->flags, file.flags | EXT4_INODE_IMMUTABLE);
-			expected = EXT4_UNSUPPORTED;
+			expected = EXT4_PERMISSION_DENIED;
 			break;
 		case PROTECTED_TARGET_MAP:
 			EXPECT(ext4_get_inode(fs, fs->journal_inode, &journal), EXT4_OK);

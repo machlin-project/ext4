@@ -2,6 +2,7 @@
 #include <dirent.h>
 #include <sys/statvfs.h>
 #include <sys/sysmacros.h>
+#include "linux_inode_flags.h"
 
 #define TEST_SYMLINK_INLINE_CAPACITY 60U
 #define TEST_DIRECTORY_ENTRIES_MAX (1U << 20)
@@ -426,6 +427,11 @@ check_namespace(uint32_t block_size)
 		    "verify hardlink to symlink");
 	}
 	puts("LINUX_EXT4_NAMESPACE_PASS");
+	if (namespace_flag_checks()) {
+		puts("LINUX_EXT4_COMMITTED_RECOVERY_PENDING");
+		power_off(1);
+		return;
+	}
 	if (ranges == 3) {
 		require(statvfs("/mnt", &counts) == 0 && counts.f_bfree == 0,
 		    "Linux sees physically full preallocation image");

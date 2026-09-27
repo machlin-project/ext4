@@ -59,6 +59,9 @@ ext4_error(enum ext4_result result)
 	case EXT4_NOT_EMPTY:
 		error = ENOTEMPTY;
 		break;
+	case EXT4_PERMISSION_DENIED:
+		error = EPERM;
+		break;
 	case EXT4_CORRUPT:
 	case EXT4_RECOVERY_REQUIRED:
 	case EXT4_IO:

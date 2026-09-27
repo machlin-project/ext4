@@ -103,6 +103,8 @@ enum ext4_result ext4_inode_decode_live(
     struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4_inode *inode);
 struct ext4_inode_hold *ext4_inode_find_hold(struct ext4_fs *fs, uint32_t number);
 void ext4_inode_holds_destroy(struct ext4_fs *fs);
+/* Validate mutation-compatible formats. Public operation boundaries separately
+ * enforce immutable/append policy; orphan cleanup must finish accepted deletion. */
 enum ext4_result ext4_inode_writable(
     struct ext4_fs *fs, const struct ext4_inode_disk *disk, const struct ext4_inode *inode);
 enum ext4_result ext4_inode_flags_writable(struct ext4_fs *fs, const struct ext4_inode *inode);

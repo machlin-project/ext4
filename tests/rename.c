@@ -602,7 +602,7 @@ malformed(struct device *device)
 			    scenario == IMMUTABLE_DESTINATION_PARENT) {
 				ext4_encode32(
 				    &disk->flags, parents[index].flags | EXT4_INODE_IMMUTABLE);
-				expected = EXT4_UNSUPPORTED;
+				expected = EXT4_PERMISSION_DENIED;
 			} else {
 				ext4_encode16(&disk->links,
 				    scenario == SOURCE_PARENT_LINKS	     ? 2
