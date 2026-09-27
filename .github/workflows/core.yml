@@ -55,6 +55,9 @@ jobs:
             2>&1 | tee artifacts/checks/write-exports.log
           python3 tests/check_writes.py --exports artifacts/write-exports --output artifacts/write-independent \
             2>&1 | tee artifacts/checks/write-independent.log
+          find artifacts/write-exports artifacts/write-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          df -h .
       - name: Recover independently authored journals
         run: |
           python3 tests/generate_journal_fixtures.py --source artifacts/fixtures/ext4-4k.img \
@@ -62,6 +65,9 @@ jobs:
           python3 tests/check_journal_recovery.py --fixtures artifacts/journal-fixtures \
             --recover .build/ext4-recover --e2fsck "$(command -v e2fsck)" \
             --output artifacts/journal-independent 2>&1 | tee artifacts/checks/journal-independent.log
+          find artifacts/journal-fixtures artifacts/journal-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          df -h .
       - name: Independently verify allocation and unwritten conversion
         run: |
           mkdir artifacts/allocation-exports
@@ -74,6 +80,9 @@ jobs:
             artifacts/allocation-fixtures/*.img 2>&1 | tee artifacts/checks/allocation-exports.log
           python3 tests/check_allocation.py --exports artifacts/allocation-exports \
             --output artifacts/allocation-independent 2>&1 | tee artifacts/checks/allocation-independent.log
+          find artifacts/allocation-exports artifacts/allocation-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          df -h .
       - name: Independently verify truncate and freed block reuse
         run: |
           mkdir artifacts/truncate-exports
@@ -86,6 +95,9 @@ jobs:
             artifacts/allocation-fixtures/*.img 2>&1 | tee artifacts/checks/truncate-exports.log
           python3 tests/check_allocation.py --truncate --exports artifacts/truncate-exports \
             --output artifacts/truncate-independent 2>&1 | tee artifacts/checks/truncate-independent.log
+          find artifacts/truncate-exports artifacts/truncate-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          df -h .
       - name: Independently verify orphan cleanup
         run: |
           mkdir artifacts/orphan-linked-exports
@@ -101,6 +113,9 @@ jobs:
             2>&1 | tee artifacts/checks/orphan-linked-independent.log
           e2fsck -fn artifacts/orphan-linked-exports/large-clean-ext4-indirect-1k.img \
             2>&1 | tee artifacts/checks/orphan-large-independent.log
+          find artifacts/orphan-linked-exports artifacts/orphan-linked-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          df -h .
       - name: Independently verify live truncate and recovery
         run: |
           mkdir artifacts/live-exports artifacts/live-large-exports
@@ -118,6 +133,9 @@ jobs:
           python3 tests/check_resize.py --large --exports artifacts/live-large-exports \
             --recover .build/ext4-recover --output artifacts/live-large-independent \
             2>&1 | tee artifacts/checks/live-large-independent.log
+          find artifacts/live-exports artifacts/live-large-exports artifacts/live-independent artifacts/live-large-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          df -h .
       - name: Preserve test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
