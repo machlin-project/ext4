@@ -50,6 +50,61 @@ decode_le32(const struct ext4_le32 *field)
 	    ((uint32_t)field->bytes[2] << 16) | ((uint32_t)field->bytes[3] << 24);
 }
 
+#ifdef EXT4_TEST_FILE_WRITES
+static void
+check_exported_files(uint32_t block_size, uint16_t inode_size)
+{
+	struct stat metadata;
+	struct stat original;
+	struct stat alias;
+	uint8_t *bytes;
+	uint8_t expected;
+	size_t index;
+	size_t start = block_size - 7;
+	int fd;
+
+	bytes = malloc(200000);
+	require(bytes != NULL, "allocate whole-file comparison");
+	fd = open("/mnt/payload.bin", O_RDONLY | O_CLOEXEC);
+	require(fd >= 0, "open written payload");
+	require(pread(fd, bytes, 200000, 0) == 200000, "read complete written payload");
+	for (index = 0; index < 200000; index++) {
+		expected = (uint8_t)(index * 17 + 23);
+		if (index >= start && index - start < block_size + 23) {
+			expected = (uint8_t)((index - start) * 29 + 7);
+		}
+		require(bytes[index] == expected, "compare native file write");
+	}
+	require(close(fd) == 0, "close written payload");
+	free(bytes);
+	require(stat("/mnt/metadata.txt", &metadata) == 0, "stat written metadata");
+	require(metadata.st_uid == UINT32_MAX - 1U && metadata.st_gid == 0x81234567U &&
+		(metadata.st_mode & 07777) == 0610,
+	    "verify full-width owners and mode");
+	require(metadata.st_atim.tv_sec == 0 && metadata.st_atim.tv_nsec == 0, "verify atime");
+	if (inode_size == EXT4_INODE_BASE_SIZE) {
+		require(metadata.st_mtim.tv_sec == 1700000001 && metadata.st_mtim.tv_nsec == 0 &&
+			metadata.st_ctim.tv_sec == 1700000002 && metadata.st_ctim.tv_nsec == 0,
+		    "verify legacy timestamps");
+	} else {
+		require(metadata.st_mtim.tv_sec == INT32_MIN &&
+			metadata.st_mtim.tv_nsec == 123456789 &&
+			metadata.st_ctim.tv_sec == INT64_C(15032385535) &&
+			metadata.st_ctim.tv_nsec == 999999999,
+		    "verify extended signed timestamps");
+	}
+	require(stat("/mnt/hello.txt", &original) == 0 && stat("/mnt/hello-hardlink", &alias) == 0,
+	    "stat both hardlinks");
+	require(original.st_ino == alias.st_ino && alias.st_nlink == 2 && alias.st_uid == 1111 &&
+		alias.st_gid == 2222 && (alias.st_mode & 07777) == 0640,
+	    "verify shared hardlink attributes");
+	fd = open("/mnt/hello-hardlink", O_RDONLY | O_CLOEXEC);
+	require(fd >= 0 && read(fd, &expected, 1) == 1 && expected == 'X', "verify hardlink write");
+	require(close(fd) == 0, "close hardlink");
+	puts("LINUX_EXT4_FILE_WRITE_PASS");
+}
+#endif
+
 int
 main(void)
 {
@@ -59,13 +114,15 @@ main(void)
 	struct utsname identity;
 	char module[128];
 	FILE *configuration;
+#ifndef EXT4_TEST_FILE_WRITES
 	uint8_t *buffer;
+	uint32_t position;
+	uint8_t expected;
+#endif
 	uint8_t linux_byte = TEST_LINUX_BYTE;
 	uint32_t block_size;
 	uint32_t logarithm;
 	uint32_t index;
-	uint32_t position;
-	uint8_t expected;
 	int fd;
 	int result;
 
@@ -94,15 +151,25 @@ main(void)
 	logarithm = decode_le32(&super.log_block_size);
 	require(logarithm <= 6 && (EXT4_MIN_BLOCK_SIZE << logarithm) == block_size,
 	    "verify filesystem block size");
+#ifdef EXT4_TEST_FILE_WRITES
+	require((decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_RECOVER) == 0,
+	    "verify cleanly finished writable filesystem");
+#else
 	require((decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_RECOVER) != 0,
 	    "verify journal requires recovery");
+#endif
 	require(mount("/dev/vda", "/mnt", "ext4", MS_NOATIME | MS_NOSUID | MS_NODEV,
 		    "data=ordered") == 0,
 	    "Linux ext4 mount and recovery");
-	buffer = malloc((size_t)block_size * 2);
-	require(buffer != NULL, "allocate comparison buffer");
+#ifdef EXT4_TEST_FILE_WRITES
+	check_exported_files(block_size,
+	    (uint16_t)super.inode_size.bytes[0] | ((uint16_t)super.inode_size.bytes[1] << 8));
+#endif
 	fd = open("/mnt/payload.bin", O_RDWR | O_CLOEXEC);
 	require(fd >= 0, "open recovered payload");
+#ifndef EXT4_TEST_FILE_WRITES
+	buffer = malloc((size_t)block_size * 2);
+	require(buffer != NULL, "allocate comparison buffer");
 	require(pread(fd, buffer, (size_t)block_size * 2, 0) == (ssize_t)block_size * 2,
 	    "read recovered payload");
 	for (position = 0; position < block_size * 2; position++) {
@@ -117,6 +184,8 @@ main(void)
 		}
 	}
 	puts("LINUX_EXT4_REPLAY_PASS");
+	free(buffer);
+#endif
 	/* Linux now authors a real inode transaction for the reverse roundtrip. */
 	require(fchown(fd, TEST_UID, TEST_GID) == 0, "Linux chown");
 	require(fchmod(fd, TEST_MODE) == 0, "Linux chmod");
@@ -124,7 +193,6 @@ main(void)
 	    pwrite(fd, &linux_byte, sizeof(linux_byte), 0) == sizeof(linux_byte), "Linux write");
 	require(fsync(fd) == 0, "Linux fsync commit");
 	puts("LINUX_EXT4_COMMITTED_RECOVERY_PENDING");
-	free(buffer);
 	power_off(1);
 	return 1;
 }

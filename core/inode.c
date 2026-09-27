@@ -1,14 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
 
-#define EXT4_TIME_EPOCH_MASK 3U
-#define EXT4_TIME_NANOSECOND_SHIFT 2U
-#define EXT4_NANOSECONDS_PER_SECOND 1000000000U
-
-#define EXT4_INODE_HAS_FIELD(extra_size, field)                                                    \
-	(EXT4_INODE_BASE_SIZE + (size_t)(extra_size) >= offsetof(struct ext4_inode_disk, field) +  \
-		sizeof(((struct ext4_inode_disk *)0)->field))
-
 static enum ext4_result
 ext4_decode_time(uint32_t seconds, uint32_t extra, struct ext4_timestamp *time)
 {
@@ -62,89 +54,18 @@ ext4_inode_times(const struct ext4_inode_disk *disk, uint16_t extra_size, struct
 	return error;
 }
 
-static enum ext4_result
-ext4_inode_table(struct ext4_fs *fs, uint32_t group, uint64_t *table)
-{
-	struct ext4_group_disk *descriptor;
-	struct ext4_le32 group_wire;
-	uint8_t *buffer;
-	uint64_t offset;
-	uint64_t table_blocks;
-	uint32_t checksum;
-	uint16_t expected;
-	enum ext4_result error;
-
-	buffer = fs->environment.allocate(fs->environment.context, fs->descriptor_size);
-	if (buffer == NULL) {
-		return EXT4_NO_MEMORY;
-	}
-	offset = (uint64_t)(fs->first_data_block + 1) * fs->info.block_size +
-	    (uint64_t)group * fs->descriptor_size;
-	error = ext4_device_read(fs, offset, buffer, fs->descriptor_size);
-	if (error != EXT4_OK) {
-		goto out;
-	}
-	descriptor = (struct ext4_group_disk *)buffer;
-	if (fs->metadata_checksum) {
-		expected = ext4_le16(&descriptor->checksum);
-		ext4_zero(&descriptor->checksum, sizeof(descriptor->checksum));
-		ext4_encode32(&group_wire, group);
-		checksum = ext4_crc32c(fs->checksum_seed, &group_wire, sizeof(group_wire));
-		checksum = ext4_crc32c(checksum, buffer, fs->descriptor_size);
-		if ((uint16_t)checksum != expected) {
-			error = EXT4_CORRUPT;
-			goto out;
-		}
-	}
-	*table = ext4_le32(&descriptor->inode_table_lo);
-	if (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
-		*table |= (uint64_t)ext4_le32(&descriptor->inode_table_hi) << 32;
-	}
-	table_blocks = ((uint64_t)fs->inodes_per_group * fs->inode_size + fs->info.block_size - 1) /
-	    fs->info.block_size;
-	if (*table < fs->first_data_block || *table >= fs->info.blocks ||
-	    table_blocks > fs->info.blocks - *table) {
-		error = EXT4_CORRUPT;
-	}
-out:
-	fs->environment.release(fs->environment.context, buffer, fs->descriptor_size);
-	return error;
-}
-
 enum ext4_result
-ext4_get_inode(struct ext4_fs *fs, uint32_t number, struct ext4_inode *inode)
+ext4_inode_decode(struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4_inode *inode)
 {
 	struct ext4_inode_disk *disk;
 	struct ext4_inode decoded;
-	uint8_t *buffer;
-	uint64_t table;
-	uint64_t offset;
 	uint64_t xattr_block;
-	uint32_t group;
 	uint32_t checksum;
 	uint32_t expected;
 	uint16_t extra_size = 0;
 	bool checksum_hi;
 	enum ext4_result error;
 
-	if (fs == NULL || inode == NULL || number == 0 || number > fs->info.inodes) {
-		return EXT4_INVALID_ARGUMENT;
-	}
-	group = (number - 1) / fs->inodes_per_group;
-	error = ext4_inode_table(fs, group, &table);
-	if (error != EXT4_OK) {
-		return error;
-	}
-	buffer = fs->environment.allocate(fs->environment.context, fs->inode_size);
-	if (buffer == NULL) {
-		return EXT4_NO_MEMORY;
-	}
-	offset = table * fs->info.block_size +
-	    (uint64_t)((number - 1) % fs->inodes_per_group) * fs->inode_size;
-	error = ext4_device_read(fs, offset, buffer, fs->inode_size);
-	if (error != EXT4_OK) {
-		goto out;
-	}
 	disk = (struct ext4_inode_disk *)buffer;
 	ext4_zero(&decoded, sizeof(decoded));
 	decoded.number = number;
@@ -165,6 +86,10 @@ ext4_get_inode(struct ext4_fs *fs, uint32_t number, struct ext4_inode *inode)
 			ext4_zero(&disk->checksum_hi, sizeof(disk->checksum_hi));
 		}
 		checksum = ext4_crc32c(ext4_inode_seed(fs, &decoded), buffer, fs->inode_size);
+		ext4_encode16(&disk->checksum_lo, (uint16_t)expected);
+		if (checksum_hi) {
+			ext4_encode16(&disk->checksum_hi, (uint16_t)(expected >> 16));
+		}
 		if (!checksum_hi) {
 			checksum &= UINT16_MAX;
 		}
@@ -206,6 +131,133 @@ ext4_get_inode(struct ext4_fs *fs, uint32_t number, struct ext4_inode *inode)
 		*inode = decoded;
 	}
 out:
+	return error;
+}
+
+void
+ext4_inode_checksum_set(struct ext4_fs *fs, uint32_t number, struct ext4_inode_disk *disk)
+{
+	struct ext4_inode inode;
+	uint32_t checksum;
+	uint16_t extra_size;
+	bool checksum_hi;
+
+	if (!fs->metadata_checksum) {
+		return;
+	}
+	extra_size = fs->inode_size > EXT4_INODE_BASE_SIZE ? ext4_le16(&disk->extra_size) : 0;
+	checksum_hi = EXT4_INODE_HAS_FIELD(extra_size, checksum_hi);
+	ext4_zero(&inode, sizeof(inode));
+	inode.number = number;
+	inode.generation = ext4_le32(&disk->generation);
+	ext4_encode16(&disk->checksum_lo, 0);
+	if (checksum_hi) {
+		ext4_encode16(&disk->checksum_hi, 0);
+	}
+	checksum = ext4_crc32c(ext4_inode_seed(fs, &inode), disk, fs->inode_size);
+	ext4_encode16(&disk->checksum_lo, (uint16_t)checksum);
+	if (checksum_hi) {
+		ext4_encode16(&disk->checksum_hi, (uint16_t)(checksum >> 16));
+	}
+}
+
+enum ext4_result
+ext4_get_inode(struct ext4_fs *fs, uint32_t number, struct ext4_inode *inode)
+{
+	void *buffer;
+	uint64_t offset;
+	enum ext4_result error;
+
+	if (fs == NULL || inode == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
+	error = ext4_inode_location(fs, number, &offset);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	buffer = fs->environment.allocate(fs->environment.context, fs->inode_size);
+	if (buffer == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	error = ext4_device_read(fs, offset, buffer, fs->inode_size);
+	if (error == EXT4_OK) {
+		error = ext4_inode_decode(fs, number, buffer, inode);
+	}
 	fs->environment.release(fs->environment.context, buffer, fs->inode_size);
+	return error;
+}
+
+static enum ext4_result
+ext4_encode_time(
+    const struct ext4_timestamp *time, struct ext4_le32 *seconds, struct ext4_le32 *extra)
+{
+	uint32_t low;
+	uint32_t epoch;
+	int64_t signed_low;
+	int64_t maximum =
+	    extra == NULL ? INT32_MAX : INT32_MAX + ((int64_t)EXT4_TIME_EPOCH_MASK << 32);
+
+	if (time->nanoseconds >= EXT4_NANOSECONDS_PER_SECOND || time->seconds < INT32_MIN ||
+	    time->seconds > maximum || (extra == NULL && time->nanoseconds != 0)) {
+		return EXT4_RANGE;
+	}
+	low = (uint32_t)(uint64_t)time->seconds;
+	signed_low = low <= INT32_MAX ? (int64_t)low : (int64_t)low - (INT64_C(1) << 32);
+	epoch = (uint32_t)((time->seconds - signed_low) >> 32);
+	ext4_encode32(seconds, low);
+	if (extra != NULL) {
+		ext4_encode32(extra, (time->nanoseconds << EXT4_TIME_NANOSECOND_SHIFT) | epoch);
+	}
+	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_inode_apply(
+    struct ext4_fs *fs, struct ext4_inode_disk *disk, const struct ext4_inode_update *update)
+{
+	uint16_t extra_size =
+	    fs->inode_size > EXT4_INODE_BASE_SIZE ? ext4_le16(&disk->extra_size) : 0;
+	enum ext4_result error = EXT4_OK;
+
+	/* The caller owns a private transaction snapshot. Any failure discards all
+	 * these changes, including fields encoded before an unrepresentable time. */
+	if (update->fields & EXT4_ATTR_PERMISSIONS) {
+		ext4_encode16(
+		    &disk->mode, (ext4_le16(&disk->mode) & EXT4_MODE_TYPE) | update->permissions);
+	}
+	if (update->fields & EXT4_ATTR_UID) {
+		ext4_encode16(&disk->uid_lo, (uint16_t)update->uid);
+		ext4_encode16(&disk->uid_hi, (uint16_t)(update->uid >> 16));
+	}
+	if (update->fields & EXT4_ATTR_GID) {
+		ext4_encode16(&disk->gid_lo, (uint16_t)update->gid);
+		ext4_encode16(&disk->gid_hi, (uint16_t)(update->gid >> 16));
+	}
+	if (update->fields & EXT4_ATTR_ACCESS_TIME) {
+		error = ext4_encode_time(&update->access_time, &disk->access_time,
+		    EXT4_INODE_HAS_FIELD(extra_size, access_time_extra) ? &disk->access_time_extra
+									: NULL);
+	}
+	if (error == EXT4_OK && (update->fields & EXT4_ATTR_CHANGE_TIME)) {
+		error = ext4_encode_time(&update->change_time, &disk->change_time,
+		    EXT4_INODE_HAS_FIELD(extra_size, change_time_extra) ? &disk->change_time_extra
+									: NULL);
+	}
+	if (error == EXT4_OK && (update->fields & EXT4_ATTR_MODIFY_TIME)) {
+		error = ext4_encode_time(&update->modify_time, &disk->modify_time,
+		    EXT4_INODE_HAS_FIELD(extra_size, modify_time_extra) ? &disk->modify_time_extra
+									: NULL);
+	}
+	if (error == EXT4_OK && (update->fields & EXT4_ATTR_BIRTH_TIME)) {
+		if (!EXT4_INODE_HAS_FIELD(extra_size, birth_time)) {
+			return EXT4_UNSUPPORTED;
+		}
+		error = ext4_encode_time(&update->birth_time, &disk->birth_time,
+		    EXT4_INODE_HAS_FIELD(extra_size, birth_time_extra) ? &disk->birth_time_extra
+								       : NULL);
+	}
 	return error;
 }

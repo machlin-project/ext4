@@ -1,0 +1,75 @@
+name: Portable filesystem
+
+on:
+  push:
+    branches: [development, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CC: clang
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang cmake ninja-build e2fsprogs
+      - name: Generate independent images
+        run: |
+          mkdir -p artifacts/checks
+          python3 tests/generate_fixtures.py --extended --inode128 2>&1 | tee artifacts/checks/fixtures.log
+      - name: Build sanitized and freestanding core
+        run: |
+          cmake -S . -B .build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DEXT4_EXTENDED_TESTS=ON -DEXT4_INODE128_TEST=ON
+          cmake --build .build --parallel 2 2>&1 | tee artifacts/checks/build.log
+      - name: Run conformance and fault tests
+        run: ctest --test-dir .build --output-on-failure --output-junit "$PWD/artifacts/core-tests.xml"
+      - name: Export and independently verify file writes
+        run: |
+          mkdir artifacts/write-exports
+          .build/ext4-write-test --export artifacts/write-exports \
+            artifacts/fixtures/ext4-1k.img artifacts/fixtures/ext4-2k.img \
+            artifacts/fixtures/ext4-4k.img artifacts/fixtures/ext4-8k.img \
+            artifacts/fixtures/ext4-16k.img artifacts/fixtures/ext4-32k.img \
+            artifacts/fixtures/ext4-indirect-1k.img artifacts/fixtures/ext4-no-checksum.img \
+            artifacts/fixtures/ext4-checksum-seed.img artifacts/fixtures/ext4-inode128.img \
+            2>&1 | tee artifacts/checks/write-exports.log
+          python3 tests/check_writes.py --exports artifacts/write-exports --output artifacts/write-independent \
+            2>&1 | tee artifacts/checks/write-independent.log
+      - name: Recover independently authored journals
+        run: |
+          python3 tests/generate_journal_fixtures.py --source artifacts/fixtures/ext4-4k.img \
+            --output artifacts/journal-fixtures
+          python3 tests/check_journal_recovery.py --fixtures artifacts/journal-fixtures \
+            --recover .build/ext4-recover --e2fsck "$(command -v e2fsck)" \
+            --output artifacts/journal-independent 2>&1 | tee artifacts/checks/journal-independent.log
+      - name: Preserve test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: portable-filesystem-reports
+          retention-days: 7
+          include-hidden-files: true
+          path: |
+            artifacts/**/*.log
+            artifacts/**/*.json
+            artifacts/**/*.xml
+            artifacts/fixtures/features.txt
+            artifacts/fixtures/tool-versions.txt
+            .build/Testing/Temporary/*.log

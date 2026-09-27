@@ -44,6 +44,9 @@ ext4_error(enum ext4_result result)
 	case EXT4_RANGE:
 		error = EOVERFLOW;
 		break;
+	case EXT4_STALE:
+		error = ESTALE;
+		break;
 	case EXT4_CORRUPT:
 	case EXT4_RECOVERY_REQUIRED:
 	case EXT4_IO:

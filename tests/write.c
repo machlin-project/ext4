@@ -1,0 +1,875 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
+#include "journal.h"
+#include "image.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define TEST_IMAGE_LIMIT (128U * 1024U * 1024U)
+#define TEST_PAYLOAD_SIZE 200000U
+#define TEST_SECTOR_SIZE 512U
+#define TEST_UNKNOWN_INODE_FLAG 0x80000000U
+#define TEST_UNKNOWN_ATTRIBUTE (1U << 31)
+#define TEST_WIDE_UID (UINT32_MAX - 1U)
+#define TEST_WRITE_FIELDS (EXT4_ATTR_PERMISSIONS | EXT4_ATTR_MODIFY_TIME | EXT4_ATTR_CHANGE_TIME)
+
+#define CHECK(expression)                                                                          \
+	do {                                                                                       \
+		if (!(expression)) {                                                               \
+			fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expression);           \
+			exit(1);                                                                   \
+		}                                                                                  \
+	} while (0)
+#define EXPECT(expression, expected)                                                               \
+	do {                                                                                       \
+		enum ext4_result actual = (expression);                                            \
+		if (actual != (expected)) {                                                        \
+			fprintf(stderr, "%s:%d: %s: %s, expected %s\n", __FILE__, __LINE__,        \
+			    #expression, ext4_result_string(actual),                               \
+			    ext4_result_string(expected));                                         \
+			exit(1);                                                                   \
+		}                                                                                  \
+	} while (0)
+
+struct device {
+	struct ext4_environment environment;
+	struct ext4_write_environment writer;
+	uint8_t *base;
+	uint8_t *cache;
+	uint8_t *stable;
+	uint8_t *dirty;
+	size_t size;
+	uint32_t block_size;
+	uint32_t blocks;
+	uint32_t events;
+	uint32_t stop_at;
+	uint32_t writes;
+	uint32_t reads;
+	uint32_t allocations;
+	uint32_t fail_read;
+	uint32_t fail_allocation;
+	uint32_t live;
+	unsigned int survival;
+	bool partial;
+	bool off;
+};
+
+static void *
+device_allocate(void *context, size_t size)
+{
+	struct device *device = context;
+	void *buffer;
+
+	if (++device->allocations == device->fail_allocation) {
+		return NULL;
+	}
+	buffer = malloc(size);
+	if (buffer != NULL) {
+		device->live++;
+	}
+	return buffer;
+}
+
+static void
+device_release(void *context, void *buffer, size_t size)
+{
+	struct device *device = context;
+
+	(void)size;
+	CHECK(buffer != NULL && device->live != 0);
+	device->live--;
+	free(buffer);
+}
+
+static enum ext4_result
+device_read(void *context, uint64_t offset, void *buffer, size_t length)
+{
+	struct device *device = context;
+
+	CHECK(offset <= device->size && length <= device->size - offset);
+	if (++device->reads == device->fail_read || device->off) {
+		return EXT4_IO;
+	}
+	memcpy(buffer, device->cache + offset, length);
+	return EXT4_OK;
+}
+
+static void
+device_persist(struct device *device, unsigned int survival)
+{
+	uint32_t index;
+
+	for (index = 0; index < device->blocks; index++) {
+		if (device->dirty[index] && (survival == 1 || (survival == 2 && (index & 1)))) {
+			memcpy(device->stable + (size_t)index * device->block_size,
+			    device->cache + (size_t)index * device->block_size, device->block_size);
+		}
+		device->dirty[index] = 0;
+	}
+}
+
+static enum ext4_result
+device_write(void *context, uint64_t offset, const void *buffer, size_t length)
+{
+	struct device *device = context;
+	size_t partial;
+
+	CHECK(!device->off && offset % device->block_size == 0 && length == device->block_size);
+	CHECK(offset <= device->size && length <= device->size - offset);
+	device->writes++;
+	if (++device->events == device->stop_at) {
+		if (device->partial) {
+			partial = length / 2;
+			if (offset ==
+			    (EXT4_SUPER_OFFSET / device->block_size) * device->block_size) {
+				partial = EXT4_SUPER_OFFSET % device->block_size + TEST_SECTOR_SIZE;
+			}
+			memcpy(device->cache + offset, buffer, partial);
+			device->dirty[offset / device->block_size] = 1;
+		}
+		device_persist(device, device->survival);
+		device->off = true;
+		return EXT4_IO;
+	}
+	memcpy(device->cache + offset, buffer, length);
+	device->dirty[offset / device->block_size] = 1;
+	return EXT4_OK;
+}
+
+static enum ext4_result
+device_flush(void *context)
+{
+	struct device *device = context;
+	bool stop;
+
+	CHECK(!device->off);
+	stop = ++device->events == device->stop_at;
+	device_persist(device, stop ? device->survival : 1);
+	if (stop) {
+		device->off = true;
+		return EXT4_IO;
+	}
+	return EXT4_OK;
+}
+
+static void
+device_reset(struct device *device, const uint8_t *source)
+{
+	CHECK(device->live == 0);
+	memcpy(device->cache, source, device->size);
+	if (source != device->stable) {
+		memcpy(device->stable, source, device->size);
+	}
+	memset(device->dirty, 0, device->blocks);
+	device->events = device->stop_at = device->writes = device->reads = 0;
+	device->allocations = device->fail_read = device->fail_allocation = 0;
+	device->off = false;
+	device->partial = false;
+}
+
+static struct ext4_fs *
+mount_writer(struct device *device)
+{
+	struct ext4_fs *fs;
+
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	return fs;
+}
+
+static struct ext4_inode
+lookup(struct ext4_fs *fs, const char *name)
+{
+	struct ext4_inode root;
+	struct ext4_inode inode;
+
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(ext4_lookup(fs, &root, (const uint8_t *)name, strlen(name), &inode), EXT4_OK);
+	return inode;
+}
+
+static struct ext4_inode_update
+write_update(struct ext4_fs *fs)
+{
+	struct ext4_inode_update update;
+
+	memset(&update, 0, sizeof(update));
+	update.fields = TEST_WRITE_FIELDS;
+	update.permissions = 0640;
+	update.modify_time.seconds =
+	    fs->inode_size == EXT4_INODE_BASE_SIZE ? 1700000001 : INT32_MIN;
+	update.change_time.seconds = fs->inode_size == EXT4_INODE_BASE_SIZE
+	    ? 1700000002
+	    : INT32_MAX + ((int64_t)EXT4_TIME_EPOCH_MASK << 32);
+	if (fs->inode_size > EXT4_INODE_BASE_SIZE) {
+		update.modify_time.nanoseconds = 123456789;
+		update.change_time.nanoseconds = 999999999;
+	}
+	return update;
+}
+
+static uint8_t *
+write_bytes(struct device *device, size_t *length)
+{
+	uint8_t *bytes;
+	size_t index;
+
+	*length = device->block_size + 23;
+	bytes = malloc(*length);
+	CHECK(bytes != NULL);
+	for (index = 0; index < *length; index++) {
+		bytes[index] = (uint8_t)(index * 29 + 7);
+	}
+	return bytes;
+}
+
+static void
+check_payload(struct ext4_fs *fs, const uint8_t *patch, size_t patch_length)
+{
+	struct ext4_inode inode = lookup(fs, "payload.bin");
+	uint8_t *bytes = malloc(TEST_PAYLOAD_SIZE);
+	size_t completed;
+	size_t index;
+	size_t start = fs->info.block_size - 7;
+	uint8_t expected;
+
+	CHECK(bytes != NULL && inode.size == TEST_PAYLOAD_SIZE);
+	EXPECT(ext4_read(fs, &inode, 0, bytes, TEST_PAYLOAD_SIZE, &completed), EXT4_OK);
+	CHECK(completed == TEST_PAYLOAD_SIZE);
+	for (index = 0; index < completed; index++) {
+		expected = (uint8_t)(index * 17 + 23);
+		if (patch != NULL && index >= start && index - start < patch_length) {
+			expected = patch[index - start];
+		}
+		CHECK(bytes[index] == expected);
+	}
+	free(bytes);
+}
+
+static void
+check_inode_neighbors(struct device *device, struct ext4_fs *fs, uint32_t number, uint64_t offset,
+    const uint8_t *before)
+{
+	size_t within = (size_t)(offset % device->block_size);
+	uint64_t block = offset - within;
+
+	(void)number;
+	CHECK(memcmp(before, device->cache + block, within) == 0);
+	CHECK(memcmp(before + within + fs->inode_size, device->cache + offset + fs->inode_size,
+		  device->block_size - within - fs->inode_size) == 0);
+}
+
+static void
+basic_operations(struct device *device)
+{
+	struct ext4_fs *fs = mount_writer(device);
+	struct ext4_inode inode = lookup(fs, "metadata.txt");
+	struct ext4_inode after;
+	struct ext4_inode alias;
+	struct ext4_inode_update update = write_update(fs);
+	uint8_t *neighbor = malloc(device->block_size);
+	uint8_t *patch;
+	uint64_t offset;
+	size_t length;
+	size_t completed;
+	uint32_t writes;
+	char first;
+
+	CHECK(neighbor != NULL);
+	EXPECT(ext4_inode_location(fs, inode.number, &offset), EXT4_OK);
+	memcpy(neighbor, device->cache + offset - offset % device->block_size, device->block_size);
+	update.fields |= EXT4_ATTR_UID | EXT4_ATTR_GID | EXT4_ATTR_ACCESS_TIME;
+	update.uid = TEST_WIDE_UID;
+	update.gid = 0x81234567U;
+	update.permissions = 0610;
+	update.access_time.seconds = -1;
+	update.access_time.nanoseconds = fs->inode_size == EXT4_INODE_BASE_SIZE ? 0 : 42;
+	if (inode.birth_time_valid) {
+		update.fields |= EXT4_ATTR_BIRTH_TIME;
+		update.birth_time.seconds = INT64_C(1) << 32;
+		update.birth_time.nanoseconds = 987654321;
+	}
+	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after), EXT4_OK);
+	CHECK(after.uid == update.uid && after.gid == update.gid &&
+	    after.mode == (EXT4_MODE_REGULAR | update.permissions));
+	CHECK(after.access_time.seconds == -1 &&
+	    after.access_time.nanoseconds == update.access_time.nanoseconds);
+	CHECK(after.modify_time.seconds == update.modify_time.seconds &&
+	    after.change_time.seconds == update.change_time.seconds);
+	CHECK(after.size == inode.size && after.blocks_512 == inode.blocks_512 &&
+	    after.links == inode.links && after.flags == inode.flags &&
+	    after.generation == inode.generation);
+	CHECK(memcmp(after.block_data, inode.block_data, sizeof(inode.block_data)) == 0);
+	check_inode_neighbors(device, fs, inode.number, offset, neighbor);
+	/* A field-selective update must preserve all other live fields; an old
+	 * caller snapshot is never copied back over the just-committed inode. */
+	update.fields = EXT4_ATTR_ACCESS_TIME;
+	update.access_time.seconds = 0;
+	update.access_time.nanoseconds = 0;
+	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after), EXT4_OK);
+	CHECK(after.uid == TEST_WIDE_UID && after.gid == 0x81234567U &&
+	    after.mode == (EXT4_MODE_REGULAR | 0610));
+	update.fields = 0;
+	writes = device->writes;
+	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after), EXT4_OK);
+	CHECK(device->writes == writes);
+	inode = lookup(fs, "hello.txt");
+	update = write_update(fs);
+	update.fields |= EXT4_ATTR_UID | EXT4_ATTR_GID;
+	update.uid = 1111;
+	update.gid = 2222;
+	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after), EXT4_OK);
+	alias = lookup(fs, "hello-hardlink");
+	CHECK(alias.number == inode.number && alias.links == 2 && alias.uid == 1111 &&
+	    alias.gid == 2222);
+	update.fields = TEST_WRITE_FIELDS;
+	EXPECT(ext4_write(fs, alias.number, alias.generation, 0, "X", 1, &update, &completed),
+	    EXT4_OK);
+	CHECK(completed == 1);
+	EXPECT(ext4_get_inode(fs, inode.number, &inode), EXT4_OK);
+	EXPECT(ext4_read(fs, &inode, 0, &first, 1, &completed), EXT4_OK);
+	CHECK(completed == 1 && first == 'X');
+	inode = lookup(fs, "payload.bin");
+	patch = write_bytes(device, &length);
+	EXPECT(ext4_write(fs, inode.number, inode.generation, device->block_size - 7, patch, length,
+		   &update, &completed),
+	    EXT4_OK);
+	CHECK(completed == length);
+	check_payload(fs, patch, length);
+	writes = device->writes;
+	EXPECT(ext4_write(
+		   fs, inode.number, inode.generation, UINT64_MAX, NULL, 0, &update, &completed),
+	    EXT4_OK);
+	CHECK(completed == 0 && device->writes == writes);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	CHECK(device->live == 0 && memcmp(device->cache, device->stable, device->size) == 0);
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	check_payload(fs, patch, length);
+	EXPECT(ext4_write(fs, inode.number, inode.generation, 0, patch, 1, &update, &completed),
+	    EXT4_READ_ONLY);
+	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after),
+	    EXT4_READ_ONLY);
+	ext4_unmount(fs);
+	free(neighbor);
+	free(patch);
+}
+
+static void
+timestamp_cases(struct device *device)
+{
+	static const int64_t seconds[] = { INT32_MIN, -1, 0, INT32_MAX, INT64_C(2147483648),
+		UINT32_MAX, INT64_C(4294967296), INT64_C(6442450943), INT64_C(6442450944),
+		INT64_C(8589934592), INT64_C(10737418240), INT64_C(12884901888),
+		INT64_C(15032385535) };
+	struct ext4_fs *fs = mount_writer(device);
+	struct ext4_inode inode = lookup(fs, "metadata.txt");
+	struct ext4_inode after;
+	struct ext4_inode_update update = write_update(fs);
+	size_t index;
+	uint32_t writes;
+	enum ext4_result expected;
+
+	update.fields = EXT4_ATTR_ACCESS_TIME;
+	for (index = 0; index < sizeof(seconds) / sizeof(seconds[0]); index++) {
+		update.access_time.seconds = seconds[index];
+		update.access_time.nanoseconds =
+		    fs->inode_size == EXT4_INODE_BASE_SIZE ? 0 : 999999999;
+		expected = fs->inode_size == EXT4_INODE_BASE_SIZE && seconds[index] > INT32_MAX
+		    ? EXT4_RANGE
+		    : EXT4_OK;
+		writes = device->writes;
+		EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after),
+		    expected);
+		if (expected == EXT4_OK) {
+			CHECK(after.access_time.seconds == seconds[index] &&
+			    after.access_time.nanoseconds == update.access_time.nanoseconds);
+		} else {
+			CHECK(device->writes == writes);
+		}
+	}
+	writes = device->writes;
+	update.access_time.seconds = (int64_t)INT32_MIN - 1;
+	EXPECT(
+	    ext4_set_attributes(fs, inode.number, inode.generation, &update, &after), EXT4_RANGE);
+	update.access_time.seconds = INT64_C(15032385536);
+	EXPECT(
+	    ext4_set_attributes(fs, inode.number, inode.generation, &update, &after), EXT4_RANGE);
+	update.access_time.seconds = 0;
+	update.access_time.nanoseconds = EXT4_NANOSECONDS_PER_SECOND;
+	EXPECT(
+	    ext4_set_attributes(fs, inode.number, inode.generation, &update, &after), EXT4_RANGE);
+	if (fs->inode_size == EXT4_INODE_BASE_SIZE) {
+		update.access_time.nanoseconds = 1;
+		EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after),
+		    EXT4_RANGE);
+		update.fields = EXT4_ATTR_BIRTH_TIME | EXT4_ATTR_CHANGE_TIME;
+		EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after),
+		    EXT4_UNSUPPORTED);
+	}
+	CHECK(device->writes == writes);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+}
+
+static void
+rejected_operations(struct device *device)
+{
+	struct ext4_fs *fs = mount_writer(device);
+	struct ext4_inode inode = lookup(fs, "payload.bin");
+	struct ext4_inode sparse = lookup(fs, "sparse.bin");
+	struct ext4_inode link = lookup(fs, "hello-link");
+	struct ext4_inode root;
+	struct ext4_inode after;
+	struct ext4_inode_update update = write_update(fs);
+	size_t completed;
+
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(ext4_write(fs, inode.number, inode.generation + 1, 0, "a", 1, &update, &completed),
+	    EXT4_STALE);
+	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation + 1, &update, &after),
+	    EXT4_STALE);
+	EXPECT(
+	    ext4_write(fs, inode.number, inode.generation, inode.size, "a", 1, &update, &completed),
+	    EXT4_UNSUPPORTED);
+	EXPECT(
+	    ext4_write(fs, inode.number, inode.generation, UINT64_MAX, "a", 1, &update, &completed),
+	    EXT4_RANGE);
+	EXPECT(ext4_write(fs, inode.number, inode.generation, 0, "a",
+		   (size_t)device->block_size * EXT4_TRANSACTION_MAX_BLOCKS, &update, &completed),
+	    EXT4_RANGE);
+	EXPECT(ext4_write(fs, sparse.number, sparse.generation, 32768, "a", 1, &update, &completed),
+	    EXT4_UNSUPPORTED);
+	EXPECT(ext4_write(fs, link.number, link.generation, 0, "a", 1, &update, &completed),
+	    EXT4_UNSUPPORTED);
+	EXPECT(ext4_write(fs, root.number, root.generation, 0, "a", 1, &update, &completed),
+	    EXT4_IS_DIRECTORY);
+	EXPECT(
+	    ext4_write(fs, fs->journal_inode, 0, 0, "a", 1, &update, &completed), EXT4_UNSUPPORTED);
+	update.permissions |= EXT4_MODE_REGULAR;
+	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after),
+	    EXT4_INVALID_ARGUMENT);
+	update = write_update(fs);
+	update.fields |= TEST_UNKNOWN_ATTRIBUTE;
+	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after),
+	    EXT4_INVALID_ARGUMENT);
+	update.fields = EXT4_ATTR_UID | EXT4_ATTR_CHANGE_TIME;
+	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after),
+	    EXT4_INVALID_ARGUMENT);
+	update.fields = EXT4_ATTR_PERMISSIONS;
+	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after),
+	    EXT4_INVALID_ARGUMENT);
+	update.fields = TEST_WRITE_FIELDS;
+	update.change_time.nanoseconds = EXT4_NANOSECONDS_PER_SECOND;
+	EXPECT(ext4_write(fs, inode.number, inode.generation, 0, "a", 1, &update, &completed),
+	    EXT4_RANGE);
+	CHECK(completed == 0 && device->writes == 0 &&
+	    memcmp(device->cache, device->base, device->size) == 0);
+	ext4_unmount(fs);
+}
+
+static void
+extra_inode_fields(struct device *device)
+{
+	static const uint32_t fields[] = { EXT4_ATTR_ACCESS_TIME, EXT4_ATTR_CHANGE_TIME,
+		EXT4_ATTR_MODIFY_TIME, EXT4_ATTR_BIRTH_TIME };
+	struct ext4_fs *fs = mount_writer(device);
+	struct ext4_inode inode = lookup(fs, "metadata.txt");
+	struct ext4_inode result;
+	struct ext4_inode_disk *disk;
+	struct ext4_inode_update update;
+	struct ext4_timestamp *time;
+	uint8_t *original;
+	uint64_t offset;
+	uint16_t extra;
+	size_t index;
+	uint32_t writes;
+	bool represented;
+	enum ext4_result expected;
+
+	if (fs->inode_size == EXT4_INODE_BASE_SIZE) {
+		ext4_unmount(fs);
+		return;
+	}
+	EXPECT(ext4_inode_location(fs, inode.number, &offset), EXT4_OK);
+	disk = (struct ext4_inode_disk *)(device->cache + offset);
+	original = malloc(fs->inode_size);
+	CHECK(original != NULL);
+	memcpy(original, disk, fs->inode_size);
+	for (extra = 0; extra <= sizeof(struct ext4_inode_disk) - EXT4_INODE_BASE_SIZE;
+	    extra += 4) {
+		for (index = 0; index < sizeof(fields) / sizeof(fields[0]); index++) {
+			memcpy(disk, original, fs->inode_size);
+			ext4_encode16(&disk->extra_size, extra);
+			ext4_inode_checksum_set(fs, inode.number, disk);
+			memset(&update, 0, sizeof(update));
+			update.fields = fields[index] | EXT4_ATTR_CHANGE_TIME;
+			switch (fields[index]) {
+			case EXT4_ATTR_ACCESS_TIME:
+				time = &update.access_time;
+				represented = EXT4_INODE_HAS_FIELD(extra, access_time_extra);
+				break;
+			case EXT4_ATTR_CHANGE_TIME:
+				time = &update.change_time;
+				represented = EXT4_INODE_HAS_FIELD(extra, change_time_extra);
+				break;
+			case EXT4_ATTR_MODIFY_TIME:
+				time = &update.modify_time;
+				represented = EXT4_INODE_HAS_FIELD(extra, modify_time_extra);
+				break;
+			default:
+				time = &update.birth_time;
+				represented = EXT4_INODE_HAS_FIELD(extra, birth_time_extra);
+				break;
+			}
+			time->seconds = (int64_t)INT32_MAX + 1;
+			time->nanoseconds = 1;
+			expected = represented ? EXT4_OK : EXT4_RANGE;
+			if (fields[index] == EXT4_ATTR_BIRTH_TIME &&
+			    !EXT4_INODE_HAS_FIELD(extra, birth_time)) {
+				expected = EXT4_UNSUPPORTED;
+			}
+			writes = device->writes;
+			EXPECT(ext4_set_attributes(
+				   fs, inode.number, inode.generation, &update, &result),
+			    expected);
+			if (expected != EXT4_OK) {
+				CHECK(device->writes == writes &&
+				    ext4_le16(&disk->extra_size) == extra);
+			} else {
+				switch (fields[index]) {
+				case EXT4_ATTR_ACCESS_TIME:
+					time = &result.access_time;
+					break;
+				case EXT4_ATTR_CHANGE_TIME:
+					time = &result.change_time;
+					break;
+				case EXT4_ATTR_MODIFY_TIME:
+					time = &result.modify_time;
+					break;
+				default:
+					time = &result.birth_time;
+					break;
+				}
+				CHECK(time->seconds == (int64_t)INT32_MAX + 1 &&
+				    time->nanoseconds == 1);
+			}
+		}
+	}
+	free(original);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+}
+
+static enum ext4_result
+run_write(struct device *device, struct ext4_fs *fs, const struct ext4_inode *inode,
+    const uint8_t *patch, size_t length)
+{
+	struct ext4_inode_update update = write_update(fs);
+	size_t completed;
+	enum ext4_result error;
+
+	error = ext4_write(fs, inode->number, inode->generation, device->block_size - 7, patch,
+	    length, &update, &completed);
+	CHECK(completed == (error == EXT4_OK ? length : 0));
+	return error;
+}
+
+static void
+precommit_failures(struct device *device)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode inode;
+	uint8_t *patch;
+	size_t length;
+	uint32_t allocations;
+	uint32_t reads;
+	uint32_t index;
+	uint32_t phase;
+	uint32_t count;
+	enum ext4_result error;
+
+	patch = write_bytes(device, &length);
+	fs = mount_writer(device);
+	inode = lookup(fs, "payload.bin");
+	device->reads = device->allocations = 0;
+	EXPECT(run_write(device, fs, &inode, patch, length), EXT4_OK);
+	allocations = device->allocations;
+	reads = device->reads;
+	ext4_unmount(fs);
+	for (phase = 0; phase < 2; phase++) {
+		count = phase == 0 ? allocations : reads;
+		for (index = 1; index <= count; index++) {
+			device_reset(device, device->base);
+			fs = mount_writer(device);
+			device->reads = device->allocations = 0;
+			device->fail_allocation = phase == 0 ? index : 0;
+			device->fail_read = phase == 1 ? index : 0;
+			error = run_write(device, fs, &inode, patch, length);
+			CHECK(error == (phase == 0 ? EXT4_NO_MEMORY : EXT4_IO));
+			/* All fallible reads and allocation precede the first commit write. */
+			CHECK(device->writes == 0 &&
+			    memcmp(device->cache, device->base, device->size) == 0);
+			device->fail_read = device->fail_allocation = 0;
+			if (!fs->aborted) {
+				EXPECT(run_write(device, fs, &inode, patch, length), EXT4_OK);
+			}
+			ext4_unmount(fs);
+			CHECK(device->live == 0);
+		}
+	}
+	printf("write resource faults: allocations=%u reads=%u\n", allocations, reads);
+	free(patch);
+}
+
+static void
+crash_cases(struct device *device)
+{
+	struct ext4_fs *fs = mount_writer(device);
+	struct ext4_inode inode = lookup(fs, "payload.bin");
+	struct ext4_inode after;
+	struct ext4_recovery_report report;
+	struct ext4_inode_update update = write_update(fs);
+	struct ext4_mapping mapping;
+	uint8_t *patch;
+	uint8_t *expected_inode;
+	uint64_t inode_offset;
+	size_t length;
+	size_t completed;
+	uint32_t events;
+	uint32_t stop;
+	uint32_t partial;
+	uint32_t survival;
+	uint32_t cases = 0;
+	uint32_t repaired = 0;
+	uint32_t rejected = 0;
+	uint16_t inode_size = fs->inode_size;
+	bool old;
+	bool changed;
+	enum ext4_result error;
+
+	expected_inode = malloc(inode_size);
+	CHECK(expected_inode != NULL);
+	EXPECT(ext4_inode_location(fs, inode.number, &inode_offset), EXT4_OK);
+	patch = write_bytes(device, &length);
+	EXPECT(run_write(device, fs, &inode, patch, length), EXT4_OK);
+	memcpy(expected_inode, device->cache + inode_offset, inode_size);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	events = device->events;
+	ext4_unmount(fs);
+	for (stop = 1; stop <= events; stop++) {
+		for (partial = 0; partial < 2; partial++) {
+			for (survival = 0; survival < 3; survival++) {
+				device_reset(device, device->base);
+				device->stop_at = stop;
+				device->partial = partial != 0;
+				device->survival = survival;
+				fs = mount_writer(device);
+				error = run_write(device, fs, &inode, patch, length);
+				if (error == EXT4_OK) {
+					error = ext4_sync(fs);
+				}
+				CHECK(error == EXT4_IO && device->off && device->events == stop);
+				EXPECT(ext4_get_inode(fs, inode.number, &after),
+				    EXT4_RECOVERY_REQUIRED);
+				EXPECT(ext4_read(fs, &inode, 0, patch, 0, &completed),
+				    EXT4_RECOVERY_REQUIRED);
+				EXPECT(ext4_map_read(fs, &inode, inode.size, 1, &mapping),
+				    EXT4_RECOVERY_REQUIRED);
+				EXPECT(ext4_set_attributes(
+					   fs, inode.number, inode.generation, &update, &after),
+				    EXT4_RECOVERY_REQUIRED);
+				EXPECT(ext4_sync(fs), EXT4_RECOVERY_REQUIRED);
+				ext4_unmount(fs);
+				device_reset(device, device->stable);
+				error =
+				    ext4_recover(&device->environment, &device->writer, &report);
+				cases++;
+				if (error == EXT4_CORRUPT) {
+					CHECK(partial != 0 && survival != 0 && device->writes == 0);
+					rejected++;
+					continue;
+				}
+				CHECK(error == EXT4_OK);
+				repaired++;
+				old = memcmp(device->stable + inode_offset,
+					  device->base + inode_offset, inode_size) == 0;
+				changed = memcmp(device->stable + inode_offset, expected_inode,
+					      inode_size) == 0;
+				CHECK(old != changed);
+				EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+				check_payload(fs, changed ? patch : NULL, length);
+				ext4_unmount(fs);
+				CHECK(device->live == 0);
+			}
+		}
+	}
+	printf("write crash cuts: cases=%u recovered=%u damaged-superblock=%u\n", cases, repaired,
+	    rejected);
+	free(expected_inode);
+	free(patch);
+}
+
+static void
+metadata_guards(struct device *device)
+{
+	static const uint32_t flags[] = { EXT4_INODE_IMMUTABLE, EXT4_INODE_APPEND,
+		TEST_UNKNOWN_INODE_FLAG };
+	struct ext4_fs *fs;
+	struct ext4_inode inode;
+	struct ext4_inode after;
+	struct ext4_inode_disk *disk;
+	struct ext4_inode_update update;
+	struct ext4_extent_disk *extent;
+	struct ext4_group group;
+	uint64_t offset;
+	uint64_t targets[5];
+	uint32_t original_flags;
+	size_t index;
+	size_t completed;
+	size_t extra;
+
+	fs = mount_writer(device);
+	inode = lookup(fs, "payload.bin");
+	update = write_update(fs);
+	EXPECT(ext4_inode_location(fs, inode.number, &offset), EXT4_OK);
+	disk = (struct ext4_inode_disk *)(device->cache + offset);
+	original_flags = ext4_le32(&disk->flags);
+	for (index = 0; index < sizeof(flags) / sizeof(flags[0]); index++) {
+		ext4_encode32(&disk->flags, original_flags | flags[index]);
+		ext4_inode_checksum_set(fs, inode.number, disk);
+		EXPECT(
+		    ext4_write(fs, inode.number, inode.generation, 0, "a", 1, &update, &completed),
+		    EXT4_UNSUPPORTED);
+		EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after),
+		    EXT4_UNSUPPORTED);
+	}
+	ext4_encode32(&disk->flags, original_flags);
+	ext4_encode32(&disk->xattr_block_lo, 1);
+	ext4_inode_checksum_set(fs, inode.number, disk);
+	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after),
+	    EXT4_UNSUPPORTED);
+	ext4_encode32(&disk->xattr_block_lo, 0);
+	if (fs->inode_size > EXT4_INODE_BASE_SIZE) {
+		extra = EXT4_INODE_BASE_SIZE + ext4_le16(&disk->extra_size);
+		ext4_encode32((struct ext4_le32 *)((uint8_t *)disk + extra), EXT4_XATTR_MAGIC);
+		ext4_inode_checksum_set(fs, inode.number, disk);
+		EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after),
+		    EXT4_UNSUPPORTED);
+		ext4_encode32((struct ext4_le32 *)((uint8_t *)disk + extra), 0);
+	}
+	ext4_inode_checksum_set(fs, inode.number, disk);
+	EXPECT(ext4_group_get(fs, 0, &group), EXT4_OK);
+	targets[0] = fs->first_data_block;
+	targets[1] = fs->first_data_block + 1;
+	targets[2] = group.block_bitmap;
+	targets[3] = group.inode_bitmap;
+	targets[4] = group.inode_table;
+	for (index = 0; index < sizeof(targets) / sizeof(targets[0]); index++) {
+		if (original_flags & EXT4_INODE_EXTENTS) {
+			extent = (struct ext4_extent_disk *)(disk->block_data +
+			    sizeof(struct ext4_extent_header_disk));
+			ext4_encode16(&extent->length, 1);
+			ext4_encode32(&extent->physical_lo, (uint32_t)targets[index]);
+			ext4_encode16(&extent->physical_hi, (uint16_t)(targets[index] >> 32));
+		} else {
+			ext4_encode32(
+			    (struct ext4_le32 *)disk->block_data, (uint32_t)targets[index]);
+		}
+		ext4_inode_checksum_set(fs, inode.number, disk);
+		/* A zero block is the legacy indirect hole marker. */
+		EXPECT(
+		    ext4_write(fs, inode.number, inode.generation, 0, "a", 1, &update, &completed),
+		    targets[index] == 0 && !(original_flags & EXT4_INODE_EXTENTS) ? EXT4_UNSUPPORTED
+										  : EXT4_CORRUPT);
+	}
+	CHECK(device->writes == 0);
+	ext4_unmount(fs);
+}
+
+static void
+test_image(const char *path, const char *export_directory)
+{
+	struct ext4_posix_image image;
+	struct ext4_fs *fs;
+	struct device device;
+	const char *name;
+	char *destination;
+	FILE *output;
+	size_t path_size;
+
+	memset(&device, 0, sizeof(device));
+	EXPECT(ext4_posix_open(&image, path), EXT4_OK);
+	EXPECT(ext4_mount(&image.environment, &fs), EXT4_OK);
+	device.size = (size_t)image.environment.size_bytes;
+	CHECK(device.size <= TEST_IMAGE_LIMIT);
+	device.block_size = fs->info.block_size;
+	device.blocks = (uint32_t)(device.size / device.block_size);
+	device.base = malloc(device.size);
+	device.cache = malloc(device.size);
+	device.stable = malloc(device.size);
+	device.dirty = calloc(device.blocks, 1);
+	CHECK(device.base && device.cache && device.stable && device.dirty);
+	EXPECT(image.environment.read(&image, 0, device.base, device.size), EXT4_OK);
+	ext4_unmount(fs);
+	CHECK(image.live_allocations == 0);
+	ext4_posix_close(&image);
+	device.environment.context = &device;
+	device.environment.size_bytes = device.size;
+	device.environment.read = device_read;
+	device.environment.allocate = device_allocate;
+	device.environment.release = device_release;
+	device.writer.context = &device;
+	device.writer.write = device_write;
+	device.writer.flush = device_flush;
+	device_reset(&device, device.base);
+	basic_operations(&device);
+	if (export_directory != NULL) {
+		name = strrchr(path, '/');
+		name = name == NULL ? path : name + 1;
+		path_size = strlen(export_directory) + strlen(name) + 2;
+		destination = malloc(path_size);
+		CHECK(destination != NULL);
+		CHECK(snprintf(destination, path_size, "%s/%s", export_directory, name) > 0);
+		output = fopen(destination, "wbx");
+		CHECK(
+		    output != NULL && fwrite(device.stable, 1, device.size, output) == device.size);
+		CHECK(fclose(output) == 0);
+		free(destination);
+	}
+	device_reset(&device, device.base);
+	timestamp_cases(&device);
+	device_reset(&device, device.base);
+	rejected_operations(&device);
+	device_reset(&device, device.base);
+	extra_inode_fields(&device);
+	device_reset(&device, device.base);
+	metadata_guards(&device);
+	device_reset(&device, device.base);
+	precommit_failures(&device);
+	device_reset(&device, device.base);
+	crash_cases(&device);
+	CHECK(device.live == 0);
+	free(device.base);
+	free(device.cache);
+	free(device.stable);
+	free(device.dirty);
+	printf("PASS writable inode and file: %s\n", path);
+}
+
+int
+main(int argc, char **argv)
+{
+	const char *export_directory = NULL;
+	int index = 1;
+
+	if (argc > 3 && strcmp(argv[1], "--export") == 0) {
+		export_directory = argv[2];
+		index = 3;
+	}
+	CHECK(index < argc);
+	for (; index < argc; index++) {
+		test_image(argv[index], export_directory);
+	}
+	return 0;
+}

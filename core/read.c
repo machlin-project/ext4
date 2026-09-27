@@ -14,6 +14,9 @@ ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offse
 	    (inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR) {
 		return EXT4_INVALID_ARGUMENT;
 	}
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
 	if (offset >= inode->size) {
 		return EXT4_NOT_FOUND;
 	}
@@ -193,6 +196,9 @@ ext4_map_block(
 	uint8_t *scratch;
 	enum ext4_result error;
 
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
 	scratch = fs->environment.allocate(fs->environment.context, fs->info.block_size);
 	if (scratch == NULL) {
 		return EXT4_NO_MEMORY;
@@ -223,6 +229,9 @@ ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, v
 	*completed = 0;
 	if (fs == NULL || inode == NULL || (length != 0 && buffer == NULL)) {
 		return EXT4_INVALID_ARGUMENT;
+	}
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
 	}
 	if (offset >= inode->size) {
 		return EXT4_OK;

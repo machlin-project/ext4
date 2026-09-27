@@ -102,6 +102,9 @@ ext4_inode_seed(const struct ext4_fs *fs, const struct ext4_inode *inode)
 enum ext4_result
 ext4_device_read(struct ext4_fs *fs, uint64_t offset, void *buffer, size_t length)
 {
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
 	if (offset > fs->environment.size_bytes || length > fs->environment.size_bytes - offset) {
 		return EXT4_CORRUPT;
 	}
@@ -149,6 +152,8 @@ ext4_result_string(enum ext4_result result)
 		return "operation requires a nondirectory";
 	case EXT4_RANGE:
 		return "value out of range";
+	case EXT4_STALE:
+		return "inode generation changed";
 	}
 	return "unknown filesystem error";
 }

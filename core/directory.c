@@ -94,6 +94,9 @@ ext4_next_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *
 	if (fs == NULL || directory == NULL || cookie == NULL || entry == NULL) {
 		return EXT4_INVALID_ARGUMENT;
 	}
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
 	if ((directory->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
 		return EXT4_NOT_DIRECTORY;
 	}

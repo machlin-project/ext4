@@ -21,8 +21,10 @@ read-only tests for all eleven profiles in a dedicated custom-kernel VM, includi
 mmap, concurrent reads, repeated mounts and open-file/mapping lifetime.
 Portable journal transactions and offline recovery pass interrupted-I/O tests,
 independent debugfs journals and roundtrips through a real Linux kernel. General
-writable filesystem operations, ACLs/xattrs and Linux capability policy remain
-unimplemented. Both platform adapters remain read-only; FSKit has not been mounted. Read
+writable operations remain incomplete: selective inode updates and bounded
+overwrites of allocated ranges now pass crash faults, independent e2fsck and
+Linux roundtrips. Allocation, directory mutation, ACLs/xattrs and Linux capability
+policy remain unimplemented. Both platform adapters remain read-only; FSKit has not been mounted. Read
 [the acceptance matrix](docs/ACCEPTANCE.md) before using an image with this code.
 Generated disk images and reports are not source artifacts.
 

@@ -64,6 +64,35 @@ The internal block transaction interface is not an application or driver ioctl.
 Platform adapters remain read-only until their metadata ownership, native cache
 integration and durable device-barrier paths are implemented and tested.
 
+The writable core instance is an exclusive resource owner. Its caller serializes
+all reads, mutations and snapshot/mapping consumers through operation completion.
+It is not safe to call the instance concurrently without that owner lock. A
+mutation resolves the inode number and generation again, checks allocation and
+the inode checksum, and edits only selected fields in a private full-block
+snapshot. It never writes back a caller's cached inode. Unselected bytes and
+neighboring inode records survive unchanged, and unrepresentable timestamps fail
+without I/O instead of losing precision. Mount does not implicitly recover;
+`ext4_sync` performs clean finish, while `ext4_unmount` only releases memory.
+An uncertain commit or clean-finish error poisons the instance, including reads.
+
+Bounded overwrites currently journal both data and inode attributes. They require
+allocated regular-file ranges within EOF and fit at most 255 data blocks plus
+the inode block. Holes, growth and larger requests reject before writing. Data
+targets must be allocated and outside journal, superblock/GDT/reserved-GDT,
+bitmap and inode-table ranges, including metadata placed by flex_bg. Group
+descriptors and allocation bitmaps are checksum-validated. This implementation
+scans group system ranges per target; allocator ownership and a scalable range
+index remain future work. It does not establish performance on large volumes.
+
+The admitted operation supplies final permission bits and captured timestamps
+under the same owner lock as authorization and mutation. Ownership changes must
+include the admitted permission transition; a write requires final permissions,
+mtime and ctime. The core applies them in the data transaction, never repairs
+set-ID bits afterward. No untrusted ioctl exposes this authority. Inodes with
+xattrs or unsupported flags (including immutable and append-only) currently
+reject mutation pending their actual policy implementation. Native UBC/FSKit
+integration and LXNU policy acceptance remain separate from this portable API.
+
 The initial kernel reader uses a fixed device-sector buffer-cache key for
 metadata. Regular file reads and page-in use `cluster_read`/`cluster_pagein`,
 with validated byte mappings from the C core and `buf_strategy` device dispatch.

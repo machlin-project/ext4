@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
-#include "internal.h"
+#include "journal.h"
 
 static enum ext4_result
 ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, bool recovery)
@@ -66,6 +66,10 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	fs->first_data_block = ext4_le32(&super->first_data_block);
 	fs->blocks_per_group = ext4_le32(&super->blocks_per_group);
 	fs->inodes_per_group = ext4_le32(&super->inodes_per_group);
+	fs->first_inode =
+	    revision == 0 ? EXT4_FIRST_NON_RESERVED_INODE : ext4_le32(&super->first_inode);
+	fs->journal_inode = ext4_le32(&super->journal_inode);
+	fs->reserved_gdt_blocks = ext4_le16(&super->reserved_gdt_blocks);
 	fs->inode_size = revision == 0 ? EXT4_INODE_BASE_SIZE : ext4_le16(&super->inode_size);
 	fs->descriptor_size = (incompat & EXT4_FEATURE_INCOMPAT_64BIT)
 	    ? ext4_le16(&super->descriptor_size)
@@ -162,6 +166,7 @@ ext4_unmount(struct ext4_fs *fs)
 		return;
 	}
 	environment = fs->environment;
+	ext4_journal_close(fs->journal);
 	environment.release(environment.context, fs, sizeof(*fs));
 }
 

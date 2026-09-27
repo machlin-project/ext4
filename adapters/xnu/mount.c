@@ -35,6 +35,8 @@ ext4_xnu_error(enum ext4_result result)
 		return EISDIR;
 	case EXT4_RANGE:
 		return EOVERFLOW;
+	case EXT4_STALE:
+		return ESTALE;
 	default:
 		return EIO;
 	}

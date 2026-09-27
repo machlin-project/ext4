@@ -9,13 +9,15 @@ import re
 import shutil
 import subprocess
 
+from generate_fixtures import resolve_tools
+
 JBD2_MAGIC = 0xC03B3998
 JOURNAL_PAYLOAD = "/payload.bin"
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tools-root", required=True, type=Path)
+    parser.add_argument("--tools-root", type=Path, help="e2fsprogs build; defaults to tools on PATH")
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
@@ -23,8 +25,9 @@ def main():
     if output.exists():
         parser.error("output must be a new directory")
     output.mkdir(parents=True)
-    debugfs = args.tools_root.resolve() / "debugfs/debugfs"
-    dumpe2fs = args.tools_root.resolve() / "misc/dumpe2fs"
+    tools = resolve_tools(args.tools_root)
+    debugfs = tools["debugfs"]
+    dumpe2fs = tools["dumpe2fs"]
     source = args.source.resolve()
     transcript = []
 

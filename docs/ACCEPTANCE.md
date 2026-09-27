@@ -11,9 +11,9 @@ safe rejection of a feature is recorded separately from supporting it.
 | Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Eleven read profiles pass; broader format and size coverage pending |
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
-| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Not implemented |
+| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded allocated-range overwrites pass portable and Linux checks; growth, allocation, directory mutation and platform writes pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine passes the portable fault matrix, debugfs replay and Linux roundtrips; advanced journal formats, orphans and platform write integration remain pending |
-| Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Not implemented |
+| Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; ACLs/xattrs and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
 | LXNU policy | CAP_FSETID and privilege removal, xattrs, mixed-ABI races, inherited descriptions and attachment restrictions | Not implemented |
@@ -121,6 +121,48 @@ suites under ASan/UBSan, the freestanding stack check, clang-format, unsigned
 arm64e/x86_64 kext builds, and the unsigned universal FSKit app/extension build.
 These new kernel and FSKit binaries have compilation evidence only; the mounted
 read-only kernel evidence below belongs to the preceding verified reader build.
+
+## Portable mutation evidence
+
+`ext4-write-test` passes ten profiles: block sizes 1 through 32 KiB, indirect
+mapping, absent metadata checksums, explicit checksum seed and 128-byte inodes.
+It verifies selective UID/GID/mode/time updates, signed/extended date boundaries,
+shared hardlink identity, unchanged neighboring inode records, whole-file bytes
+after an unaligned three-block overwrite, zero-length writes, stale generation,
+read-only and unsupported-operation rejection. Permission transitions and data
+share the transaction. It does not authorize a platform operation by itself.
+
+Across those profiles, every allocation/read after mount is injected: 276
+allocation points and 236 read points. The commit/finish crash matrix contains
+1,260 cuts: 1,236 recover to matching old/new inode and file data, and 24 torn
+primary-superblock cases reject with a checksum error. The latter are explicit
+fail-closed cases. Reads and further mutations reject on a poisoned instance.
+The modeled tests are not evidence of device-specific power-loss protection.
+
+Ten clean exports passed independent file/metadata checks and nonrepairing
+e2fsck; source hashes stayed unchanged. Evidence is under
+`artifacts/inode-write-exports/`, `artifacts/inode-write-independent-owners/` and
+`artifacts/checks/inode-write-expanded-tests.log`. debugfs prints large UID/GID
+values as signed decimal in this build; the checker compares their 32-bit values.
+
+Seven selected exports (1/2/4 KiB and indirect/checksum/inode-size variations)
+also passed actual Linux mounts, full file comparison, hardlink attributes,
+wide owners and signed/extended timestamps. Linux then committed its own changes;
+our replayer recovered one Linux-authored transaction in each returned image,
+followed by exact file/owner/mode checks and clean e2fsck. The reference kernel
+uses 4 KiB pages. Larger-block exports have portable/e2fsprogs evidence and were
+not selected for these Linux runs. Lab evidence is under
+`artifacts/ext4-journal/linux-reference/file-write-roundtrip/` and
+`logs/ext4-file-write-linux-roundtrip.log`.
+
+The reproducible generator now has `--inode128`; the fresh twelve-image set in
+`artifacts/fixtures-write-regression/` passes feature and e2fsck checks. Final
+checks in `artifacts/checks/inode-write-final-*` pass all five sanitized CTest
+suites, the freestanding stack budget, formatter, both unsigned kext builds
+without core warnings, and the unsigned universal FSKit build. These adapters
+still expose read-only operations and were not runtime-tested in this change.
+Allocation, growth/truncate, orphan cleanup, directory mutation, security xattrs,
+concurrent native page-cache ownership and LXNU policy remain unaccepted.
 
 ## FSKit build evidence
 

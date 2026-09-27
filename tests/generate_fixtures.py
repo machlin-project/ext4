@@ -64,6 +64,10 @@ def parse_args() -> argparse.Namespace:
         "--extended", action="store_true",
         help="also generate block-size, indirect-map and checksum-feature variations",
     )
+    parser.add_argument(
+        "--inode128", action="store_true",
+        help="also generate a 128-byte-inode write fixture without extended timestamps",
+    )
     return parser.parse_args()
 
 
@@ -192,13 +196,14 @@ def set_metadata_inode(
     image: Path,
     tools: dict[str, Path],
     versions: dict[str, str],
+    extended_times: bool = True,
 ) -> None:
     fields = [
         ("uid", "70001"),
         ("gid", "80002"),
         ("mode", "0100640"),
     ]
-    for name, (seconds, nanoseconds) in METADATA_TIMES.items():
+    for name, (seconds, nanoseconds) in (METADATA_TIMES.items() if extended_times else []):
         low_seconds, extra = encoded_inode_time(seconds, nanoseconds)
         fields.extend(
             [
@@ -232,6 +237,7 @@ def create_image(
     tools: dict[str, Path],
     versions: dict[str, str],
     features: set[str] | None = None,
+    inode_size: int | None = None,
 ) -> None:
     selected_features = EXPECTED_FEATURES if features is None else features
     blocks = (64 * 1024 * 1024) // block_size
@@ -245,6 +251,7 @@ def create_image(
             "ext4",
             "-b",
             str(block_size),
+            *(["-I", str(inode_size)] if inode_size is not None else []),
             "-O",
             "none," + ",".join(sorted(selected_features)),
             "-U",
@@ -258,7 +265,7 @@ def create_image(
         ],
         versions,
     )
-    set_metadata_inode(output, image, tools, versions)
+    set_metadata_inode(output, image, tools, versions, extended_times=inode_size != 128)
     run_logged(
         output,
         f"e2fsck-{image.stem}",
@@ -371,6 +378,18 @@ def main() -> None:
                 raise FileExistsError(f"Refusing to overwrite existing fixture image: {image}")
             create_image(output, root, image, block_size, tools, versions, features)
             expected_by_image[image] = features
+
+    if args.inode128:
+        image = output / "ext4-inode128.img"
+        if image.exists():
+            raise FileExistsError(f"Refusing to overwrite existing fixture image: {image}")
+        features = EXPECTED_FEATURES - {"extra_isize"}
+        create_image(output, root, image, 1024, tools, versions, features, inode_size=128)
+        header = run_logged(output, "inode128-size", [str(tools["dumpe2fs"]), "-h", str(image)], versions)
+        if not any(line.startswith("Inode size:") and line.split(":", 1)[1].strip() == "128"
+                   for line in header.splitlines()):
+            raise RuntimeError("mke2fs did not produce 128-byte inodes")
+        expected_by_image[image] = features
 
     report_lines = []
     feature_mismatch = False

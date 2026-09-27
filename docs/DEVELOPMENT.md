@@ -103,6 +103,38 @@ The filesystem adapters do not enable writes or invoke offline recovery yet.
 In particular, FSKit metadata-flush completion has not been established as a
 durable device-cache barrier; it cannot satisfy the write capability by assumption.
 
+## Inode and file-write tests
+
+`ext4-write-test` opens source fixtures read-only and mutates separate modeled
+volatile/persistent images. It checks selective inode updates, bounded allocated
+range overwrites, validation failures, resource faults and every commit/finish
+interruption. Optional `--export NEW_EMPTY_DIRECTORY` writes clean finished
+images for independent inspection. Pass the desired image paths after the option;
+the tool refuses to overwrite export files. It also accepts 128-byte inode
+fixtures, where extended timestamp fields are absent. The 64 KiB reader fixture
+has no journal and is not a writable test image.
+Use `tests/generate_fixtures.py --extended --inode128` to reproduce the complete
+reader/write profile, and configure `-DEXT4_EXTENDED_TESTS=ON -DEXT4_INODE128_TEST=ON`.
+The generator verifies the legacy inode size and omits unrepresentable timestamp
+fixture fields; tests verify that such updates reject instead of truncating.
+
+`tests/check_writes.py --exports DIRECTORY --tools-root E2FSPROGS_BUILD --output NEW_DIRECTORY`
+checks the exports with debugfs, dumpe2fs and nonrepairing e2fsck. It verifies exact
+file bytes, hardlinks, full-width ownership, mode and raw timestamp encodings,
+and requires unchanged source hashes. Its generated `report.json` can be passed
+as `--exports` to `tests/run_linux_journal.py --file-writes`. Repeat `--case NAME.img`
+to select an explicit Linux acceptance profile. As with journal tests, run that
+harness from the lab working directory after Sol prepares the isolated runner.
+Linux independently mounts and checks the written files and attributes, then
+authors a new committed transaction for the portable replayer to recover.
+
+The `Portable filesystem` GitHub Actions workflow runs on development/main pushes
+and pull requests. Its isolated Ubuntu job generates fresh fixtures, builds with
+Clang and ASan/UBSan, runs CTest, checks clean mutation exports independently, and
+recovers debugfs-authored journals. It retains reports and logs, not disk images.
+This portable CI does not replace selected-Xcode formatting, unsigned platform
+builds, actual macOS mounts, or the separately identified kernel/LXNU VM tests.
+
 Use the selected Xcode C compiler and formatter on macOS. The portable core and
 image tests must also compile with Clang on Linux. FSKit builds target a declared
 macOS baseline; do not use newer SDK APIs without availability handling.

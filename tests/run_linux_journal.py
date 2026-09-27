@@ -24,6 +24,10 @@ def main():
     parser.add_argument("--module-report", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--file-writes", action="store_true",
+                        help="verify clean file-write exports listed by check_writes.py")
+    parser.add_argument("--case", action="append", default=[],
+                        help="select an exact exported image filename (repeatable)")
     args = parser.parse_args()
     lab = args.lab.resolve()
     root = Path(__file__).resolve().parent.parent
@@ -63,14 +67,27 @@ def main():
                library / "crt1.o", library / "crti.o", root / "tests/linux_journal_init.c",
                f"-L{library}", "-Wl,--start-group", "-lc", "-lclang_rt.builtins-aarch64",
                "-Wl,--end-group", library / "crtn.o", "-o", probe]
+    if args.file_writes:
+        command.insert(1, "-DEXT4_TEST_FILE_WRITES=1")
     with (output / "build.log").open("wb") as log:
         subprocess.run([str(x) for x in command], stdout=log, stderr=subprocess.STDOUT, check=True)
     archives = {}
-    exports = sorted(args.exports.resolve().glob("writer-*.json"))
+    if args.file_writes:
+        exports = json.loads(args.exports.resolve().read_text())
+        if not all(record.get("passed") for record in exports):
+            raise RuntimeError("file-write exports need successful independent checks")
+    else:
+        exports = [dict(json.loads(path.read_text()), image=str(path.with_suffix(".img")))
+                   for path in sorted(args.exports.resolve().glob("writer-*.json"))]
+    if args.case:
+        names = {Path(record["image"]).name for record in exports}
+        if set(args.case) - names:
+            raise RuntimeError("requested cases are absent from the exports")
+        exports = [record for record in exports if Path(record["image"]).name in args.case]
     if not exports:
         raise RuntimeError("no exported writer cases")
-    for metadata in exports:
-        block_size = json.loads(metadata.read_text())["block_size"]
+    for case in exports:
+        block_size = case["block_size"]
         if block_size in archives:
             continue
         tree = output / f"root-{block_size}"
@@ -95,9 +112,10 @@ def main():
         return
     tools = lab / "vendor/e2fsprogs-ext4/build"
     results = []
-    for metadata in exports:
-        case = json.loads(metadata.read_text())
-        source = metadata.with_suffix(".img")
+    for case in exports:
+        source = Path(case["image"])
+        if args.file_writes and digest(source) != case["input_sha256"]:
+            raise RuntimeError(f"file-write export changed: {source}")
         scratch = output / source.name
         shutil.copyfile(source, scratch)
         record = {"case": source.name, "input_sha256": digest(source), "commands": []}
@@ -116,7 +134,8 @@ def main():
         console = run([runner, kernel, archives[case["block_size"]], "2", "512",
                        "console=hvc0 rdinit=/init panic=-1 loglevel=4", scratch])
         (output / f"{source.stem}.console.log").write_text(console)
-        for marker in ("LINUX_EXT4_REPLAY_PASS", "LINUX_EXT4_COMMITTED_RECOVERY_PENDING",
+        for marker in ("LINUX_EXT4_FILE_WRITE_PASS" if args.file_writes else "LINUX_EXT4_REPLAY_PASS",
+                       "LINUX_EXT4_COMMITTED_RECOVERY_PENDING",
                        "LINUX_EXT4_PROBE_RESULT=PASS", f"Linux {module_report['kernel_release']} aarch64"):
             if marker not in console:
                 raise RuntimeError(f"missing guest evidence: {marker}")
@@ -132,9 +151,13 @@ def main():
         data = contents.read_bytes()
         expected = bytearray((index * 17 + 23) & 255 for index in range(200000))
         block_size = case["block_size"]
-        expected[:block_size] = b"\x53" * block_size
-        expected[block_size:block_size * 2] = b"\xa7" * block_size
-        expected[:4] = bytes.fromhex("c03b3998")
+        if args.file_writes:
+            expected[block_size - 7:block_size * 2 + 16] = bytes(
+                (index * 29 + 7) & 255 for index in range(block_size + 23))
+        else:
+            expected[:block_size] = b"\x53" * block_size
+            expected[block_size:block_size * 2] = b"\xa7" * block_size
+            expected[:4] = bytes.fromhex("c03b3998")
         expected[0] = 0x6c
         if data != expected:
             raise RuntimeError("incorrect contents after Linux/native recovery roundtrip")
@@ -145,7 +168,7 @@ def main():
         record["output_sha256"] = digest(scratch)
         record["passed"] = True
         (output / "report.json").write_text(json.dumps(results, indent=2) + "\n")
-        print(f"PASS {source.name}: Linux replay, Linux commit, core replay, bytes/mode/owners, e2fsck", flush=True)
+        print(f"PASS {source.name}: Linux verification, Linux commit, core replay, bytes/mode/owners, e2fsck", flush=True)
 
 
 if __name__ == "__main__":

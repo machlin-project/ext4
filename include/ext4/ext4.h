@@ -27,7 +27,8 @@ enum ext4_result {
 	EXT4_READ_ONLY,
 	EXT4_RECOVERY_REQUIRED,
 	EXT4_IS_DIRECTORY,
-	EXT4_RANGE
+	EXT4_RANGE,
+	EXT4_STALE
 };
 
 enum ext4_file_type {
@@ -100,6 +101,31 @@ struct ext4_timestamp {
 	uint32_t nanoseconds;
 };
 
+enum ext4_attribute_field {
+	EXT4_ATTR_PERMISSIONS = 1U << 0,
+	EXT4_ATTR_UID = 1U << 1,
+	EXT4_ATTR_GID = 1U << 2,
+	EXT4_ATTR_ACCESS_TIME = 1U << 3,
+	EXT4_ATTR_CHANGE_TIME = 1U << 4,
+	EXT4_ATTR_MODIFY_TIME = 1U << 5,
+	EXT4_ATTR_BIRTH_TIME = 1U << 6
+};
+
+/* An admitted operation, not credentials or an authorization bypass. The owner
+ * authorizes against a fresh inode while holding its serialization lock, and
+ * supplies the final permission bits (including any set-ID removal) and times.
+ * Unselected fields are preserved. permissions contains no file-type bits. */
+struct ext4_inode_update {
+	uint32_t fields;
+	uint32_t uid;
+	uint32_t gid;
+	uint16_t permissions;
+	struct ext4_timestamp access_time;
+	struct ext4_timestamp change_time;
+	struct ext4_timestamp modify_time;
+	struct ext4_timestamp birth_time;
+};
+
 struct ext4_inode {
 	uint64_t size;
 	uint64_t blocks_512;
@@ -134,6 +160,27 @@ struct ext4_mapping {
 };
 
 enum ext4_result ext4_mount(const struct ext4_environment *environment, struct ext4_fs **result);
+/* The owner must serialize ALL access to a writable instance, including reads,
+ * inode snapshots and mapping consumers, through each operation's completion.
+ * Refresh affected snapshots after mutation; never retain a mapping across it.
+ * Mount requires a clean resource and does not implicitly recover it. */
+enum ext4_result ext4_mount_writable(const struct ext4_environment *environment,
+    const struct ext4_write_environment *writer, struct ext4_fs **result);
+/* Mutations are synchronous durable transactions. sync also clears the recovery
+ * marker. unmount only releases memory; call sync first for a clean shutdown.
+ * An uncertain commit poisons the instance, including reads: unmount and recover. */
+enum ext4_result ext4_sync(struct ext4_fs *fs);
+enum ext4_result ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
+    const struct ext4_inode_update *update, struct ext4_inode *result);
+/* Currently writes allocated regular-file ranges within EOF, in bounded atomic
+ * transactions. Holes, growth and requests exceeding transaction capacity reject
+ * without writes. Data, permission bits, mtime and ctime share the transaction.
+ * Those three attribute fields are required; no other fields may be selected.
+ * completed is length only on success, otherwise zero; an I/O error can have a
+ * committed outcome that must be resolved by recovery. Zero length is a no-op. */
+enum ext4_result ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation,
+    uint64_t offset, const void *buffer, size_t length, const struct ext4_inode_update *update,
+    size_t *completed);
 /* Offline recovery only. A read-only mount never invokes this operation.
  * On error the resource remains unmounted and must not be used for mutations. */
 enum ext4_result ext4_recover(const struct ext4_environment *environment,

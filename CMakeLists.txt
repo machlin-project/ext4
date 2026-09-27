@@ -10,10 +10,11 @@ endif()
 option(EXT4_SANITIZERS "Instrument userspace code with ASan and UBSan" ON)
 option(EXT4_BUILD_FUZZER "Build the bounded metadata mutation fuzzer with Clang" OFF)
 option(EXT4_EXTENDED_TESTS "Require the extended generated image profile" OFF)
+option(EXT4_INODE128_TEST "Require the generated 128-byte-inode write fixture" OFF)
 
 set(EXT4_CORE_SOURCES
     core/support.c core/mount.c core/inode.c core/read.c core/directory.c
-    core/journal.c core/recovery.c)
+    core/journal.c core/recovery.c core/group.c core/write.c)
 add_library(ext4_core STATIC ${EXT4_CORE_SOURCES})
 target_include_directories(ext4_core PUBLIC include)
 target_compile_options(ext4_core PRIVATE
@@ -76,6 +77,24 @@ target_compile_options(ext4-journal-test PRIVATE -Wall -Wextra -Werror -Wdeclara
 add_test(NAME journal-durability-4k COMMAND ext4-journal-test "${EXT4_FIXTURES}/ext4-4k.img")
 add_test(NAME journal-durability-1k COMMAND ext4-journal-test "${EXT4_FIXTURES}/ext4-1k.img")
 set_tests_properties(journal-durability-4k journal-durability-1k PROPERTIES TIMEOUT 300)
+
+add_executable(ext4-write-test tests/write.c)
+target_include_directories(ext4-write-test PRIVATE core)
+target_link_libraries(ext4-write-test PRIVATE ext4_posix)
+target_compile_options(ext4-write-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
+set(EXT4_WRITE_IMAGES "${EXT4_FIXTURES}/ext4-4k.img" "${EXT4_FIXTURES}/ext4-1k.img")
+if(EXT4_EXTENDED_TESTS)
+    list(APPEND EXT4_WRITE_IMAGES
+        "${EXT4_FIXTURES}/ext4-2k.img" "${EXT4_FIXTURES}/ext4-8k.img"
+        "${EXT4_FIXTURES}/ext4-16k.img" "${EXT4_FIXTURES}/ext4-32k.img"
+        "${EXT4_FIXTURES}/ext4-indirect-1k.img" "${EXT4_FIXTURES}/ext4-no-checksum.img"
+        "${EXT4_FIXTURES}/ext4-checksum-seed.img")
+endif()
+if(EXT4_INODE128_TEST)
+    list(APPEND EXT4_WRITE_IMAGES "${EXT4_FIXTURES}/ext4-inode128.img")
+endif()
+add_test(NAME inode-and-file-write COMMAND ext4-write-test ${EXT4_WRITE_IMAGES})
+set_tests_properties(inode-and-file-write PROPERTIES TIMEOUT 300)
 
 find_package(Threads REQUIRED)
 add_executable(ext4-mounted-test tests/mounted.c)
