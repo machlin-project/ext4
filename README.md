@@ -26,8 +26,8 @@ block allocation, sparse growth, unwritten conversion and truncate/freeing pass
 portable faults, independent e2fsck and Linux roundtrips. Live shrink can span
 bounded journal transactions, with orphan recovery completing interrupted operations.
 Large writes now have a separate API that spans transactions and reports a durable
-prefix on failure. Its focused fault and independent image checks pass; full
-regression and native write integration remain pending.
+prefix on failure. Its focused faults, independent image checks and combined
+253-test CI regression pass; native write integration remains pending.
 Offline recovery handles legacy lists and bounded modern orphan files, including
 Linux-authored open-unlinked objects and mixed representations.
 Atomic creation, mkdir, symlinks, hard links, removal and rename now have portable
@@ -44,7 +44,7 @@ The portable core reads, lists and transactionally changes inode-body and extern
 xattrs, including copying shared blocks before modification. Attribute batches can
 commit together with inode permissions, ownership and times. Attribute lifetime now
 extends through creation, file writes, truncate, namespace changes and final orphan
-release. The combined 249-test CI regression passes for the read-path checkpoint,
+release. The combined 253-test CI regression passes for the large-write/checksum checkpoint,
 alongside targeted fault and independent checks. Bidirectional Linux
 attribute/ACL/security roundtrips and direct
 Linux replay of core attribute transactions pass on eight format profiles. ACL
@@ -52,8 +52,7 @@ enforcement and Linux capability policy are not implemented. Work proceeds throu
 portable-core acceptance, then FSKit integration on stock macOS, then LXNU policy.
 Both platform adapters remain read-only; FSKit has not been mounted. Read
 [the acceptance matrix](docs/ACCEPTANCE.md) before using an image with this code.
-Native adapters have not yet adopted the streamed enumeration API. Large-write and
-checksum changes have a separate combined CI run. Bounded zeroing of written
+Native adapters have not yet adopted the streamed enumeration API. Bounded zeroing of written
 preallocation now passes focused faults and independent image checks for both
 write and truncate growth; its full regression remains pending.
 Generated disk images and reports are not source artifacts.

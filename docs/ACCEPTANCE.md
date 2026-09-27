@@ -401,9 +401,11 @@ debugfs byte/metadata/attribute comparisons, exact free-block/inode accounting a
 nonrepairing e2fsck. Original inputs remain unchanged. Evidence is under
 `artifacts/checks/partial-write-development-*`,
 `artifacts/checks/partial-write-independent-summary.json` and
-`artifacts/partial-write-independent/`. This batch's full regression is pending
-in the combined large-write/checksum CI run. The accepted read-path regression
-uses an earlier source snapshot. Platform
+`artifacts/partial-write-independent/`. The combined large-write/checksum CI run
+passes all six jobs and the exact 253-test inventory with no Meson failures or
+skips. Its 30 partial-write states pass nonrepairing e2fsck and all independent
+comparisons. The run review and downloaded reports are under
+`artifacts/checks/partial-crc-ci-36341405091/`. Platform
 adapters still expose read-only operations, and concurrent writable owners remain
 outside this evidence.
 
@@ -1138,7 +1140,11 @@ extent/indirect profiles are byte-identical to the earlier independently verifie
 images. Evidence is in `artifacts/checks/crc32c-development-summary.json`,
 `artifacts/checks/crc32c-benchmark-results/` and
 `artifacts/checks/crc32c-write-export-comparison.json`.
-Full regression is scheduled together with the completed partial-write batch.
+Full regression passes with the partial-write batch: six successful CI jobs,
+253 unique tests matching the registered inventory, no Meson failures or skips,
+and no failed independent states. The existing shared-value reader-only oracle
+limitations and embedded applicability notices remain separate. Evidence is under
+`artifacts/checks/partial-crc-ci-36341405091/`; it does not cover later growth work.
 
 ## Namespace on completely allocated block bitmaps
 
