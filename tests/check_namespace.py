@@ -17,6 +17,46 @@ GID = 0x81234567
 PERMISSIONS = 0o2751
 NAME_MAX = 255
 SECTOR_SIZE = 512
+INODE_BLOCK_DATA_OFFSET = 0x28
+INODE_BLOCK_DATA_SIZE = 60
+INODE_EXTENTS = 0x80000
+
+
+def symlink_target(length, binary=False):
+    return bytes(0x80 + index % 128 if binary and index % 7 == 0 else
+                 ord('/') if index % 17 == 16 else ord('a') + index % 26
+                 for index in range(length))
+
+
+def symlink_bytes(image, path, inode, block_size, debugfs, run):
+    """Resolve storage with debugfs, then compare raw bytes without text decoding."""
+    length = inode["size"]
+    if inode["type"] != "symlink" or not 0 < length < block_size:
+        raise RuntimeError("Invalid independently decoded symlink type or length")
+    inline = length < INODE_BLOCK_DATA_SIZE
+    if inode["blocks"] != (0 if inline else block_size // SECTOR_SIZE):
+        raise RuntimeError("Symlink has an incorrect inline/block storage boundary")
+    if inline:
+        if inode["flags"] & INODE_EXTENTS:
+            raise RuntimeError("Inline symlink incorrectly advertises an extent map")
+        location = run([debugfs, "-R", f"imap {path}", image])
+        match = re.search(r"located at block (\d+), offset 0x([0-9a-f]+)", location)
+        if match is None:
+            raise RuntimeError("Missing independently resolved symlink inode location")
+        offset = int(match[1]) * block_size + int(match[2], 16) + INODE_BLOCK_DATA_OFFSET
+        capacity = INODE_BLOCK_DATA_SIZE
+    else:
+        mapping = run([debugfs, "-R", f"bmap {path} 0", image])
+        if not re.fullmatch(r"[1-9]\d*\s*", mapping):
+            raise RuntimeError("Missing independently resolved symlink data block")
+        offset = int(mapping) * block_size
+        capacity = block_size
+    with image.open("rb") as stream:
+        stream.seek(offset)
+        storage = stream.read(capacity)
+    if len(storage) != capacity or any(storage[length:]) or b"\0" in storage[:length]:
+        raise RuntimeError("Symlink has missing bytes, embedded NUL or uninitialized tail")
+    return storage[:length]
 
 
 def inode_fields(text):
@@ -37,13 +77,17 @@ def inode_fields(text):
         result[key] = int(match[1], 8 if key == "mode" else 16 if key == "flags" else 10)
     result["uid"] &= 0xffffffff
     result["gid"] &= 0xffffffff
+    kind = re.search(r"Type:\s+(\w+)", text)
+    if kind is None:
+        raise RuntimeError("Missing independently decoded inode type")
+    result["type"] = kind[1]
     for key in ("atime", "mtime", "ctime", "crtime"):
         match = re.search(rf"\b{key}:\s+0x([0-9a-f]+)(?::([0-9a-f]+))?", text)
         result[key] = (int(match[1], 16), int(match[2] or "0", 16)) if match else None
     return result
 
 
-def creation_attributes(inode, inode_size, modified_directory=False):
+def creation_attributes(inode, inode_size, modified_directory=False, symlink=False):
     times = {"atime": (-1, 0 if inode_size == 128 else 123456789),
              "mtime": (1700000001, 0 if inode_size == 128 else 999999999),
              "ctime": (1700000002, 0 if inode_size == 128 else 42)}
@@ -51,7 +95,7 @@ def creation_attributes(inode, inode_size, modified_directory=False):
         times["crtime"] = (1 << 32, 987654321)
     if modified_directory:
         times["mtime"] = times["ctime"]
-    if (inode["uid"], inode["gid"], inode["mode"]) != (UID, GID, PERMISSIONS):
+    if (inode["uid"], inode["gid"], inode["mode"]) != (UID, GID, 0o777 if symlink else PERMISSIONS):
         raise RuntimeError("Incorrect independently decoded creation ownership or mode")
     if inode["generation"] == 0 or any(inode[key] != encoded_time(*value) for key, value in times.items()):
         raise RuntimeError("Creation lost its generation or precise captured timestamps")
@@ -70,12 +114,12 @@ def main():
     exports = args.exports.resolve()
     tools = resolve_tools(args.tools_root)
     images = sorted(p for p in exports.glob("*.img") if re.match(
-        r"^(basic-|exhaust-|(?:append-|group-)?atomic-[012]-)", p.name))
+        r"^(basic-|exhaust-|symlinks-|(?:append-|group-)?atomic-[0-5]-)", p.name))
     if not images:
         raise RuntimeError("No namespace exports")
     records = []
     for image in images:
-        match = re.fullmatch(r"(append-|group-)?atomic-([012])-(.+\.img)", image.name)
+        match = re.fullmatch(r"(append-|group-)?atomic-([0-5])-(.+\.img)", image.name)
         atomic = match is not None
         scenario = (match[1] or "") if atomic else ""
         operation = int(match[2]) if atomic else None
@@ -92,7 +136,8 @@ def main():
             (output / "report.json").write_text(json.dumps(records, indent=2) + "\n")
 
         def run(command, allowed=(0,)):
-            done = subprocess.run([str(part) for part in command], capture_output=True, text=True, timeout=90)
+            done = subprocess.run([str(part) for part in command], capture_output=True,
+                                  text=True, errors="backslashreplace", timeout=90)
             record["commands"].append({"command": [str(part) for part in command],
                                        "status": done.returncode, "stdout": done.stdout, "stderr": done.stderr})
             save()
@@ -120,6 +165,9 @@ def main():
             run([tools["debugfs"], "-R", f"dump {path} {dump}", candidate])
             return dump.read_bytes()
 
+        def target(candidate, path, inode, block_size):
+            return symlink_bytes(candidate, path, inode, block_size, tools["debugfs"], run)
+
         def snapshot(candidate):
             run([tools["e2fsck"], "-fn", candidate])
             header = run([tools["dumpe2fs"], "-h", candidate])
@@ -127,8 +175,12 @@ def main():
             entry = stat(candidate, "/atomic-entry")
             contents = None
             if entry is not None and atomic:
-                contents = (names(candidate, "/atomic-entry") if operation == 1 else
-                            data(candidate, "/atomic-entry", f"{candidate.stem}.entry").hex())
+                if operation == 1:
+                    contents = names(candidate, "/atomic-entry")
+                elif operation >= 3:
+                    contents = target(candidate, "/atomic-entry", entry, accounting(header)["Block size"]).hex()
+                else:
+                    contents = data(candidate, "/atomic-entry", f"{candidate.stem}.entry").hex()
             return {"accounting": accounting(header), "inode_size": inode_size,
                     "root": stat(candidate, "/"), "hello": stat(candidate, "/hello.txt"),
                     "names": names(candidate, "/"), "entry": entry, "entry_contents": contents}
@@ -162,6 +214,13 @@ def main():
                     expected_root["links"] += 1
                     if names(image, "/atomic-entry") != {".": entry["inode"], "..": new["root"]["inode"]}:
                         raise RuntimeError("New directory has incorrect dot/dotdot ownership")
+            elif operation >= 3:
+                creation_attributes(entry, inode_size, symlink=True)
+                length = {3: INODE_BLOCK_DATA_SIZE - 1, 4: INODE_BLOCK_DATA_SIZE, 5: block_size - 1}[operation]
+                if entry["links"] != 1 or new["entry_contents"] != symlink_target(length).hex():
+                    raise RuntimeError("Atomic symlink lost its exact target or link count")
+                child_blocks = entry["blocks"]
+                inode_delta = 1
             else:
                 expected_target = dict(old["hello"])
                 expected_target.update(links=old["hello"]["links"] + 1, ctime=namespace_time)
@@ -197,6 +256,23 @@ def main():
             if (file["blocks"], directory["blocks"], child["blocks"], child["size"]) != (
                     block_size // SECTOR_SIZE, block_size // SECTOR_SIZE, 0, 0):
                 raise RuntimeError("New data or directory blocks leaked")
+        elif image.name.startswith("symlinks-"):
+            lengths = (1, INODE_BLOCK_DATA_SIZE - 1, INODE_BLOCK_DATA_SIZE,
+                       INODE_BLOCK_DATA_SIZE + 1, block_size - 1, 15)
+            allocated = set()
+            for index, length in enumerate(lengths):
+                path = f"/symbolic-{index}"
+                alias_path = f"/symbolic-alias-{index}"
+                inode = stat(image, path)
+                creation_attributes(inode, inode_size, symlink=True)
+                if inode["inode"] in allocated or inode["links"] != 2 or stat(image, alias_path) != inode:
+                    raise RuntimeError("Symlink creations or hardlinks lost unique inode identity")
+                allocated.add(inode["inode"])
+                if target(image, path, inode, block_size) != symlink_target(length, index == 5):
+                    raise RuntimeError("Symlink target differs from the exact opaque input bytes")
+                expected_names[path[1:]] = expected_names[alias_path[1:]] = inode["inode"]
+                child_blocks += inode["blocks"]
+            inode_delta = len(lengths)
         else:
             inode_delta = old["accounting"]["Free inodes"]
             if inode_delta > 256 or new["accounting"]["Free inodes"] != 0:

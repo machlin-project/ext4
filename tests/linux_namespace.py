@@ -7,12 +7,24 @@ import shutil
 import stat
 import subprocess
 
-from check_namespace import inode_fields
+from check_namespace import inode_fields, symlink_bytes
 from check_orphans import accounting, digest
 
 
 def node_name(index):
     return f"node-{index:08d}".ljust(255, "n")
+
+
+def symlink_paths(case):
+    name = Path(case["image"]).name
+    if name.startswith("symlinks-"):
+        return [f"/{prefix}{index}" for index in range(6)
+                for prefix in ("symbolic-", "symbolic-alias-")]
+    if re.match(r"(?:append-|group-)?atomic-[3-5]-", name):
+        return ["/atomic-entry"]
+    if name.startswith("basic-"):
+        return ["/hello-link", "/symlink-alias"]
+    return []
 
 
 def prepare(case, tree, tools):
@@ -23,7 +35,7 @@ def prepare(case, tree, tools):
 
     def run(command):
         result = subprocess.run([str(x) for x in command], capture_output=True,
-                                text=True, timeout=90)
+                                text=True, errors="backslashreplace", timeout=90)
         commands.append({"command": [str(x) for x in command], "status": result.returncode,
                          "stdout": result.stdout, "stderr": result.stderr})
         (tree.parent / f"{tree.name}-expectations.json").write_text(json.dumps(commands, indent=2) + "\n")
@@ -34,6 +46,10 @@ def prepare(case, tree, tools):
     basic = image.name.startswith("basic-")
     paths = ["/", "/hello.txt"]
     data_paths = ["/hello.txt"]
+    links = symlink_paths(case)
+    link_lines = []
+    expected = tree / "expected"
+    expected.mkdir()
     if basic:
         paths += ["/created", "/created-dir", "/created-dir/child", "/created-dir/alias",
                   "/hello-link", "/symlink-alias"]
@@ -42,6 +58,8 @@ def prepare(case, tree, tools):
         paths += [f"/{node_name(index)}" for index in range(case["inode_allocations"])]
         paths += ["/still-links"]
         data_paths += ["/still-links"]
+    elif image.name.startswith("symlinks-"):
+        paths += links
     else:
         paths += ["/atomic-entry"]
     (tree / "namespace-options").write_text(f"{int(exhaust)} {int(basic)}\n")
@@ -72,12 +90,19 @@ def prepare(case, tree, tools):
                     raise RuntimeError(f"Invalid namespace oracle listing: {line!r}")
                 entries.append(f"{fields[5]} {int(fields[1])}")
             directories += [f"{path} {len(entries)}", *entries]
+        elif kind[1] == "symlink":
+            if path not in links:
+                raise RuntimeError(f"Unexpected symbolic link in namespace oracle: {path}")
+            target = symlink_bytes(image, path, inode, case["block_size"],
+                                   tools / "debugfs/debugfs", run)
+            name = f"link-{len(link_lines)}"
+            (expected / name).write_bytes(target)
+            link_lines.append(f"{path} /expected/{name}")
         elif path == "/atomic-entry":
             data_paths += [path]
     (tree / "namespace-inodes").write_text("\n".join(inode_lines) + "\n")
     (tree / "namespace-directories").write_text("\n".join(directories) + "\n")
-    expected = tree / "expected"
-    expected.mkdir()
+    (tree / "namespace-links").write_text("\n".join(link_lines) + "\n")
     for index, path in enumerate(data_paths):
         run([tools / "debugfs/debugfs", "-R", f"dump {path} {expected / str(index)}", image])
         if not (expected / str(index)).is_file():
@@ -94,7 +119,7 @@ def verify(case, image, output, tools, recover, run):
     transactions = re.search(r"transactions=(\d+)", replay)
     if transactions is None or int(transactions[1]) == 0:
         raise RuntimeError("Namespace roundtrip did not replay a Linux-authored transaction")
-    # This option replays only the journal. The following -fn must pass without repairs.
+    # Replay only the journal and orphan cleanup. The following -fn performs no repairs.
     run([tools / "e2fsck/e2fsck", "-y", "-E", "journal_only", oracle], allowed=(0, 1))
     block_size = case["block_size"]
     expected = bytes(block_size + 3) + bytes((index * 13 + 0x6c) & 255 for index in range(73))
@@ -140,6 +165,17 @@ def verify(case, image, output, tools, recover, run):
         inodes = {}
         for path in ("/", "/linux-dir", "/linux-dir/renamed", "/linux-link", "/linux-symlink"):
             inodes[path] = inode_fields(run([tools / "debugfs/debugfs", "-R", f"stat {path}", candidate]))
+        retained_links = {}
+        for path in symlink_paths(case):
+            inode = inode_fields(run([tools / "debugfs/debugfs", "-R", f"stat {path}", candidate]))
+            original = Path(case["image"])
+            original_inode = inode_fields(run([tools / "debugfs/debugfs", "-R", f"stat {path}", original]))
+            target = symlink_bytes(candidate, path, inode, block_size, tools / "debugfs/debugfs", run)
+            expected_target = symlink_bytes(original, path, original_inode, block_size,
+                                            tools / "debugfs/debugfs", run)
+            if inode != original_inode or target != expected_target:
+                raise RuntimeError("Linux roundtrip changed the core-created symbolic link")
+            retained_links[path] = target.hex()
         file = inodes["/linux-dir/renamed"]
         if file is None or file != inodes["/linux-link"] or (
                 file["uid"], file["gid"], file["mode"], file["links"], file["size"], file["blocks"]) != (
@@ -160,7 +196,8 @@ def verify(case, image, output, tools, recover, run):
         names = {}
         for path in ("/", "/linux-dir"):
             names[path] = run([tools / "debugfs/debugfs", "-R", f"ls -p {path}", candidate])
-        return {"inodes": inodes, "directories": names, "accounting": counts}, lag
+        return {"inodes": inodes, "directories": names, "accounting": counts,
+                "retained_symlinks": retained_links}, lag
 
     observed, _ = snapshot(image, "core")
     independent, lag = snapshot(oracle, "oracle", allow_summary_lag=True)

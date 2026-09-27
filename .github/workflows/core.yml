@@ -247,6 +247,31 @@ jobs:
             done
           done
           df -h .
+      - name: Independently verify symbolic link transactions
+        if: matrix.suite == 'namespace'
+        run: |
+          for fixtures in artifacts/fixtures artifacts/orphan-file-fixtures artifacts/namespace-fixtures; do
+            for image in "$fixtures"/*.img; do
+              name="${image##*/}"
+              case "$name" in ext4-indexed.img|ext4-64k.img) continue ;; esac
+              profile="${name%.img}"
+              exports="artifacts/symlink-exports/$profile"
+              checked="artifacts/symlink-independent/$profile"
+              mkdir -p "$exports"
+              .build/ext4-namespace-test --symlinks --smoke --export "$exports" "$image" \
+                2>&1 | tee "artifacts/checks/symlink-$profile-exports.log"
+              if [[ "$fixtures" == artifacts/namespace-fixtures ]]; then
+                .build/ext4-namespace-test --symlinks --smoke --groups --export "$exports" "$image" \
+                  2>&1 | tee "artifacts/checks/symlink-$profile-groups.log"
+              fi
+              python3 tests/check_namespace.py --fixtures "$fixtures" --exports "$exports" \
+                --recover .build/ext4-recover --output "$checked" \
+                2>&1 | tee "artifacts/checks/symlink-$profile-independent.log"
+              find "$exports" "$checked" -type f \
+                ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+            done
+          done
+          df -h .
       - name: Preserve test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -185,7 +185,7 @@ def main():
 
         def run(command, timeout=90, allowed=(0,)):
             done = subprocess.run([str(x) for x in command], cwd=lab,
-                                  capture_output=True, text=True, timeout=timeout)
+                                  capture_output=True, text=True, errors="backslashreplace", timeout=timeout)
             record["commands"].append({"command": [str(x) for x in command],
                                        "status": done.returncode, "stdout": done.stdout,
                                        "stderr": done.stderr})

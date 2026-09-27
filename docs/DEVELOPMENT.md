@@ -272,6 +272,28 @@ committed journal; basic/exhaustion exports are clean cases. Sol prepares the
 reference environment, then Luna runs the CLI batches. The guest verifies an
 independent namespace oracle and authors new committed changes for reverse replay.
 
+Add `--symlinks` to `ext4-namespace-test` for short, long and maximum-length
+target creation, validation and recovery. Use a separate empty export directory
+from the create/mkdir/link run because both modes preserve a parent-append input.
+Combine `--symlinks --groups` for the small multi-group fixtures. The same
+independent checker and Linux `--namespace` runner consume these outputs;
+`symlinks-` images are clean multi-target cases, while atomic entries have the
+usual committed and uncommitted exports.
+
+After read-only mounting an independently checked `symlinks-` image in a dedicated
+native guest, run `ext4-mounted-symlink-test MOUNTPOINT BLOCK_SIZE`. The explicit
+block size is part of the known fixture profile, not the host VM page size. Run
+as an ordinary user, then unmount, detach and require unchanged source bytes.
+This probes the native readlink path; it does not enable adapter writes.
+`run_macos_symlinks.py` runs these checked exports through an already prepared
+lab VM. It requires explicit lab/VM paths, packaged products, read-only share,
+guest directory, expected boot session and loaded-module UUID, independent
+reports and a new output directory inside the shared products. It verifies the
+identified kernel/module and probe hashes, attaches each raw image read-only,
+checks its exact device identity, runs the probe without privilege, then unmounts,
+detaches and verifies unchanged device/source bytes. It does not load a module,
+replace a kernel or change boot state; those remain the separate VM preparation.
+
 `ext4-write-test --truncate IMAGE...` checks bounded resize, freeing, corruption
 and recovery. Add `--export-only --export NEW_DIRECTORY` after a successful CTest
 run to create independent inspection images without duplicating its fault loops.

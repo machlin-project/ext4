@@ -125,7 +125,7 @@ ext4_inode_decode_record(
 		error = EXT4_NOT_FOUND;
 	} else if (decoded.flags & EXT4_INODE_INLINE_DATA) {
 		error = EXT4_UNSUPPORTED;
-	} else if ((decoded.fast_symlink && decoded.size > sizeof(decoded.block_data)) ||
+	} else if ((decoded.fast_symlink && decoded.size >= sizeof(decoded.block_data)) ||
 	    decoded.size > (uint64_t)UINT32_MAX * fs->info.block_size) {
 		error = EXT4_CORRUPT;
 	} else {

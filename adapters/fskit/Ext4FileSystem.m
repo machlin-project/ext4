@@ -480,13 +480,19 @@ ext4_item_type(uint16_t mode)
 	size_t completed = 0;
 	enum ext4_result error;
 
-	if ((owned->inode.mode & EXT4_MODE_TYPE) != EXT4_MODE_SYMLINK ||
-	    owned->inode.size > MAXPATHLEN) {
+	if ((owned->inode.mode & EXT4_MODE_TYPE) != EXT4_MODE_SYMLINK) {
 		reply(nil, ext4_error(EXT4_INVALID_ARGUMENT));
+		return;
+	}
+	if (owned->inode.size >= _info.block_size) {
+		reply(nil, ext4_error(EXT4_UNSUPPORTED));
 		return;
 	}
 	bytes = [NSMutableData dataWithLength:(NSUInteger)owned->inode.size];
 	error = ext4_read(_fs, &owned->inode, 0, bytes.mutableBytes, bytes.length, &completed);
+	if (error == EXT4_OK && completed != bytes.length) {
+		error = EXT4_IO;
+	}
 	reply(error == EXT4_OK ? [FSFileName nameWithData:bytes] : nil, ext4_error(error));
 }
 

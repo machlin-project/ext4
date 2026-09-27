@@ -8,7 +8,14 @@
 #define TEST_GID 0x81234567U
 #define TEST_SMALL_JOURNAL_CREDITS 4U
 
-enum operation { CREATE_FILE, CREATE_DIRECTORY, CREATE_LINK };
+enum operation {
+	CREATE_FILE,
+	CREATE_DIRECTORY,
+	CREATE_LINK,
+	CREATE_SYMLINK_SHORT,
+	CREATE_SYMLINK_LONG,
+	CREATE_SYMLINK_MAXIMUM
+};
 
 struct trace {
 	uint32_t allocations;
@@ -80,6 +87,9 @@ check_created(struct ext4_fs *fs, const struct ext4_inode *inode, uint16_t mode)
 {
 	struct ext4_inode_update update = create_attributes(fs);
 
+	if (mode == EXT4_MODE_SYMLINK) {
+		update.permissions = 0777;
+	}
 	CHECK(inode->mode == (mode | update.permissions));
 	CHECK(inode->uid == update.uid && inode->gid == update.gid && inode->generation != 0);
 	CHECK(equal_time(inode->access_time, update.access_time));
@@ -91,13 +101,29 @@ check_created(struct ext4_fs *fs, const struct ext4_inode *inode, uint16_t mode)
 	}
 }
 
+static void
+symlink_contents(uint8_t *target, size_t length, bool binary)
+{
+	size_t index;
+
+	for (index = 0; index < length; index++) {
+		target[index] = index % 17 == 16 ? '/' : (uint8_t)('a' + index % 26);
+		if (binary && index % 7 == 0) {
+			target[index] = (uint8_t)(0x80U + index % 128);
+		}
+	}
+}
+
 static enum ext4_result
 operate(struct ext4_fs *fs, const struct ext4_inode *parent, const struct ext4_inode *target,
     enum operation operation, struct ext4_inode *result)
 {
 	struct ext4_inode_update update = create_attributes(fs);
 	const uint8_t *name = (const uint8_t *)"atomic-entry";
+	uint8_t *link_target;
 	size_t length = strlen((const char *)name);
+	size_t link_length;
+	enum ext4_result error;
 
 	switch (operation) {
 	case CREATE_FILE:
@@ -109,6 +135,20 @@ operate(struct ext4_fs *fs, const struct ext4_inode *parent, const struct ext4_i
 	case CREATE_LINK:
 		return ext4_link(fs, parent->number, parent->generation, name, length,
 		    target->number, target->generation, &update.change_time, result);
+	case CREATE_SYMLINK_SHORT:
+	case CREATE_SYMLINK_LONG:
+	case CREATE_SYMLINK_MAXIMUM:
+		link_length = operation == CREATE_SYMLINK_MAXIMUM
+		    ? fs->info.block_size - 1
+		    : sizeof(result->block_data) - (operation == CREATE_SYMLINK_SHORT ? 1U : 0U);
+		link_target = malloc(link_length);
+		CHECK(link_target != NULL);
+		symlink_contents(link_target, link_length, false);
+		update.permissions = 0777;
+		error = ext4_symlink(fs, parent->number, parent->generation, name, length,
+		    link_target, link_length, &update, &update.change_time, result);
+		free(link_target);
+		return error;
 	}
 	return EXT4_INVALID_ARGUMENT;
 }
@@ -408,9 +448,251 @@ guards(struct device *device)
 }
 
 static void
+symlink_cases(struct device *device, const char *exports, const char *path)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode root;
+	struct ext4_inode inode;
+	struct ext4_inode alias;
+	struct ext4_inode_update update;
+	struct ext4_inode_update write_update;
+	uint8_t *target;
+	uint8_t *observed;
+	uint64_t physical;
+	uint32_t free_inodes;
+	uint16_t root_links;
+	size_t lengths[] = { 1, sizeof(inode.block_data) - 1, sizeof(inode.block_data),
+		sizeof(inode.block_data) + 1, 0, 15 };
+	size_t completed;
+	size_t index;
+	size_t byte;
+	uint32_t writes;
+	char name[32];
+	char alias_name[32];
+	int name_length;
+	int alias_length;
+
+	device_reset(device, device->base);
+	fs = mount_writer(device);
+	root = root_inode(fs);
+	root_links = root.links;
+	free_inodes = fs->info.free_inodes;
+	update = create_attributes(fs);
+	update.permissions = 0777;
+	write_update = update;
+	write_update.fields = EXT4_ATTR_PERMISSIONS | EXT4_ATTR_MODIFY_TIME | EXT4_ATTR_CHANGE_TIME;
+	target = malloc(device->block_size);
+	observed = malloc(device->block_size + 13);
+	CHECK(target != NULL && observed != NULL);
+	lengths[4] = device->block_size - 1;
+	for (index = 0; index < sizeof(lengths) / sizeof(lengths[0]); index++) {
+		symlink_contents(target, lengths[index], index == 5);
+		name_length = snprintf(name, sizeof(name), "symbolic-%zu", index);
+		alias_length =
+		    snprintf(alias_name, sizeof(alias_name), "symbolic-alias-%zu", index);
+		CHECK(name_length > 0 && (size_t)name_length < sizeof(name) && alias_length > 0 &&
+		    (size_t)alias_length < sizeof(alias_name));
+		EXPECT(ext4_symlink(fs, root.number, root.generation, (const uint8_t *)name,
+			   (size_t)name_length, target, lengths[index], &update,
+			   &update.change_time, &inode),
+		    EXT4_OK);
+		check_created(fs, &inode, EXT4_MODE_SYMLINK);
+		CHECK(inode.size == lengths[index] && inode.links == 1);
+		CHECK(inode.fast_symlink == (lengths[index] < sizeof(inode.block_data)));
+		CHECK(inode.blocks_512 ==
+		    (inode.fast_symlink ? 0 : device->block_size / EXT4_SECTOR_SIZE));
+		if (inode.fast_symlink) {
+			CHECK((inode.flags & EXT4_INODE_EXTENTS) == 0);
+			for (byte = lengths[index]; byte < sizeof(inode.block_data); byte++) {
+				CHECK(inode.block_data[byte] == 0);
+			}
+		} else {
+			EXPECT(ext4_map_block(fs, &inode, 0, &physical), EXT4_OK);
+			for (byte = lengths[index]; byte < device->block_size; byte++) {
+				CHECK(device->cache[physical * device->block_size + byte] == 0);
+			}
+		}
+		EXPECT(ext4_link(fs, root.number, root.generation, (const uint8_t *)alias_name,
+			   (size_t)alias_length, inode.number, inode.generation,
+			   &update.change_time, &alias),
+		    EXT4_OK);
+		CHECK(alias.number == inode.number && alias.links == 2 &&
+		    alias.generation == inode.generation);
+		memset(observed, 0xa5, device->block_size + 13);
+		EXPECT(
+		    ext4_read(fs, &alias, 0, observed, lengths[index] + 13, &completed), EXT4_OK);
+		CHECK(completed == lengths[index] && memcmp(target, observed, completed) == 0 &&
+		    observed[completed] == 0xa5);
+		EXPECT(ext4_read(fs, &alias, lengths[index] - 1, observed, 3, &completed), EXT4_OK);
+		CHECK(completed == 1 && observed[0] == target[lengths[index] - 1]);
+		EXPECT(ext4_read(fs, &alias, lengths[index], observed, 1, &completed), EXT4_OK);
+		CHECK(completed == 0);
+		writes = device->writes;
+		EXPECT(ext4_write(fs, inode.number, inode.generation, 0, target, 1, &write_update,
+			   &completed),
+		    EXT4_UNSUPPORTED);
+		CHECK(completed == 0);
+		EXPECT(ext4_truncate_atomic(
+			   fs, inode.number, inode.generation, 0, &write_update, &alias),
+		    EXT4_UNSUPPORTED);
+		CHECK(device->writes == writes);
+		root = root_inode(fs);
+		CHECK(root.links == root_links && fs->info.free_inodes == free_inodes - index - 1);
+	}
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	storage_export(device, exports, path, "symlinks-");
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	root = root_inode(fs);
+	inode = lookup(fs, &root, "symbolic-4");
+	EXPECT(ext4_read(fs, &inode, 0, observed, device->block_size, &completed), EXT4_OK);
+	symlink_contents(target, lengths[4], false);
+	CHECK(completed == lengths[4] && memcmp(target, observed, completed) == 0);
+	ext4_unmount(fs);
+	free(target);
+	free(observed);
+	printf("PASS symbolic link boundaries, opaque bytes, hardlink identity and read limits\n");
+}
+
+static void
+inline_symlink_bounds(struct device *device)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode root;
+	struct ext4_inode inode;
+	struct ext4_inode result;
+	struct ext4_inode untouched;
+	struct ext4_inode_disk *disk;
+	uint8_t bytes[sizeof(inode.block_data) + 1];
+	uint64_t offset;
+	size_t completed;
+	size_t size;
+
+	device_reset(device, device->base);
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	root = root_inode(fs);
+	inode = lookup(fs, &root, "hello-link");
+	CHECK(inode.fast_symlink);
+	EXPECT(ext4_inode_location(fs, inode.number, &offset), EXT4_OK);
+	disk = (struct ext4_inode_disk *)(device->cache + offset);
+	memset(disk->block_data, 'x', sizeof(disk->block_data));
+	disk->block_data[sizeof(disk->block_data) - 1] = 0;
+	for (size = sizeof(disk->block_data) - 1; size <= sizeof(disk->block_data) + 1; size++) {
+		ext4_encode32(&disk->size_lo, (uint32_t)size);
+		ext4_inode_checksum_set(fs, inode.number, disk);
+		memset(&result, 0xa5, sizeof(result));
+		untouched = result;
+		EXPECT(ext4_get_inode(fs, inode.number, &result),
+		    size < sizeof(disk->block_data) ? EXT4_OK : EXT4_CORRUPT);
+		if (size < sizeof(disk->block_data)) {
+			memset(bytes, 0xa5, sizeof(bytes));
+			EXPECT(
+			    ext4_read(fs, &result, 0, bytes, sizeof(bytes), &completed), EXT4_OK);
+			CHECK(completed == size && bytes[size] == 0xa5 &&
+			    memcmp(bytes, disk->block_data, size) == 0);
+		} else {
+			CHECK(memcmp(&result, &untouched, sizeof(result)) == 0);
+		}
+	}
+	CHECK(device->writes == 0);
+	ext4_unmount(fs);
+	printf("PASS inline symbolic link length validation with valid inode checksums\n");
+}
+
+static void
+symlink_guards(struct device *device)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode root;
+	struct ext4_inode result;
+	struct ext4_inode untouched;
+	struct ext4_inode_update update;
+	const uint8_t *name = (const uint8_t *)"invalid-link";
+	const uint8_t *targets[] = { NULL, (const uint8_t *)"", (const uint8_t *)"a\0b",
+		(const uint8_t *)"a", (const uint8_t *)"a" };
+	size_t lengths[] = { 1, 0, 3, 0, SIZE_MAX };
+	size_t index;
+
+	device_reset(device, device->base);
+	fs = mount_writer(device);
+	root = root_inode(fs);
+	update = create_attributes(fs);
+	update.permissions = 0777;
+	lengths[3] = device->block_size;
+	memset(&result, 0xa5, sizeof(result));
+	untouched = result;
+	for (index = 0; index < sizeof(lengths) / sizeof(lengths[0]); index++) {
+		EXPECT(ext4_symlink(fs, root.number, root.generation, name, 12, targets[index],
+			   lengths[index], &update, &update.change_time, &result),
+		    index < 3 ? EXT4_INVALID_ARGUMENT : EXT4_NAME_TOO_LONG);
+	}
+	EXPECT(ext4_symlink(fs, root.number, root.generation, (const uint8_t *)"hello.txt", 9,
+		   (const uint8_t *)"a", 1, &update, &update.change_time, &result),
+	    EXT4_EXISTS);
+	EXPECT(ext4_symlink(fs, root.number, root.generation + 1, name, 12, (const uint8_t *)"a", 1,
+		   &update, &update.change_time, &result),
+	    EXT4_STALE);
+	CHECK(device->writes == 0 && memcmp(device->cache, device->base, device->size) == 0 &&
+	    memcmp(&result, &untouched, sizeof(result)) == 0);
+	ext4_unmount(fs);
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	EXPECT(ext4_symlink(fs, root.number, root.generation, name, 12, (const uint8_t *)"a", 1,
+		   &update, &update.change_time, &result),
+	    EXT4_READ_ONLY);
+	ext4_unmount(fs);
+}
+
+static void
+symlink_block_space(struct device *device)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode root;
+	struct ext4_inode target;
+	struct ext4_inode result;
+	struct ext4_inode untouched;
+	struct ext4_super_disk *super;
+	uint8_t *before = malloc(device->size);
+	uint64_t free_blocks;
+	uint32_t free_inodes;
+
+	CHECK(before != NULL);
+	device_reset(device, device->base);
+	fs = mount_writer(device);
+	root = root_inode(fs);
+	target = lookup(fs, &root, "hello.txt");
+	free_blocks = fs->info.free_blocks;
+	free_inodes = fs->info.free_inodes;
+	super = (struct ext4_super_disk *)(device->cache + EXT4_SUPER_OFFSET);
+	ext4_encode32(&super->reserved_blocks_lo, (uint32_t)free_blocks);
+	ext4_encode32(&super->reserved_blocks_hi, (uint32_t)(free_blocks >> 32));
+	if (device->metadata_checksum) {
+		ext4_encode32(&super->checksum,
+		    ext4_crc32c(UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum)));
+	}
+	memcpy(before, device->cache, device->size);
+	memset(&result, 0xa5, sizeof(result));
+	untouched = result;
+	EXPECT(operate(fs, &root, &target, CREATE_SYMLINK_LONG, &result), EXT4_NO_SPACE);
+	EXPECT(operate(fs, &root, &target, CREATE_SYMLINK_MAXIMUM, &result), EXT4_NO_SPACE);
+	CHECK(memcmp(&result, &untouched, sizeof(result)) == 0 && device->writes == 0 &&
+	    memcmp(before, device->cache, device->size) == 0);
+	CHECK(fs->info.free_blocks == free_blocks && fs->info.free_inodes == free_inodes);
+	EXPECT(operate(fs, &root, &target, CREATE_SYMLINK_SHORT, &result), EXT4_OK);
+	CHECK(result.fast_symlink && result.blocks_512 == 0);
+	CHECK(fs->info.free_blocks == free_blocks && fs->info.free_inodes == free_inodes - 1);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	free(before);
+	printf("PASS symbolic link block exhaustion: inline creation needs no data block\n");
+}
+
+static void
 inode_reuse_and_flags(struct device *device)
 {
 	static const uint32_t generations[] = { 1234567U, UINT32_MAX };
+
+	static const enum operation operations[] = { CREATE_FILE, CREATE_DIRECTORY,
+		CREATE_SYMLINK_SHORT, CREATE_SYMLINK_LONG };
 	struct ext4_fs *fs;
 	struct ext4_inode root;
 	struct ext4_inode target;
@@ -422,6 +704,7 @@ inode_reuse_and_flags(struct device *device)
 	uint32_t flags;
 	uint32_t expected;
 	unsigned int index;
+	unsigned int choice;
 	enum operation operation;
 
 	device_reset(device, device->base);
@@ -432,7 +715,8 @@ inode_reuse_and_flags(struct device *device)
 	number = created.number;
 	ext4_unmount(fs);
 	for (index = 0; index < sizeof(generations) / sizeof(generations[0]); index++) {
-		for (operation = CREATE_FILE; operation <= CREATE_DIRECTORY; operation++) {
+		for (choice = 0; choice < sizeof(operations) / sizeof(operations[0]); choice++) {
+			operation = operations[choice];
 			device_reset(device, device->base);
 			fs = mount_writer(device);
 			root = root_inode(fs);
@@ -454,8 +738,14 @@ inode_reuse_and_flags(struct device *device)
 			expected = generations[index] == UINT32_MAX ? 1 : generations[index] + 1;
 			CHECK(created.number == number && created.generation == expected);
 			check_created(fs, &created,
-			    operation == CREATE_FILE ? EXT4_MODE_REGULAR : EXT4_MODE_DIRECTORY);
-			if (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) {
+			    operation == CREATE_FILE		? EXT4_MODE_REGULAR
+				: operation == CREATE_DIRECTORY ? EXT4_MODE_DIRECTORY
+								: EXT4_MODE_SYMLINK);
+			if (operation >= CREATE_SYMLINK_SHORT) {
+				flags &= EXT4_INODE_NODUMP | EXT4_INODE_NOATIME;
+			}
+			if ((fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) &&
+			    operation != CREATE_SYMLINK_SHORT) {
 				flags |= EXT4_INODE_EXTENTS;
 			}
 			if (operation == CREATE_DIRECTORY) {
@@ -495,7 +785,10 @@ credit_exhaustion(struct device *device)
 	enum operation operation;
 
 	CHECK(before != NULL);
-	for (operation = CREATE_FILE; operation <= CREATE_DIRECTORY; operation++) {
+	for (operation = CREATE_FILE; operation <= CREATE_SYMLINK_MAXIMUM; operation++) {
+		if (operation == CREATE_LINK) {
+			continue;
+		}
 		device_reset(device, device->base);
 		EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
 		EXPECT(ext4_get_inode(fs, fs->journal_inode, &journal), EXT4_OK);
@@ -865,6 +1158,8 @@ exhaustion(struct device *device, const char *exports, const char *path)
 	EXPECT(ext4_mkdir(fs, root.number, root.generation, (const uint8_t *)"full", 4, &update,
 		   &update.change_time, &result),
 	    EXT4_NO_SPACE);
+	EXPECT(operate(fs, &root, &target, CREATE_SYMLINK_SHORT, &result), EXT4_NO_SPACE);
+	EXPECT(operate(fs, &root, &target, CREATE_SYMLINK_LONG, &result), EXT4_NO_SPACE);
 	CHECK(writes == device->writes && memcmp(before, device->cache, device->size) == 0);
 	EXPECT(ext4_link(fs, root.number, root.generation, (const uint8_t *)"still-links", 11,
 		   target.number, target.generation, &update.change_time, &result),
@@ -928,7 +1223,7 @@ indexed_guard(struct device *device)
 	CHECK(directory.flags & EXT4_INODE_INDEX);
 	memset(&result, 0xa5, sizeof(result));
 	untouched = result;
-	for (operation = CREATE_FILE; operation <= CREATE_LINK; operation++) {
+	for (operation = CREATE_FILE; operation <= CREATE_SYMLINK_MAXIMUM; operation++) {
 		EXPECT(operate(fs, &directory, &target, (enum operation)operation, &result),
 		    EXT4_UNSUPPORTED);
 		CHECK(memcmp(&result, &untouched, sizeof(result)) == 0);
@@ -947,6 +1242,7 @@ main(int argc, char **argv)
 	bool exhaust = false;
 	bool groups = false;
 	bool indexed = false;
+	bool symlinks = false;
 	int argument = 1;
 	unsigned int operation;
 
@@ -959,6 +1255,8 @@ main(int argc, char **argv)
 			groups = true;
 		} else if (strcmp(argv[argument], "--indexed") == 0) {
 			indexed = true;
+		} else if (strcmp(argv[argument], "--symlinks") == 0) {
+			symlinks = true;
 		} else if (strcmp(argv[argument], "--export") == 0 && argument + 1 < argc) {
 			exports = argv[++argument];
 		} else {
@@ -983,11 +1281,34 @@ main(int argc, char **argv)
 		if (groups) {
 			group_fixture(&device);
 			storage_export(&device, exports, argv[argument], "group-before-");
-			for (operation = CREATE_FILE; operation <= CREATE_DIRECTORY; operation++) {
+			for (operation = symlinks ? CREATE_SYMLINK_SHORT : CREATE_FILE;
+			    operation <= (symlinks ? CREATE_SYMLINK_MAXIMUM : CREATE_DIRECTORY);
+			    operation++) {
 				fault_cases(&device, (enum operation)operation, smoke, exports,
 				    argv[argument], "group-");
 			}
 			storage_close(&device);
+			continue;
+		}
+		if (symlinks) {
+			inline_symlink_bounds(&device);
+			symlink_guards(&device);
+			symlink_block_space(&device);
+			symlink_cases(&device, exports, argv[argument]);
+			for (operation = CREATE_SYMLINK_SHORT; operation <= CREATE_SYMLINK_MAXIMUM;
+			    operation++) {
+				fault_cases(&device, (enum operation)operation, smoke, exports,
+				    argv[argument], "");
+			}
+			append_fixture(&device);
+			storage_export(&device, exports, argv[argument], "append-before-");
+			for (operation = CREATE_SYMLINK_SHORT; operation <= CREATE_SYMLINK_MAXIMUM;
+			    operation++) {
+				fault_cases(&device, (enum operation)operation, smoke, exports,
+				    argv[argument], "append-");
+			}
+			storage_close(&device);
+			printf("PASS symlinks: %s\n", argv[argument]);
 			continue;
 		}
 		guards(&device);

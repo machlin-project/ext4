@@ -228,6 +228,14 @@ enum ext4_result ext4_create(struct ext4_fs *fs, uint32_t directory, uint32_t ge
 enum ext4_result ext4_mkdir(struct ext4_fs *fs, uint32_t directory, uint32_t generation,
     const uint8_t *name, size_t name_length, const struct ext4_inode_update *attributes,
     const struct ext4_timestamp *directory_time, struct ext4_inode *result);
+/* Create a symbolic link in the same atomic namespace transaction. Target bytes
+ * are opaque except that NUL and empty targets are rejected. The target and its
+ * terminating NUL must fit one filesystem block. The terminator is not in size.
+ * Creation attributes and parent timestamps follow the create/mkdir contract. */
+enum ext4_result ext4_symlink(struct ext4_fs *fs, uint32_t directory, uint32_t generation,
+    const uint8_t *name, size_t name_length, const uint8_t *target, size_t target_length,
+    const struct ext4_inode_update *attributes, const struct ext4_timestamp *directory_time,
+    struct ext4_inode *result);
 /* Add another name for an allocated non-directory inode. Update its ctime and
  * the destination directory's ctime/mtime to time, preserving other attributes. */
 enum ext4_result ext4_link(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation,

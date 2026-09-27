@@ -236,18 +236,37 @@ ext4_xnu_readlink(void *arguments)
 	struct vnop_readlink_args *args = arguments;
 	struct ext4_xnu_node *node = vnode_fsnode(args->a_vp);
 	uint8_t *buffer;
+	size_t capacity;
 	size_t completed;
+	user_ssize_t residual;
 	int error;
 
-	if (node->inode.size > MAXPATHLEN || vnode_vtype(args->a_vp) != VLNK) {
+	if (vnode_vtype(args->a_vp) != VLNK) {
 		return EINVAL;
 	}
-	buffer = _MALLOC(MAXPATHLEN, M_TEMP, M_WAITOK | M_NULL);
+	if (node->inode.size >= node->mount->info.block_size) {
+		return EOPNOTSUPP;
+	}
+	residual = uio_resid(args->a_uio);
+	if (residual < 0) {
+		return EINVAL;
+	}
+	capacity = (size_t)node->inode.size;
+	if ((uint64_t)residual < capacity) {
+		capacity = (size_t)residual;
+	}
+	if (capacity == 0) {
+		return 0;
+	}
+	buffer = _MALLOC(capacity, M_TEMP, M_WAITOK | M_NULL);
 	if (buffer == NULL) {
 		return ENOMEM;
 	}
-	error = ext4_xnu_error(ext4_read(
-	    node->mount->fs, &node->inode, 0, buffer, (size_t)node->inode.size, &completed));
+	error = ext4_xnu_error(
+	    ext4_read(node->mount->fs, &node->inode, 0, buffer, capacity, &completed));
+	if (error == 0 && completed != capacity) {
+		error = EIO;
+	}
 	if (error == 0) {
 		error = uiomove((char *)buffer, (int)completed, args->a_uio);
 	}

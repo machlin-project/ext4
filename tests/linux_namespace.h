@@ -2,6 +2,8 @@
 #include <dirent.h>
 #include <sys/statvfs.h>
 
+#define TEST_SYMLINK_INLINE_CAPACITY 60U
+
 struct namespace_entry {
 	char name[EXT4_NAME_MAX + 1];
 	unsigned long long inode;
@@ -170,6 +172,63 @@ namespace_data_checks(void)
 }
 
 static void
+namespace_symlink_checks(uint32_t block_size)
+{
+	struct stat inode;
+	FILE *input;
+	uint8_t *expected;
+	uint8_t *actual;
+	char path[512];
+	char mounted[sizeof(path) + 4];
+	char oracle[64];
+	size_t capacities[] = { 1, TEST_SYMLINK_INLINE_CAPACITY - 1, TEST_SYMLINK_INLINE_CAPACITY,
+		1024, 0 };
+	size_t length;
+	size_t completed;
+	size_t index;
+	unsigned int count = 0;
+	int fields;
+	int fd;
+
+	input = fopen("/namespace-links", "r");
+	require(input != NULL, "open independent symlink expectations");
+	expected = malloc(block_size + 1);
+	actual = malloc(block_size + 1);
+	require(expected != NULL && actual != NULL, "allocate bounded readlink buffers");
+	capacities[4] = block_size;
+	for (;;) {
+		fields = fscanf(input, "%511s %63s", path, oracle);
+		if (fields == EOF) {
+			break;
+		}
+		require(fields == 2, "parse independent symlink expectation");
+		snprintf(mounted, sizeof(mounted), "/mnt%s", path);
+		require(lstat(mounted, &inode) == 0 && S_ISLNK(inode.st_mode) &&
+			inode.st_size > 0 && inode.st_size < block_size,
+		    "verify symlink type and bounded length");
+		length = (size_t)inode.st_size;
+		fd = open(oracle, O_RDONLY | O_CLOEXEC);
+		require(fd >= 0 && read(fd, expected, block_size + 1) == (ssize_t)length &&
+			close(fd) == 0,
+		    "read independent opaque symlink target");
+		for (index = 0; index < sizeof(capacities) / sizeof(capacities[0]); index++) {
+			completed = length < capacities[index] ? length : capacities[index];
+			memset(actual, 0xa5, block_size + 1);
+			require(readlink(mounted, (char *)actual, capacities[index]) ==
+				    (ssize_t)completed &&
+				memcmp(actual, expected, completed) == 0 &&
+				actual[completed] == 0xa5,
+			    "compare exact and truncated readlink without a returned NUL");
+		}
+		count++;
+	}
+	require(!ferror(input) && fclose(input) == 0, "finish symlink expectations");
+	free(actual);
+	free(expected);
+	printf("LINUX_EXT4_NAMESPACE_SYMLINKS count=%u\n", count);
+}
+
+static void
 namespace_exhausted_name(char *path, size_t capacity, unsigned int index)
 {
 	int length;
@@ -207,6 +266,7 @@ check_namespace(uint32_t block_size)
 	namespace_inode_checks();
 	namespace_directory_checks();
 	namespace_data_checks();
+	namespace_symlink_checks(block_size);
 	if (basic) {
 		require(readlink("/mnt/hello-link", link_target, sizeof(link_target)) == 9 &&
 			memcmp(link_target, "hello.txt", 9) == 0,

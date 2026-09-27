@@ -90,7 +90,7 @@ ext4_allocate_inode(struct ext4_allocation *allocation, uint16_t mode,
 	uint16_t desired;
 	enum ext4_result error;
 
-	if (mode != EXT4_MODE_REGULAR && mode != EXT4_MODE_DIRECTORY) {
+	if (mode != EXT4_MODE_REGULAR && mode != EXT4_MODE_DIRECTORY && mode != EXT4_MODE_SYMLINK) {
 		return EXT4_INVALID_ARGUMENT;
 	}
 	error = ext4_allocation_super(allocation);

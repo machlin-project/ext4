@@ -197,7 +197,7 @@ xattrs or unsupported flags (including immutable and append-only) currently
 reject mutation pending their actual policy implementation. Native UBC/FSKit
 integration and LXNU policy acceptance remain separate from this portable API.
 
-`ext4_create`, `ext4_mkdir` and `ext4_link` share the exclusive writable owner and
+`ext4_create`, `ext4_mkdir`, `ext4_symlink` and `ext4_link` share the exclusive writable owner and
 generation-checked inode resolution. Creation receives admitted permissions,
 full-width owners and captured atime/mtime/ctime, with optional representable birth
 time. The caller supplies one parent mutation time. The core does not derive
@@ -212,6 +212,16 @@ without producing zero, and clears all remaining old bytes. Lazy inode bitmaps
 are initialized from the group's actual inode bounds; allocation advances the
 initialized-table high-water mark while preserving the table-zeroed flag.
 
+Symlink creation includes its target in that same transaction. Targets shorter
+than the 60-byte inode mapping area use inline storage with no extent flag or
+data allocation; longer targets receive one zeroed data block. The target plus
+its terminating NUL must fit that block, while the inode size excludes the NUL.
+Targets contain opaque non-NUL bytes and may include slashes or invalid UTF-8;
+empty targets are rejected. Only the parent's NODUMP and NOATIME flags propagate
+to a symlink. The reader rejects an inline length that leaves no terminator space.
+Adapter readlink operations bound allocation by the filesystem block size and
+preserve target bytes; native path traversal limits remain the platform's policy.
+
 The current namespace writer scans linear directories, validating their full maps
 and every record before insertion, even after finding a candidate slot. It reuses
 record slack or appends a zeroed block, preserving legacy name-length encoding and
@@ -219,7 +229,7 @@ metadata checksum tails. Directory size is bounded to 1,048,576 blocks. Existing
 indexed parents explicitly reject mutation. Duplicate names, stale generations,
 invalid dot records, exhausted inodes, reserved-space exclusion and journal-credit
 exhaustion cancel before resource writes; uncertain commits poison the owner.
-These operations do not yet implement directory indexing, symlink creation,
+These operations do not yet implement directory indexing,
 unlink/rmdir/rename or open-unlinked lifetime, and neither adapter exposes them.
 
 The initial kernel reader uses a fixed device-sector buffer-cache key for

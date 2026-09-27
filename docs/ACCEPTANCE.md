@@ -11,7 +11,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Eleven read profiles pass; broader format and size coverage pending |
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
-| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/link have portable and independent evidence; indexed mutation, unlink/rename and platform writes pending |
+| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link pass portable, independent and Linux checks; indexed mutation, unlink/rename and platform writes pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine, legacy lists and modern orphan files pass portable faults, independent recovery and Linux reuse; advanced journal formats and platform write integration remain pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; ACLs/xattrs and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
@@ -210,10 +210,53 @@ The selected-Xcode formatter, freestanding stack budget, unsigned arm64e/x86_64
 kext builds and unsigned universal FSKit app/extension build also pass. These new
 platform binaries have compilation evidence only.
 
-This accepts neither indexed-directory mutation, unlink/rmdir/rename, symlink
-creation nor open-unlinked ownership. Both platform adapters remain read-only.
+This create/mkdir/link checkpoint does not establish indexed-directory mutation,
+unlink/rmdir/rename or open-unlinked ownership. Symlink creation is covered by
+the separate evidence below. Both platform adapters remain read-only.
 The namespace API takes caller-admitted attributes and does not implement native
 authorization, LXNU policy, writable page-cache ownership or concurrent mutation.
+
+## Portable symlink evidence
+
+`ext4-namespace-test --symlinks` adds targets of 1, 59, 60, 61 and block-size-minus-one
+bytes, plus an opaque non-UTF-8 target. It verifies the inline/data-block boundary,
+zeroed terminator and tail, hardlink identity, owners/timestamps, readonly remount
+and exact partial reads. Invalid targets and stale or duplicate names leave media
+and caller output unchanged. Data-space exclusion rejects mapped targets while
+allowing inline creation without a data allocation. Inode exhaustion and small
+journal cancellation also cover symlinks. Generation reuse and parent flag
+inheritance distinguish symbolic links from regular files and directories.
+
+The full optimized ASan/UBSan matrix passed 28 suites. Review then found that the
+reader admitted an inline target of exactly 60 bytes, leaving no terminator space.
+The guard now rejects that length; tests use valid checksums for the 59-byte
+positive boundary and invalid 60/61-byte records. All twelve reader, malformed
+and namespace suites passed after this change. Reports are
+`artifacts/symlink-final-tests.xml`, `artifacts/symlink-decoder-tests.xml` and
+`artifacts/checks/symlink-*-ctest*.log`.
+
+The 174 fault scenarios cover 3,059 allocation points, 2,886 reads and 29,196
+write/flush cuts. Of those cuts, 28,494 recover to the required complete state;
+702 torn-primary-superblock cases fail closed. The same totals pass before and
+after the decoder guard. Independent checks pass 200 records across 26 profiles,
+including both committed replay and uncommitted rollback for all 174 atomic
+records. Target bytes, terminator space, inode/block accounting and metadata
+are checked independently with e2fsprogs, including journal-only recovery.
+
+The reference Linux kernel passes 158 roundtrips: 20 clean exports and 138 pending
+transactions. Cases cover inline, mapped and maximum targets, parent-directory
+growth and inode-group transitions. Linux checks exact and truncated readlink
+bytes and hardlink identity, then commits further namespace changes; reverse
+core recovery preserves the links and passes independent checking. A separate
+two-case smoke also passes. The reference kernel has 4 KiB pages, so larger block
+profiles have portable and e2fsprogs evidence only.
+
+Independent reports are under `artifacts/symlink-final-*-independent/`, Linux
+reports under the lab's `artifacts/ext4-journal/linux-reference/symlink-linux-*`,
+and the combined evidence is `artifacts/checks/symlink-acceptance.json`.
+Both unsigned kext architectures and the unsigned FSKit app/extension build.
+Mounted kext verification is in progress. Both platform adapters remain read-only;
+FSKit runtime remains pending signing.
 
 ## Allocation and growth evidence
 

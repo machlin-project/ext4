@@ -27,7 +27,7 @@ portable faults, independent e2fsck and Linux roundtrips. Live shrink can span
 bounded journal transactions, with orphan recovery completing interrupted operations.
 Offline recovery handles legacy lists and bounded modern orphan files, including
 Linux-authored open-unlinked objects and mixed representations.
-Atomic creation, mkdir and hard links now have portable fault and independent
+Atomic creation, mkdir, symlinks and hard links now have portable fault and independent
 image tests; indexed-directory mutation, unlink, rename, ACLs/xattrs and Linux
 capability policy remain unimplemented. Both platform adapters remain
 read-only; FSKit has not been mounted. Read

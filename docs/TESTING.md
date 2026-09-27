@@ -24,9 +24,11 @@ contract, not physical power-loss protection on a particular disk.
 | File overwrite | Complete-file comparison after an unaligned three-block overwrite, preserved EOF and untouched bytes, hardlinks, zero-length operation and read-only rejection |
 | Write admission | Stale generation, invalid fields/types/ranges, unsupported xattrs/flags, metadata-target exclusion; no writes before successful validation |
 | Namespace creation | Regular files, mkdir dot/dotdot and parent link counts, full-width owners and precise captured times, nested hard links and hard links to symlinks, sparse writes through new aliases |
+| Symlink creation | Lengths 1/59/60/61 and block-size-minus-one, opaque non-UTF-8 bytes, zeroed terminator/tail, inline versus mapped accounting, hardlink identity, precise metadata and readonly remount |
+| Symlink validation | Empty/NUL/oversized targets, stale/duplicate/indexed destinations, inode and journal exhaustion, mapped-target ENOSPC versus successful inline creation, checksummed invalid inline lengths |
 | Namespace allocation | Full-directory append, lazy inode bitmap/table ownership, group transitions, all inodes exhausted, hard links after exhaustion, cleared released records, generation increment/wrap and inherited inode flags |
 | Namespace validation | Invalid/duplicate names, stale parent/target, directory hard links, indexed/immutable parents, link limits, malformed records/dot entries, inode bitmap/count/high-water corruption and small-journal credit exhaustion |
-| Namespace failures | Every allocation/read after mount and every write/flush cut for create/mkdir/link in existing and appended blocks and at an inode-group transition; full-resource old/new comparison, with durable commits forced to the new state |
+| Namespace failures | Every allocation/read after mount and every write/flush cut for create/mkdir/link and short/long/maximum symlinks in existing and appended blocks and at an inode-group transition; full-resource old/new comparison, with durable commits forced to the new state |
 | Allocation and growth | Unaligned initial writes, sparse gaps, written allocations beyond EOF, deterministic fragmented insertion, extent root/leaf/parent splits, and direct through triple-indirect boundaries |
 | Unwritten conversion | Independent debugfs allocation with deliberately nonzero backing bytes; partial writes preserve zero semantics and split/merge extent records |
 | Free-space ownership | Group and superblock counters, inode data/mapping block counts, lazy bitmaps, short final groups, exhaustion to zero free blocks, reserved-space rejection, late credit failure with no writes |
@@ -75,6 +77,12 @@ before faulting the next creation; `--exhaust` fills all eight groups with long
 names, growing the parent through legacy indirect blocks. An actual indexed
 directory is a separate unsupported-operation test, not an accepted write case.
 
+`--symlinks` adds inline and block-backed targets, including a hardlinked binary
+target and the maximum permitted length. It combines with `--groups` to exercise
+allocation into initialized and lazy inode groups. Short targets can still be
+created when all remaining data blocks are reserved; mapped targets must fail
+without leaking the inode or changing its caller output.
+
 `--smoke --export DIR` preserves completed operations and two distinct interrupted
 states: before the commit write and immediately after its successful durability
 barrier. `check_namespace.py` requires old and new outcomes respectively, then
@@ -83,9 +91,13 @@ inode identity, owners/times, link counts, sparse bytes, free-space accounting,
 nonrepairing e2fsck, unchanged sources and idempotent recovery. Malformed input,
 allocation failures and deliberately torn primary superblocks remain separate
 from successful journal recovery.
+For symlinks, debugfs independently resolves inode locations or data block maps;
+the checker reads raw target bytes and requires a zeroed tail, avoiding loss from
+text decoding or a C-string display of binary targets.
 
 The Linux namespace probe reads expectations independently decoded from the
-checked clean image. It checks stat, lookup, complete readdir and file bytes,
+checked clean image. It checks stat, lookup, complete readdir, file bytes and
+exact/truncated readlink results without a returned terminator,
 then creates and links new objects and commits a cross-directory rename. On an
 inode-exhausted image it first requires ENOSPC and then reuses the only released
 inode. Returned pending Linux transactions are replayed by both the core and
@@ -147,6 +159,11 @@ Mounted tests verify the adapter's ordinary file operations, metadata, directory
 positions, read-only enforcement, concurrent readers and mmap. XNU lifetime tests
 retain open files or mappings across attempted unmounts. These do not establish
 writable UBC, cache coherence during truncate or filesystem operation concurrency.
+`ext4-mounted-symlink-test MOUNTPOINT BLOCK_SIZE` consumes a clean `symlinks-`
+export. It checks six target lengths/encodings and their hardlinks, inode identity,
+mode/owners/accounting and 7,680 readlink calls from four concurrent workers.
+Buffer capacities cross the inline and native path-size boundaries; each call
+must preserve the exact opaque bytes and leave the byte after its result untouched.
 
 Before enabling general writes, extend the matrix to platform allocation/full devices,
 create/link/unlink/rename, orphan cleanup, open-but-unlinked files, truncate versus

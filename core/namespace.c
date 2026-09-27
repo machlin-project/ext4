@@ -310,10 +310,40 @@ ext4_namespace_type(uint16_t mode)
 }
 
 static enum ext4_result
+ext4_symlink_initialize(struct ext4_allocation *allocation, struct ext4_inode *inode,
+    struct ext4_inode_disk *disk, const uint8_t *target, size_t length)
+{
+	struct ext4_fs *fs = allocation->fs;
+	void *buffer;
+	uint64_t physical;
+	bool zero;
+	enum ext4_result error;
+
+	if (length < sizeof(disk->block_data)) {
+		inode->flags &= ~EXT4_INODE_EXTENTS;
+		ext4_zero(disk->block_data, sizeof(disk->block_data));
+		ext4_copy(disk->block_data, target, length);
+	} else {
+		error = ext4_write_map_allocate(allocation, inode, disk, 0, &physical, &zero);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		error = ext4_transaction_buffer(allocation->transaction, physical, &buffer);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		ext4_zero(buffer, fs->info.block_size);
+		ext4_copy(buffer, target, length);
+	}
+	return ext4_inode_account(allocation, inode, disk, length);
+}
+
+static enum ext4_result
 ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation,
     const uint8_t *name, size_t name_length, uint16_t create_mode, uint32_t target,
     uint32_t target_generation, const struct ext4_inode_update *attributes,
-    const struct ext4_timestamp *time, struct ext4_inode *result)
+    const uint8_t *link_target, size_t link_length, const struct ext4_timestamp *time,
+    struct ext4_inode *result)
 {
 	struct ext4_transaction *transaction = NULL;
 	struct ext4_inode_disk *parent_disk;
@@ -325,6 +355,7 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	struct ext4_allocation allocation;
 	uint64_t free_blocks;
 	uint32_t flags;
+	size_t index;
 	bool ready = false;
 	enum ext4_file_type type;
 	enum ext4_result error;
@@ -344,6 +375,19 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	}
 	if (fs->journal == NULL) {
 		return EXT4_READ_ONLY;
+	}
+	if (create_mode == EXT4_MODE_SYMLINK) {
+		if (link_target == NULL || link_length == 0) {
+			return EXT4_INVALID_ARGUMENT;
+		}
+		if (link_length >= fs->info.block_size) {
+			return EXT4_NAME_TOO_LONG;
+		}
+		for (index = 0; index < link_length; index++) {
+			if (link_target[index] == 0) {
+				return EXT4_INVALID_ARGUMENT;
+			}
+		}
 	}
 	error = ext4_namespace_name(name, name_length);
 	if (error != EXT4_OK) {
@@ -415,6 +459,8 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		flags = parent.flags & EXT4_INHERITED_FILE_FLAGS;
 		if (create_mode == EXT4_MODE_DIRECTORY) {
 			flags |= parent.flags & EXT4_INODE_DIRSYNC;
+		} else if (create_mode == EXT4_MODE_SYMLINK) {
+			flags &= EXT4_INODE_NODUMP | EXT4_INODE_NOATIME;
 		}
 		flags |= child.flags;
 		ext4_encode32(&child_disk->flags, flags);
@@ -427,6 +473,9 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 			error = ext4_directory_initialize(
 			    &allocation, &child, child_disk, parent.number);
 			ext4_encode16(&parent_disk->links, parent.links + 1);
+		} else if (error == EXT4_OK && create_mode == EXT4_MODE_SYMLINK) {
+			error = ext4_symlink_initialize(
+			    &allocation, &child, child_disk, link_target, link_length);
 		}
 		if (error != EXT4_OK) {
 			goto cancel;
@@ -478,7 +527,7 @@ ext4_create(struct ext4_fs *fs, uint32_t directory, uint32_t generation, const u
     const struct ext4_timestamp *directory_time, struct ext4_inode *result)
 {
 	return ext4_namespace_add(fs, directory, generation, name, name_length, EXT4_MODE_REGULAR,
-	    0, 0, attributes, directory_time, result);
+	    0, 0, attributes, NULL, 0, directory_time, result);
 }
 
 enum ext4_result
@@ -487,7 +536,7 @@ ext4_mkdir(struct ext4_fs *fs, uint32_t directory, uint32_t generation, const ui
     const struct ext4_timestamp *directory_time, struct ext4_inode *result)
 {
 	return ext4_namespace_add(fs, directory, generation, name, name_length, EXT4_MODE_DIRECTORY,
-	    0, 0, attributes, directory_time, result);
+	    0, 0, attributes, NULL, 0, directory_time, result);
 }
 
 enum ext4_result
@@ -496,5 +545,15 @@ ext4_link(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation,
     const struct ext4_timestamp *time, struct ext4_inode *result)
 {
 	return ext4_namespace_add(fs, directory, directory_generation, name, name_length, 0, target,
-	    target_generation, NULL, time, result);
+	    target_generation, NULL, NULL, 0, time, result);
+}
+
+enum ext4_result
+ext4_symlink(struct ext4_fs *fs, uint32_t directory, uint32_t generation, const uint8_t *name,
+    size_t name_length, const uint8_t *target, size_t target_length,
+    const struct ext4_inode_update *attributes, const struct ext4_timestamp *directory_time,
+    struct ext4_inode *result)
+{
+	return ext4_namespace_add(fs, directory, generation, name, name_length, EXT4_MODE_SYMLINK,
+	    0, 0, attributes, target, target_length, directory_time, result);
 }
