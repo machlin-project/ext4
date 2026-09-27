@@ -678,6 +678,14 @@ the same complete functional/fault workload, so enabling more profiles does not
 consume one shared per-test deadline. The failed run's output remains under
 `artifacts/checks/rename-ci-artifacts/` and the job log in `artifacts/checks/`.
 
+The follow-up CI run passed all 27 per-profile rename tests and all 286 independent
+rename cases, including both journal outcomes. Core and orphan-file jobs also
+passed. The overall run still failed: the aggregated ordinary removal test reached
+its 900-second deadline, with 13 of 14 namespace tests passing. No assertion or
+sanitizer failure appeared in that timeout output. Its logs and reviewed reports
+are under `artifacts/checks/rename-profile-ci-*`. Removal is now scheduled per
+image in its own CI job as well; this scheduling change still needs its own CI result.
+
 ## FSKit build evidence
 
 The app and embedded extension compile using the macOS 27 SDK with deployment

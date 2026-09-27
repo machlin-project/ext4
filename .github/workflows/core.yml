@@ -27,7 +27,9 @@ jobs:
           - suite: orphan-file
             test-filter: -R '^orphan-file'
           - suite: namespace
-            test-filter: -R '^namespace' -E '^namespace-rename'
+            test-filter: -R '^namespace' -E '^namespace-(rename|removal)'
+          - suite: removal
+            test-filter: -R '^namespace-removal'
           - suite: rename
             test-filter: -R '^namespace-rename'
     env:
@@ -275,7 +277,7 @@ jobs:
           done
           df -h .
       - name: Independently verify unlink and rmdir transactions
-        if: matrix.suite == 'namespace'
+        if: matrix.suite == 'removal'
         run: |
           for fixtures in artifacts/fixtures artifacts/orphan-file-fixtures artifacts/namespace-fixtures; do
             for image in "$fixtures"/*.img; do
