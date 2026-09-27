@@ -222,10 +222,34 @@ Queries and insufficient-buffer or failed-I/O paths leave outputs unchanged on e
 The reader follows the documented [ext4 attribute layout](https://docs.kernel.org/filesystems/ext4/attributes.html).
 e2fsprogs can read the synthetic shared-value test, but e2fsck rejects its overlapping
 values and zero external entry hashes. That case establishes reader compatibility,
-not clean filesystem acceptance. Attribute writers, shared-block copy-on-write,
-reference release during orphan cleanup, EA_INODE storage and atomic ACL/security
-transitions remain unimplemented. Existing mutations still reject attribute-owning
-inodes; raw read support does not authorize access or enforce an ACL.
+not clean filesystem acceptance.
+
+`EXT4_ATTR_XATTRS` selects a batch of distinct raw keys in `ext4_set_attributes`.
+SET, CREATE, REPLACE and REMOVE test existence against the original inode. A batch
+requires a captured ctime and commits with the other selected inode fields, allowing
+an owner to supply one admitted ACL/security and permission/ownership transition.
+Names and values remain caller-owned until return. Values are opaque; this storage
+operation does not parse an ACL, authorize access or derive privilege removal.
+
+The writer validates complete inode mapping ownership and attribute storage before
+changing private snapshots. It preserves storage assignments when they fit, including
+an unchanged shared external block during an inode-body-only update. When repacking
+is necessary, bounded subset selection avoids false ENOSPC from a greedy placement.
+It writes sorted entries, disjoint padded values, entry/block hashes and metadata
+checksums. Existing nonzero extra_isize bounds inode-body storage; 128-byte inodes
+and records with no extended body use external storage. EA_INODE is unsupported.
+
+Changing a shared block decrements its reference count and allocates a private copy
+in the same transaction. Dropping a shared reference changes the inode's block count
+without freeing that physical block; dropping its final reference releases it.
+Allocation and feature summaries become visible only after a successful commit.
+Validation, resource and capacity failures cancel the snapshots without device writes
+or changed output. An uncertain commit aborts the filesystem until recovery.
+
+Ordinary file/namespace mutation and orphan cleanup still reject attribute-owning
+inodes until their lifetime integration is implemented. The new batch API rejects
+unlinked inodes for the same reason. Raw ACL/security storage is implemented;
+authorization, inheritance and privilege semantics remain pending.
 
 ## Admitted inode and namespace changes
 
@@ -233,9 +257,10 @@ The admitted operation supplies final permission bits and captured timestamps
 under the same owner lock as authorization and mutation. Ownership changes must
 include the admitted permission transition; a write requires final permissions,
 mtime and ctime. The core applies them in the data transaction, never repairs
-set-ID bits afterward. No untrusted ioctl exposes this authority. Inodes with
-xattrs or unsupported flags (including immutable and append-only) currently
-reject mutation pending their actual policy implementation. Native UBC/FSKit
+set-ID bits afterward. No untrusted ioctl exposes this authority. Unsupported flags
+(including immutable and append-only) reject mutation. Attribute-owning inodes can
+use the admitted attribute batch; other mutation paths await lifetime integration.
+Native UBC/FSKit
 integration and LXNU policy acceptance remain separate from this portable API.
 
 `ext4_create`, `ext4_mkdir`, `ext4_symlink` and `ext4_link` share the exclusive writable owner and

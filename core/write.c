@@ -1,10 +1,11 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "allocate.h"
+#include "xattr.h"
 
 #define EXT4_ATTRIBUTE_FIELDS                                                                      \
 	((uint32_t)(EXT4_ATTR_PERMISSIONS | EXT4_ATTR_UID | EXT4_ATTR_GID |                        \
 	    EXT4_ATTR_ACCESS_TIME | EXT4_ATTR_CHANGE_TIME | EXT4_ATTR_MODIFY_TIME |                \
-	    EXT4_ATTR_BIRTH_TIME))
+	    EXT4_ATTR_BIRTH_TIME | EXT4_ATTR_XATTRS))
 #define EXT4_WRITE_FIELDS (EXT4_ATTR_PERMISSIONS | EXT4_ATTR_CHANGE_TIME | EXT4_ATTR_MODIFY_TIME)
 
 enum ext4_result
@@ -97,11 +98,13 @@ ext4_update_validate(struct ext4_fs *fs, const struct ext4_inode_update *update)
 		!(update->fields & EXT4_ATTR_CHANGE_TIME))) {
 		return EXT4_INVALID_ARGUMENT;
 	}
-	return EXT4_OK;
+	return update->fields & EXT4_ATTR_XATTRS
+	    ? ext4_xattr_changes_validate(fs, update->xattrs, update->xattr_count)
+	    : EXT4_OK;
 }
 
-enum ext4_result
-ext4_edit_inode(struct ext4_fs *fs, struct ext4_transaction *transaction, uint32_t number,
+static enum ext4_result
+ext4_edit_inode_record(struct ext4_fs *fs, struct ext4_transaction *transaction, uint32_t number,
     uint32_t generation, struct ext4_inode_disk **disk, struct ext4_inode *inode)
 {
 	void *buffer;
@@ -140,7 +143,17 @@ ext4_edit_inode(struct ext4_fs *fs, struct ext4_transaction *transaction, uint32
 	if (ext4_le32(&(*disk)->deletion_time) != 0 && (hold == NULL || !hold->unlinked)) {
 		return EXT4_CORRUPT;
 	}
-	return ext4_inode_writable(fs, *disk, inode);
+	return ext4_inode_flags_writable(fs, inode);
+}
+
+enum ext4_result
+ext4_edit_inode(struct ext4_fs *fs, struct ext4_transaction *transaction, uint32_t number,
+    uint32_t generation, struct ext4_inode_disk **disk, struct ext4_inode *inode)
+{
+	enum ext4_result error;
+
+	error = ext4_edit_inode_record(fs, transaction, number, generation, disk, inode);
+	return error == EXT4_OK ? ext4_inode_writable(fs, *disk, inode) : error;
 }
 
 static enum ext4_result
@@ -162,6 +175,11 @@ ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	struct ext4_transaction *transaction;
 	struct ext4_inode_disk *disk;
 	struct ext4_inode inode;
+	struct ext4_allocation allocation;
+	uint64_t free_blocks;
+	uint32_t feature_compat;
+	uint32_t credits;
+	bool allocation_ready = false;
 	enum ext4_result error;
 
 	if (result == NULL) {
@@ -171,11 +189,36 @@ ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	if (error != EXT4_OK) {
 		return error;
 	}
-	error = ext4_transaction_begin(fs->journal, 1, &transaction);
+	free_blocks = fs->info.free_blocks;
+	feature_compat = fs->info.feature_compat;
+	credits = update->fields & EXT4_ATTR_XATTRS ? ext4_journal_credits(fs->journal) : 1;
+	error = ext4_transaction_begin(fs->journal, credits, &transaction);
 	if (error != EXT4_OK) {
 		return error;
 	}
-	error = ext4_edit_inode(fs, transaction, number, generation, &disk, &inode);
+	error = update->fields & EXT4_ATTR_XATTRS
+	    ? ext4_edit_inode_record(fs, transaction, number, generation, &disk, &inode)
+	    : ext4_edit_inode(fs, transaction, number, generation, &disk, &inode);
+	if (error == EXT4_OK && (update->fields & EXT4_ATTR_XATTRS)) {
+		/* Orphan teardown must own attribute references before an unlinked
+		 * inode can acquire or change them. */
+		if (inode.links == 0) {
+			error = EXT4_UNSUPPORTED;
+		} else {
+			error = ext4_allocation_init(&allocation, fs, transaction, &inode);
+			allocation_ready = error == EXT4_OK;
+		}
+		if (error == EXT4_OK) {
+			error = ext4_write_map_validate(&allocation, &inode, disk);
+		}
+		if (error == EXT4_OK) {
+			error = ext4_xattr_apply(
+			    &allocation, &inode, disk, update->xattrs, update->xattr_count);
+		}
+		if (error == EXT4_OK) {
+			error = ext4_inode_account(&allocation, &inode, disk, inode.size);
+		}
+	}
 	if (error == EXT4_OK) {
 		error = ext4_inode_apply(fs, disk, update);
 	}
@@ -183,12 +226,21 @@ ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 		ext4_inode_checksum_set(fs, number, disk);
 		error = ext4_inode_decode_live(fs, number, disk, &inode);
 	}
+	if (allocation_ready) {
+		free_blocks = allocation.free_blocks;
+		if (allocation.super != NULL) {
+			feature_compat = ext4_le32(&allocation.super->feature_compat);
+		}
+		ext4_allocation_destroy(&allocation);
+	}
 	if (error != EXT4_OK || update->fields == 0) {
 		ext4_transaction_cancel(transaction);
 	} else {
 		error = ext4_edit_commit(fs, transaction);
 	}
 	if (error == EXT4_OK) {
+		fs->info.free_blocks = free_blocks;
+		fs->info.feature_compat = feature_compat;
 		*result = inode;
 	}
 	return error;
@@ -282,7 +334,7 @@ ext4_inode_account(struct ext4_allocation *allocation, const struct ext4_inode *
 	struct ext4_fs *fs = allocation->fs;
 	uint64_t units = ext4_le32(&disk->blocks_lo);
 	uint64_t increment = allocation->allocated;
-	uint64_t decrement = allocation->freed;
+	uint64_t decrement = allocation->freed + allocation->detached_shared_blocks;
 	uint64_t maximum = UINT32_MAX;
 	uint32_t flags = inode->flags;
 

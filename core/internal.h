@@ -103,6 +103,7 @@ struct ext4_inode_hold *ext4_inode_find_hold(struct ext4_fs *fs, uint32_t number
 void ext4_inode_holds_destroy(struct ext4_fs *fs);
 enum ext4_result ext4_inode_writable(
     struct ext4_fs *fs, const struct ext4_inode_disk *disk, const struct ext4_inode *inode);
+enum ext4_result ext4_inode_flags_writable(struct ext4_fs *fs, const struct ext4_inode *inode);
 void ext4_inode_checksum_set(struct ext4_fs *fs, uint32_t number, struct ext4_inode_disk *disk);
 enum ext4_result ext4_inode_apply(
     struct ext4_fs *fs, struct ext4_inode_disk *disk, const struct ext4_inode_update *update);

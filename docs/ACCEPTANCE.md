@@ -17,7 +17,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir/rename and bounded indexed mutation pass portable, independent and Linux checks; core holds retain open-unlinked or replaced objects; platform writes and broader capacity/concurrency acceptance pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine, legacy lists and modern orphan files pass portable faults, independent recovery and Linux reuse; advanced journal formats and platform write integration remain pending |
-| Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list pass portable and independent checks; mutation, ACL enforcement and platform policy pending |
+| Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list and atomic attribute batches pass portable and independent checks; mutation lifetime integration, ACL enforcement, Linux xattr roundtrips and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
 | LXNU policy | CAP_FSETID and privilege removal, xattrs, mixed-ABI races, inherited descriptions and attachment restrictions | Not implemented |
@@ -106,12 +106,51 @@ images. The final selected-Xcode build, formatter and freestanding stack check
 pass, as do 23 combined xattr, image-reader, malformed-input, inode-write,
 journal and full-space suites. All 30 selected source images remain unchanged.
 Evidence is in `artifacts/xattr-final.xml` and
-`artifacts/checks/xattr-final-summary.json`. Published CI for the new reader
-remains pending.
+`artifacts/checks/xattr-final-summary.json`. Published reader CI passes all six
+jobs and 177 JUnit suites. Downloaded evidence and full test logs are pinned in
+`artifacts/checks/xattr-ci-manifest.json`; reader compatibility and embedded
+applicability skips remain separate from clean-image and successful recovery counts.
 
-Raw attribute access does not implement POSIX ACL authorization, macOS xattr naming,
-attribute mutation or Linux privilege transitions. Existing mutation paths still
-reject attribute-owning inodes. Both platform adapters remain read-only.
+Raw attribute access does not implement POSIX ACL authorization, macOS xattr naming
+or Linux privilege transitions. Both platform adapters remain read-only.
+
+## Portable extended-attribute mutation evidence
+
+Six operations on ten profiles test create/set/replace/remove batches, unchanged
+outputs on errors, shared-block copy-on-write, shared reference release, final
+unique-block freeing, inline/mapped symlink attributes and atomic changes to raw
+ACL/security bytes with mode/UID/GID/ctime. Complete allocation/read failure sweeps
+inject 1,204 allocation failures and 1,006 read failures. The 6,768 write/flush cuts
+recover 6,556 consistent old/new states and explicitly reject 212 torn primary
+superblocks with invalid checksums. A durable commit must recover the new state.
+Those 212 cases establish rejection, not successful media repair. Reports are in
+`artifacts/xattr-write-faults-first.xml` and
+`artifacts/checks/xattr-write-smoke-first-summary.json`.
+
+Independent e2fsprogs inspection verifies 320 snapshots, 4,810 raw values, complete
+names, inode metadata, block accounting, symlink bytes and shared reference counts.
+All snapshots pass nonrepairing e2fsck. Separate copies of pending/uncommitted exports
+are replayed by the core and by e2fsprogs; both must produce the expected state,
+including the exact shared-block ownership. Repeated core recovery changes no bytes.
+All 12,860 commands return zero and protected inputs remain unchanged. Evidence is
+in `artifacts/xattr-write-independent-tools/`; an earlier tool-path startup failure
+is retained separately and did not inspect or modify any image.
+
+This accepts the linked-inode raw attribute batch. Ordinary file writes, creation,
+namespace mutation and orphan cleanup still reject attribute-owning inodes. Their
+integration, ACL enforcement and Linux xattr roundtrips remain required. Full-space,
+packing and additional ownership checks also pass: ten full-space profiles exercise
+in-place/unchanged writes, shared-block allocation rollback and reuse of a released
+block. Ten packing/ownership profiles cover maximum values, exact packing across
+both storage areas and malformed type/map/refcount/system-block/accounting rejection.
+The 128-byte inode profile explicitly has no two-region packing case. Independent
+inspection accepts 29 packing snapshots and 20 full-space snapshots, including
+unchanged filler data and block mappings. All 2,033 independent commands return zero.
+The combined selected regression passes 53 suites under sanitizers, and the
+freestanding stack-budget build passes. Evidence is in
+`artifacts/checks/xattr-write-edges-summary.json`, `artifacts/xattr-write-edges.xml`,
+`artifacts/xattr-write-independent-edges/` and `artifacts/xattr-write-independent-full/`.
+Linux runtime roundtrips and published CI for this writer are still pending.
 
 ## Journal evidence
 

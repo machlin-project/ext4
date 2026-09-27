@@ -33,9 +33,11 @@ EXCHANGE and cross-parent directory moves. The serialized core retains
 open-unlinked or replaced inodes until their last hold is released.
 Indexed-directory mutation now passes portable functional/fault tests, independent
 e2fsprogs checks and Linux roundtrips, including collisions and bounded tree growth.
-The portable core reads and lists inode-body and external xattrs, including shared
-attribute blocks; xattr mutation, ACL enforcement and Linux capability policy remain
-unimplemented. Work proceeds through portable-core acceptance, then FSKit integration
+The portable core reads, lists and transactionally changes inode-body and external
+xattrs, including copying shared blocks before modification. Attribute batches can
+commit together with inode permissions, ownership and times. Integration with ordinary
+file mutation and orphan cleanup, ACL enforcement and Linux capability policy remains
+pending. Work proceeds through portable-core acceptance, then FSKit integration
 on stock macOS, then LXNU policy.
 Both platform adapters remain
 read-only; FSKit has not been mounted. Read

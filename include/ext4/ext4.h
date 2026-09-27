@@ -59,6 +59,7 @@ enum ext4_mode {
 
 struct ext4_fs;
 struct ext4_inode_hold;
+struct ext4_xattr_change;
 
 /* read must complete exactly length bytes or return an error. The resource and
  * callbacks remain valid until unmount. All offsets are resource-relative. */
@@ -121,7 +122,8 @@ enum ext4_attribute_field {
 	EXT4_ATTR_ACCESS_TIME = 1U << 3,
 	EXT4_ATTR_CHANGE_TIME = 1U << 4,
 	EXT4_ATTR_MODIFY_TIME = 1U << 5,
-	EXT4_ATTR_BIRTH_TIME = 1U << 6
+	EXT4_ATTR_BIRTH_TIME = 1U << 6,
+	EXT4_ATTR_XATTRS = 1U << 7
 };
 
 /* An admitted operation, not credentials or an authorization bypass. The owner
@@ -137,6 +139,8 @@ struct ext4_inode_update {
 	struct ext4_timestamp change_time;
 	struct ext4_timestamp modify_time;
 	struct ext4_timestamp birth_time;
+	const struct ext4_xattr_change *xattrs;
+	size_t xattr_count;
 };
 
 struct ext4_inode {
@@ -181,6 +185,24 @@ struct ext4_xattr_key {
 	uint8_t name_index;
 	uint8_t name_length;
 	uint8_t name[EXT4_NAME_MAX];
+};
+
+enum ext4_xattr_policy { EXT4_XATTR_SET, EXT4_XATTR_CREATE, EXT4_XATTR_REPLACE, EXT4_XATTR_REMOVE };
+
+#define EXT4_XATTR_MAX_CHANGES 8192U
+
+/* EXT4_ATTR_XATTRS selects an admitted batch of distinct raw keys, changed in one
+ * transaction with the other selected inode fields. CHANGE_TIME is required. CREATE/REPLACE
+ * enforce existence against the original inode; REMOVE requires an existing key
+ * and NULL/zero value. Caller-owned names and values remain valid through return.
+ * ACL/security values are opaque; the owner supplies their admitted transition. */
+struct ext4_xattr_change {
+	enum ext4_xattr_policy policy;
+	uint8_t name_index;
+	const uint8_t *name;
+	size_t name_length;
+	const void *value;
+	size_t value_size;
 };
 
 /* Immutable read mapping; an adapter must not reuse it across future mutations. */

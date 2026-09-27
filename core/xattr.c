@@ -1,23 +1,9 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
-#include "internal.h"
+#include "xattr.h"
 
 #define EXT4_XATTR_NAME_HASH_SHIFT 5U
 #define EXT4_XATTR_VALUE_HASH_SHIFT 16U
 #define EXT4_XATTR_HASH_BITS 32U
-
-struct ext4_xattr_record {
-	const struct ext4_xattr_entry_disk *entry;
-	const uint8_t *value;
-};
-
-struct ext4_xattr_snapshot {
-	struct ext4_fs *fs;
-	uint8_t *inode;
-	uint8_t *block;
-	struct ext4_xattr_record *records;
-	size_t capacity;
-	size_t count;
-};
 
 static size_t
 ext4_xattr_aligned(size_t size)
@@ -26,7 +12,7 @@ ext4_xattr_aligned(size_t size)
 	return (size + EXT4_XATTR_ALIGNMENT - 1) & ~(size_t)(EXT4_XATTR_ALIGNMENT - 1);
 }
 
-static int
+int
 ext4_xattr_compare(
     const struct ext4_xattr_entry_disk *left, const struct ext4_xattr_entry_disk *right)
 {
@@ -100,37 +86,27 @@ ext4_xattr_hash_step(uint32_t hash, uint32_t value, unsigned int shift)
 	return ((hash << shift) | (hash >> (EXT4_XATTR_HASH_BITS - shift))) ^ value;
 }
 
-static bool
-ext4_xattr_hash_valid(const struct ext4_xattr_record *record)
+uint32_t
+ext4_xattr_hash(const struct ext4_xattr_entry_disk *entry, const uint8_t *value, bool signed_names)
 {
-	const struct ext4_xattr_entry_disk *entry = record->entry;
 	const uint8_t *name = (const uint8_t *)(entry + 1);
-	uint32_t expected = ext4_le32(&entry->hash);
-	uint32_t unsigned_hash = 0;
-	uint32_t signed_hash = 0;
+	uint32_t hash = 0;
 	uint32_t word;
 	size_t index;
 	size_t value_size = ext4_le32(&entry->value_size);
 
-	if (expected == 0) {
-		return true;
-	}
 	for (index = 0; index < entry->name_length; index++) {
 		word = name[index];
-		unsigned_hash =
-		    ext4_xattr_hash_step(unsigned_hash, word, EXT4_XATTR_NAME_HASH_SHIFT);
-		if (word > INT8_MAX) {
+		if (signed_names && word > INT8_MAX) {
 			word |= UINT32_MAX << 8;
 		}
-		signed_hash = ext4_xattr_hash_step(signed_hash, word, EXT4_XATTR_NAME_HASH_SHIFT);
+		hash = ext4_xattr_hash_step(hash, word, EXT4_XATTR_NAME_HASH_SHIFT);
 	}
 	for (index = 0; index < ext4_xattr_aligned(value_size); index += sizeof(struct ext4_le32)) {
-		word = ext4_le32((const struct ext4_le32 *)(record->value + index));
-		unsigned_hash =
-		    ext4_xattr_hash_step(unsigned_hash, word, EXT4_XATTR_VALUE_HASH_SHIFT);
-		signed_hash = ext4_xattr_hash_step(signed_hash, word, EXT4_XATTR_VALUE_HASH_SHIFT);
+		word = ext4_le32((const struct ext4_le32 *)(value + index));
+		hash = ext4_xattr_hash_step(hash, word, EXT4_XATTR_VALUE_HASH_SHIFT);
 	}
-	return expected == unsigned_hash || expected == signed_hash;
+	return hash;
 }
 
 static enum ext4_result
@@ -175,6 +151,7 @@ ext4_xattr_region(struct ext4_xattr_snapshot *snapshot, const uint8_t *buffer, s
 		    ext4_xattr_compare(snapshot->records[snapshot->count - 1].entry, entry) >= 0) {
 			return EXT4_CORRUPT;
 		}
+		snapshot->records[snapshot->count].external = sorted;
 		snapshot->records[snapshot->count++].entry = entry;
 		offset += length;
 	}
@@ -191,7 +168,9 @@ ext4_xattr_region(struct ext4_xattr_snapshot *snapshot, const uint8_t *buffer, s
 			return EXT4_CORRUPT;
 		}
 		record->value = buffer + value_offset;
-		if (!ext4_xattr_hash_valid(record)) {
+		if (ext4_le32(&entry->hash) != 0 &&
+		    ext4_le32(&entry->hash) != ext4_xattr_hash(entry, record->value, false) &&
+		    ext4_le32(&entry->hash) != ext4_xattr_hash(entry, record->value, true)) {
 			return EXT4_CORRUPT;
 		}
 		if (ext4_le32(&entry->hash) == 0) {
@@ -212,7 +191,7 @@ ext4_xattr_region(struct ext4_xattr_snapshot *snapshot, const uint8_t *buffer, s
 	return EXT4_OK;
 }
 
-static void
+void
 ext4_xattr_close(struct ext4_xattr_snapshot *snapshot)
 {
 	struct ext4_environment *environment = &snapshot->fs->environment;
@@ -231,14 +210,29 @@ ext4_xattr_close(struct ext4_xattr_snapshot *snapshot)
 	}
 }
 
+void
+ext4_xattr_checksum_set(struct ext4_fs *fs, uint64_t block, struct ext4_xattr_header_disk *header)
+{
+	struct ext4_block_number_disk address;
+	uint32_t checksum;
+
+	if (!fs->metadata_checksum) {
+		return;
+	}
+	ext4_encode32(&header->checksum, 0);
+	ext4_encode32(&address.low, (uint32_t)block);
+	ext4_encode32(&address.high, (uint32_t)(block >> 32));
+	checksum = ext4_crc32c(fs->checksum_seed, &address, sizeof(address));
+	checksum = ext4_crc32c(checksum, header, fs->info.block_size);
+	ext4_encode32(&header->checksum, checksum);
+}
+
 static enum ext4_result
 ext4_xattr_external(struct ext4_xattr_snapshot *snapshot, uint64_t block)
 {
 	struct ext4_fs *fs = snapshot->fs;
 	struct ext4_xattr_header_disk *header;
-	struct ext4_block_number_disk address;
 	uint32_t expected;
-	uint32_t checksum;
 	size_t index;
 	enum ext4_result error;
 
@@ -258,13 +252,8 @@ ext4_xattr_external(struct ext4_xattr_snapshot *snapshot, uint64_t block)
 	header = (struct ext4_xattr_header_disk *)snapshot->block;
 	if (fs->metadata_checksum) {
 		expected = ext4_le32(&header->checksum);
-		ext4_encode32(&header->checksum, 0);
-		ext4_encode32(&address.low, (uint32_t)block);
-		ext4_encode32(&address.high, (uint32_t)(block >> 32));
-		checksum = ext4_crc32c(fs->checksum_seed, &address, sizeof(address));
-		checksum = ext4_crc32c(checksum, snapshot->block, fs->info.block_size);
-		ext4_encode32(&header->checksum, expected);
-		if (checksum != expected) {
+		ext4_xattr_checksum_set(fs, block, header);
+		if (ext4_le32(&header->checksum) != expected) {
 			return EXT4_CORRUPT;
 		}
 	}
@@ -281,7 +270,7 @@ ext4_xattr_external(struct ext4_xattr_snapshot *snapshot, uint64_t block)
 	return EXT4_OK;
 }
 
-static enum ext4_result
+enum ext4_result
 ext4_xattr_open(
     struct ext4_fs *fs, uint32_t number, uint32_t generation, struct ext4_xattr_snapshot *snapshot)
 {
@@ -323,6 +312,7 @@ ext4_xattr_open(
 	disk = (struct ext4_inode_disk *)snapshot->inode;
 	block =
 	    ext4_le32(&disk->xattr_block_lo) | ((uint64_t)ext4_le16(&disk->xattr_block_hi) << 32);
+	snapshot->external_block = block;
 	if (fs->inode_size > EXT4_INODE_BASE_SIZE) {
 		extra = ext4_le16(&disk->extra_size);
 		offset = EXT4_INODE_BASE_SIZE + extra;

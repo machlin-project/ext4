@@ -919,6 +919,8 @@ ext4_write_map_validate(struct ext4_allocation *allocation, const struct ext4_in
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_map_owners owners;
 	uint8_t *scratch;
+	uint64_t attribute_block;
+	uint16_t type = inode->mode & EXT4_MODE_TYPE;
 	size_t scratch_size = (size_t)fs->info.block_size * EXT4_EXTENT_MAX_DEPTH;
 	size_t index;
 	enum ext4_result error;
@@ -928,9 +930,19 @@ ext4_write_map_validate(struct ext4_allocation *allocation, const struct ext4_in
 	if (scratch == NULL) {
 		return EXT4_NO_MEMORY;
 	}
-	error = inode->flags & EXT4_INODE_EXTENTS
-	    ? ext4_extent_owners(allocation, inode, disk, &owners, scratch)
-	    : ext4_indirect_owners(allocation, disk, &owners, scratch);
+	if (type == EXT4_MODE_REGULAR || type == EXT4_MODE_DIRECTORY ||
+	    (type == EXT4_MODE_SYMLINK && !inode->fast_symlink)) {
+		error = inode->flags & EXT4_INODE_EXTENTS
+		    ? ext4_extent_owners(allocation, inode, disk, &owners, scratch)
+		    : ext4_indirect_owners(allocation, disk, &owners, scratch);
+	} else {
+		error = inode->flags & EXT4_INODE_EXTENTS ? EXT4_CORRUPT : EXT4_OK;
+	}
+	attribute_block =
+	    ext4_le32(&disk->xattr_block_lo) | ((uint64_t)ext4_le16(&disk->xattr_block_hi) << 32);
+	if (error == EXT4_OK && attribute_block != 0) {
+		error = ext4_map_owner_add(allocation, &owners, attribute_block, 1);
+	}
 	if (error == EXT4_OK &&
 	    (inode->blocks_512 % (fs->info.block_size / EXT4_SECTOR_SIZE) != 0 ||
 		owners.blocks != inode->blocks_512 / (fs->info.block_size / EXT4_SECTOR_SIZE))) {

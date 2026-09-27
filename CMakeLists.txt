@@ -20,7 +20,7 @@ set(EXT4_CORE_SOURCES
     core/journal.c core/recovery.c core/group.c core/system.c
     core/allocate.c core/map_write.c core/write.c core/orphan.c
     core/inode_allocate.c core/namespace.c core/lifetime.c core/directory_hash.c
-    core/directory_index.c core/directory_write.c core/xattr.c)
+    core/directory_index.c core/directory_write.c core/xattr.c core/xattr_write.c)
 add_library(ext4_core STATIC ${EXT4_CORE_SOURCES})
 target_include_directories(ext4_core PUBLIC include)
 target_compile_options(ext4_core PRIVATE
@@ -57,6 +57,10 @@ add_executable(ext4-xattr-test tests/xattr.c)
 target_include_directories(ext4-xattr-test PRIVATE core)
 target_link_libraries(ext4-xattr-test PRIVATE ext4_posix)
 target_compile_options(ext4-xattr-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
+add_executable(ext4-xattr-write-test tests/xattr_write.c)
+target_include_directories(ext4-xattr-write-test PRIVATE core)
+target_link_libraries(ext4-xattr-write-test PRIVATE ext4_posix)
+target_compile_options(ext4-xattr-write-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
 set(EXT4_XATTR_FIXTURES "" CACHE PATH "Independent inode-body, external and shared xattr images")
 if(EXT4_XATTR_FIXTURES)
     foreach(profile 1k 4k 16k 64k indirect no-checksum checksum-seed inode128 inode512 orphan-file)
@@ -64,6 +68,20 @@ if(EXT4_XATTR_FIXTURES)
             "${EXT4_XATTR_FIXTURES}/xattr-${profile}.img"
             "${EXT4_XATTR_FIXTURES}/xattr-${profile}.expected")
         set_tests_properties("xattr-reader-${profile}" PROPERTIES TIMEOUT 300)
+        add_test(NAME "xattr-mutation-${profile}" COMMAND ext4-xattr-write-test
+            "${EXT4_XATTR_FIXTURES}/xattr-${profile}.img")
+        set_tests_properties("xattr-mutation-${profile}" PROPERTIES TIMEOUT 600)
+        add_test(NAME "xattr-packing-${profile}" COMMAND ext4-xattr-write-test --edges
+            "${EXT4_XATTR_FIXTURES}/xattr-${profile}.img")
+        set_tests_properties("xattr-packing-${profile}" PROPERTIES TIMEOUT 300)
+    endforeach()
+endif()
+set(EXT4_XATTR_SPACE_FIXTURES "" CACHE PATH "Independent full-space images with shared xattr blocks")
+if(EXT4_XATTR_SPACE_FIXTURES)
+    foreach(profile 1k 4k 16k 64k indirect no-checksum checksum-seed inode128 inode512 orphan-file)
+        add_test(NAME "xattr-full-space-${profile}" COMMAND ext4-xattr-write-test --full
+            "${EXT4_XATTR_SPACE_FIXTURES}/xattr-space-${profile}.img")
+        set_tests_properties("xattr-full-space-${profile}" PROPERTIES TIMEOUT 300)
     endforeach()
 endif()
 

@@ -149,12 +149,20 @@ ext4_inode_decode_orphan(
 }
 
 enum ext4_result
-ext4_inode_writable(
-    struct ext4_fs *fs, const struct ext4_inode_disk *disk, const struct ext4_inode *inode)
+ext4_inode_flags_writable(struct ext4_fs *fs, const struct ext4_inode *inode)
 {
-	size_t xattr_offset;
-	uint16_t extra_size;
-
+	switch (inode->mode & EXT4_MODE_TYPE) {
+	case EXT4_MODE_REGULAR:
+	case EXT4_MODE_DIRECTORY:
+	case EXT4_MODE_SYMLINK:
+	case EXT4_MODE_CHARACTER:
+	case EXT4_MODE_BLOCK:
+	case EXT4_MODE_FIFO:
+	case EXT4_MODE_SOCKET:
+		break;
+	default:
+		return EXT4_CORRUPT;
+	}
 	if (inode->flags & ~EXT4_INODE_WRITABLE_FLAGS) {
 		return EXT4_UNSUPPORTED;
 	}
@@ -163,6 +171,20 @@ ext4_inode_writable(
 	    ((inode->flags & EXT4_INODE_HUGE_FILE) &&
 		!(fs->info.feature_ro_compat & EXT4_FEATURE_RO_HUGE_FILE))) {
 		return EXT4_CORRUPT;
+	}
+	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_inode_writable(
+    struct ext4_fs *fs, const struct ext4_inode_disk *disk, const struct ext4_inode *inode)
+{
+	size_t xattr_offset;
+	uint16_t extra_size;
+	enum ext4_result error = ext4_inode_flags_writable(fs, inode);
+
+	if (error != EXT4_OK) {
+		return error;
 	}
 	/* Attribute ownership and ACL/security policy need their own transaction
 	 * contract, including releasing external attribute blocks on deletion. */

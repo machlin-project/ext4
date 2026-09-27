@@ -100,6 +100,8 @@ jobs:
         run: |
           python3 tests/generate_xattr_fixtures.py --output artifacts/xattr-fixtures \
             2>&1 | tee artifacts/checks/xattr-fixtures.log
+          python3 tests/generate_xattr_space.py --fixtures artifacts/xattr-fixtures/report.json \
+            --output artifacts/xattr-space-fixtures 2>&1 | tee artifacts/checks/xattr-space-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
@@ -114,7 +116,8 @@ jobs:
             space_options=(-DEXT4_SPACE_FIXTURES="$PWD/artifacts/space-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == core ]]; then
-            xattr_options=(-DEXT4_XATTR_FIXTURES="$PWD/artifacts/xattr-fixtures")
+            xattr_options=(-DEXT4_XATTR_FIXTURES="$PWD/artifacts/xattr-fixtures" \
+              -DEXT4_XATTR_SPACE_FIXTURES="$PWD/artifacts/xattr-space-fixtures")
           fi
           cmake -S . -B .build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DEXT4_EXTENDED_TESTS=ON -DEXT4_INODE128_TEST=ON -DEXT4_UNWRITTEN_TESTS=ON \
@@ -139,8 +142,32 @@ jobs:
           python3 tests/check_xattrs.py --fixtures artifacts/xattr-fixtures/report.json \
             --exports artifacts/xattr-exports --output artifacts/xattr-independent \
             2>&1 | tee artifacts/checks/xattr-independent.log
-          find artifacts/xattr-fixtures artifacts/xattr-exports artifacts/xattr-independent -type f \
+          find artifacts/xattr-exports artifacts/xattr-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Independently verify extended attribute transactions and capacity
+        if: matrix.suite == 'core'
+        run: |
+          mkdir artifacts/xattr-write-exports artifacts/xattr-edge-exports artifacts/xattr-full-exports
+          .build/ext4-xattr-write-test --smoke --export artifacts/xattr-write-exports \
+            artifacts/xattr-fixtures/*.img 2>&1 | tee artifacts/checks/xattr-write-exports.log
+          .build/ext4-xattr-write-test --edges --export artifacts/xattr-edge-exports \
+            artifacts/xattr-fixtures/*.img 2>&1 | tee artifacts/checks/xattr-edge-exports.log
+          .build/ext4-xattr-write-test --full --export artifacts/xattr-full-exports \
+            artifacts/xattr-space-fixtures/*.img 2>&1 | tee artifacts/checks/xattr-full-exports.log
+          python3 tests/check_xattr_writes.py --fixtures artifacts/xattr-fixtures/report.json \
+            --exports artifacts/xattr-write-exports --recover .build/ext4-recover \
+            --output artifacts/xattr-write-independent --discard-recovered \
+            2>&1 | tee artifacts/checks/xattr-write-independent.log
+          python3 tests/check_xattr_writes.py --edges --fixtures artifacts/xattr-fixtures/report.json \
+            --exports artifacts/xattr-edge-exports --recover .build/ext4-recover \
+            --output artifacts/xattr-edge-independent 2>&1 | tee artifacts/checks/xattr-edge-independent.log
+          python3 tests/check_xattr_writes.py --full --fixtures artifacts/xattr-space-fixtures/report.json \
+            --exports artifacts/xattr-full-exports --recover .build/ext4-recover \
+            --output artifacts/xattr-full-independent 2>&1 | tee artifacts/checks/xattr-full-independent.log
+          find artifacts/xattr-fixtures artifacts/xattr-space-fixtures \
+            artifacts/xattr-write-exports artifacts/xattr-edge-exports artifacts/xattr-full-exports \
+            artifacts/xattr-write-independent artifacts/xattr-edge-independent artifacts/xattr-full-independent \
+            -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Export and independently verify file writes
         if: matrix.suite == 'core'
         run: |

@@ -203,6 +203,42 @@ The checker distinguishes clean unknown-namespace exports from synthetic shared-
 reader compatibility images. The latter deliberately fail e2fsck and are never
 reported as clean filesystem acceptance. No input image is repaired or modified.
 
+## Extended-attribute mutation tests
+
+The same ten fixtures drive `xattr-mutation-*` and `xattr-packing-*`. The first
+enumerates every post-lookup allocation/read failure and write/flush interruption
+for six atomic operations. `--smoke` exports their successful and interrupted states
+without repeating fault sweeps; it does not replace the registered CTest suites.
+
+```sh
+cmake --build .build --target ext4-xattr-write-test ext4-recover
+ctest --test-dir .build -R '^xattr-(mutation|packing)-' --output-on-failure
+mkdir artifacts/xattr-write-exports artifacts/xattr-edge-exports
+.build/ext4-xattr-write-test --smoke --export artifacts/xattr-write-exports artifacts/xattr-fixtures/*.img
+.build/ext4-xattr-write-test --edges --export artifacts/xattr-edge-exports artifacts/xattr-fixtures/*.img
+python3 tests/check_xattr_writes.py --fixtures artifacts/xattr-fixtures/report.json \
+  --exports artifacts/xattr-write-exports --recover .build/ext4-recover \
+  --tools-root /path/to/e2fsprogs/build --output artifacts/xattr-write-independent
+python3 tests/check_xattr_writes.py --edges --fixtures artifacts/xattr-fixtures/report.json \
+  --exports artifacts/xattr-edge-exports --recover .build/ext4-recover \
+  --tools-root /path/to/e2fsprogs/build --output artifacts/xattr-edge-independent
+python3 tests/generate_xattr_space.py --fixtures artifacts/xattr-fixtures/report.json \
+  --tools-root /path/to/e2fsprogs/build --output artifacts/xattr-space-fixtures
+cmake -S . -B .build -DEXT4_XATTR_SPACE_FIXTURES="$PWD/artifacts/xattr-space-fixtures"
+ctest --test-dir .build -R '^xattr-full-space-' --output-on-failure
+mkdir artifacts/xattr-full-exports
+.build/ext4-xattr-write-test --full --export artifacts/xattr-full-exports artifacts/xattr-space-fixtures/*.img
+python3 tests/check_xattr_writes.py --full --fixtures artifacts/xattr-space-fixtures/report.json \
+  --exports artifacts/xattr-full-exports --recover .build/ext4-recover \
+  --tools-root /path/to/e2fsprogs/build --output artifacts/xattr-full-independent
+```
+
+The independent checker preserves source images and mutates only newly created
+recovery copies. CI uses `--discard-recovered` to delete each verified copy after
+recording its final hash, reducing disk use while retaining reports and commands.
+The default retains every recovery image. Full-space checks also hash all filler
+data/mapping blocks and require them to remain unchanged.
+
 ## Inode and file-write tests
 
 `ext4-write-test` opens source fixtures read-only and mutates separate modeled

@@ -23,6 +23,9 @@ struct ext4_allocation {
 	uint32_t next_bit;
 	uint32_t allocated;
 	uint64_t freed;
+	/* Dropping a shared external attribute reference changes i_blocks without
+	 * freeing that physical block. Keep it separate from allocation counters. */
+	uint64_t detached_shared_blocks;
 };
 
 enum ext4_result ext4_allocation_init(struct ext4_allocation *allocation, struct ext4_fs *fs,
