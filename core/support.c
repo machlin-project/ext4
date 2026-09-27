@@ -160,6 +160,8 @@ ext4_result_string(enum ext4_result result)
 		return "entry already exists";
 	case EXT4_TOO_MANY_LINKS:
 		return "too many hard links";
+	case EXT4_NOT_EMPTY:
+		return "directory not empty";
 	}
 	return "unknown filesystem error";
 }

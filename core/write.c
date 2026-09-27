@@ -57,7 +57,18 @@ ext4_sync(struct ext4_fs *fs)
 	if (fs->journal == NULL) {
 		return EXT4_OK;
 	}
-	error = ext4_journal_finish(fs->journal);
+	if (fs->last_orphan != 0) {
+		error = ext4_orphan_validate_live(fs);
+		if (error == EXT4_OK &&
+		    (fs->journal->transaction_active || fs->journal->start != 0)) {
+			error = EXT4_RECOVERY_REQUIRED;
+		}
+		if (error == EXT4_OK) {
+			error = ext4_journal_flush(fs->journal);
+		}
+	} else {
+		error = ext4_journal_finish(fs->journal);
+	}
 	if (error != EXT4_OK) {
 		fs->aborted = true;
 	}
@@ -95,6 +106,7 @@ ext4_edit_inode(struct ext4_fs *fs, struct ext4_transaction *transaction, uint32
 {
 	void *buffer;
 	uint64_t offset;
+	struct ext4_inode_hold *hold;
 	enum ext4_result error;
 
 	if (number == 0 || number > fs->info.inodes) {
@@ -117,14 +129,15 @@ ext4_edit_inode(struct ext4_fs *fs, struct ext4_transaction *transaction, uint32
 		return error;
 	}
 	*disk = (struct ext4_inode_disk *)((uint8_t *)buffer + offset % fs->info.block_size);
-	error = ext4_inode_decode(fs, number, *disk, inode);
+	error = ext4_inode_decode_live(fs, number, *disk, inode);
 	if (error != EXT4_OK) {
 		return error;
 	}
 	if (inode->generation != generation) {
 		return EXT4_STALE;
 	}
-	if (ext4_le32(&(*disk)->deletion_time) != 0) {
+	hold = ext4_inode_find_hold(fs, number);
+	if (ext4_le32(&(*disk)->deletion_time) != 0 && (hold == NULL || !hold->unlinked)) {
 		return EXT4_CORRUPT;
 	}
 	return ext4_inode_writable(fs, *disk, inode);
@@ -168,7 +181,7 @@ ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	}
 	if (error == EXT4_OK) {
 		ext4_inode_checksum_set(fs, number, disk);
-		error = ext4_inode_decode(fs, number, disk, &inode);
+		error = ext4_inode_decode_live(fs, number, disk, &inode);
 	}
 	if (error != EXT4_OK || update->fields == 0) {
 		ext4_transaction_cancel(transaction);
@@ -459,11 +472,12 @@ cancel:
  * per released block, plus the inode, superblock and retained data tail. Small
  * journals keep the atomic contract rather than admitting an intent whose
  * later path might not fit even the minimum cleanup batch. */
-#define EXT4_TRUNCATE_RECOVERY_CREDITS (3U * (2U * EXT4_EXTENT_MAX_DEPTH + 1U) + 3U)
+#define EXT4_TRUNCATE_RECOVERY_CREDITS (3U * (2U * EXT4_EXTENT_MAX_DEPTH + 1U) + 4U)
 
 static enum ext4_result
 ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t size,
-    const struct ext4_inode_update *update, struct ext4_inode *result, uint32_t batch, bool *retry)
+    const struct ext4_inode_update *update, struct ext4_inode *result, uint32_t batch, bool *retry,
+    bool *pending)
 {
 	struct ext4_transaction *transaction;
 	struct ext4_inode_disk *disk;
@@ -483,6 +497,7 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 	enum ext4_result error;
 
 	*retry = false;
+	*pending = false;
 	if (result == NULL) {
 		return EXT4_INVALID_ARGUMENT;
 	}
@@ -538,9 +553,8 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 		} else {
 			error = ext4_allocation_super(&allocation);
 			if (error == EXT4_OK &&
-			    (fs->last_orphan != 0 ||
-				ext4_le32(&allocation.super->last_orphan) != 0)) {
-				error = EXT4_RECOVERY_REQUIRED;
+			    ext4_le32(&allocation.super->last_orphan) != fs->last_orphan) {
+				error = EXT4_CORRUPT;
 			}
 			if (error == EXT4_OK) {
 				error = ext4_write_map_validate(&allocation, &inode, disk);
@@ -553,7 +567,8 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 			if (error == EXT4_OK && !done) {
 				if (allocation.freed == 0) {
 					error = EXT4_CORRUPT;
-				} else {
+				} else if (inode.links != 0) {
+					ext4_encode32(&disk->deletion_time, fs->last_orphan);
 					ext4_encode32(&allocation.super->last_orphan, number);
 				}
 			}
@@ -581,7 +596,7 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 	}
 	if (error == EXT4_OK) {
 		ext4_inode_checksum_set(fs, number, disk);
-		error = ext4_inode_decode(fs, number, disk, &inode);
+		error = ext4_inode_decode_live(fs, number, disk, &inode);
 	}
 	if (error != EXT4_OK) {
 		goto cancel;
@@ -593,9 +608,10 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 	error = ext4_edit_commit(fs, transaction);
 	if (error == EXT4_OK) {
 		fs->info.free_blocks = free_blocks;
-		if (!done) {
+		if (!done && inode.links != 0) {
 			fs->last_orphan = number;
 		}
+		*pending = !done;
 		*result = inode;
 	}
 	return error;
@@ -616,8 +632,10 @@ ext4_truncate_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
     const struct ext4_inode_update *update, struct ext4_inode *result)
 {
 	bool retry;
+	bool pending;
 
-	return ext4_truncate_start(fs, number, generation, size, update, result, 0, &retry);
+	return ext4_truncate_start(
+	    fs, number, generation, size, update, result, 0, &retry, &pending);
 }
 
 enum ext4_result
@@ -625,9 +643,10 @@ ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t
     const struct ext4_inode_update *update, struct ext4_inode *result)
 {
 	struct ext4_inode inode;
-	struct ext4_recovery_report report;
+	struct ext4_inode_hold *hold;
 	uint32_t batch = EXT4_ORPHAN_BATCH_BLOCKS;
 	bool retry;
+	bool pending;
 	enum ext4_result error;
 
 	if (result == NULL) {
@@ -635,7 +654,7 @@ ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t
 	}
 	for (;;) {
 		error = ext4_truncate_start(
-		    fs, number, generation, size, update, &inode, batch, &retry);
+		    fs, number, generation, size, update, &inode, batch, &retry, &pending);
 		if (error != EXT4_RANGE || !retry || fs->aborted) {
 			break;
 		}
@@ -644,11 +663,12 @@ ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t
 	if (error != EXT4_OK) {
 		return error;
 	}
-	if (fs->last_orphan != 0) {
-		ext4_zero(&report, sizeof(report));
-		error = ext4_orphan_cleanup(fs, &report);
+	if (pending) {
+		error = ext4_orphan_finish_inode(fs, number, generation, inode.links == 0);
 		if (error == EXT4_OK) {
-			error = ext4_get_inode(fs, number, &inode);
+			hold = ext4_inode_find_hold(fs, number);
+			error = hold == NULL ? ext4_get_inode(fs, number, &inode)
+					     : ext4_refresh_inode(hold, &inode);
 		}
 		if (error != EXT4_OK) {
 			/* Even a private allocation/read failure now follows a committed

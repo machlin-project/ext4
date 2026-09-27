@@ -56,6 +56,9 @@ ext4_error(enum ext4_result result)
 	case EXT4_TOO_MANY_LINKS:
 		error = EMLINK;
 		break;
+	case EXT4_NOT_EMPTY:
+		error = ENOTEMPTY;
+		break;
 	case EXT4_CORRUPT:
 	case EXT4_RECOVERY_REQUIRED:
 	case EXT4_IO:

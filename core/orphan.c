@@ -253,16 +253,19 @@ ext4_orphan_record(struct ext4_fs *fs, uint32_t number, struct ext4_inode_disk *
 }
 
 static enum ext4_result
-ext4_orphan_chain(struct ext4_fs *fs, const struct ext4_block_range *entries, size_t count)
+ext4_orphan_chain(
+    struct ext4_fs *fs, const struct ext4_block_range *entries, size_t count, bool live)
 {
 	struct ext4_inode_disk *disk;
 	struct ext4_inode inode;
+	struct ext4_inode_hold *hold;
 	uint64_t offset = 0;
 	uint64_t power = 1;
 	uint64_t distance = 0;
 	uint32_t number = fs->last_orphan;
 	uint32_t anchor = number;
 	uint32_t visited = 0;
+	uint32_t held = 0;
 	size_t low;
 	size_t high;
 	size_t middle;
@@ -312,6 +315,14 @@ ext4_orphan_chain(struct ext4_fs *fs, const struct ext4_block_range *entries, si
 		if (error != EXT4_OK) {
 			break;
 		}
+		if (live) {
+			hold = ext4_inode_find_hold(fs, number);
+			if (hold == NULL || !hold->unlinked || hold->references == 0 ||
+			    hold->generation != inode.generation || inode.links != 0) {
+				error = EXT4_CORRUPT;
+				break;
+			}
+		}
 		number = ext4_le32(&disk->deletion_time);
 		distance++;
 		if (number != 0 && number == anchor) {
@@ -324,8 +335,25 @@ ext4_orphan_chain(struct ext4_fs *fs, const struct ext4_block_range *entries, si
 			distance = 0;
 		}
 	}
+	if (error == EXT4_OK && live) {
+		for (hold = fs->holds; hold != NULL; hold = hold->next) {
+			held += hold->unlinked ? 1U : 0U;
+		}
+		if (held != visited) {
+			error = EXT4_CORRUPT;
+		}
+	}
 	fs->environment.release(fs->environment.context, disk, fs->inode_size);
 	return error;
+}
+
+enum ext4_result
+ext4_orphan_validate_live(struct ext4_fs *fs)
+{
+	if (fs->orphan_file != NULL && fs->orphan_file->pending != 0) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
+	return ext4_orphan_chain(fs, NULL, 0, true);
 }
 
 static enum ext4_result
@@ -346,7 +374,7 @@ ext4_orphan_validate(struct ext4_fs *fs)
 	enum ext4_result error = EXT4_OK;
 
 	if (file == NULL || file->pending == 0) {
-		return ext4_orphan_chain(fs, NULL, 0);
+		return ext4_orphan_chain(fs, NULL, 0, false);
 	}
 	bytes = (size_t)file->pending * sizeof(*numbers);
 	numbers = fs->environment.allocate(fs->environment.context, bytes);
@@ -402,7 +430,7 @@ ext4_orphan_validate(struct ext4_fs *fs)
 	 * is then checked against this set before either representation is edited. */
 	error = ext4_ranges_sort(numbers, &count);
 	if (error == EXT4_OK) {
-		error = ext4_orphan_chain(fs, numbers, count);
+		error = ext4_orphan_chain(fs, numbers, count, false);
 	}
 out:
 	if (entries != NULL) {
@@ -669,21 +697,23 @@ ext4_orphan_tail(struct ext4_allocation *allocation, const struct ext4_inode *in
 }
 
 static enum ext4_result
-ext4_orphan_step(
-    struct ext4_fs *fs, uint32_t limit, bool validate, struct ext4_recovery_report *report)
+ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool retained,
+    uint32_t limit, bool validate, bool *completed, struct ext4_recovery_report *report)
 {
 	struct ext4_transaction *transaction;
 	struct ext4_allocation allocation;
 	struct ext4_inode inode;
 	struct ext4_inode_disk *disk;
+	struct ext4_inode_disk *previous_disk;
+	struct ext4_inode previous_inode;
 	void *buffer = NULL;
 	uint64_t offset;
 	uint64_t free_blocks;
-	uint32_t number = fs->last_orphan;
 	uint32_t next = 0;
 	uint32_t first;
 	bool ready = false;
 	bool mapped;
+	bool previous_mapped;
 	bool done = true;
 	enum ext4_result error;
 
@@ -711,31 +741,57 @@ ext4_orphan_step(
 	}
 	ready = true;
 	error = ext4_allocation_super(&allocation);
-	if (error == EXT4_OK && ext4_le32(&allocation.super->last_orphan) != number) {
+	if (error == EXT4_OK && ext4_le32(&allocation.super->last_orphan) != fs->last_orphan) {
 		error = EXT4_CORRUPT;
 	}
 	if (error == EXT4_OK && validate && mapped) {
 		error = ext4_write_map_validate(&allocation, &inode, disk);
 	}
-	first = inode.links == 0
+	first = inode.links == 0 && !retained
 	    ? 0
 	    : (uint32_t)((inode.size + fs->info.block_size - 1) / fs->info.block_size);
 	if (error == EXT4_OK && mapped) {
 		error = ext4_write_map_trim(&allocation, &inode, disk, first, limit, &done);
 	}
-	if (error == EXT4_OK && done && inode.links != 0) {
+	if (error == EXT4_OK && done && (inode.links != 0 || retained)) {
 		error = ext4_orphan_tail(&allocation, &inode, disk);
 	}
 	if (error == EXT4_OK) {
 		error = ext4_inode_account(&allocation, &inode, disk, inode.size);
 	}
-	if (error == EXT4_OK && done) {
+	if (error == EXT4_OK && done && !retained) {
 		if (inode.links == 0) {
 			error = ext4_orphan_free_inode(&allocation, disk, &inode);
 		} else {
 			ext4_encode32(&disk->deletion_time, 0);
 		}
-		ext4_encode32(&allocation.super->last_orphan, next);
+		if (error == EXT4_OK && previous == 0) {
+			if (fs->last_orphan != number) {
+				error = EXT4_CORRUPT;
+			} else {
+				ext4_encode32(&allocation.super->last_orphan, next);
+			}
+		} else if (error == EXT4_OK) {
+			error = ext4_inode_location(fs, previous, &offset);
+			if (error == EXT4_OK) {
+				error = ext4_transaction_buffer(
+				    transaction, offset / fs->info.block_size, &buffer);
+			}
+			if (error == EXT4_OK) {
+				previous_disk = (struct ext4_inode_disk *)((uint8_t *)buffer +
+				    offset % fs->info.block_size);
+				error = ext4_orphan_record(
+				    fs, previous, previous_disk, &previous_inode, &previous_mapped);
+				if (error == EXT4_OK &&
+				    ext4_le32(&previous_disk->deletion_time) != number) {
+					error = EXT4_CORRUPT;
+				}
+				if (error == EXT4_OK) {
+					ext4_encode32(&previous_disk->deletion_time, next);
+					ext4_inode_checksum_set(fs, previous, previous_disk);
+				}
+			}
+		}
 	}
 	if (error != EXT4_OK) {
 		goto cancel;
@@ -754,11 +810,14 @@ ext4_orphan_step(
 	}
 	fs->info.free_blocks = free_blocks;
 	report->orphan_transactions++;
-	if (done) {
-		fs->last_orphan = next;
+	if (done && !retained) {
+		if (previous == 0) {
+			fs->last_orphan = next;
+		}
 		fs->info.free_inodes += inode.links == 0 ? 1U : 0U;
 		report->cleaned_orphans++;
 	}
+	*completed = done;
 	return EXT4_OK;
 cancel:
 	if (ready) {
@@ -769,12 +828,79 @@ cancel:
 }
 
 enum ext4_result
+ext4_orphan_finish_inode(struct ext4_fs *fs, uint32_t number, uint32_t generation, bool retained)
+{
+	struct ext4_inode_disk *disk;
+	struct ext4_inode inode;
+	struct ext4_recovery_report report;
+	uint64_t offset = 0;
+	uint32_t cursor = fs->last_orphan;
+	uint32_t previous = 0;
+	uint32_t limit = EXT4_ORPHAN_BATCH_BLOCKS;
+	bool mapped;
+	bool completed = false;
+	bool validate = true;
+	enum ext4_result error;
+
+	error = ext4_orphan_validate(fs);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	disk = fs->environment.allocate(fs->environment.context, fs->inode_size);
+	if (disk == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	while (cursor != 0) {
+		error = ext4_inode_location(fs, cursor, &offset);
+		if (error == EXT4_OK) {
+			error = ext4_device_read(fs, offset, disk, fs->inode_size);
+		}
+		if (error == EXT4_OK) {
+			error = ext4_orphan_record(fs, cursor, disk, &inode, &mapped);
+		}
+		if (error != EXT4_OK || cursor == number) {
+			break;
+		}
+		previous = cursor;
+		cursor = ext4_le32(&disk->deletion_time);
+	}
+	fs->environment.release(fs->environment.context, disk, fs->inode_size);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (cursor == 0) {
+		return EXT4_NOT_FOUND;
+	}
+	if (inode.generation != generation) {
+		return EXT4_STALE;
+	}
+	if (retained && inode.links != 0) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	ext4_zero(&report, sizeof(report));
+	while (!completed) {
+		error = ext4_orphan_step(
+		    fs, number, previous, retained, limit, validate, &completed, &report);
+		if (error == EXT4_RANGE && !fs->aborted && limit > 1) {
+			limit /= 2;
+			continue;
+		}
+		if (error != EXT4_OK) {
+			return error;
+		}
+		validate = false;
+	}
+	return EXT4_OK;
+}
+
+enum ext4_result
 ext4_orphan_cleanup(struct ext4_fs *fs, struct ext4_recovery_report *report)
 {
 	uint32_t number;
 	uint32_t limit;
 	uint32_t cursor = 0;
 	bool validate;
+	bool completed;
 	enum ext4_result error;
 
 	if (fs->last_orphan == 0 && (fs->orphan_file == NULL || fs->orphan_file->pending == 0)) {
@@ -803,7 +929,8 @@ ext4_orphan_cleanup(struct ext4_fs *fs, struct ext4_recovery_report *report)
 		limit = EXT4_ORPHAN_BATCH_BLOCKS;
 		validate = true;
 		do {
-			error = ext4_orphan_step(fs, limit, validate, report);
+			error = ext4_orphan_step(
+			    fs, number, 0, false, limit, validate, &completed, report);
 			if (error == EXT4_RANGE && !fs->aborted && limit > 1) {
 				limit /= 2;
 				continue;

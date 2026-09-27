@@ -15,7 +15,12 @@ struct ext4_directory_slot {
 	uint32_t offset;
 	uint32_t used;
 	uint32_t length;
+	uint32_t previous;
+	uint32_t number;
+	enum ext4_file_type type;
 };
+
+enum ext4_directory_action { EXT4_DIRECTORY_INSERT, EXT4_DIRECTORY_FIND, EXT4_DIRECTORY_EMPTY };
 
 static uint32_t
 ext4_directory_minimum(size_t length)
@@ -91,9 +96,9 @@ ext4_namespace_name(const uint8_t *name, size_t length)
 }
 
 static enum ext4_result
-ext4_directory_space(struct ext4_allocation *allocation, const struct ext4_inode *parent,
+ext4_directory_scan(struct ext4_allocation *allocation, const struct ext4_inode *parent,
     struct ext4_inode_disk *disk, const uint8_t *name, size_t name_length,
-    struct ext4_directory_slot *slot)
+    enum ext4_directory_action action, uint32_t expected_parent, struct ext4_directory_slot *slot)
 {
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_map_run run;
@@ -108,9 +113,11 @@ ext4_directory_space(struct ext4_allocation *allocation, const struct ext4_inode
 	uint32_t length;
 	uint32_t used;
 	uint32_t number;
+	uint32_t previous;
 	uint16_t names;
 	size_t index;
 	bool exists = false;
+	bool populated = false;
 	bool dot;
 	bool dotdot;
 	enum ext4_result error;
@@ -145,7 +152,8 @@ ext4_directory_space(struct ext4_allocation *allocation, const struct ext4_inode
 		if (error != EXT4_OK) {
 			return error;
 		}
-		for (offset = 0; offset < usable; offset += length) {
+		previous = UINT32_MAX;
+		for (offset = 0; offset < usable; previous = offset, offset += length) {
 			if (usable - offset < sizeof(*entry)) {
 				return EXT4_CORRUPT;
 			}
@@ -171,6 +179,7 @@ ext4_directory_space(struct ext4_allocation *allocation, const struct ext4_inode
 				}
 			} else if (logical == 0 && offset == ext4_directory_minimum(1)) {
 				if (!dotdot || number == 0 ||
+				    (expected_parent != 0 && number != expected_parent) ||
 				    (parent->number == EXT4_ROOT_INODE &&
 					number != EXT4_ROOT_INODE)) {
 					return EXT4_CORRUPT;
@@ -194,11 +203,28 @@ ext4_directory_space(struct ext4_allocation *allocation, const struct ext4_inode
 				}
 				if (names == name_length &&
 				    ext4_equal(entry_name, name, name_length)) {
+					if (exists) {
+						return EXT4_CORRUPT;
+					}
 					exists = true;
+					if (action == EXT4_DIRECTORY_FIND) {
+						slot->logical = logical;
+						slot->physical = run.physical;
+						slot->offset = offset;
+						slot->length = length;
+						slot->previous = previous;
+						slot->number = number;
+						slot->type = (fs->info.feature_incompat &
+								 EXT4_FEATURE_INCOMPAT_FILETYPE)
+						    ? (enum ext4_file_type)entry->type
+						    : EXT4_FT_UNKNOWN;
+					}
 				}
+				populated |= !dot && !dotdot;
 				used = ext4_directory_minimum(names);
 			}
-			if (slot->logical == UINT32_MAX && length - used >= required) {
+			if (action == EXT4_DIRECTORY_INSERT && slot->logical == UINT32_MAX &&
+			    length - used >= required) {
 				slot->logical = logical;
 				slot->physical = run.physical;
 				slot->offset = offset;
@@ -206,6 +232,12 @@ ext4_directory_space(struct ext4_allocation *allocation, const struct ext4_inode
 				slot->length = length;
 			}
 		}
+	}
+	if (action == EXT4_DIRECTORY_EMPTY) {
+		return populated ? EXT4_NOT_EMPTY : EXT4_OK;
+	}
+	if (action == EXT4_DIRECTORY_FIND) {
+		return exists ? EXT4_OK : EXT4_NOT_FOUND;
 	}
 	if (exists) {
 		return EXT4_EXISTS;
@@ -407,6 +439,10 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		error = EXT4_NOT_DIRECTORY;
 		goto cancel;
 	}
+	if (parent.links == 0) {
+		error = EXT4_NOT_FOUND;
+		goto cancel;
+	}
 	if (create_mode == EXT4_MODE_DIRECTORY &&
 	    (parent.links == 1 || parent.links >= EXT4_LINK_MAX)) {
 		error = EXT4_TOO_MANY_LINKS;
@@ -424,6 +460,10 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		}
 		if ((child.mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY) {
 			error = EXT4_IS_DIRECTORY;
+			goto cancel;
+		}
+		if (child.links == 0) {
+			error = EXT4_NOT_FOUND;
 			goto cancel;
 		}
 		if (child.links >= EXT4_LINK_MAX) {
@@ -447,7 +487,8 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		goto cancel;
 	}
 	ready = true;
-	error = ext4_directory_space(&allocation, &parent, parent_disk, name, name_length, &slot);
+	error = ext4_directory_scan(
+	    &allocation, &parent, parent_disk, name, name_length, EXT4_DIRECTORY_INSERT, 0, &slot);
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
@@ -556,4 +597,249 @@ ext4_symlink(struct ext4_fs *fs, uint32_t directory, uint32_t generation, const 
 {
 	return ext4_namespace_add(fs, directory, generation, name, name_length, EXT4_MODE_SYMLINK,
 	    0, 0, attributes, target, target_length, directory_time, result);
+}
+
+static enum ext4_result
+ext4_directory_remove(struct ext4_allocation *allocation, const struct ext4_inode *parent,
+    const struct ext4_directory_slot *slot)
+{
+	struct ext4_dir_header_disk *entry;
+	struct ext4_dir_header_disk *previous;
+	void *snapshot;
+	uint8_t *buffer;
+	uint32_t length;
+	enum ext4_result error;
+
+	error = ext4_transaction_buffer(allocation->transaction, slot->physical, &snapshot);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	buffer = snapshot;
+	entry = (struct ext4_dir_header_disk *)(buffer + slot->offset);
+	if (ext4_le32(&entry->inode) != slot->number ||
+	    ext4_directory_record_length(allocation->fs, entry) != slot->length) {
+		return EXT4_CORRUPT;
+	}
+	ext4_zero(entry, slot->length);
+	if (slot->previous == UINT32_MAX) {
+		ext4_directory_length(entry, slot->length);
+	} else {
+		previous = (struct ext4_dir_header_disk *)(buffer + slot->previous);
+		length = ext4_directory_record_length(allocation->fs, previous);
+		if (slot->previous + length != slot->offset) {
+			return EXT4_CORRUPT;
+		}
+		ext4_directory_length(previous, length + slot->length);
+	}
+	ext4_directory_checksum_set(allocation->fs, parent, buffer);
+	return EXT4_OK;
+}
+
+/* Reserve both mapping paths, their allocation metadata, the inode and primary
+ * superblock, the inode bitmap/group and an orphan predecessor. No committed
+ * deletion may depend on cleanup that cannot fit the smallest bounded batch. */
+#define EXT4_REMOVE_RECOVERY_CREDITS (3U * (2U * EXT4_EXTENT_MAX_DEPTH + 1U) + 6U)
+#define EXT4_REMOVE_UNMAPPED_CREDITS 5U
+
+static enum ext4_result
+ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation,
+    const uint8_t *name, size_t name_length, uint32_t target, uint32_t target_generation,
+    bool remove_directory, const struct ext4_timestamp *time, struct ext4_inode *result)
+{
+	struct ext4_transaction *transaction;
+	struct ext4_inode_disk *parent_disk;
+	struct ext4_inode_disk *child_disk;
+	struct ext4_inode parent;
+	struct ext4_inode child;
+	struct ext4_inode_hold *hold;
+	struct ext4_inode_update times;
+	struct ext4_allocation allocation;
+	struct ext4_directory_slot slot;
+	struct ext4_directory_slot empty;
+	uint16_t type;
+	uint32_t required;
+	bool ready = false;
+	bool last;
+	bool mapped;
+	enum ext4_result error;
+
+	if (fs == NULL || time == NULL || result == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
+	if (fs->journal == NULL) {
+		return EXT4_READ_ONLY;
+	}
+	error = ext4_namespace_name(name, name_length);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	error =
+	    ext4_transaction_begin(fs->journal, ext4_journal_credits(fs->journal), &transaction);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	error = ext4_edit_inode(
+	    fs, transaction, directory, directory_generation, &parent_disk, &parent);
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	if ((parent.mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
+		error = EXT4_NOT_DIRECTORY;
+		goto cancel;
+	}
+	if (parent.links == 0) {
+		error = EXT4_NOT_FOUND;
+		goto cancel;
+	}
+	error = ext4_allocation_init(&allocation, fs, transaction, &parent);
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	ready = true;
+	error = ext4_directory_scan(
+	    &allocation, &parent, parent_disk, name, name_length, EXT4_DIRECTORY_FIND, 0, &slot);
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	if (slot.number != target) {
+		error = EXT4_STALE;
+		goto cancel;
+	}
+	if (target == directory || target == EXT4_ROOT_INODE) {
+		error = EXT4_CORRUPT;
+		goto cancel;
+	}
+	error = ext4_edit_inode(fs, transaction, target, target_generation, &child_disk, &child);
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	type = child.mode & EXT4_MODE_TYPE;
+	if (ext4_namespace_type(child.mode) == EXT4_FT_UNKNOWN) {
+		error = EXT4_UNSUPPORTED;
+		goto cancel;
+	}
+	if (child.links == 0 ||
+	    (slot.type != EXT4_FT_UNKNOWN && slot.type != ext4_namespace_type(child.mode))) {
+		error = EXT4_CORRUPT;
+		goto cancel;
+	}
+	if (remove_directory != (type == EXT4_MODE_DIRECTORY)) {
+		error = remove_directory ? EXT4_NOT_DIRECTORY : EXT4_IS_DIRECTORY;
+		goto cancel;
+	}
+	if (remove_directory) {
+		error = ext4_directory_scan(&allocation, &child, child_disk, NULL, 0,
+		    EXT4_DIRECTORY_EMPTY, parent.number, &empty);
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
+		if (parent.links < 3 || child.links != 2) {
+			error = EXT4_CORRUPT;
+			goto cancel;
+		}
+	}
+	last = remove_directory || child.links == 1;
+	mapped = type == EXT4_MODE_REGULAR || type == EXT4_MODE_DIRECTORY ||
+	    (type == EXT4_MODE_SYMLINK && !child.fast_symlink);
+	if (last) {
+		required = mapped && child.blocks_512 != 0 ? EXT4_REMOVE_RECOVERY_CREDITS
+							   : EXT4_REMOVE_UNMAPPED_CREDITS;
+		if (ext4_journal_credits(fs->journal) < required) {
+			error = EXT4_RANGE;
+			goto cancel;
+		}
+		if (mapped && !remove_directory) {
+			error = ext4_write_map_validate(&allocation, &child, child_disk);
+		} else if (!mapped &&
+		    (child.blocks_512 != 0 || (child.flags & EXT4_INODE_EXTENTS))) {
+			error = EXT4_CORRUPT;
+		}
+		if (error == EXT4_OK) {
+			error = ext4_allocation_super(&allocation);
+		}
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
+		if (ext4_le32(&allocation.super->last_orphan) != fs->last_orphan) {
+			error = EXT4_CORRUPT;
+			goto cancel;
+		}
+		ext4_encode32(&child_disk->deletion_time, fs->last_orphan);
+		ext4_encode32(&allocation.super->last_orphan, target);
+	}
+	ext4_zero(&times, sizeof(times));
+	times.fields = EXT4_ATTR_MODIFY_TIME | EXT4_ATTR_CHANGE_TIME;
+	times.modify_time = *time;
+	times.change_time = *time;
+	error = ext4_inode_apply(fs, parent_disk, &times);
+	if (error == EXT4_OK) {
+		times.fields = EXT4_ATTR_CHANGE_TIME;
+		error = ext4_inode_apply(fs, child_disk, &times);
+	}
+	if (error == EXT4_OK) {
+		error = ext4_directory_remove(&allocation, &parent, &slot);
+	}
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	ext4_encode16(&child_disk->links, last ? 0 : child.links - 1);
+	if (remove_directory) {
+		ext4_encode16(&parent_disk->links, parent.links - 1);
+		ext4_encode32(&child_disk->size_lo, 0);
+		ext4_encode32(&child_disk->size_hi, 0);
+	}
+	ext4_inode_checksum_set(fs, directory, parent_disk);
+	ext4_inode_checksum_set(fs, target, child_disk);
+	error = ext4_inode_decode_orphan(fs, target, child_disk, &child);
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	ext4_allocation_destroy(&allocation);
+	error = ext4_transaction_commit(transaction);
+	if (error != EXT4_OK) {
+		fs->aborted = true;
+		return error;
+	}
+	if (last) {
+		fs->last_orphan = target;
+		hold = ext4_inode_find_hold(fs, target);
+		if (hold != NULL) {
+			hold->unlinked = true;
+		} else {
+			error = ext4_orphan_finish_inode(fs, target, target_generation, false);
+			if (error != EXT4_OK) {
+				fs->aborted = true;
+				return error;
+			}
+		}
+	}
+	*result = child;
+	return EXT4_OK;
+cancel:
+	if (ready) {
+		ext4_allocation_destroy(&allocation);
+	}
+	ext4_transaction_cancel(transaction);
+	return error;
+}
+
+enum ext4_result
+ext4_unlink(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation,
+    const uint8_t *name, size_t name_length, uint32_t target, uint32_t target_generation,
+    const struct ext4_timestamp *time, struct ext4_inode *result)
+{
+	return ext4_namespace_remove(fs, directory, directory_generation, name, name_length, target,
+	    target_generation, false, time, result);
+}
+
+enum ext4_result
+ext4_rmdir(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation,
+    const uint8_t *name, size_t name_length, uint32_t target, uint32_t target_generation,
+    const struct ext4_timestamp *time, struct ext4_inode *result)
+{
+	return ext4_namespace_remove(fs, directory, directory_generation, name, name_length, target,
+	    target_generation, true, time, result);
 }

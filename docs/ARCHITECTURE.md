@@ -73,7 +73,8 @@ the inode checksum, and edits only selected fields in a private full-block
 snapshot. It never writes back a caller's cached inode. Unselected bytes and
 neighboring inode records survive unchanged, and unrepresentable timestamps fail
 without I/O instead of losing precision. Mount does not implicitly recover;
-`ext4_sync` performs clean finish, while `ext4_unmount` only releases memory.
+`ext4_sync` performs clean finish when no held unlinked objects remain, while
+`ext4_unmount` only releases memory.
 An uncertain commit or clean-finish error poisons the instance, including reads.
 
 Bounded writes journal data, allocation metadata and inode attributes together.
@@ -139,7 +140,10 @@ Journals too small to reserve the minimum cleanup paths retain the atomic
 contract, preventing an intent that a later cleanup batch cannot fit. Live growth
 still uses a single transaction: sparse and unwritten runs need no data snapshots,
 but zeroing many written allocations beyond the previous EOF remains credit-bound.
-These APIs do not yet own open-unlinked files or native page-cache concurrency.
+An unlinked inode retained by a core hold can also shrink in batches; it remains
+on the orphan list after cleanup reaches its new EOF. A linked truncate intent
+can coexist with those held objects and removes only its own list entry.
+Native page-cache concurrency remains the platform owner's responsibility.
 
 Offline recovery completes legacy orphan-list and modern orphan-file operations after journal replay.
 It validates the entire inode-number chain, allocation, checksums, types and cycles
@@ -156,7 +160,7 @@ and list update commit together. Interrupted cleanup can restart from the remain
 map; it never reuses a block before the previous transaction's checkpoint completes.
 The recovery report separates replayed transactions, cleanup transactions and
 completed orphan entries. Unsupported inode attributes/flags leave cleanup pending.
-Online open-unlinked lifetime is not yet implemented.
+The serialized live owner uses the same restartable cleaner for final inode release.
 
 The orphan file has a fixed, validated inode and mapping for the writable owner's
 lifetime. Preparation checks its allocation, complete map and block count, rejects
@@ -179,9 +183,9 @@ from completed orphan entries and total cleanup transactions.
 Every writing transaction on this feature retains ORPHAN_PRESENT alongside RECOVER;
 clean finish clears both only after the validated file and legacy list are empty.
 Read-only mounts reject ORPHAN_PRESENT even if RECOVER is absent. Live truncation
-continues to use the legacy list on these volumes. Scalable concurrent insertion,
-orphan-file growth and the owning platform's open-unlinked lifetime remain separate
-work; this recovery owner does not provide those contracts.
+and unlink continue to use the legacy list on these volumes. Scalable concurrent
+insertion, orphan-file growth and integration with the owning platform's object
+lifetime remain separate work.
 
 Linux's primary free-block/inode summaries may lag committed group-descriptor
 changes. Explicit recovery reconstructs those totals from the validated, replayed
@@ -229,8 +233,35 @@ metadata checksum tails. Directory size is bounded to 1,048,576 blocks. Existing
 indexed parents explicitly reject mutation. Duplicate names, stale generations,
 invalid dot records, exhausted inodes, reserved-space exclusion and journal-credit
 exhaustion cancel before resource writes; uncertain commits poison the owner.
-These operations do not yet implement directory indexing,
-unlink/rmdir/rename or open-unlinked lifetime, and neither adapter exposes them.
+These operations do not yet implement directory indexing or rename, and neither
+adapter exposes mutations.
+
+`ext4_unlink` and `ext4_rmdir` verify the named target's inode number and generation
+under that same owner. The complete parent directory is validated before removing
+a record; rmdir also requires valid dot/dotdot, an empty child and matching link
+counts. Removal coalesces record space without shrinking the parent's map. A first
+record in a later block becomes a reusable empty record. Name removal, link counts,
+parent mtime/ctime and target ctime commit together. Removing the last link adds
+the inode to the legacy orphan list in that transaction, before any reclamation.
+Enough journal credits must be available to complete a minimal cleanup batch.
+
+The opaque `ext4_inode_hold` represents lifetime under the exclusive core owner.
+The platform retains one while a descriptor, mapping or other native object can
+still access that inode. Repeated holds share number/generation identity and each
+requires release. A held unlinked file remains allocated and supports fresh
+snapshots, reads, writes, attribute changes and truncate. Ordinary namespace lookup
+cannot resurrect it. Unlinked directories expose size zero and reject new children;
+held symlinks retain their target bytes. The last release reclaims the inode and its
+map in bounded transactions, atomically updating its predecessor if the orphan is
+not at the list head. Inode reuse advances the preserved generation.
+
+Unheld deletion finishes reclamation before returning. A last-release error consumes
+the reference and poisons the instance, leaving recovery to finish committed work.
+Unmount invalidates all holds without writing. With held unlinked objects, sync
+checks the complete list against the live registry and flushes it while retaining
+the recovery markers; it cannot declare the volume clean. The hold registry is a
+bounded linear list, not an accepted scalable concurrent inode cache. These APIs
+do not replace native vnode/FD/mapping lifetime, page-cache locking or policy.
 
 The initial kernel reader uses a fixed device-sector buffer-cache key for
 metadata. Regular file reads and page-in use `cluster_read`/`cluster_pagein`,

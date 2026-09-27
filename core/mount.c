@@ -182,6 +182,7 @@ ext4_unmount(struct ext4_fs *fs)
 		return;
 	}
 	environment = fs->environment;
+	ext4_inode_holds_destroy(fs);
 	ext4_journal_close(fs->journal);
 	ext4_orphan_file_close(fs);
 	if (fs->system_ranges != NULL) {

@@ -43,6 +43,8 @@ ext4_xnu_error(enum ext4_result result)
 		return EEXIST;
 	case EXT4_TOO_MANY_LINKS:
 		return EMLINK;
+	case EXT4_NOT_EMPTY:
+		return ENOTEMPTY;
 	default:
 		return EIO;
 	}

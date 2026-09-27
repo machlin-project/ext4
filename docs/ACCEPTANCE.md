@@ -11,7 +11,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Eleven read profiles pass; broader format and size coverage pending |
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
-| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link pass portable, independent and Linux checks; indexed mutation, unlink/rename and platform writes pending |
+| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir pass portable, independent and Linux checks; core holds retain open-unlinked objects; indexed mutation, rename and platform writes pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine, legacy lists and modern orphan files pass portable faults, independent recovery and Linux reuse; advanced journal formats and platform write integration remain pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; ACLs/xattrs and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
@@ -109,9 +109,9 @@ Only independent image copies were attached. Lab reports are under
 remain separate from this successful run.
 
 This establishes the bounded journal engine, not general read/write filesystem
-operations. Directory mutation, online orphan lifetime, writable UBC/FSKit
-coherence, and durable platform device barriers still need implementation and
-acceptance. Internal journals with external devices, old checksum v1, async or
+operations. Namespace and held-inode evidence are recorded separately below;
+writable UBC/FSKit coherence and durable platform device barriers still need
+implementation and acceptance. Internal journals with external devices, old checksum v1, async or
 fast commits are unsupported; configured resource bounds are explicit in
 [ARCHITECTURE.md](ARCHITECTURE.md). Arbitrary media corruption and physical-device
 power-loss protection are not established by the modeled crash tests.
@@ -161,8 +161,8 @@ checks in `artifacts/checks/inode-write-final-*` pass all five sanitized CTest
 suites, the freestanding stack budget, formatter, both unsigned kext builds
 without core warnings, and the unsigned universal FSKit build. These adapters
 still expose read-only operations and were not runtime-tested in this change.
-Directory mutation, security xattrs,
-concurrent native page-cache ownership and LXNU policy remain unaccepted.
+Security xattrs, concurrent native page-cache ownership and LXNU policy remain
+unaccepted; namespace operations have separate evidence below.
 
 ## Portable namespace evidence
 
@@ -210,9 +210,9 @@ The selected-Xcode formatter, freestanding stack budget, unsigned arm64e/x86_64
 kext builds and unsigned universal FSKit app/extension build also pass. These new
 platform binaries have compilation evidence only.
 
-This create/mkdir/link checkpoint does not establish indexed-directory mutation,
-unlink/rmdir/rename or open-unlinked ownership. Symlink creation is covered by
-the separate evidence below. Both platform adapters remain read-only.
+This create/mkdir/link checkpoint does not establish indexed-directory mutation
+or rename. Symlink creation and removal/held-inode lifetime have separate evidence
+below. Both platform adapters remain read-only.
 The namespace API takes caller-admitted attributes and does not implement native
 authorization, LXNU policy, writable page-cache ownership or concurrent mutation.
 
@@ -255,8 +255,16 @@ Independent reports are under `artifacts/symlink-final-*-independent/`, Linux
 reports under the lab's `artifacts/ext4-journal/linux-reference/symlink-linux-*`,
 and the combined evidence is `artifacts/checks/symlink-acceptance.json`.
 Both unsigned kext architectures and the unsigned FSKit app/extension build.
-Mounted kext verification is in progress. Both platform adapters remain read-only;
-FSKit runtime remains pending signing.
+The arm64e kext passes all 26 clean exports on the identified custom kernel in
+the dedicated macOS VM. Each profile checks six targets and their hardlink
+aliases with five buffer sizes and four concurrent workers: 199,680 readlink
+calls in total. Owners, modes, link counts and storage accounting match, all
+220 guest commands pass, and source/device bytes remain unchanged. Kernel,
+boot-session and loaded-module identities remain constant across the run.
+Normal unload, reload and final unload also pass; the VM is then shut down.
+Native reports are under the lab's `artifacts/ext4-symlink-kext/` and
+`logs/ext4-symlink-kext/`. This verifies reading core-created links through XNU;
+both platform adapters remain read-only and FSKit runtime remains pending signing.
 
 ## Allocation and growth evidence
 
@@ -347,8 +355,8 @@ The shared core also compiles in both unsigned kext architectures and universal 
 Those new adapter binaries remain read-only and have compilation evidence only.
 These tests exercise `ext4_truncate_atomic`, where changed mapping nodes and other
 metadata must fit one transaction. The separate live shrink contract is described
-below. Open-unlinked lifetime and native UBC/FSKit resize
-concurrency remain unaccepted.
+below. Native open-unlinked lifetime and UBC/FSKit resize concurrency remain
+unaccepted; serialized core holds have separate evidence below.
 
 ## Legacy orphan recovery evidence
 
@@ -402,8 +410,8 @@ logs and the JUnit report are under `artifacts/checks/orphan-final-*` and
 `artifacts/orphan-tests.xml`.
 
 This accepts offline legacy-list cleanup for the tested inode profiles. Modern
-orphan-file evidence is recorded below; orphaned ACL/xattr inodes, online
-open-unlinked lifetime or writable
+orphan-file and serialized held-inode evidence is recorded below; orphaned ACL/xattr
+inodes, native open-unlinked lifetime or writable
 platform cache/concurrency behavior remain unaccepted. Both adapters continue to expose read-only
 operations.
 
@@ -464,7 +472,7 @@ Live growth retains the atomic credit limit when many written allocations beyond
 the previous EOF need zeroing. Very small journals retain the atomic shrink limit
 rather than admitting an intent they cannot complete. Mapping validation and all
 other documented format/resource bounds still apply. Native cache ownership,
-open-unlinked lifetime and platform writes remain unaccepted.
+native open-unlinked lifetime and platform writes remain unaccepted.
 
 ## Modern orphan-file evidence
 
@@ -529,8 +537,8 @@ orphan-file suites pass again. Logs and JUnit reports are under
 `artifacts/orphan-file-final-tests.xml` and `artifacts/orphan-file-guard-tests.xml`.
 Both unsigned kext architectures and universal FSKit compile with the final core;
 style, Python and CI workflow syntax checks pass. These adapters remain read-only
-and have compilation evidence only for this change. Online orphan insertion,
-file growth, ACL/xattr cleanup, native object lifetime and writable cache/durability
+and have compilation evidence only for this change. Concurrent orphan-file insertion,
+orphan-file growth, ACL/xattr cleanup, native object lifetime and writable cache/durability
 contracts remain required work.
 
 The preceding live-truncate CI run exhausted runner storage after its CTest suites
@@ -538,6 +546,68 @@ and ten ordinary independent live profiles passed. The workflow now removes each
 stage's generated images/dumps only after successful independent validation,
 retaining JSON reports, logs, hashes and JUnit output. This corrects CI storage
 use; that failed run is not counted as completed CI acceptance.
+
+## Portable removal and held-inode evidence
+
+`ext4-removal-test` covers unlink/rmdir on ten ordinary writable profiles, ten
+modern orphan-file profiles and six small multi-group profiles. It checks last
+and nonlast links, nested/nonempty directories, inline/mapped symlinks, exact
+accounting, directory-record coalescing, a first entry in a later block, empty-slot
+reuse and reclamation of an empty multiblock directory. Held unlinked files retain
+read/write/setattr/truncate access, while ordinary lookup fails. Held directories
+reject new children and held symlinks retain their target bytes. Shared references,
+nonhead orphan release, linked truncate while other orphans remain, delayed inode
+reuse, generation advance and unmount without implicit writes are checked.
+
+The five namespace fault operations and three held-object sequences inject every
+allocation/read after their prepared mount/lookup or committed unlink: 7,356
+allocation and 7,406 read failures across 208 operation/profile combinations.
+The held sequences release the head, release a nonhead inode, or truncate a
+nonhead held inode before releasing both objects. Every write/flush cut uses all
+three pending-write survival patterns and partial writes. Of 55,980 cuts, 54,926
+recover to the required complete resource outside the journal; 1,054 torn
+checksummed primary-superblock cases fail closed. A committed deletion must finish
+during recovery even if last release fails before its first write. Failed final
+release consumes the hold and poisons further access without leaking allocations.
+These modeled storage tests do not establish physical-device power-loss behavior.
+
+Malformed guards pass 204 cases, with three checksum-absent skips and one
+FILETYPE-absent skip. Late invalid records, duplicate names, wrong dotdot, immutable
+objects, protected target mappings and inconsistent entry types reject without
+mutation. Invalid arguments, stale identities, readonly/type errors and journals
+too small for restartable cleanup also leave media and output unchanged. A real
+indexed directory separately rejects mutation; indexed writes are not accepted.
+
+All four removal CTest suites pass under optimized ASan/UBSan. The earlier
+29-suite regression also passes with the same core, covering the reader, writers,
+namespace creation, truncate and both orphan representations. Evidence is under
+`artifacts/checks/removal-*`, `artifacts/removal-initial-regression.xml` and
+`artifacts/removal-lifetime-final.xml`.
+
+Independent checks pass 156 records: 26 clean operation sequences and 130 atomic
+cases. Each atomic case checks both uncommitted rollback and durable-commit replay
+against e2fsprogs journal-only recovery, with exact names, remaining alias identity,
+contents, metadata, released space, nonrepairing e2fsck and idempotent recovery.
+Reports are in `artifacts/removal-guards-*-independent/`. All 546 final regenerated
+exports are byte-identical to these verified inputs; their comparison is recorded
+in `artifacts/checks/removal-export-comparison.json`.
+
+The actual Linux reference kernel passes 120 cases with 1/2/4 KiB blocks: 20 clean
+sequences and 100 pending deletion commits. It verifies the namespace and retained
+hardlink, creates further objects, and leaves a committed Linux journal. Portable
+and independent reverse replay agree, preserving the remaining alias and never
+restoring a removed name. Reports and console evidence are in the lab under
+`artifacts/ext4-journal/linux-reference/removal-linux-*` and
+`logs/ext4-removal-linux-*`; the separate two-case smoke is not included in 120.
+Larger block sizes have portable/e2fsprogs evidence only.
+
+Both unsigned kext architectures and the universal FSKit app/embedded extension
+build with this core; frame/style, Python and workflow checks pass. Product
+inspection includes FSKit debug dylibs as well as their launcher executables and
+is recorded in `artifacts/checks/removal-platform-builds.json`. These new binaries
+have compilation evidence only. Both adapters remain read-only; native object
+lifetime, cache coherence, authorization, writable mounts and LXNU policy remain
+unaccepted. Rename, indexed mutation and ACL/xattr handling remain required work.
 
 ## FSKit build evidence
 

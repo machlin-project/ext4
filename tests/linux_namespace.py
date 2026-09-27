@@ -60,6 +60,10 @@ def prepare(case, tree, tools):
         data_paths += ["/still-links"]
     elif image.name.startswith("symlinks-"):
         paths += links
+    elif image.name.startswith(("removed-", "remove-atomic-")):
+        if image.name.startswith("remove-atomic-0-"):
+            paths += ["/kept-name"]
+            data_paths += ["/kept-name"]
     else:
         paths += ["/atomic-entry"]
     (tree / "namespace-options").write_text(f"{int(exhaust)} {int(basic)}\n")
@@ -196,8 +200,47 @@ def verify(case, image, output, tools, recover, run):
         names = {}
         for path in ("/", "/linux-dir"):
             names[path] = run([tools / "debugfs/debugfs", "-R", f"ls -p {path}", candidate])
+        retained_alias = None
+        original = Path(case["image"])
+        if original.name.startswith(("removed-", "remove-atomic-")):
+            def entries(listing):
+                result = {}
+                for line in listing.splitlines():
+                    if not line.strip():
+                        continue
+                    fields = line.split("/")
+                    if len(fields) != 8:
+                        raise RuntimeError("Malformed independently decoded removal directory")
+                    number = int(fields[1])
+                    if number == 0:
+                        continue
+                    if not fields[5] or fields[5] in result:
+                        raise RuntimeError("Missing or duplicate removal directory name")
+                    result[fields[5]] = number
+                return result
+
+            expected_names = entries(run([tools / "debugfs/debugfs", "-R", "ls -p /", original]))
+            if "victim" in expected_names:
+                raise RuntimeError("Independently checked removal still contains its victim")
+            for name in ("linux-dir", "linux-link", "linux-symlink"):
+                expected_names[name] = inodes[f"/{name}"]["inode"]
+            if entries(names["/"]) != expected_names:
+                raise RuntimeError("Linux roundtrip lost an existing name or resurrected a removed name")
+            if original.name.startswith("remove-atomic-0-"):
+                retained_alias = inode_fields(run(
+                    [tools / "debugfs/debugfs", "-R", "stat /kept-name", candidate]))
+                original_alias = inode_fields(run(
+                    [tools / "debugfs/debugfs", "-R", "stat /kept-name", original]))
+                if retained_alias != original_alias:
+                    raise RuntimeError("Linux changed the remaining hardlink's identity or attributes")
+                original_data = output / f"{prefix}-{image.stem}.alias-before"
+                retained_data = output / f"{prefix}-{image.stem}.alias-after"
+                run([tools / "debugfs/debugfs", "-R", f"dump /kept-name {original_data}", original])
+                run([tools / "debugfs/debugfs", "-R", f"dump /kept-name {retained_data}", candidate])
+                if retained_data.read_bytes() != original_data.read_bytes():
+                    raise RuntimeError("Linux changed bytes reachable through the remaining hardlink")
         return {"inodes": inodes, "directories": names, "accounting": counts,
-                "retained_symlinks": retained_links}, lag
+                "retained_symlinks": retained_links, "retained_alias": retained_alias}, lag
 
     observed, _ = snapshot(image, "core")
     independent, lag = snapshot(oracle, "oracle", allow_summary_lag=True)

@@ -29,6 +29,10 @@ contract, not physical power-loss protection on a particular disk.
 | Namespace allocation | Full-directory append, lazy inode bitmap/table ownership, group transitions, all inodes exhausted, hard links after exhaustion, cleared released records, generation increment/wrap and inherited inode flags |
 | Namespace validation | Invalid/duplicate names, stale parent/target, directory hard links, indexed/immutable parents, link limits, malformed records/dot entries, inode bitmap/count/high-water corruption and small-journal credit exhaustion |
 | Namespace failures | Every allocation/read after mount and every write/flush cut for create/mkdir/link and short/long/maximum symlinks in existing and appended blocks and at an inode-group transition; full-resource old/new comparison, with durable commits forced to the new state |
+| Removal | Last and nonlast hardlinks, nonempty and empty directories, dot/dotdot ownership, short/long symlinks, first records in later blocks, free-record reuse, coalescing and empty multiblock directory reclamation |
+| Removal validation | Invalid names/arguments, stale parent/target generation, mismatched target identity, readonly/type errors, indexed directories, malformed late/duplicate entries, immutable objects, protected target mappings and minimum cleanup credits; no mutation on rejection |
+| Held unlinked objects | Shared hold identity/refcounts, reads/writes/setattr/truncate after unlink, independent linked truncate while orphans remain, held directories/symlinks, no early inode reuse, generation advance after release, nonhead orphan removal, sync markers and unmount without implicit writes |
+| Removal and release failures | Every operation allocation/read and every write/flush cut for unlink/rmdir, held unlinked truncate and final release at the head or inside the orphan list; consumed-reference error poisoning, leak balance, committed deletion completion and whole-resource comparison outside the journal |
 | Allocation and growth | Unaligned initial writes, sparse gaps, written allocations beyond EOF, deterministic fragmented insertion, extent root/leaf/parent splits, and direct through triple-indirect boundaries |
 | Unwritten conversion | Independent debugfs allocation with deliberately nonzero backing bytes; partial writes preserve zero semantics and split/merge extent records |
 | Free-space ownership | Group and superblock counters, inode data/mapping block counts, lazy bitmaps, short final groups, exhaustion to zero free blocks, reserved-space rejection, late credit failure with no writes |
@@ -94,6 +98,24 @@ from successful journal recovery.
 For symlinks, debugfs independently resolves inode locations or data block maps;
 the checker reads raw target bytes and requires a zeroed tail, avoiding loss from
 text decoding or a C-string display of binary targets.
+
+`ext4-removal-test` uses the same ordinary, modern and small profiles. It injects
+failures into five namespace operations: removing one alias, the last regular-file
+link, an empty directory, an inline symlink and a mapped symlink. A 35-block file
+forces bounded cleanup across transactions. The last-release matrix starts after
+unlink is durably committed; every recoverable interruption must finish deletion,
+even when release fails before writing. A separate live predecessor exercises
+nonhead list removal and subsequent cleanup of the remaining held object. A third
+held-object sequence faults truncate-to-zero before releasing either hold, checking
+that a retained cleanup entry remains recoverable throughout the operation.
+
+The removal exporter preserves `removed-` operation sequences and paired
+`remove-before-`, `remove-atomic-`, `remove-pending-` and `remove-uncommitted-`
+images. The independent checker verifies exact retained names/data/attributes,
+directory link counts, released inode/data/mapping space and both commit outcomes.
+Linux checks the removed namespace and remaining hardlink before creating its own
+objects; reverse recovery requires that no removed name reappears and the alias's
+identity, metadata and bytes remain intact.
 
 The Linux namespace probe reads expectations independently decoded from the
 checked clean image. It checks stat, lookup, complete readdir, file bytes and

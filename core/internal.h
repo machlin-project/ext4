@@ -30,6 +30,15 @@ struct ext4_orphan_file {
 	uint32_t pending;
 };
 
+struct ext4_inode_hold {
+	struct ext4_fs *fs;
+	struct ext4_inode_hold *next;
+	uint32_t number;
+	uint32_t generation;
+	uint32_t references;
+	bool unlinked;
+};
+
 struct ext4_fs {
 	struct ext4_environment environment;
 	struct ext4_info info;
@@ -49,6 +58,8 @@ struct ext4_fs {
 	bool aborted;
 	struct ext4_journal *journal;
 	struct ext4_orphan_file *orphan_file;
+	struct ext4_inode_hold *holds;
+	uint32_t hold_count;
 	struct ext4_block_range *system_ranges;
 	size_t system_range_capacity;
 	size_t system_range_count;
@@ -81,6 +92,10 @@ enum ext4_result ext4_inode_decode(
 /* Offline orphan ownership may inspect allocated inodes with no links. */
 enum ext4_result ext4_inode_decode_orphan(
     struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4_inode *inode);
+enum ext4_result ext4_inode_decode_live(
+    struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4_inode *inode);
+struct ext4_inode_hold *ext4_inode_find_hold(struct ext4_fs *fs, uint32_t number);
+void ext4_inode_holds_destroy(struct ext4_fs *fs);
 enum ext4_result ext4_inode_writable(
     struct ext4_fs *fs, const struct ext4_inode_disk *disk, const struct ext4_inode *inode);
 void ext4_inode_checksum_set(struct ext4_fs *fs, uint32_t number, struct ext4_inode_disk *disk);
@@ -94,6 +109,9 @@ uint32_t ext4_directory_record_length(
 enum ext4_result ext4_directory_checksum(
     struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical, uint8_t *buffer);
 enum ext4_result ext4_orphan_cleanup(struct ext4_fs *fs, struct ext4_recovery_report *report);
+enum ext4_result ext4_orphan_finish_inode(
+    struct ext4_fs *fs, uint32_t number, uint32_t generation, bool retained);
+enum ext4_result ext4_orphan_validate_live(struct ext4_fs *fs);
 enum ext4_result ext4_orphan_file_prepare(struct ext4_fs *fs);
 void ext4_orphan_file_close(struct ext4_fs *fs);
 enum ext4_result ext4_data_block_valid(struct ext4_fs *fs, uint64_t block);

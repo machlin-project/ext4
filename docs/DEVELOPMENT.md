@@ -280,6 +280,14 @@ independent checker and Linux `--namespace` runner consume these outputs;
 `symlinks-` images are clean multi-target cases, while atomic entries have the
 usual committed and uncommitted exports.
 
+`ext4-removal-test IMAGE...` runs unlink/rmdir, held-inode lifetime, malformed
+inputs and fault recovery. Its ordinary and indexed-rejection suites are always
+configured; small and orphan-file suites follow the corresponding fixture options.
+Use `--smoke --export NEW_EMPTY_DIRECTORY` after the full suite to retain removal
+images, then pass them to `check_namespace.py` with the matching source directory.
+The same Linux `--namespace` runner accepts the checked report: `removed-` cases
+are clean operation sequences, and `remove-atomic-` cases also support `--pending`.
+
 After read-only mounting an independently checked `symlinks-` image in a dedicated
 native guest, run `ext4-mounted-symlink-test MOUNTPOINT BLOCK_SIZE`. The explicit
 block size is part of the known fixture profile, not the host VM page size. Run

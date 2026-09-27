@@ -20,6 +20,7 @@ SECTOR_SIZE = 512
 INODE_BLOCK_DATA_OFFSET = 0x28
 INODE_BLOCK_DATA_SIZE = 60
 INODE_EXTENTS = 0x80000
+REMOVAL_DATA_BLOCKS = 35
 
 
 def symlink_target(length, binary=False):
@@ -114,17 +115,19 @@ def main():
     exports = args.exports.resolve()
     tools = resolve_tools(args.tools_root)
     images = sorted(p for p in exports.glob("*.img") if re.match(
-        r"^(basic-|exhaust-|symlinks-|(?:append-|group-)?atomic-[0-5]-)", p.name))
+        r"^(basic-|exhaust-|symlinks-|removed-|(?:append-|group-|remove-)?atomic-[0-5]-)", p.name))
     if not images:
         raise RuntimeError("No namespace exports")
     records = []
     for image in images:
-        match = re.fullmatch(r"(append-|group-)?atomic-([0-5])-(.+\.img)", image.name)
+        match = re.fullmatch(r"(append-|group-|remove-)?atomic-([0-5])-(.+\.img)", image.name)
         atomic = match is not None
         scenario = (match[1] or "") if atomic else ""
+        removal = scenario == "remove-"
         operation = int(match[2]) if atomic else None
         name = match[3] if atomic else image.name.split("-", 1)[1]
-        before = exports / f"{scenario}before-{name}" if scenario else args.fixtures.resolve() / name
+        before = (exports / f"remove-before-{operation}-{name}" if removal else
+                  exports / f"{scenario}before-{name}" if scenario else args.fixtures.resolve() / name)
         pending = exports / f"{scenario}pending-{operation}-{name}" if atomic else None
         uncommitted = exports / f"{scenario}uncommitted-{operation}-{name}" if atomic else None
         protected = {p: digest(p) for p in (before, image, *([pending, uncommitted] if atomic else []))}
@@ -172,31 +175,77 @@ def main():
             run([tools["e2fsck"], "-fn", candidate])
             header = run([tools["dumpe2fs"], "-h", candidate])
             inode_size = int(re.search(r"^Inode size:\s+(\d+)$", header, re.M)[1])
-            entry = stat(candidate, "/atomic-entry")
+            entry_path = "/victim" if removal else "/atomic-entry"
+            entry = stat(candidate, entry_path)
             contents = None
             if entry is not None and atomic:
-                if operation == 1:
-                    contents = names(candidate, "/atomic-entry")
-                elif operation >= 3:
-                    contents = target(candidate, "/atomic-entry", entry, accounting(header)["Block size"]).hex()
+                if entry["type"] == "directory":
+                    contents = names(candidate, entry_path)
+                elif entry["type"] == "symlink":
+                    contents = target(candidate, entry_path, entry, accounting(header)["Block size"]).hex()
                 else:
-                    contents = data(candidate, "/atomic-entry", f"{candidate.stem}.entry").hex()
-            return {"accounting": accounting(header), "inode_size": inode_size,
-                    "root": stat(candidate, "/"), "hello": stat(candidate, "/hello.txt"),
-                    "names": names(candidate, "/"), "entry": entry, "entry_contents": contents}
+                    contents = data(candidate, entry_path, f"{candidate.stem}.entry").hex()
+            result = {"accounting": accounting(header), "inode_size": inode_size,
+                      "root": stat(candidate, "/"), "hello": stat(candidate, "/hello.txt"),
+                      "names": names(candidate, "/"), "entry": entry, "entry_contents": contents}
+            if removal:
+                result["alias"] = stat(candidate, "/kept-name")
+                result["alias_contents"] = (data(candidate, "/kept-name", f"{candidate.stem}.alias").hex()
+                                              if result["alias"] is not None else None)
+            return result
 
         old = snapshot(before)
         new = snapshot(image)
         block_size = new["accounting"]["Block size"]
         inode_size = new["inode_size"]
-        namespace_time = encoded_time(1700000002, 0 if inode_size == 128 else 42)
+        removed = removal or image.name.startswith("removed-")
+        namespace_time = (encoded_time(1700000030, 0) if removed else
+                          encoded_time(1700000002, 0 if inode_size == 128 else 42))
         expected_root = dict(old["root"])
         expected_root.update(ctime=namespace_time, mtime=namespace_time,
                              blocks=new["root"]["blocks"], size=new["root"]["size"])
         child_blocks = 0
         inode_delta = 0
         expected_names = dict(old["names"])
-        if atomic:
+        if removal:
+            entry = old["entry"]
+            if entry is None or new["entry"] is not None or operation not in range(5):
+                raise RuntimeError("Removed namespace output has the wrong entry existence")
+            expected_type = "regular" if operation < 2 else "directory" if operation == 2 else "symlink"
+            expected_size = (REMOVAL_DATA_BLOCKS * block_size if operation < 2 else
+                             block_size if operation == 2 else
+                             INODE_BLOCK_DATA_SIZE - (operation == 3))
+            if (entry["type"] != expected_type or entry["size"] != expected_size or
+                    (entry["uid"], entry["gid"], entry["mode"]) !=
+                    (UID, GID, 0o777 if operation >= 3 else 0o640) or entry["generation"] == 0):
+                raise RuntimeError("Removal input has unexpected type, size, ownership or generation")
+            if operation != 2 and old["entry_contents"] != (b"s" * expected_size).hex():
+                raise RuntimeError("Removal input has incorrect independently read contents")
+            if (old["names"].get("victim") != entry["inode"] or
+                    new["root"]["blocks"] != old["root"]["blocks"] or
+                    new["root"]["size"] != old["root"]["size"]):
+                raise RuntimeError("Removal changed the parent map or selected an incorrect inode")
+            del expected_names["victim"]
+            if operation == 0:
+                expected_alias = dict(entry)
+                expected_alias.update(links=1, ctime=namespace_time)
+                if (entry["links"] != 2 or old["alias"] != entry or
+                        new["alias"] != expected_alias or
+                        new["alias_contents"] != old["entry_contents"]):
+                    raise RuntimeError("Removing one hardlink damaged the retained file")
+            else:
+                if new["alias"] is not None or entry["links"] != (2 if operation == 2 else 1):
+                    raise RuntimeError("Last-link removal has incorrect inode ownership")
+                inode_delta = -1
+                child_blocks = -entry["blocks"]
+                if operation == 2:
+                    if (entry["type"] != "directory" or
+                            old["entry_contents"] != {".": entry["inode"], "..": old["root"]["inode"]}):
+                        raise RuntimeError("Rmdir input was not an independently verified empty directory")
+                    expected_root["links"] -= 1
+            if new["hello"] != old["hello"]:
+                raise RuntimeError("Removal changed an unrelated live inode")
+        elif atomic:
             entry = new["entry"]
             if old["entry"] is not None or entry is None:
                 raise RuntimeError("Atomic namespace output has the wrong entry existence")
@@ -273,6 +322,9 @@ def main():
                 expected_names[path[1:]] = expected_names[alias_path[1:]] = inode["inode"]
                 child_blocks += inode["blocks"]
             inode_delta = len(lengths)
+        elif image.name.startswith("removed-"):
+            if new["hello"] != old["hello"]:
+                raise RuntimeError("Repeated removal damaged an existing inode")
         else:
             inode_delta = old["accounting"]["Free inodes"]
             if inode_delta > 256 or new["accounting"]["Free inodes"] != 0:
@@ -304,7 +356,7 @@ def main():
         if new["root"] != expected_root or new["names"] != expected_names:
             raise RuntimeError("Parent attributes or namespace changed outside the intended operation")
         consumed = new["root"]["blocks"] - old["root"]["blocks"] + child_blocks
-        if consumed < 0 or consumed % (block_size // SECTOR_SIZE):
+        if (consumed < 0 and not removal) or consumed % (block_size // SECTOR_SIZE):
             raise RuntimeError("Invalid new allocation accounting")
         expected_counts = dict(old["accounting"])
         expected_counts["Free inodes"] -= inode_delta

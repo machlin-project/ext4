@@ -31,7 +31,8 @@ enum ext4_result {
 	EXT4_STALE,
 	EXT4_NO_SPACE,
 	EXT4_EXISTS,
-	EXT4_TOO_MANY_LINKS
+	EXT4_TOO_MANY_LINKS,
+	EXT4_NOT_EMPTY
 };
 
 enum ext4_file_type {
@@ -57,6 +58,7 @@ enum ext4_mode {
 };
 
 struct ext4_fs;
+struct ext4_inode_hold;
 
 /* read must complete exactly length bytes or return an error. The resource and
  * callbacks remain valid until unmount. All offsets are resource-relative. */
@@ -241,6 +243,20 @@ enum ext4_result ext4_symlink(struct ext4_fs *fs, uint32_t directory, uint32_t g
 enum ext4_result ext4_link(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation,
     const uint8_t *name, size_t name_length, uint32_t target, uint32_t target_generation,
     const struct ext4_timestamp *time, struct ext4_inode *result);
+/* Remove the named, generation-checked target. Unlink rejects directories;
+ * rmdir requires an empty directory with matching dot/dotdot. Name removal,
+ * link counts, parent mtime/ctime and target ctime share one transaction. The
+ * last link enrolls crash recovery before any block can be reused. Held objects
+ * survive until their last release; unheld objects are reclaimed before return.
+ * An error after the namespace commit poisons the instance and recovery may
+ * complete the deletion. result changes only on complete success and describes
+ * the removed inode before reclamation; it is not itself a lifetime reference. */
+enum ext4_result ext4_unlink(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation,
+    const uint8_t *name, size_t name_length, uint32_t target, uint32_t target_generation,
+    const struct ext4_timestamp *time, struct ext4_inode *result);
+enum ext4_result ext4_rmdir(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation,
+    const uint8_t *name, size_t name_length, uint32_t target, uint32_t target_generation,
+    const struct ext4_timestamp *time, struct ext4_inode *result);
 /* Offline recovery replays the journal, reconstructs allocation summaries and
  * completes legacy-list and modern orphan-file cleanup in bounded transactions.
  * A read-only mount never invokes this operation.
@@ -250,6 +266,18 @@ enum ext4_result ext4_recover(const struct ext4_environment *environment,
 void ext4_unmount(struct ext4_fs *fs);
 void ext4_get_info(const struct ext4_fs *fs, struct ext4_info *info);
 enum ext4_result ext4_get_inode(struct ext4_fs *fs, uint32_t number, struct ext4_inode *inode);
+/* Hold an allocated inode under the filesystem owner's serialization. Platform
+ * owners retain a hold while descriptors, mappings or other native references
+ * can access the object. Repeated holds share identity and each needs release.
+ * Refresh returns a current snapshot, including an inode unlinked while held;
+ * ordinary lookup/get_inode still require a linked inode. The final release
+ * reclaims an unlinked inode in restartable transactions and consumes the hold
+ * even on failure. Such failure poisons the filesystem until offline recovery.
+ * Unmount invalidates all holds without writing, as with other core objects. */
+enum ext4_result ext4_hold_inode(
+    struct ext4_fs *fs, uint32_t number, uint32_t generation, struct ext4_inode_hold **result);
+enum ext4_result ext4_refresh_inode(struct ext4_inode_hold *hold, struct ext4_inode *result);
+enum ext4_result ext4_release_inode(struct ext4_inode_hold *hold);
 enum ext4_result ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset,
     void *buffer, size_t length, size_t *completed);
 enum ext4_result ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset,

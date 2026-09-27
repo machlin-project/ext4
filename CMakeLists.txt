@@ -19,7 +19,7 @@ set(EXT4_CORE_SOURCES
     core/support.c core/mount.c core/inode.c core/read.c core/directory.c
     core/journal.c core/recovery.c core/group.c core/system.c
     core/allocate.c core/map_write.c core/write.c core/orphan.c
-    core/inode_allocate.c core/namespace.c)
+    core/inode_allocate.c core/namespace.c core/lifetime.c)
 add_library(ext4_core STATIC ${EXT4_CORE_SOURCES})
 target_include_directories(ext4_core PUBLIC include)
 target_compile_options(ext4_core PRIVATE
@@ -112,6 +112,14 @@ add_test(NAME namespace-create-and-link COMMAND ext4-namespace-test ${EXT4_WRITE
 add_test(NAME namespace-symlinks COMMAND ext4-namespace-test --symlinks ${EXT4_WRITE_IMAGES})
 set_tests_properties(namespace-create-and-link PROPERTIES TIMEOUT 900)
 set_tests_properties(namespace-symlinks PROPERTIES TIMEOUT 900)
+add_executable(ext4-removal-test tests/removal.c)
+target_include_directories(ext4-removal-test PRIVATE core)
+target_link_libraries(ext4-removal-test PRIVATE ext4_posix)
+target_compile_options(ext4-removal-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
+add_test(NAME namespace-removal COMMAND ext4-removal-test ${EXT4_WRITE_IMAGES})
+set_tests_properties(namespace-removal PROPERTIES TIMEOUT 900)
+add_test(NAME namespace-removal-indexed-rejection COMMAND ext4-removal-test --indexed
+    "${EXT4_FIXTURES}/ext4-indexed.img")
 add_test(NAME namespace-indexed-rejection COMMAND ext4-namespace-test --indexed
     "${EXT4_FIXTURES}/ext4-indexed.img")
 set(EXT4_NAMESPACE_FIXTURES "${CMAKE_SOURCE_DIR}/artifacts/namespace-fixtures" CACHE PATH
@@ -126,9 +134,10 @@ if(EXT4_NAMESPACE_TESTS)
     add_test(NAME namespace-inode-group-transition COMMAND ext4-namespace-test --groups ${EXT4_NAMESPACE_IMAGES})
     add_test(NAME namespace-symlink-small-formats COMMAND ext4-namespace-test --symlinks ${EXT4_NAMESPACE_IMAGES})
     add_test(NAME namespace-symlink-inode-groups COMMAND ext4-namespace-test --symlinks --groups ${EXT4_NAMESPACE_IMAGES})
+    add_test(NAME namespace-removal-small-formats COMMAND ext4-removal-test ${EXT4_NAMESPACE_IMAGES})
     set_tests_properties(namespace-small-formats namespace-inode-exhaustion
         namespace-inode-group-transition namespace-symlink-small-formats
-        namespace-symlink-inode-groups PROPERTIES TIMEOUT 600)
+        namespace-symlink-inode-groups namespace-removal-small-formats PROPERTIES TIMEOUT 600)
 endif()
 add_executable(ext4-orphan-test tests/orphan.c)
 target_include_directories(ext4-orphan-test PRIVATE core)
@@ -155,6 +164,8 @@ if(EXT4_ORPHAN_FILE_TESTS)
     add_test(NAME namespace-symlink-orphan-file COMMAND ext4-namespace-test --symlinks ${EXT4_ORPHAN_FILE_IMAGES})
     set_tests_properties(namespace-orphan-file PROPERTIES TIMEOUT 900)
     set_tests_properties(namespace-symlink-orphan-file PROPERTIES TIMEOUT 900)
+    add_test(NAME namespace-removal-orphan-file COMMAND ext4-removal-test ${EXT4_ORPHAN_FILE_IMAGES})
+    set_tests_properties(namespace-removal-orphan-file PROPERTIES TIMEOUT 900)
     set_tests_properties(orphan-file-recovery orphan-file-mixed-recovery orphan-file-live-truncate
         PROPERTIES TIMEOUT 900)
     if(EXT4_EXTENDED_TESTS)
