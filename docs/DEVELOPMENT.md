@@ -128,6 +128,26 @@ harness from the lab working directory after Sol prepares the isolated runner.
 Linux independently mounts and checks the written files and attributes, then
 authors a new committed transaction for the portable replayer to recover.
 
+`ext4-write-test --allocation IMAGE...` runs the allocation, sparse growth,
+extent/indirect mapping, full-disk and fault suites. Combine it with
+`--export NEW_EMPTY_DIRECTORY` to retain clean grown images. The independent checker
+is `tests/check_allocation.py --exports DIRECTORY --tools-root E2FSPROGS_BUILD
+--output NEW_DIRECTORY`.
+
+Generate deliberately nonzero unwritten backing data with
+`tests/generate_allocation_fixtures.py --fixtures EXTENDED_FIXTURE_DIRECTORY
+--tools-root E2FSPROGS_BUILD --output NEW_DIRECTORY`. Enable its CTest suite with
+`-DEXT4_UNWRITTEN_TESTS=ON -DEXT4_ALLOCATION_FIXTURES=ABSOLUTE_NEW_DIRECTORY`.
+The generator preserves its source images and records each independent mapping,
+the exact modified data blocks, tool output and nonrepairing e2fsck result.
+
+`tests/run_linux_journal.py --allocation` accepts the allocation checker's
+`report.json` as `--exports`. It verifies the full grown file in Linux, extends
+it with a new allocation, commits and powers off without unmount. The returned
+image must contain a pending Linux journal that the portable core can recover,
+with exact file bytes/attributes and e2fsck verified afterward. The same lab
+working directory, explicit profile selection and Sol/Luna VM handoff apply.
+
 The `Portable filesystem` GitHub Actions workflow runs on development/main pushes
 and pull requests. Its isolated Ubuntu job generates fresh fixtures, builds with
 Clang and ASan/UBSan, runs CTest, checks clean mutation exports independently, and

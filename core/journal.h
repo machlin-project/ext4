@@ -22,6 +22,7 @@
 #define EXT4_JBD_TAG_FLAGS (EXT4_JBD_ESCAPE | EXT4_JBD_SAME_UUID | EXT4_JBD_LAST_TAG)
 #define EXT4_JOURNAL_MAX_RUNS 1024U
 #define EXT4_JOURNAL_MAX_BLOCKS (1U << 20)
+#define EXT4_JOURNAL_MAX_MAPPING_BLOCKS 8192U
 #define EXT4_TRANSACTION_MAX_BLOCKS 256U
 #define EXT4_RECOVERY_MAX_RECORDS (1U << 20)
 
@@ -103,10 +104,12 @@ struct ext4_journal {
 	struct ext4_fs *fs;
 	struct ext4_write_environment writer;
 	struct ext4_journal_run *runs;
+	uint64_t *mapping_blocks;
 	uint8_t *super_buffer;
 	uint8_t *work;
 	uint8_t *data;
 	uint32_t run_count;
+	uint32_t mapping_count;
 	uint32_t blocks;
 	uint32_t first;
 	uint32_t sequence;
@@ -139,6 +142,15 @@ enum ext4_result ext4_transaction_begin(
     struct ext4_journal *journal, uint32_t credits, struct ext4_transaction **result);
 enum ext4_result ext4_transaction_buffer(
     struct ext4_transaction *transaction, uint64_t block, void **result);
+/* Allocation accounting owns this special snapshot. Commit always retains the
+ * recovery bit and recalculates its checksum before logging/checkpointing it. */
+enum ext4_result ext4_transaction_super(
+    struct ext4_transaction *transaction, struct ext4_super_disk **result);
+/* Read the transaction's current view, falling back to the live home block.
+ * Merely inspecting a block does not consume a journal credit. */
+enum ext4_result ext4_transaction_read(
+    struct ext4_transaction *transaction, uint64_t block, void *buffer);
+uint32_t ext4_journal_credits(const struct ext4_journal *journal);
 /* Both commit and cancel consume the transaction and release all snapshots. */
 enum ext4_result ext4_transaction_commit(struct ext4_transaction *transaction);
 void ext4_transaction_cancel(struct ext4_transaction *transaction);

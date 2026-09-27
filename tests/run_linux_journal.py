@@ -11,6 +11,8 @@ import shutil
 import struct
 import subprocess
 
+from check_allocation import expected_contents
+
 
 def digest(path):
     with path.open("rb") as stream:
@@ -26,9 +28,14 @@ def main():
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--file-writes", action="store_true",
                         help="verify clean file-write exports listed by check_writes.py")
+    parser.add_argument("--allocation", action="store_true",
+                        help="verify allocation exports and replay a Linux-authored file extension")
     parser.add_argument("--case", action="append", default=[],
                         help="select an exact exported image filename (repeatable)")
     args = parser.parse_args()
+    if args.file_writes and args.allocation:
+        parser.error("select either file-write or allocation exports")
+    clean_exports = args.file_writes or args.allocation
     lab = args.lab.resolve()
     root = Path(__file__).resolve().parent.parent
     output = args.output.resolve()
@@ -69,10 +76,12 @@ def main():
                "-Wl,--end-group", library / "crtn.o", "-o", probe]
     if args.file_writes:
         command.insert(1, "-DEXT4_TEST_FILE_WRITES=1")
+    if args.allocation:
+        command.insert(1, "-DEXT4_TEST_ALLOCATION=1")
     with (output / "build.log").open("wb") as log:
         subprocess.run([str(x) for x in command], stdout=log, stderr=subprocess.STDOUT, check=True)
     archives = {}
-    if args.file_writes:
+    if clean_exports:
         exports = json.loads(args.exports.resolve().read_text())
         if not all(record.get("passed") for record in exports):
             raise RuntimeError("file-write exports need successful independent checks")
@@ -114,7 +123,7 @@ def main():
     results = []
     for case in exports:
         source = Path(case["image"])
-        if args.file_writes and digest(source) != case["input_sha256"]:
+        if clean_exports and digest(source) != case["input_sha256"]:
             raise RuntimeError(f"file-write export changed: {source}")
         scratch = output / source.name
         shutil.copyfile(source, scratch)
@@ -134,7 +143,9 @@ def main():
         console = run([runner, kernel, archives[case["block_size"]], "2", "512",
                        "console=hvc0 rdinit=/init panic=-1 loglevel=4", scratch])
         (output / f"{source.stem}.console.log").write_text(console)
-        for marker in ("LINUX_EXT4_FILE_WRITE_PASS" if args.file_writes else "LINUX_EXT4_REPLAY_PASS",
+        verification_marker = ("LINUX_EXT4_ALLOCATION_PASS" if args.allocation else
+                               "LINUX_EXT4_FILE_WRITE_PASS" if args.file_writes else "LINUX_EXT4_REPLAY_PASS")
+        for marker in (verification_marker,
                        "LINUX_EXT4_COMMITTED_RECOVERY_PENDING",
                        "LINUX_EXT4_PROBE_RESULT=PASS", f"Linux {module_report['kernel_release']} aarch64"):
             if marker not in console:
@@ -146,22 +157,27 @@ def main():
         transactions = re.search(r"transactions=(\d+)", recovery)
         if not transactions or int(transactions[1]) == 0:
             raise RuntimeError("reverse roundtrip did not replay a Linux-authored transaction")
-        contents = output / f"{source.stem}.payload"
-        run([tools / "debugfs/debugfs", "-R", f"dump /payload.bin {contents}", scratch])
+        name = "empty" if args.allocation else "payload.bin"
+        contents = output / f"{source.stem}.contents"
+        run([tools / "debugfs/debugfs", "-R", f"dump /{name} {contents}", scratch])
         data = contents.read_bytes()
         expected = bytearray((index * 17 + 23) & 255 for index in range(200000))
         block_size = case["block_size"]
-        if args.file_writes:
+        if args.allocation:
+            expected = expected_contents(block_size)
+            expected += bytes(block_size + 7) + b"\x6c"
+        elif args.file_writes:
             expected[block_size - 7:block_size * 2 + 16] = bytes(
                 (index * 29 + 7) & 255 for index in range(block_size + 23))
         else:
             expected[:block_size] = b"\x53" * block_size
             expected[block_size:block_size * 2] = b"\xa7" * block_size
             expected[:4] = bytes.fromhex("c03b3998")
-        expected[0] = 0x6c
+        if not args.allocation:
+            expected[0] = 0x6c
         if data != expected:
             raise RuntimeError("incorrect contents after Linux/native recovery roundtrip")
-        status = run([tools / "debugfs/debugfs", "-R", "stat /payload.bin", scratch])
+        status = run([tools / "debugfs/debugfs", "-R", f"stat /{name}", scratch])
         if not re.search(r"User:\s+12345\s+Group:\s+23456", status) or not re.search(r"Mode:\s+0600", status):
             raise RuntimeError("Linux-authored ownership or mode was not preserved")
         run([tools / "e2fsck/e2fsck", "-fn", scratch])

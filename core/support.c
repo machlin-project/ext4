@@ -154,6 +154,8 @@ ext4_result_string(enum ext4_result result)
 		return "value out of range";
 	case EXT4_STALE:
 		return "inode generation changed";
+	case EXT4_NO_SPACE:
+		return "no free filesystem blocks";
 	}
 	return "unknown filesystem error";
 }

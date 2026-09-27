@@ -105,6 +105,50 @@ check_exported_files(uint32_t block_size, uint16_t inode_size)
 }
 #endif
 
+#ifdef EXT4_TEST_ALLOCATION
+static uint64_t
+check_allocated_file(uint32_t block_size)
+{
+	struct stat status;
+	uint8_t *expected;
+	uint8_t *observed;
+	size_t capacity = (size_t)block_size * 724;
+	size_t size = (size_t)block_size * 2 + 16;
+	size_t offset;
+	size_t index;
+	uint32_t logical;
+	int fd;
+
+	expected = calloc(1, capacity);
+	observed = malloc(capacity);
+	require(expected != NULL && observed != NULL, "allocate sparse-file oracle");
+	for (index = 0; index < block_size + 23; index++) {
+		expected[block_size - 7 + index] = (uint8_t)(index * 29 + 7);
+	}
+	for (index = 0; index < 350; index++) {
+		logical = 4 + (uint32_t)((index * 73) % 359) * 2;
+		offset = (size_t)logical * block_size + index % 31;
+		memset(expected + offset, (int)(index % 251 + 1), 17);
+		if (size < offset + 17) {
+			size = offset + 17;
+		}
+	}
+	for (index = 0; index < block_size + 23; index++) {
+		expected[block_size * 3 - 7 + index] = (uint8_t)(index * 29 + 7);
+	}
+	fd = open("/mnt/empty", O_RDONLY | O_CLOEXEC);
+	require(fd >= 0 && fstat(fd, &status) == 0, "open/stat allocated file");
+	require(status.st_size == (off_t)size, "verify grown size");
+	require(pread(fd, observed, size, 0) == (ssize_t)size, "read grown file");
+	require(memcmp(observed, expected, size) == 0, "compare allocated bytes and sparse gaps");
+	require(close(fd) == 0, "close grown file");
+	free(expected);
+	free(observed);
+	puts("LINUX_EXT4_ALLOCATION_PASS");
+	return size;
+}
+#endif
+
 int
 main(void)
 {
@@ -114,11 +158,12 @@ main(void)
 	struct utsname identity;
 	char module[128];
 	FILE *configuration;
-#ifndef EXT4_TEST_FILE_WRITES
+#if !defined(EXT4_TEST_FILE_WRITES) && !defined(EXT4_TEST_ALLOCATION)
 	uint8_t *buffer;
 	uint32_t position;
 	uint8_t expected;
 #endif
+	off_t write_offset = 0;
 	uint8_t linux_byte = TEST_LINUX_BYTE;
 	uint32_t block_size;
 	uint32_t logarithm;
@@ -151,7 +196,7 @@ main(void)
 	logarithm = decode_le32(&super.log_block_size);
 	require(logarithm <= 6 && (EXT4_MIN_BLOCK_SIZE << logarithm) == block_size,
 	    "verify filesystem block size");
-#ifdef EXT4_TEST_FILE_WRITES
+#if defined(EXT4_TEST_FILE_WRITES) || defined(EXT4_TEST_ALLOCATION)
 	require((decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_RECOVER) == 0,
 	    "verify cleanly finished writable filesystem");
 #else
@@ -165,9 +210,15 @@ main(void)
 	check_exported_files(block_size,
 	    (uint16_t)super.inode_size.bytes[0] | ((uint16_t)super.inode_size.bytes[1] << 8));
 #endif
+
+#ifdef EXT4_TEST_ALLOCATION
+	write_offset = (off_t)(check_allocated_file(block_size) + block_size + 7);
+	fd = open("/mnt/empty", O_RDWR | O_CLOEXEC);
+#else
 	fd = open("/mnt/payload.bin", O_RDWR | O_CLOEXEC);
+#endif
 	require(fd >= 0, "open recovered payload");
-#ifndef EXT4_TEST_FILE_WRITES
+#if !defined(EXT4_TEST_FILE_WRITES) && !defined(EXT4_TEST_ALLOCATION)
 	buffer = malloc((size_t)block_size * 2);
 	require(buffer != NULL, "allocate comparison buffer");
 	require(pread(fd, buffer, (size_t)block_size * 2, 0) == (ssize_t)block_size * 2,
@@ -189,8 +240,8 @@ main(void)
 	/* Linux now authors a real inode transaction for the reverse roundtrip. */
 	require(fchown(fd, TEST_UID, TEST_GID) == 0, "Linux chown");
 	require(fchmod(fd, TEST_MODE) == 0, "Linux chmod");
-	require(
-	    pwrite(fd, &linux_byte, sizeof(linux_byte), 0) == sizeof(linux_byte), "Linux write");
+	require(pwrite(fd, &linux_byte, sizeof(linux_byte), write_offset) == sizeof(linux_byte),
+	    "Linux write");
 	require(fsync(fd) == 0, "Linux fsync commit");
 	puts("LINUX_EXT4_COMMITTED_RECOVERY_PENDING");
 	power_off(1);

@@ -28,7 +28,8 @@ enum ext4_result {
 	EXT4_RECOVERY_REQUIRED,
 	EXT4_IS_DIRECTORY,
 	EXT4_RANGE,
-	EXT4_STALE
+	EXT4_STALE,
+	EXT4_NO_SPACE
 };
 
 enum ext4_file_type {
@@ -172,9 +173,11 @@ enum ext4_result ext4_mount_writable(const struct ext4_environment *environment,
 enum ext4_result ext4_sync(struct ext4_fs *fs);
 enum ext4_result ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     const struct ext4_inode_update *update, struct ext4_inode *result);
-/* Currently writes allocated regular-file ranges within EOF, in bounded atomic
- * transactions. Holes, growth and requests exceeding transaction capacity reject
- * without writes. Data, permission bits, mtime and ctime share the transaction.
+/* Writes regular files, allocating holes, converting unwritten extents and
+ * extending EOF in a bounded atomic transaction. Newly exposed bytes are zeroed.
+ * Requests exceeding transaction capacity reject without writes. Ordinary
+ * allocation preserves the filesystem's reserved-block pool. Data, allocation
+ * metadata, size, permission bits, mtime and ctime share the transaction.
  * Those three attribute fields are required; no other fields may be selected.
  * completed is length only on success, otherwise zero; an I/O error can have a
  * committed outcome that must be resolved by recovery. Zero length is a no-op. */

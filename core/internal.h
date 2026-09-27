@@ -7,6 +7,16 @@
 struct ext4_journal;
 struct ext4_transaction;
 
+struct ext4_block_range {
+	uint64_t first;
+	uint64_t length;
+};
+
+struct ext4_block_path {
+	uint64_t blocks[EXT4_EXTENT_MAX_DEPTH];
+	uint16_t count;
+};
+
 struct ext4_fs {
 	struct ext4_environment environment;
 	struct ext4_info info;
@@ -23,6 +33,9 @@ struct ext4_fs {
 	bool writer_attached;
 	bool aborted;
 	struct ext4_journal *journal;
+	struct ext4_block_range *system_ranges;
+	size_t system_range_capacity;
+	size_t system_range_count;
 };
 
 struct ext4_group {
@@ -32,10 +45,18 @@ struct ext4_group {
 	uint64_t table_blocks;
 	uint32_t block_bitmap_checksum;
 	uint32_t inode_bitmap_checksum;
+	uint32_t free_blocks;
+	uint32_t free_inodes;
 	uint16_t flags;
 };
 
 enum ext4_result ext4_group_get(struct ext4_fs *fs, uint32_t group, struct ext4_group *result);
+enum ext4_result ext4_group_decode(
+    struct ext4_fs *fs, uint32_t group, struct ext4_group_disk *disk, struct ext4_group *result);
+void ext4_group_checksum_set(struct ext4_fs *fs, uint32_t group, struct ext4_group_disk *disk);
+enum ext4_result ext4_system_ranges_build(struct ext4_fs *fs);
+bool ext4_system_block(const struct ext4_fs *fs, uint64_t block);
+bool ext4_system_overlaps(const struct ext4_fs *fs, uint64_t block, uint64_t length);
 enum ext4_result ext4_inode_location(struct ext4_fs *fs, uint32_t number, uint64_t *offset);
 enum ext4_result ext4_inode_decode(
     struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4_inode *inode);
@@ -61,5 +82,7 @@ enum ext4_result ext4_device_read(struct ext4_fs *fs, uint64_t offset, void *buf
 enum ext4_result ext4_block_read(struct ext4_fs *fs, uint64_t block, void *buffer);
 enum ext4_result ext4_map_block(
     struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical, uint64_t *physical);
+enum ext4_result ext4_map_block_path(struct ext4_fs *fs, const struct ext4_inode *inode,
+    uint32_t logical, uint64_t *physical, struct ext4_block_path *path);
 
 #endif

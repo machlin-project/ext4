@@ -74,6 +74,11 @@ ext4_journal_target(const struct ext4_journal *journal, uint64_t block)
 			return false;
 		}
 	}
+	for (index = 0; index < journal->mapping_count; index++) {
+		if (block == journal->mapping_blocks[index]) {
+			return false;
+		}
+	}
 	return true;
 }
 
@@ -224,14 +229,19 @@ static enum ext4_result
 ext4_journal_map(struct ext4_journal *journal, const struct ext4_inode *inode)
 {
 	struct ext4_journal_run *run = NULL;
+	struct ext4_block_path path;
+	struct ext4_block_path previous;
 	uint64_t physical;
 	uint32_t logical;
 	uint32_t left;
 	uint32_t right;
+	uint32_t index;
+	uint16_t level;
 	enum ext4_result error;
 
+	ext4_zero(&previous, sizeof(previous));
 	for (logical = 0; logical < journal->blocks; logical++) {
-		error = ext4_map_block(journal->fs, inode, logical, &physical);
+		error = ext4_map_block_path(journal->fs, inode, logical, &physical, &path);
 		if (error != EXT4_OK) {
 			return error;
 		}
@@ -239,6 +249,33 @@ ext4_journal_map(struct ext4_journal *journal, const struct ext4_inode *inode)
 		if (physical <= journal->fs->first_data_block + 1) {
 			return EXT4_CORRUPT;
 		}
+		if (path.count != 0 && journal->mapping_blocks == NULL) {
+			journal->mapping_blocks =
+			    journal->fs->environment.allocate(journal->fs->environment.context,
+				EXT4_JOURNAL_MAX_MAPPING_BLOCKS * sizeof(*journal->mapping_blocks));
+			if (journal->mapping_blocks == NULL) {
+				return EXT4_NO_MEMORY;
+			}
+		}
+		for (level = 0; level < path.count; level++) {
+			if (level < previous.count &&
+			    path.blocks[level] == previous.blocks[level]) {
+				continue;
+			}
+			if (path.blocks[level] <= journal->fs->first_data_block + 1) {
+				return EXT4_CORRUPT;
+			}
+			for (index = 0; index < journal->mapping_count; index++) {
+				if (path.blocks[level] == journal->mapping_blocks[index]) {
+					return EXT4_CORRUPT;
+				}
+			}
+			if (journal->mapping_count == EXT4_JOURNAL_MAX_MAPPING_BLOCKS) {
+				return EXT4_UNSUPPORTED;
+			}
+			journal->mapping_blocks[journal->mapping_count++] = path.blocks[level];
+		}
+		previous = path;
 		if (run != NULL && physical == run->physical + run->length) {
 			run->length++;
 		} else {
@@ -252,6 +289,13 @@ ext4_journal_map(struct ext4_journal *journal, const struct ext4_inode *inode)
 		}
 	}
 	for (left = 0; left < journal->run_count; left++) {
+		for (index = 0; index < journal->mapping_count; index++) {
+			if (journal->mapping_blocks[index] >= journal->runs[left].physical &&
+			    journal->mapping_blocks[index] - journal->runs[left].physical <
+				journal->runs[left].length) {
+				return EXT4_CORRUPT;
+			}
+		}
 		for (right = left + 1; right < journal->run_count; right++) {
 			if (journal->runs[left].physical <
 				journal->runs[right].physical + journal->runs[right].length &&
@@ -434,6 +478,10 @@ ext4_journal_close(struct ext4_journal *journal)
 		fs->environment.release(fs->environment.context, journal->runs,
 		    EXT4_JOURNAL_MAX_RUNS * sizeof(*journal->runs));
 	}
+	if (journal->mapping_blocks != NULL) {
+		fs->environment.release(fs->environment.context, journal->mapping_blocks,
+		    EXT4_JOURNAL_MAX_MAPPING_BLOCKS * sizeof(*journal->mapping_blocks));
+	}
 	if (journal->super_buffer != NULL) {
 		fs->environment.release(
 		    fs->environment.context, journal->super_buffer, fs->info.block_size);
@@ -586,8 +634,9 @@ ext4_transaction_begin(
 	return EXT4_OK;
 }
 
-enum ext4_result
-ext4_transaction_buffer(struct ext4_transaction *transaction, uint64_t block, void **result)
+static enum ext4_result
+ext4_transaction_snapshot(
+    struct ext4_transaction *transaction, uint64_t block, bool primary, void **result)
 {
 	struct ext4_journal *journal;
 	struct ext4_fs *fs;
@@ -604,7 +653,7 @@ ext4_transaction_buffer(struct ext4_transaction *transaction, uint64_t block, vo
 	}
 	journal = transaction->journal;
 	fs = journal->fs;
-	if (!ext4_journal_target(journal, block) || block == fs->first_data_block ||
+	if (!ext4_journal_target(journal, block) || (!primary && block == fs->first_data_block) ||
 	    (!(journal->features & EXT4_JBD_64BIT) && block > UINT32_MAX)) {
 		return EXT4_INVALID_ARGUMENT;
 	}
@@ -630,6 +679,94 @@ ext4_transaction_buffer(struct ext4_transaction *transaction, uint64_t block, vo
 	transaction->entries[transaction->count++].buffer = buffer;
 	*result = buffer;
 	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_transaction_buffer(struct ext4_transaction *transaction, uint64_t block, void **result)
+{
+	return ext4_transaction_snapshot(transaction, block, false, result);
+}
+
+enum ext4_result
+ext4_transaction_super(struct ext4_transaction *transaction, struct ext4_super_disk **result)
+{
+	struct ext4_fs *fs;
+	struct ext4_super_disk *super;
+	void *buffer;
+	enum ext4_result error;
+
+	if (result == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	*result = NULL;
+	if (transaction == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	fs = transaction->journal->fs;
+	error = ext4_transaction_snapshot(transaction, fs->first_data_block, true, &buffer);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	super =
+	    (struct ext4_super_disk *)((uint8_t *)buffer + EXT4_SUPER_OFFSET % fs->info.block_size);
+	if (ext4_le16(&super->magic) != EXT4_SUPER_MAGIC ||
+	    !ext4_equal(super->uuid, fs->info.uuid, EXT4_UUID_SIZE) ||
+	    (fs->metadata_checksum &&
+		ext4_crc32c(UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum)) !=
+		    ext4_le32(&super->checksum))) {
+		return EXT4_CORRUPT;
+	}
+	*result = super;
+	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_transaction_read(struct ext4_transaction *transaction, uint64_t block, void *buffer)
+{
+	uint32_t index;
+
+	if (transaction == NULL || buffer == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	for (index = 0; index < transaction->count; index++) {
+		if (transaction->entries[index].block == block) {
+			ext4_copy(buffer, transaction->entries[index].buffer,
+			    transaction->journal->fs->info.block_size);
+			return EXT4_OK;
+		}
+	}
+	return ext4_block_read(transaction->journal->fs, block, buffer);
+}
+
+uint32_t
+ext4_journal_credits(const struct ext4_journal *journal)
+{
+	uint32_t credits = (journal->blocks - journal->first - 2U) / 2U;
+
+	return credits > EXT4_TRANSACTION_MAX_BLOCKS ? EXT4_TRANSACTION_MAX_BLOCKS : credits;
+}
+
+static void
+ext4_transaction_prepare_super(struct ext4_transaction *transaction)
+{
+	struct ext4_fs *fs = transaction->journal->fs;
+	struct ext4_super_disk *super;
+	uint32_t index;
+
+	for (index = 0; index < transaction->count; index++) {
+		if (transaction->entries[index].block != fs->first_data_block) {
+			continue;
+		}
+		super = (struct ext4_super_disk *)((uint8_t *)transaction->entries[index].buffer +
+		    EXT4_SUPER_OFFSET % fs->info.block_size);
+		ext4_encode32(&super->feature_incompat,
+		    ext4_le32(&super->feature_incompat) | EXT4_FEATURE_INCOMPAT_RECOVER);
+		if (fs->metadata_checksum) {
+			ext4_encode32(&super->checksum,
+			    ext4_crc32c(
+				UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum)));
+		}
+	}
 }
 
 void
@@ -766,6 +903,7 @@ ext4_transaction_commit(struct ext4_transaction *transaction)
 		ext4_transaction_cancel(transaction);
 		return EXT4_OK;
 	}
+	ext4_transaction_prepare_super(transaction);
 	error = ext4_journal_set_recovery(journal, true);
 	if (error == EXT4_OK) {
 		error = ext4_journal_publish(journal, journal->first, journal->sequence);

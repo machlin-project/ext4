@@ -2,15 +2,85 @@
 #include "internal.h"
 
 enum ext4_result
-ext4_group_get(struct ext4_fs *fs, uint32_t group, struct ext4_group *result)
+ext4_group_decode(
+    struct ext4_fs *fs, uint32_t group, struct ext4_group_disk *disk, struct ext4_group *result)
 {
-	struct ext4_group_disk *disk;
 	struct ext4_le32 group_wire;
 	struct ext4_group decoded;
-	uint8_t *buffer;
-	uint64_t offset;
 	uint32_t checksum;
 	uint16_t expected;
+
+	if (group >= fs->info.groups) {
+		return EXT4_CORRUPT;
+	}
+	if (fs->metadata_checksum) {
+		expected = ext4_le16(&disk->checksum);
+		ext4_encode16(&disk->checksum, 0);
+		ext4_encode32(&group_wire, group);
+		checksum = ext4_crc32c(fs->checksum_seed, &group_wire, sizeof(group_wire));
+		checksum = ext4_crc32c(checksum, disk, fs->descriptor_size);
+		ext4_encode16(&disk->checksum, expected);
+		if ((uint16_t)checksum != expected) {
+			return EXT4_CORRUPT;
+		}
+	}
+	ext4_zero(&decoded, sizeof(decoded));
+	decoded.block_bitmap = ext4_le32(&disk->block_bitmap_lo);
+	decoded.inode_bitmap = ext4_le32(&disk->inode_bitmap_lo);
+	decoded.inode_table = ext4_le32(&disk->inode_table_lo);
+	decoded.block_bitmap_checksum = ext4_le16(&disk->block_bitmap_checksum_lo);
+	decoded.inode_bitmap_checksum = ext4_le16(&disk->inode_bitmap_checksum_lo);
+	decoded.free_blocks = ext4_le16(&disk->free_blocks_lo);
+	decoded.free_inodes = ext4_le16(&disk->free_inodes_lo);
+	decoded.flags = ext4_le16(&disk->flags);
+	if (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
+		decoded.block_bitmap |= (uint64_t)ext4_le32(&disk->block_bitmap_hi) << 32;
+		decoded.inode_bitmap |= (uint64_t)ext4_le32(&disk->inode_bitmap_hi) << 32;
+		decoded.inode_table |= (uint64_t)ext4_le32(&disk->inode_table_hi) << 32;
+		decoded.block_bitmap_checksum |=
+		    (uint32_t)ext4_le16(&disk->block_bitmap_checksum_hi) << 16;
+		decoded.inode_bitmap_checksum |=
+		    (uint32_t)ext4_le16(&disk->inode_bitmap_checksum_hi) << 16;
+		decoded.free_blocks |= (uint32_t)ext4_le16(&disk->free_blocks_hi) << 16;
+		decoded.free_inodes |= (uint32_t)ext4_le16(&disk->free_inodes_hi) << 16;
+	}
+	decoded.table_blocks =
+	    ((uint64_t)fs->inodes_per_group * fs->inode_size + fs->info.block_size - 1) /
+	    fs->info.block_size;
+	if (decoded.inode_table < fs->first_data_block || decoded.inode_table >= fs->info.blocks ||
+	    decoded.table_blocks > fs->info.blocks - decoded.inode_table ||
+	    decoded.block_bitmap < fs->first_data_block ||
+	    decoded.block_bitmap >= fs->info.blocks ||
+	    decoded.inode_bitmap < fs->first_data_block ||
+	    decoded.inode_bitmap >= fs->info.blocks || decoded.free_blocks > fs->blocks_per_group ||
+	    decoded.free_inodes > fs->inodes_per_group) {
+		return EXT4_CORRUPT;
+	}
+	*result = decoded;
+	return EXT4_OK;
+}
+
+void
+ext4_group_checksum_set(struct ext4_fs *fs, uint32_t group, struct ext4_group_disk *disk)
+{
+	struct ext4_le32 group_wire;
+	uint32_t checksum;
+
+	if (!fs->metadata_checksum) {
+		return;
+	}
+	ext4_encode16(&disk->checksum, 0);
+	ext4_encode32(&group_wire, group);
+	checksum = ext4_crc32c(fs->checksum_seed, &group_wire, sizeof(group_wire));
+	checksum = ext4_crc32c(checksum, disk, fs->descriptor_size);
+	ext4_encode16(&disk->checksum, (uint16_t)checksum);
+}
+
+enum ext4_result
+ext4_group_get(struct ext4_fs *fs, uint32_t group, struct ext4_group *result)
+{
+	void *buffer;
+	uint64_t offset;
 	enum ext4_result error;
 
 	if (group >= fs->info.groups) {
@@ -23,51 +93,9 @@ ext4_group_get(struct ext4_fs *fs, uint32_t group, struct ext4_group *result)
 	offset = (uint64_t)(fs->first_data_block + 1) * fs->info.block_size +
 	    (uint64_t)group * fs->descriptor_size;
 	error = ext4_device_read(fs, offset, buffer, fs->descriptor_size);
-	if (error != EXT4_OK) {
-		goto out;
+	if (error == EXT4_OK) {
+		error = ext4_group_decode(fs, group, buffer, result);
 	}
-	disk = (struct ext4_group_disk *)buffer;
-	if (fs->metadata_checksum) {
-		expected = ext4_le16(&disk->checksum);
-		ext4_encode16(&disk->checksum, 0);
-		ext4_encode32(&group_wire, group);
-		checksum = ext4_crc32c(fs->checksum_seed, &group_wire, sizeof(group_wire));
-		checksum = ext4_crc32c(checksum, buffer, fs->descriptor_size);
-		if ((uint16_t)checksum != expected) {
-			error = EXT4_CORRUPT;
-			goto out;
-		}
-	}
-	ext4_zero(&decoded, sizeof(decoded));
-	decoded.block_bitmap = ext4_le32(&disk->block_bitmap_lo);
-	decoded.inode_bitmap = ext4_le32(&disk->inode_bitmap_lo);
-	decoded.inode_table = ext4_le32(&disk->inode_table_lo);
-	decoded.block_bitmap_checksum = ext4_le16(&disk->block_bitmap_checksum_lo);
-	decoded.inode_bitmap_checksum = ext4_le16(&disk->inode_bitmap_checksum_lo);
-	decoded.flags = ext4_le16(&disk->flags);
-	if (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
-		decoded.block_bitmap |= (uint64_t)ext4_le32(&disk->block_bitmap_hi) << 32;
-		decoded.inode_bitmap |= (uint64_t)ext4_le32(&disk->inode_bitmap_hi) << 32;
-		decoded.inode_table |= (uint64_t)ext4_le32(&disk->inode_table_hi) << 32;
-		decoded.block_bitmap_checksum |=
-		    (uint32_t)ext4_le16(&disk->block_bitmap_checksum_hi) << 16;
-		decoded.inode_bitmap_checksum |=
-		    (uint32_t)ext4_le16(&disk->inode_bitmap_checksum_hi) << 16;
-	}
-	decoded.table_blocks =
-	    ((uint64_t)fs->inodes_per_group * fs->inode_size + fs->info.block_size - 1) /
-	    fs->info.block_size;
-	if (decoded.inode_table < fs->first_data_block || decoded.inode_table >= fs->info.blocks ||
-	    decoded.table_blocks > fs->info.blocks - decoded.inode_table ||
-	    decoded.block_bitmap < fs->first_data_block ||
-	    decoded.block_bitmap >= fs->info.blocks ||
-	    decoded.inode_bitmap < fs->first_data_block ||
-	    decoded.inode_bitmap >= fs->info.blocks) {
-		error = EXT4_CORRUPT;
-		goto out;
-	}
-	*result = decoded;
-out:
 	fs->environment.release(fs->environment.context, buffer, fs->descriptor_size);
 	return error;
 }
@@ -143,52 +171,16 @@ ext4_inode_allocated(struct ext4_fs *fs, uint32_t number)
 	    group.inode_bitmap_checksum, (number - 1) % fs->inodes_per_group);
 }
 
-static bool
-ext4_power_of(uint32_t value, uint32_t base)
-{
-	while (value > 1 && value % base == 0) {
-		value /= base;
-	}
-	return value == 1;
-}
-
 enum ext4_result
 ext4_data_block_valid(struct ext4_fs *fs, uint64_t block)
 {
 	struct ext4_group group;
-	uint64_t first;
-	uint64_t reserved;
 	uint64_t relative;
-	uint32_t index;
-	bool super;
 	enum ext4_result error;
 
-	if (block < fs->first_data_block || block >= fs->info.blocks) {
+	if (fs->system_ranges == NULL || block < fs->first_data_block || block >= fs->info.blocks ||
+	    ext4_system_block(fs, block)) {
 		return EXT4_CORRUPT;
-	}
-	reserved = 1 +
-	    ((uint64_t)fs->info.groups * fs->descriptor_size + fs->info.block_size - 1) /
-		fs->info.block_size +
-	    fs->reserved_gdt_blocks;
-	/* flex_bg can place another group's bitmaps and table anywhere. Check all
-	 * system ranges before accepting a file-data target, not just its group. */
-	for (index = 0; index < fs->info.groups; index++) {
-		first = fs->first_data_block + (uint64_t)index * fs->blocks_per_group;
-		super = !(fs->info.feature_ro_compat & EXT4_FEATURE_RO_SPARSE_SUPER) ||
-		    index == 0 || ext4_power_of(index, 3) || ext4_power_of(index, 5) ||
-		    ext4_power_of(index, 7);
-		if (super && block >= first && block - first < reserved) {
-			return EXT4_CORRUPT;
-		}
-		error = ext4_group_get(fs, index, &group);
-		if (error != EXT4_OK) {
-			return error;
-		}
-		if (block == group.block_bitmap || block == group.inode_bitmap ||
-		    (block >= group.inode_table &&
-			block - group.inode_table < group.table_blocks)) {
-			return EXT4_CORRUPT;
-		}
 	}
 	relative = block - fs->first_data_block;
 	error = ext4_group_get(fs, (uint32_t)(relative / fs->blocks_per_group), &group);

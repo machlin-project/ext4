@@ -167,6 +167,10 @@ ext4_unmount(struct ext4_fs *fs)
 	}
 	environment = fs->environment;
 	ext4_journal_close(fs->journal);
+	if (fs->system_ranges != NULL) {
+		environment.release(environment.context, fs->system_ranges,
+		    fs->system_range_capacity * sizeof(*fs->system_ranges));
+	}
 	environment.release(environment.context, fs, sizeof(*fs));
 }
 

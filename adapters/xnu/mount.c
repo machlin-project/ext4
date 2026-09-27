@@ -37,6 +37,8 @@ ext4_xnu_error(enum ext4_result result)
 		return EOVERFLOW;
 	case EXT4_STALE:
 		return ESTALE;
+	case EXT4_NO_SPACE:
+		return ENOSPC;
 	default:
 		return EIO;
 	}

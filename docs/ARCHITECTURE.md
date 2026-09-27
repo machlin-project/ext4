@@ -50,14 +50,15 @@ Recovery checks the committed prefix before changing home blocks, records bounde
 replay locations and applies the last committed event for each block. A revoke
 wins against data from its own transaction and earlier transactions; a later
 logged allocation supersedes it. Journal and transaction-ID wrap are explicit.
-The journal inode's mapping is frozen before writes, and replay cannot target
-journal blocks or ranges outside the filesystem. Checksummed primary-superblock
+The journal inode's data and mapping blocks are frozen before writes, and replay
+cannot target those blocks or ranges outside the filesystem. Checksummed primary-superblock
 damage remains an offline-repair condition. Recovery does not invent geometry.
 
 The current journal engine handles internal v2-superblock journals with legacy,
 v2 or v3 checksums/tags (legacy means no journal checksums), 64-bit addresses and
-revokes. It bounds the journal to 1,048,576 blocks and 1,024 mapping runs, a writing
-transaction to 256 snapshots, and recovery to 1,048,576 records. Exceeding a bound
+revokes. It bounds the journal to 1,048,576 data blocks, 1,024 data runs and 8,192
+mapping blocks, a writing transaction to 256 snapshots, and recovery to 1,048,576
+records. Exceeding a bound
 is an explicit unsupported result. External journals, checksum v1, async/fast
 commit, orphan cleanup and general filesystem mutation remain separate work.
 The internal block transaction interface is not an application or driver ioctl.
@@ -75,14 +76,32 @@ without I/O instead of losing precision. Mount does not implicitly recover;
 `ext4_sync` performs clean finish, while `ext4_unmount` only releases memory.
 An uncertain commit or clean-finish error poisons the instance, including reads.
 
-Bounded overwrites currently journal both data and inode attributes. They require
-allocated regular-file ranges within EOF and fit at most 255 data blocks plus
-the inode block. Holes, growth and larger requests reject before writing. Data
-targets must be allocated and outside journal, superblock/GDT/reserved-GDT,
-bitmap and inode-table ranges, including metadata placed by flex_bg. Group
-descriptors and allocation bitmaps are checksum-validated. This implementation
-scans group system ranges per target; allocator ownership and a scalable range
-index remain future work. It does not establish performance on large volumes.
+Bounded writes journal data, allocation metadata and inode attributes together.
+They allocate holes, convert unwritten extents and extend EOF. The entire request
+must fit the actual journal's credit bound; inode, bitmap, group, superblock and
+mapping-node snapshots consume credits alongside data. Credit exhaustion and
+allocation failure cancel the private transaction before any resource writes.
+The public API reports the full length on success and zero on error. Platform
+adapters will need a separate partial-progress/chunking contract for large I/O.
+
+The allocator validates group descriptors, bitmap checksums and free counts before
+selecting blocks. It initializes lazy block bitmaps from protected system ranges
+and marks the invalid tail of the final group. A sorted, merged range index covers
+superblocks, GDT/reserved GDT, bitmaps, inode tables and journal data/mapping nodes,
+including flex_bg placement. Writable mount bounds its input index to 1,048,576
+ranges. It is a metadata exclusion index, not a global filesystem consistency
+checker. Ordinary allocation preserves the reserved-block pool; admitted use of
+reserved space remains a separate policy contract.
+
+New blocks are fully zeroed before partial writes. Growth skips sparse/unwritten
+runs and zeroes exposed bytes in existing written allocations beyond the old EOF.
+Extent insertion supports bounded tree growth and node splits, including splitting
+an unwritten extent around initialized data; legacy mapping allocates through
+triple-indirect blocks. Both mapping nodes and data contribute to inode block
+accounting. Allocation counters become visible in the filesystem instance only
+after commit succeeds. The primary-superblock snapshot always retains RECOVER and
+a fresh checksum through checkpoint; only clean finish clears that marker.
+Large-volume performance and a concurrent allocator remain unaccepted.
 
 The admitted operation supplies final permission bits and captured timestamps
 under the same owner lock as authorization and mutation. Ownership changes must

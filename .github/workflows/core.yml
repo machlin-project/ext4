@@ -34,9 +34,12 @@ jobs:
         run: |
           mkdir -p artifacts/checks
           python3 tests/generate_fixtures.py --extended --inode128 2>&1 | tee artifacts/checks/fixtures.log
+          python3 tests/generate_allocation_fixtures.py --fixtures artifacts/fixtures \
+            --output artifacts/allocation-fixtures 2>&1 | tee artifacts/checks/allocation-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
-          cmake -S . -B .build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DEXT4_EXTENDED_TESTS=ON -DEXT4_INODE128_TEST=ON
+          cmake -S . -B .build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DEXT4_EXTENDED_TESTS=ON -DEXT4_INODE128_TEST=ON -DEXT4_UNWRITTEN_TESTS=ON
           cmake --build .build --parallel 2 2>&1 | tee artifacts/checks/build.log
       - name: Run conformance and fault tests
         run: ctest --test-dir .build --output-on-failure --output-junit "$PWD/artifacts/core-tests.xml"
@@ -59,6 +62,18 @@ jobs:
           python3 tests/check_journal_recovery.py --fixtures artifacts/journal-fixtures \
             --recover .build/ext4-recover --e2fsck "$(command -v e2fsck)" \
             --output artifacts/journal-independent 2>&1 | tee artifacts/checks/journal-independent.log
+      - name: Independently verify allocation and unwritten conversion
+        run: |
+          mkdir artifacts/allocation-exports
+          .build/ext4-write-test --allocation --export artifacts/allocation-exports \
+            artifacts/fixtures/ext4-1k.img artifacts/fixtures/ext4-2k.img \
+            artifacts/fixtures/ext4-4k.img artifacts/fixtures/ext4-8k.img \
+            artifacts/fixtures/ext4-16k.img artifacts/fixtures/ext4-32k.img \
+            artifacts/fixtures/ext4-indirect-1k.img artifacts/fixtures/ext4-no-checksum.img \
+            artifacts/fixtures/ext4-checksum-seed.img artifacts/fixtures/ext4-inode128.img \
+            artifacts/allocation-fixtures/*.img 2>&1 | tee artifacts/checks/allocation-exports.log
+          python3 tests/check_allocation.py --exports artifacts/allocation-exports \
+            --output artifacts/allocation-independent 2>&1 | tee artifacts/checks/allocation-independent.log
       - name: Preserve test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -41,7 +41,7 @@ ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offse
 
 static enum ext4_result
 ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
-    uint8_t *scratch, uint64_t *physical)
+    uint8_t *scratch, uint64_t *physical, struct ext4_block_path *path)
 {
 	const uint8_t *node = inode->block_data;
 	const struct ext4_extent_header_disk *header;
@@ -132,6 +132,9 @@ ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t log
 		if (depth == 0 || child == 0) {
 			return EXT4_OK;
 		}
+		if (path != NULL) {
+			path->blocks[path->count++] = child;
+		}
 		error = ext4_block_read(fs, child, scratch);
 		if (error != EXT4_OK) {
 			return error;
@@ -145,7 +148,7 @@ ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t log
 
 static enum ext4_result
 ext4_indirect_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
-    uint8_t *scratch, uint64_t *physical)
+    uint8_t *scratch, uint64_t *physical, struct ext4_block_path *path)
 {
 	const struct ext4_le32 *pointers = (const struct ext4_le32 *)inode->block_data;
 	uint64_t remaining;
@@ -172,6 +175,9 @@ ext4_indirect_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t l
 		}
 		block = ext4_le32(&pointers[EXT4_DIRECT_BLOCKS + depth - 1]);
 		for (level = depth; level != 0 && block != 0; level--) {
+			if (path != NULL) {
+				path->blocks[path->count++] = block;
+			}
 			error = ext4_block_read(fs, block, scratch);
 			if (error != EXT4_OK) {
 				return error;
@@ -193,20 +199,30 @@ enum ext4_result
 ext4_map_block(
     struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical, uint64_t *physical)
 {
+	return ext4_map_block_path(fs, inode, logical, physical, NULL);
+}
+
+enum ext4_result
+ext4_map_block_path(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
+    uint64_t *physical, struct ext4_block_path *path)
+{
 	uint8_t *scratch;
 	enum ext4_result error;
 
 	if (fs->aborted) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
+	if (path != NULL) {
+		path->count = 0;
+	}
 	scratch = fs->environment.allocate(fs->environment.context, fs->info.block_size);
 	if (scratch == NULL) {
 		return EXT4_NO_MEMORY;
 	}
 	if (inode->flags & EXT4_INODE_EXTENTS) {
-		error = ext4_extent_map(fs, inode, logical, scratch, physical);
+		error = ext4_extent_map(fs, inode, logical, scratch, physical, path);
 	} else {
-		error = ext4_indirect_map(fs, inode, logical, scratch, physical);
+		error = ext4_indirect_map(fs, inode, logical, scratch, physical, path);
 	}
 	fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
 	return error;

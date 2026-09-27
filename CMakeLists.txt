@@ -11,10 +11,12 @@ option(EXT4_SANITIZERS "Instrument userspace code with ASan and UBSan" ON)
 option(EXT4_BUILD_FUZZER "Build the bounded metadata mutation fuzzer with Clang" OFF)
 option(EXT4_EXTENDED_TESTS "Require the extended generated image profile" OFF)
 option(EXT4_INODE128_TEST "Require the generated 128-byte-inode write fixture" OFF)
+option(EXT4_UNWRITTEN_TESTS "Require independent unwritten-allocation fixtures" OFF)
 
 set(EXT4_CORE_SOURCES
     core/support.c core/mount.c core/inode.c core/read.c core/directory.c
-    core/journal.c core/recovery.c core/group.c core/write.c)
+    core/journal.c core/recovery.c core/group.c core/system.c
+    core/allocate.c core/map_write.c core/write.c)
 add_library(ext4_core STATIC ${EXT4_CORE_SOURCES})
 target_include_directories(ext4_core PUBLIC include)
 target_compile_options(ext4_core PRIVATE
@@ -95,6 +97,18 @@ if(EXT4_INODE128_TEST)
 endif()
 add_test(NAME inode-and-file-write COMMAND ext4-write-test ${EXT4_WRITE_IMAGES})
 set_tests_properties(inode-and-file-write PROPERTIES TIMEOUT 300)
+add_test(NAME allocation-and-growth COMMAND ext4-write-test --allocation ${EXT4_WRITE_IMAGES})
+set_tests_properties(allocation-and-growth PROPERTIES TIMEOUT 600)
+set(EXT4_ALLOCATION_FIXTURES "${CMAKE_SOURCE_DIR}/artifacts/allocation-fixtures" CACHE PATH
+    "Independent unwritten-allocation images")
+if(EXT4_UNWRITTEN_TESTS)
+    add_test(NAME unwritten-allocation COMMAND ext4-write-test --allocation
+        "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-1k.img"
+        "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-4k.img"
+        "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-no-checksum.img"
+        "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-checksum-seed.img")
+    set_tests_properties(unwritten-allocation PROPERTIES TIMEOUT 300)
+endif()
 
 find_package(Threads REQUIRED)
 add_executable(ext4-mounted-test tests/mounted.c)

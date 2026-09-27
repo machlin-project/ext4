@@ -11,7 +11,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Eleven read profiles pass; broader format and size coverage pending |
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
-| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded allocated-range overwrites pass portable and Linux checks; growth, allocation, directory mutation and platform writes pending |
+| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, sparse growth and unwritten conversion pass portable and Linux checks; truncate, directory mutation and platform writes pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine passes the portable fault matrix, debugfs replay and Linux roundtrips; advanced journal formats, orphans and platform write integration remain pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; ACLs/xattrs and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
@@ -109,7 +109,7 @@ Only independent image copies were attached. Lab reports are under
 remain separate from this successful run.
 
 This establishes the bounded journal engine, not general read/write filesystem
-operations. Allocation, directory mutation, orphan handling, writable UBC/FSKit
+operations. Directory mutation, orphan handling, writable UBC/FSKit
 coherence, and durable platform device barriers still need implementation and
 acceptance. Internal journals with external devices, old checksum v1, async or
 fast commits are unsupported; configured resource bounds are explicit in
@@ -132,8 +132,8 @@ after an unaligned three-block overwrite, zero-length writes, stale generation,
 read-only and unsupported-operation rejection. Permission transitions and data
 share the transaction. It does not authorize a platform operation by itself.
 
-Across those profiles, every allocation/read after mount is injected: 276
-allocation points and 236 read points. The commit/finish crash matrix contains
+Across those profiles, every allocation/read after mount is injected: the current
+overwrite path has 130 allocation points and 200 read points. The commit/finish crash matrix contains
 1,260 cuts: 1,236 recover to matching old/new inode and file data, and 24 torn
 primary-superblock cases reject with a checksum error. The latter are explicit
 fail-closed cases. Reads and further mutations reject on a poisoned instance.
@@ -161,8 +161,58 @@ checks in `artifacts/checks/inode-write-final-*` pass all five sanitized CTest
 suites, the freestanding stack budget, formatter, both unsigned kext builds
 without core warnings, and the unsigned universal FSKit build. These adapters
 still expose read-only operations and were not runtime-tested in this change.
-Allocation, growth/truncate, orphan cleanup, directory mutation, security xattrs,
+Truncate, orphan cleanup, directory mutation, security xattrs,
 concurrent native page-cache ownership and LXNU policy remain unaccepted.
+
+## Allocation and growth evidence
+
+`ext4-write-test --allocation` passes ten ordinary write profiles and four
+independently generated unwritten profiles. It grows an empty/preallocated file
+through 350 permuted sparse writes, checks all bytes and inode/free-space accounting,
+and exercises extent root, leaf and parent splits. It tests direct, single, double
+and triple-indirect transitions and the legacy logical-address limit. A multi-group
+fixture reaches zero free blocks, initializing two lazy block groups along the way.
+Late credit exhaustion, reserved-space exclusion, malformed bitmap checksums,
+forged free system blocks and counter mismatches reject before resource writes.
+Written allocations beyond the previous EOF must also expose only zeroed gaps.
+
+`generate_allocation_fixtures.py` uses debugfs to allocate 128 unwritten blocks in
+each of four copies (1/4 KiB, absent checksums and explicit checksum seed). It maps
+each block independently, replaces its backing bytes with nonzero data, and
+requires clean e2fsck. The core must preserve unwritten zero semantics during
+partial conversion and later tree growth. `check_allocation.py` independently
+checks full sparse-file contents, unchanged neighboring file data, mapping/accounting
+and e2fsck in all fourteen exports. Source hashes remain unchanged.
+
+The growth and mapping-promotion suites inject 476 allocation and 336 read failures.
+Across 3,912 commit/finish cuts, 3,832 recover to the complete old or new resource
+outside the journal. The other 80 are deliberately torn checksummed primary-superblock
+cases that reject recovery without writes; they are not successful repairs.
+The compared resource includes data, inode, extent/indirect nodes, bitmaps, group
+descriptors and primary accounting. This remains a modeled storage contract.
+
+Eleven selected exports (seven ordinary 1/2/4 KiB and feature/inode variations,
+plus four unwritten cases) also passed real Linux mounts and complete grown-file byte
+checks. Linux then allocated past EOF and committed with fsync before powering off
+without unmounting. The portable replayer recovered one Linux-authored transaction
+with five replayed blocks in every returned image. Exact extended contents,
+owners, mode and e2fsck passed. These runs use the identified 4 KiB-page reference
+kernel; larger-block profiles have portable/e2fsprogs evidence only.
+
+Evidence lives under `artifacts/allocation-final-exports/`,
+`artifacts/allocation-final-independent/`, `artifacts/allocation-unwritten-fixtures/`
+and `artifacts/checks/allocation-final-*`. Linux evidence is in the lab under
+`artifacts/ext4-journal/linux-reference/allocation-unwritten-roundtrip/` and
+`artifacts/ext4-journal/linux-reference/allocation-final-roundtrip/`, with matching
+`logs/ext4-allocation-*-roundtrip.log` files. All seven configured sanitized
+CTest suites, formatting and the freestanding stack check pass. Both unsigned
+kext architectures and universal FSKit build successfully; these new binaries
+have compilation evidence only and still expose read-only operations.
+
+Writes remain bounded atomic operations. Large requests, concurrent mapping
+ownership, truncate/freeing, inode/directory allocation, orphan cleanup, policy
+for reserved space, platform durability and writable cache integration remain
+required work. The allocation tests do not complete the filesystem acceptance matrix.
 
 ## FSKit build evidence
 

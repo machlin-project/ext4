@@ -8,7 +8,7 @@ fixture-generation command does not prove the corresponding runtime behavior.
 
 ## Portable suites
 
-`make test` runs the reader, malformed-image, file-write and journal durability tests
+`make test` runs the reader, malformed-image, file-write, allocation and journal tests
 with ASan/UBSan. The 1 KiB and 4 KiB journal suites use separate volatile and
 persistent device states. They interrupt each write and flush, then reopen the
 surviving medium. Cases retain none, all or alternating pending blocks; partial
@@ -22,7 +22,12 @@ contract, not physical power-loss protection on a particular disk.
 | Inode updates | Full-width UID/GID, permission bits, generation identity, selective updates, hardlink visibility, preserved mappings/counts and neighboring inode records |
 | Writable timestamps | Signed and extended epoch boundaries, nanosecond bounds, birth time, 128-byte inode limits and each extra_isize field boundary; rejected updates perform no writes |
 | File overwrite | Complete-file comparison after an unaligned three-block overwrite, preserved EOF and untouched bytes, hardlinks, zero-length operation and read-only rejection |
-| Write admission | Stale generation, invalid fields/types/ranges, unsupported holes/growth, xattrs/flags, metadata-target exclusion; no writes before successful validation |
+| Write admission | Stale generation, invalid fields/types/ranges, unsupported xattrs/flags, metadata-target exclusion; no writes before successful validation |
+| Allocation and growth | Unaligned initial writes, sparse gaps, written allocations beyond EOF, deterministic fragmented insertion, extent root/leaf/parent splits, and direct through triple-indirect boundaries |
+| Unwritten conversion | Independent debugfs allocation with deliberately nonzero backing bytes; partial writes preserve zero semantics and split/merge extent records |
+| Free-space ownership | Group and superblock counters, inode data/mapping block counts, lazy bitmaps, short final groups, exhaustion to zero free blocks, reserved-space rejection, late credit failure with no writes |
+| Allocator corruption | Damaged bitmap CRC, forged free system blocks with matching checksums/counters, and inconsistent bitmap/free-count pairs; journal data and mapping blocks stay protected |
+| Allocation failures | Every allocation/read in bounded growth and mapping promotion; every write/flush cut with three survival patterns and partial writes; all blocks outside the journal match the complete old or new image |
 | File mutation failures | Every allocation/read in the small overwrite, every write/flush cut through clean finish, torn writes and three survival patterns; consistent inode and data together after recovery, poisoned-instance read/write rejection |
 | Transaction ownership | One active writer/transaction, duplicate buffer identity, credit exhaustion, cancellation, empty commit, protected journal/control ranges |
 | Journal layouts | Legacy without checksums, checksum v2/v3, 32/64-bit tags, escape records, multiple descriptor blocks, ring wrap and sequence wrap |
@@ -30,7 +35,7 @@ contract, not physical power-loss protection on a particular disk.
 | Recovery faults | Interrupted replay and retry, allocation/read failures in each distinct ownership phase, no leaks, no writes on already clean media |
 | Corruption | Corrupt committed payload/descriptor rejects replay, invalid commit discards the incomplete tail; a torn checksummed control block fails closed |
 | Independent replay | debugfs-authored commits, unfinished tail, revokes and later reuse; exact recovered blocks, repeated recovery and e2fsck |
-| Linux roundtrip | Linux mounts/replays our pending log, commits metadata changes, stops without unmount; our core replays the Linux-authored transaction, then contents, owners, mode and e2fsck are checked |
+| Linux roundtrip | Linux mounts/replays our pending log or checks a clean allocation export, commits metadata/file growth, stops without unmount; our core replays the Linux-authored transaction, then contents, owners, mode and e2fsck are checked |
 
 Read/allocation failure loops select the beginnings and ends of repeated journal
 mapping operations and every distinct surrounding phase. They do not claim to
@@ -52,7 +57,7 @@ positions, read-only enforcement, concurrent readers and mmap. XNU lifetime test
 retain open files or mappings across attempted unmounts. These do not establish
 writable UBC, cache coherence during truncate or filesystem operation concurrency.
 
-Before enabling general writes, extend the matrix to allocation/full devices,
+Before enabling general writes, extend the matrix to platform allocation/full devices,
 create/link/unlink/rename, orphan cleanup, open-but-unlinked files, truncate versus
 mmap/pageout, failed writeback, metadata locking and forced unmount. Exercise
 large physical addresses and fragmented journals as real images, not only flag
