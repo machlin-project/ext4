@@ -86,6 +86,21 @@ jobs:
             artifacts/allocation-fixtures/*.img 2>&1 | tee artifacts/checks/truncate-exports.log
           python3 tests/check_allocation.py --truncate --exports artifacts/truncate-exports \
             --output artifacts/truncate-independent 2>&1 | tee artifacts/checks/truncate-independent.log
+      - name: Independently verify orphan cleanup
+        run: |
+          mkdir artifacts/orphan-linked-exports
+          .build/ext4-orphan-test --smoke --export artifacts/orphan-linked-exports \
+            artifacts/fixtures/ext4-1k.img artifacts/fixtures/ext4-2k.img \
+            artifacts/fixtures/ext4-4k.img artifacts/fixtures/ext4-8k.img \
+            artifacts/fixtures/ext4-16k.img artifacts/fixtures/ext4-32k.img \
+            artifacts/fixtures/ext4-indirect-1k.img artifacts/fixtures/ext4-no-checksum.img \
+            artifacts/fixtures/ext4-checksum-seed.img artifacts/fixtures/ext4-inode128.img \
+            2>&1 | tee artifacts/checks/orphan-linked-exports.log
+          python3 tests/check_orphans.py --linked-exports artifacts/orphan-linked-exports \
+            --recover .build/ext4-recover --output artifacts/orphan-linked-independent \
+            2>&1 | tee artifacts/checks/orphan-linked-independent.log
+          e2fsck -fn artifacts/orphan-linked-exports/large-clean-ext4-indirect-1k.img \
+            2>&1 | tee artifacts/checks/orphan-large-independent.log
       - name: Preserve test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

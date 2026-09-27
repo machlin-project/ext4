@@ -95,8 +95,6 @@ ext4_edit_inode(struct ext4_fs *fs, struct ext4_transaction *transaction, uint32
 {
 	void *buffer;
 	uint64_t offset;
-	size_t xattr_offset;
-	uint16_t extra_size;
 	enum ext4_result error;
 
 	if (number == 0 || number > fs->info.inodes) {
@@ -129,27 +127,7 @@ ext4_edit_inode(struct ext4_fs *fs, struct ext4_transaction *transaction, uint32
 	if (ext4_le32(&(*disk)->deletion_time) != 0) {
 		return EXT4_CORRUPT;
 	}
-	if (inode->flags & ~EXT4_INODE_WRITABLE_FLAGS) {
-		return EXT4_UNSUPPORTED;
-	}
-	if (((inode->flags & EXT4_INODE_EXTENTS) &&
-		!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS)) ||
-	    ((inode->flags & EXT4_INODE_HUGE_FILE) &&
-		!(fs->info.feature_ro_compat & EXT4_FEATURE_RO_HUGE_FILE))) {
-		return EXT4_CORRUPT;
-	}
-	/* Until ACL and security-xattr transitions are implemented, do not mutate
-	 * an inode with attributes whose policy we cannot preserve atomically. */
-	if (ext4_le32(&(*disk)->xattr_block_lo) != 0 || ext4_le16(&(*disk)->xattr_block_hi) != 0) {
-		return EXT4_UNSUPPORTED;
-	}
-	extra_size = fs->inode_size > EXT4_INODE_BASE_SIZE ? ext4_le16(&(*disk)->extra_size) : 0;
-	xattr_offset = EXT4_INODE_BASE_SIZE + extra_size;
-	if (extra_size != 0 && xattr_offset <= fs->inode_size - sizeof(struct ext4_le32) &&
-	    ext4_le32((struct ext4_le32 *)((uint8_t *)*disk + xattr_offset)) == EXT4_XATTR_MAGIC) {
-		return EXT4_UNSUPPORTED;
-	}
-	return EXT4_OK;
+	return ext4_inode_writable(fs, *disk, inode);
 }
 
 static enum ext4_result
@@ -284,8 +262,8 @@ ext4_write_gap(struct ext4_allocation *allocation, const struct ext4_inode *inod
 	return EXT4_OK;
 }
 
-static enum ext4_result
-ext4_write_account(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+enum ext4_result
+ext4_inode_account(struct ext4_allocation *allocation, const struct ext4_inode *inode,
     struct ext4_inode_disk *disk, uint64_t end)
 {
 	struct ext4_fs *fs = allocation->fs;
@@ -449,7 +427,7 @@ ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t of
 		consumed += chunk;
 		within = 0;
 	}
-	error = ext4_write_account(
+	error = ext4_inode_account(
 	    &allocation, &inode, disk, offset + length > inode.size ? offset + length : inode.size);
 	if (error != EXT4_OK) {
 		goto cancel;
@@ -564,7 +542,7 @@ ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t
 	}
 	error = ext4_write_gap(&allocation, &zero_from, disk, end, targets, &target_count, credits);
 	if (error == EXT4_OK) {
-		error = ext4_write_account(&allocation, &inode, disk, size);
+		error = ext4_inode_account(&allocation, &inode, disk, size);
 	}
 	if (error == EXT4_OK) {
 		ext4_inode_checksum_set(fs, number, disk);

@@ -763,14 +763,14 @@ struct ext4_extent_walk {
 
 static enum ext4_result
 ext4_extent_owners(struct ext4_allocation *allocation, const struct ext4_inode *inode,
-    struct ext4_inode_disk *disk, struct ext4_map_owners *owners)
+    struct ext4_inode_disk *disk, struct ext4_map_owners *owners, uint8_t *scratch)
 {
 	struct ext4_extent_walk frames[EXT4_EXTENT_MAX_DEPTH + 1];
 	struct ext4_extent_walk *frame;
 	struct ext4_extent_header_disk *header;
 	struct ext4_extent_disk *entries;
 	struct ext4_extent_index_disk *indices;
-	void *buffer = NULL;
+	uint8_t *buffer;
 	uint64_t child;
 	uint16_t count;
 	uint16_t position;
@@ -813,9 +813,10 @@ ext4_extent_owners(struct ext4_allocation *allocation, const struct ext4_inode *
 			continue;
 		}
 		child = ext4_extent_child(&indices[position]);
+		buffer = scratch + (size_t)level * allocation->fs->info.block_size;
 		error = ext4_map_owner_add(allocation, owners, child, 1);
 		if (error == EXT4_OK) {
-			error = ext4_transaction_buffer(allocation->transaction, child, &buffer);
+			error = ext4_transaction_read(allocation->transaction, child, buffer);
 		}
 		if (error != EXT4_OK) {
 			return error;
@@ -841,12 +842,12 @@ struct ext4_indirect_walk {
 
 static enum ext4_result
 ext4_indirect_owners(struct ext4_allocation *allocation, struct ext4_inode_disk *disk,
-    struct ext4_map_owners *owners)
+    struct ext4_map_owners *owners, uint8_t *scratch)
 {
 	struct ext4_le32 *root = (struct ext4_le32 *)disk->block_data;
 	struct ext4_indirect_walk frames[EXT4_INDIRECT_LEVELS];
 	struct ext4_indirect_walk *frame;
-	void *buffer = NULL;
+	uint8_t *buffer;
 	uint64_t block;
 	uint32_t per_block = allocation->fs->info.block_size / sizeof(*root);
 	uint32_t index;
@@ -870,15 +871,16 @@ ext4_indirect_owners(struct ext4_allocation *allocation, struct ext4_inode_disk 
 		}
 		level = 0;
 		for (;;) {
+			buffer = scratch + (size_t)level * allocation->fs->info.block_size;
 			error = ext4_map_owner_add(allocation, owners, block, 1);
 			if (error == EXT4_OK) {
-				error = ext4_transaction_buffer(
-				    allocation->transaction, block, &buffer);
+				error =
+				    ext4_transaction_read(allocation->transaction, block, buffer);
 			}
 			if (error != EXT4_OK) {
 				return error;
 			}
-			frames[level].pointers = buffer;
+			frames[level].pointers = (struct ext4_le32 *)buffer;
 			frames[level].next = 0;
 			for (;;) {
 				frame = &frames[level];
@@ -910,19 +912,25 @@ ext4_indirect_owners(struct ext4_allocation *allocation, struct ext4_inode_disk 
 	return EXT4_OK;
 }
 
-static enum ext4_result
-ext4_map_validate_owners(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+enum ext4_result
+ext4_write_map_validate(struct ext4_allocation *allocation, const struct ext4_inode *inode,
     struct ext4_inode_disk *disk)
 {
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_map_owners owners;
+	uint8_t *scratch;
+	size_t scratch_size = (size_t)fs->info.block_size * EXT4_EXTENT_MAX_DEPTH;
 	size_t index;
 	enum ext4_result error;
 
 	ext4_zero(&owners, sizeof(owners));
+	scratch = fs->environment.allocate(fs->environment.context, scratch_size);
+	if (scratch == NULL) {
+		return EXT4_NO_MEMORY;
+	}
 	error = inode->flags & EXT4_INODE_EXTENTS
-	    ? ext4_extent_owners(allocation, inode, disk, &owners)
-	    : ext4_indirect_owners(allocation, disk, &owners);
+	    ? ext4_extent_owners(allocation, inode, disk, &owners, scratch)
+	    : ext4_indirect_owners(allocation, disk, &owners, scratch);
 	if (error == EXT4_OK &&
 	    (inode->blocks_512 % (fs->info.block_size / EXT4_SECTOR_SIZE) != 0 ||
 		owners.blocks != inode->blocks_512 / (fs->info.block_size / EXT4_SECTOR_SIZE))) {
@@ -939,6 +947,7 @@ ext4_map_validate_owners(struct ext4_allocation *allocation, const struct ext4_i
 		fs->environment.release(fs->environment.context, owners.ranges,
 		    owners.capacity * sizeof(*owners.ranges));
 	}
+	fs->environment.release(fs->environment.context, scratch, scratch_size);
 	return error;
 }
 
@@ -961,7 +970,7 @@ ext4_extent_shorten(struct ext4_allocation *allocation, const struct ext4_inode 
 
 static enum ext4_result
 ext4_extent_truncate(struct ext4_allocation *allocation, const struct ext4_inode *inode,
-    struct ext4_inode_disk *disk, uint32_t first)
+    struct ext4_inode_disk *disk, uint32_t first, uint64_t limit, bool *done)
 {
 	struct ext4_extent_path path;
 	struct ext4_extent_header_disk *header;
@@ -978,10 +987,11 @@ ext4_extent_truncate(struct ext4_allocation *allocation, const struct ext4_inode
 	uint16_t level;
 	uint16_t root_max = (EXT4_INODE_BLOCK_BYTES - sizeof(*root)) / sizeof(*entries);
 	bool finished = false;
+	bool stopped = false;
 	bool unwritten;
 	enum ext4_result error;
 
-	while (!finished) {
+	while (!finished && !stopped) {
 		error = ext4_extent_path_get(allocation, inode, disk, UINT32_MAX, &path);
 		if (error != EXT4_OK) {
 			return error;
@@ -999,6 +1009,13 @@ ext4_extent_truncate(struct ext4_allocation *allocation, const struct ext4_inode
 				break;
 			}
 			keep = first > start ? (uint16_t)(first - start) : 0;
+			if (allocation->freed >= limit) {
+				stopped = true;
+				break;
+			}
+			if ((uint64_t)(length - keep) > limit - allocation->freed) {
+				keep = (uint16_t)(length - (limit - allocation->freed));
+			}
 			error = ext4_free_blocks(
 			    allocation, ext4_extent_physical(entry) + keep, length - keep);
 			if (error != EXT4_OK) {
@@ -1008,7 +1025,8 @@ ext4_extent_truncate(struct ext4_allocation *allocation, const struct ext4_inode
 				unwritten = ext4_le16(&entry->length) > EXT4_EXTENT_UNWRITTEN_LIMIT;
 				ext4_encode16(&entry->length,
 				    keep + (unwritten ? EXT4_EXTENT_UNWRITTEN_LIMIT : 0));
-				finished = true;
+				finished = start + keep <= first;
+				stopped = !finished;
 				break;
 			}
 			count--;
@@ -1054,12 +1072,13 @@ ext4_extent_truncate(struct ext4_allocation *allocation, const struct ext4_inode
 			return error;
 		}
 	}
+	*done = finished;
 	return EXT4_OK;
 }
 
 static enum ext4_result
-ext4_indirect_truncate(
-    struct ext4_allocation *allocation, struct ext4_inode_disk *disk, uint32_t first)
+ext4_indirect_truncate(struct ext4_allocation *allocation, struct ext4_inode_disk *disk,
+    uint32_t first, uint64_t limit, bool *done)
 {
 	struct ext4_le32 *root = (struct ext4_le32 *)disk->block_data;
 	struct ext4_indirect_walk frames[EXT4_INDIRECT_LEVELS];
@@ -1080,6 +1099,9 @@ ext4_indirect_truncate(
 	for (index = first; index < EXT4_DIRECT_BLOCKS; index++) {
 		block = ext4_le32(&root[index]);
 		if (block != 0) {
+			if (allocation->freed >= limit) {
+				return EXT4_OK;
+			}
 			error = ext4_free_blocks(allocation, block, 1);
 			if (error != EXT4_OK) {
 				return error;
@@ -1116,6 +1138,9 @@ ext4_indirect_truncate(
 							}
 						}
 						if (empty) {
+							if (allocation->freed >= limit) {
+								return EXT4_OK;
+							}
 							error = ext4_free_blocks(
 							    allocation, frame->block, 1);
 							if (error != EXT4_OK) {
@@ -1144,6 +1169,9 @@ ext4_indirect_truncate(
 						frames[level].span = frame->span / per_block;
 						break;
 					}
+					if (allocation->freed >= limit) {
+						return EXT4_OK;
+					}
 					error = ext4_free_blocks(allocation, block, 1);
 					if (error != EXT4_OK) {
 						return error;
@@ -1158,20 +1186,35 @@ ext4_indirect_truncate(
 		base += span * per_block;
 		span *= per_block;
 	}
+	*done = true;
 	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_write_map_trim(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk, uint32_t first, uint32_t limit, bool *done)
+{
+	*done = false;
+	if (limit == 0 || allocation->freed != 0) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	return inode->flags & EXT4_INODE_EXTENTS
+	    ? ext4_extent_truncate(allocation, inode, disk, first, limit, done)
+	    : ext4_indirect_truncate(allocation, disk, first, limit, done);
 }
 
 enum ext4_result
 ext4_write_map_truncate(struct ext4_allocation *allocation, const struct ext4_inode *inode,
     struct ext4_inode_disk *disk, uint32_t first)
 {
+	bool done = false;
 	enum ext4_result error;
 
-	error = ext4_map_validate_owners(allocation, inode, disk);
+	error = ext4_write_map_validate(allocation, inode, disk);
 	if (error != EXT4_OK) {
 		return error;
 	}
 	return inode->flags & EXT4_INODE_EXTENTS
-	    ? ext4_extent_truncate(allocation, inode, disk, first)
-	    : ext4_indirect_truncate(allocation, disk, first);
+	    ? ext4_extent_truncate(allocation, inode, disk, first, UINT64_MAX, &done)
+	    : ext4_indirect_truncate(allocation, disk, first, UINT64_MAX, &done);
 }

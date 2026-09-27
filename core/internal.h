@@ -26,6 +26,7 @@ struct ext4_fs {
 	uint32_t checksum_seed;
 	uint32_t first_inode;
 	uint32_t journal_inode;
+	uint32_t last_orphan;
 	uint16_t reserved_gdt_blocks;
 	uint16_t inode_size;
 	uint16_t descriptor_size;
@@ -62,10 +63,16 @@ bool ext4_system_overlaps(const struct ext4_fs *fs, uint64_t block, uint64_t len
 enum ext4_result ext4_inode_location(struct ext4_fs *fs, uint32_t number, uint64_t *offset);
 enum ext4_result ext4_inode_decode(
     struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4_inode *inode);
+/* Offline orphan ownership may inspect allocated inodes with no links. */
+enum ext4_result ext4_inode_decode_orphan(
+    struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4_inode *inode);
+enum ext4_result ext4_inode_writable(
+    struct ext4_fs *fs, const struct ext4_inode_disk *disk, const struct ext4_inode *inode);
 void ext4_inode_checksum_set(struct ext4_fs *fs, uint32_t number, struct ext4_inode_disk *disk);
 enum ext4_result ext4_inode_apply(
     struct ext4_fs *fs, struct ext4_inode_disk *disk, const struct ext4_inode_update *update);
 enum ext4_result ext4_inode_allocated(struct ext4_fs *fs, uint32_t number);
+enum ext4_result ext4_orphan_cleanup(struct ext4_fs *fs, struct ext4_recovery_report *report);
 enum ext4_result ext4_data_block_valid(struct ext4_fs *fs, uint64_t block);
 
 enum ext4_result ext4_load(

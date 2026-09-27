@@ -12,7 +12,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, sparse growth, unwritten conversion and bounded truncate/freeing pass portable and Linux checks; multi-transaction truncation, directory mutation and platform writes pending |
-| Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine passes the portable fault matrix, debugfs replay and Linux roundtrips; advanced journal formats, orphans and platform write integration remain pending |
+| Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine and legacy orphan cleanup pass portable faults and independent recovery; advanced journal/orphan-file formats and platform write integration remain pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; ACLs/xattrs and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
@@ -109,7 +109,7 @@ Only independent image copies were attached. Lab reports are under
 remain separate from this successful run.
 
 This establishes the bounded journal engine, not general read/write filesystem
-operations. Directory mutation, orphan handling, writable UBC/FSKit
+operations. Directory mutation, online orphan lifetime, writable UBC/FSKit
 coherence, and durable platform device barriers still need implementation and
 acceptance. Internal journals with external devices, old checksum v1, async or
 fast commits are unsupported; configured resource bounds are explicit in
@@ -161,7 +161,7 @@ checks in `artifacts/checks/inode-write-final-*` pass all five sanitized CTest
 suites, the freestanding stack budget, formatter, both unsigned kext builds
 without core warnings, and the unsigned universal FSKit build. These adapters
 still expose read-only operations and were not runtime-tested in this change.
-Truncate, orphan cleanup, directory mutation, security xattrs,
+Live multi-transaction truncate, directory mutation, security xattrs,
 concurrent native page-cache ownership and LXNU policy remain unaccepted.
 
 ## Allocation and growth evidence
@@ -210,7 +210,7 @@ kext architectures and universal FSKit build successfully; these new binaries
 have compilation evidence only and still expose read-only operations.
 
 Writes remain bounded atomic operations. Large requests, concurrent mapping
-ownership, multi-transaction truncate, inode/directory allocation, orphan cleanup, policy
+ownership, live multi-transaction truncate, inode/directory allocation, modern orphan files, policy
 for reserved space, platform durability and writable cache integration remain
 required work. The allocation tests do not complete the filesystem acceptance matrix.
 
@@ -251,9 +251,66 @@ The nine configured sanitized CTest suites pass, including the optimized freesta
 2 KiB frame check. Logs and JUnit output are under `artifacts/checks/truncate-*`.
 The shared core also compiles in both unsigned kext architectures and universal FSKit.
 Those new adapter binaries remain read-only and have compilation evidence only.
-Truncate is currently atomic only when the full mapping tree and changed metadata fit
-one bounded transaction. Larger multi-transaction operations, persistent orphan cleanup,
+Truncate is currently atomic only when changed mapping nodes and other metadata fit
+one bounded transaction. Larger operations initiated by a live API, modern orphan files,
 open-unlinked lifetime and native UBC/FSKit resize concurrency remain unaccepted.
+
+## Legacy orphan recovery evidence
+
+`ext4-orphan-test` checks linked regular-file truncates, hardlink identity,
+retained data and partial-block zeroing. Sixteen malformed chain/inode cases
+cover reserved/free/out-of-range numbers, cycles, checksums, unsupported flags,
+xattrs, wrong block accounting and protected data pointers. Stale primary
+summaries are tested in both directions; a nonempty orphan list is recovered
+even without the RECOVER flag. The indirect stress case allocates 257 sparse
+leaves, exceeds atomic truncate's credit capacity without resource writes,
+then releases the complete map in 17 cleanup transactions. Across ten linked
+profiles, 159 malformed cases pass and one checksum case is explicitly skipped
+on the checksum-absent profile. There are 1,192 allocation and 633 read-error
+injections, and 4,770 crash cuts: 4,694 recover and 76 torn-super cases fail closed.
+
+All ten ordinary linked-truncate exports independently match e2fsck recovery and
+pass nonrepairing e2fsck, including the large indirect result. Reports are under
+`artifacts/orphan-linked-independent/`, with exported images under
+`artifacts/orphan-linked-exports/`. The checker compares POSIX recovery bytes
+with the modeled result and verifies that linked inodes remain allocated.
+
+The Linux fixture generator keeps six unlinked objects open: regular and sparse
+files, a directory, short and long symlinks, and a FIFO. Seven profiles cover
+1/2/4 KiB blocks, indirect mapping, absent/seeded checksums and 128-byte inodes.
+All 42 orphan entries are reclaimed with unchanged live contents, correct free
+counts and nonrepairing e2fsck. Repeated recovery makes no changes. e2fsck may
+index an unrelated directory during its oracle run; the checker measures that
+allocation separately and also requires the core result to regain the exact
+pre-Linux baseline's free-block and free-inode counts.
+
+The seven Linux-authored images pass 1,092 allocation and 1,758 read-error cases,
+with repeated journal mapping sampled as described in TESTING.md. Across 6,090
+write/flush cuts, 6,018 recover to the complete expected resource outside the
+journal; 72 deliberately torn checksummed primary-superblock cases fail closed
+without recovery writes. The source images remain unchanged. Generation reports
+are in the lab's `artifacts/ext4-journal/linux-reference/orphan-fixtures/`;
+independent results are in `artifacts/orphan-independent-accounting/`, and fault
+logs are in `artifacts/checks/orphan-final-linux-faults.log`.
+
+Linux subsequently remounted each of the seven core-cleaned images and allocated
+and unlinked another six objects. All returned images passed portable recovery,
+live-byte checks and e2fsck again. Lab evidence is under
+`artifacts/ext4-journal/linux-reference/orphan-reuse/` and
+`logs/ext4-orphan-reuse.log`; final checks are in
+`artifacts/orphan-reuse-independent/`.
+
+All ten sanitized CTest suites, the freestanding 2 KiB frame budget, style and
+Python checks pass. Both unsigned kext architectures and universal FSKit compile
+with the shared core; these binaries have compilation evidence only. Complete
+logs and the JUnit report are under `artifacts/checks/orphan-final-*` and
+`artifacts/orphan-tests.xml`.
+
+This accepts offline legacy-list cleanup for the tested inode profiles. It does
+not establish modern orphan-file support, orphaned ACL/xattr inodes, online
+open-unlinked lifetime, arbitrary live multi-transaction truncation, or writable
+platform cache/concurrency behavior. Both adapters continue to expose read-only
+operations.
 
 ## FSKit build evidence
 

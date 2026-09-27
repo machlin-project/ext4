@@ -176,6 +176,80 @@ check_truncated_file(uint32_t block_size)
 }
 #endif
 
+#ifdef EXT4_TEST_ORPHANS
+static void
+create_orphans(uint32_t block_size, bool extents)
+{
+	static const char *paths[] = { "/mnt/orphan-regular", "/mnt/orphan-sparse",
+		"/mnt/orphan-directory", "/mnt/orphan-short-link", "/mnt/orphan-long-link",
+		"/mnt/orphan-fifo" };
+	struct stat status;
+	uint8_t *bytes;
+	char target[257];
+	uint64_t logical[6];
+	uint64_t per_block = block_size / sizeof(struct ext4_le32);
+	size_t length = (size_t)block_size * 3 + 37;
+	size_t index;
+	int descriptors[6];
+	int root;
+
+	bytes = malloc(length);
+	require(bytes != NULL, "allocate orphan payload");
+	for (index = 0; index < length; index++) {
+		bytes[index] = (uint8_t)(index * 43 + 91);
+	}
+	descriptors[0] = open(paths[0], O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0640);
+	require(descriptors[0] >= 0, "create regular orphan");
+	require(write(descriptors[0], bytes, length) == (ssize_t)length, "write regular orphan");
+	require(fsync(descriptors[0]) == 0, "commit regular orphan data");
+	descriptors[1] = open(paths[1], O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
+	require(descriptors[1] >= 0, "create sparse orphan");
+	logical[0] = 0;
+	logical[1] = extents ? 7 : EXT4_DIRECT_BLOCKS - 1;
+	logical[2] = extents ? 19 : EXT4_DIRECT_BLOCKS;
+	logical[3] = extents ? 47 : EXT4_DIRECT_BLOCKS + per_block;
+	logical[4] = extents ? 97 : EXT4_DIRECT_BLOCKS + per_block + per_block * per_block;
+	logical[5] = extents ? 193 : logical[4] + per_block * per_block * per_block - 1;
+	for (index = 0; index < sizeof(logical) / sizeof(logical[0]); index++) {
+		require(pwrite(descriptors[1], bytes, 17,
+			    (off_t)(logical[index] * block_size + 5)) == 17,
+		    "write sparse orphan mapping");
+		/* Separate durable writes prevent delayed-allocation merging from
+		 * removing the intended sparse mapping boundaries. */
+		require(fsync(descriptors[1]) == 0, "commit sparse orphan data");
+	}
+	require(mkdir(paths[2], 0700) == 0, "create orphan directory");
+	descriptors[2] = open(paths[2], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	require(symlink("target", paths[3]) == 0, "create short orphan symlink");
+	descriptors[3] = open(paths[3], O_PATH | O_NOFOLLOW | O_CLOEXEC);
+	memset(target, 'L', sizeof(target) - 1);
+	target[sizeof(target) - 1] = 0;
+	require(symlink(target, paths[4]) == 0, "create long orphan symlink");
+	descriptors[4] = open(paths[4], O_PATH | O_NOFOLLOW | O_CLOEXEC);
+	require(mkfifo(paths[5], 0600) == 0, "create orphan FIFO");
+	descriptors[5] = open(paths[5], O_PATH | O_NOFOLLOW | O_CLOEXEC);
+	for (index = 0; index < sizeof(descriptors) / sizeof(descriptors[0]); index++) {
+		require(descriptors[index] >= 0, "retain orphan descriptor");
+		require((index == 2 ? rmdir(paths[index]) : unlink(paths[index])) == 0,
+		    "remove last namespace link");
+		require(fstat(descriptors[index], &status) == 0 && status.st_nlink == 0,
+		    "verify open unlinked inode");
+		printf("LINUX_EXT4_ORPHAN index=%zu inode=%llu mode=%o size=%llu blocks=%llu\n",
+		    index, (unsigned long long)status.st_ino, (unsigned int)status.st_mode,
+		    (unsigned long long)status.st_size, (unsigned long long)status.st_blocks);
+	}
+	root = open("/mnt", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	require(root >= 0 && fsync(root) == 0, "commit orphan directory removals");
+	require(syncfs(descriptors[0]) == 0, "commit live orphan list");
+	free(bytes);
+	puts("LINUX_EXT4_ORPHANS_PENDING");
+	puts("LINUX_EXT4_COMMITTED_RECOVERY_PENDING");
+	/* Leave every descriptor open until power-off, so ordinary last-close
+	 * cleanup cannot remove the recovery work that this fixture exercises. */
+	power_off(1);
+}
+#endif
+
 int
 main(void)
 {
@@ -224,7 +298,8 @@ main(void)
 	logarithm = decode_le32(&super.log_block_size);
 	require(logarithm <= 6 && (EXT4_MIN_BLOCK_SIZE << logarithm) == block_size,
 	    "verify filesystem block size");
-#if defined(EXT4_TEST_FILE_WRITES) || defined(EXT4_TEST_ALLOCATION) || defined(EXT4_TEST_TRUNCATE)
+#if defined(EXT4_TEST_FILE_WRITES) || defined(EXT4_TEST_ALLOCATION) ||                             \
+    defined(EXT4_TEST_TRUNCATE) || defined(EXT4_TEST_ORPHANS)
 	require((decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_RECOVER) == 0,
 	    "verify cleanly finished writable filesystem");
 #else
@@ -234,6 +309,11 @@ main(void)
 	require(mount("/dev/vda", "/mnt", "ext4", MS_NOATIME | MS_NOSUID | MS_NODEV,
 		    "data=ordered") == 0,
 	    "Linux ext4 mount and recovery");
+#ifdef EXT4_TEST_ORPHANS
+	create_orphans(block_size,
+	    (decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_EXTENTS) != 0);
+	return 1;
+#endif
 #ifdef EXT4_TEST_FILE_WRITES
 	check_exported_files(block_size,
 	    (uint16_t)super.inode_size.bytes[0] | ((uint16_t)super.inode_size.bytes[1] << 8));

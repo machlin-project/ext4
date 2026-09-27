@@ -82,7 +82,7 @@ ext4_allocation_destroy(struct ext4_allocation *allocation)
 	}
 }
 
-static enum ext4_result
+enum ext4_result
 ext4_allocation_super(struct ext4_allocation *allocation)
 {
 	struct ext4_fs *fs = allocation->fs;

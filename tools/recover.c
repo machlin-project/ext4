@@ -21,9 +21,11 @@ main(int argc, char **argv)
 		return 1;
 	}
 	error = ext4_recover(&image.environment, &image.writer, &report);
-	printf("recovery: %s; transactions=%u replayed=%u revoked=%u discarded_tail=%s\n",
+	printf("recovery: %s; transactions=%u replayed=%u revoked=%u discarded_tail=%s orphans=%u "
+	       "orphan_transactions=%u accounting_updated=%s\n",
 	    ext4_result_string(error), report.transactions, report.replayed_blocks,
-	    report.revoked_blocks, report.discarded_tail ? "yes" : "no");
+	    report.revoked_blocks, report.discarded_tail ? "yes" : "no", report.cleaned_orphans,
+	    report.orphan_transactions, report.accounting_updated ? "yes" : "no");
 	if (image.live_allocations != 0) {
 		fprintf(stderr, "recovery leaked allocations\n");
 		error = EXT4_CORRUPT;

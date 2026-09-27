@@ -103,6 +103,31 @@ The filesystem adapters do not enable writes or invoke offline recovery yet.
 In particular, FSKit metadata-flush completion has not been established as a
 durable device-cache barrier; it cannot satisfy the write capability by assumption.
 
+## Orphan recovery tests
+
+`ext4-orphan-test IMAGE...` constructs linked-truncate intents in RAM copies and
+checks cleanup, malformed lists, stale summaries, interrupted recovery and retries.
+It is included in CTest for the ordinary writable profiles. Use `--smoke --export
+NEW_EMPTY_DIRECTORY` to export successful pending/clean states without the fault
+loops. The indirect profile additionally exports a 257-leaf map that cannot be
+removed by the bounded atomic truncate API. Check these exports with:
+
+```sh
+python3 tests/check_orphans.py --linked-exports artifacts/orphan-linked-exports \
+  --recover .build/ext4-recover --tools-root /path/to/e2fsprogs/build \
+  --output artifacts/orphan-linked-independent
+```
+
+From the explicit lab working directory, `run_linux_journal.py --orphans` takes
+the same prepared environment and independently checked clean truncate exports
+as `--truncate`. Linux creates and keeps open six objects, removes their final
+names, commits the orphan list and powers off. Its report marks them generated,
+not recovered. Pass that report to `check_orphans.py --fixtures REPORT.json`
+with `--recover`, `--tools-root` and a new `--output` directory. It operates on
+copies and retains every source image. `ext4-orphan-test --pending IMAGE...`
+also runs the modeled fault matrix against those untouched Linux images.
+Only one prepared Linux runner may be operated at a time.
+
 ## Inode and file-write tests
 
 `ext4-write-test` opens source fixtures read-only and mutates separate modeled

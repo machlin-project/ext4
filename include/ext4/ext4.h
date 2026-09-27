@@ -47,7 +47,11 @@ enum ext4_mode {
 	EXT4_MODE_TYPE = 0170000,
 	EXT4_MODE_REGULAR = 0100000,
 	EXT4_MODE_DIRECTORY = 0040000,
-	EXT4_MODE_SYMLINK = 0120000
+	EXT4_MODE_SYMLINK = 0120000,
+	EXT4_MODE_CHARACTER = 0020000,
+	EXT4_MODE_BLOCK = 0060000,
+	EXT4_MODE_FIFO = 0010000,
+	EXT4_MODE_SOCKET = 0140000
 };
 
 struct ext4_fs;
@@ -80,6 +84,9 @@ struct ext4_recovery_report {
 	uint32_t transactions;
 	uint32_t replayed_blocks;
 	uint32_t revoked_blocks;
+	uint32_t cleaned_orphans;
+	uint32_t orphan_transactions;
+	bool accounting_updated;
 	bool discarded_tail;
 };
 
@@ -188,11 +195,13 @@ enum ext4_result ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t genera
  * Shrink releases data and unused mapping nodes, including allocations beyond
  * EOF, and zeroes the retained partial block. Growth exposes zero bytes without
  * allocating holes. Size, block accounting and attributes commit atomically.
- * The full mapping tree and changed metadata must fit the transaction bound;
+ * Changed mapping nodes and other metadata must fit the transaction bound;
  * credit exhaustion rejects without device writes. result changes on success. */
 enum ext4_result ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint64_t size, const struct ext4_inode_update *update, struct ext4_inode *result);
-/* Offline recovery only. A read-only mount never invokes this operation.
+/* Offline recovery replays the journal, reconstructs allocation summaries and
+ * completes legacy orphan-list cleanup in bounded durable transactions.
+ * A read-only mount never invokes this operation.
  * On error the resource remains unmounted and must not be used for mutations. */
 enum ext4_result ext4_recover(const struct ext4_environment *environment,
     const struct ext4_write_environment *writer, struct ext4_recovery_report *report);

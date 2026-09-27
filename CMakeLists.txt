@@ -16,7 +16,7 @@ option(EXT4_UNWRITTEN_TESTS "Require independent unwritten-allocation fixtures" 
 set(EXT4_CORE_SOURCES
     core/support.c core/mount.c core/inode.c core/read.c core/directory.c
     core/journal.c core/recovery.c core/group.c core/system.c
-    core/allocate.c core/map_write.c core/write.c)
+    core/allocate.c core/map_write.c core/write.c core/orphan.c)
 add_library(ext4_core STATIC ${EXT4_CORE_SOURCES})
 target_include_directories(ext4_core PUBLIC include)
 target_compile_options(ext4_core PRIVATE
@@ -101,6 +101,12 @@ add_test(NAME allocation-and-growth COMMAND ext4-write-test --allocation ${EXT4_
 set_tests_properties(allocation-and-growth PROPERTIES TIMEOUT 600)
 add_test(NAME truncate-and-free COMMAND ext4-write-test --truncate ${EXT4_WRITE_IMAGES})
 set_tests_properties(truncate-and-free PROPERTIES TIMEOUT 600)
+add_executable(ext4-orphan-test tests/orphan.c)
+target_include_directories(ext4-orphan-test PRIVATE core)
+target_link_libraries(ext4-orphan-test PRIVATE ext4_posix)
+target_compile_options(ext4-orphan-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
+add_test(NAME orphan-truncate-recovery COMMAND ext4-orphan-test ${EXT4_WRITE_IMAGES})
+set_tests_properties(orphan-truncate-recovery PROPERTIES TIMEOUT 600)
 set(EXT4_ALLOCATION_FIXTURES "${CMAKE_SOURCE_DIR}/artifacts/allocation-fixtures" CACHE PATH
     "Independent unwritten-allocation images")
 if(EXT4_UNWRITTEN_TESTS)

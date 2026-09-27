@@ -69,6 +69,7 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	fs->first_inode =
 	    revision == 0 ? EXT4_FIRST_NON_RESERVED_INODE : ext4_le32(&super->first_inode);
 	fs->journal_inode = ext4_le32(&super->journal_inode);
+	fs->last_orphan = ext4_le32(&super->last_orphan);
 	fs->reserved_gdt_blocks = ext4_le16(&super->reserved_gdt_blocks);
 	fs->inode_size = revision == 0 ? EXT4_INODE_BASE_SIZE : ext4_le16(&super->inode_size);
 	fs->descriptor_size = (incompat & EXT4_FEATURE_INCOMPAT_64BIT)

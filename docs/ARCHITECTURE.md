@@ -60,7 +60,7 @@ revokes. It bounds the journal to 1,048,576 data blocks, 1,024 data runs and 8,1
 mapping blocks, a writing transaction to 256 snapshots, and recovery to 1,048,576
 records. Exceeding a bound
 is an explicit unsupported result. External journals, checksum v1, async/fast
-commit, orphan cleanup and general filesystem mutation remain separate work.
+commit, the modern orphan-file feature and general filesystem mutation remain separate work.
 The internal block transaction interface is not an application or driver ioctl.
 Platform adapters remain read-only until their metadata ownership, native cache
 integration and durable device-barrier paths are implemented and tested.
@@ -108,8 +108,9 @@ group/superblock accounting and admitted attribute transition in one journal
 transaction. It validates the entire inode map first: all physical ranges must
 be allocated, disjoint from each other and protected metadata, and agree with
 the inode's block count. Its temporary ownership index is capped at 1,048,576
-ranges (16 MiB), and all mapping-node snapshots must fit the journal credit
-bound. This checks ownership within that inode, not across every inode on disk.
+ranges (16 MiB). Validation reads mapping nodes into at most five heap block buffers;
+only changed paths consume journal credits. This checks ownership within that inode,
+not across every inode on disk.
 Extent suffix removal frees empty nodes and collapses a small sole child back
 into the inode. Indirect removal releases empty paths through all three levels.
 Shrink zeroes a retained written partial block; growth exposes zero bytes and
@@ -120,8 +121,30 @@ another transaction can reuse freed blocks. There are no deferred home writes
 from a previous owner. Relaxing this ordering would require revoke and reuse
 ownership rules. Truncate currently cancels before resource writes when its
 whole mapping/metadata set exceeds the transaction bound. Arbitrarily large
-multi-transaction truncation and persistent orphan cleanup remain required work;
+multi-transaction truncation initiated by a live API remains required work;
 this bounded API does not claim that contract or support open-unlinked files.
+
+Offline recovery completes legacy orphan-list operations after journal replay.
+It validates the entire inode-number chain, allocation, checksums, types and cycles
+before the first cleanup transaction. Each inode's complete block map is checked
+before releasing its first batch. Linked regular files retain their recorded size,
+links and attributes; cleanup removes blocks beyond EOF and zeroes the retained
+partial block. Unlinked files, directories and long symlinks release their maps,
+then their inode bit. Short symlinks and special-file device fields are never read
+as block pointers. Inode release updates bitmap checksums, free-inode and directory
+counts, clears the record, and preserves its generation for future reuse.
+
+Removal uses bounded batches, retaining the orphan entry until the final inode/map
+and list update commit together. Interrupted cleanup can restart from the remaining
+map; it never reuses a block before the previous transaction's checkpoint completes.
+The recovery report separates replayed transactions, cleanup transactions and
+completed orphan entries. Unsupported inode attributes/flags leave cleanup pending.
+Modern orphan files and online open-unlinked lifetime are not yet implemented.
+
+Linux's primary free-block/inode summaries may lag committed group-descriptor
+changes. Explicit recovery reconstructs those totals from the validated, replayed
+group descriptors in a journal transaction before cleanup. This is restricted to
+recovery; ordinary clean writable mounts still reject inconsistent summaries.
 
 The admitted operation supplies final permission bits and captured timestamps
 under the same owner lock as authorization and mutation. Ownership changes must

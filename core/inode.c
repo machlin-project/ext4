@@ -54,8 +54,9 @@ ext4_inode_times(const struct ext4_inode_disk *disk, uint16_t extra_size, struct
 	return error;
 }
 
-enum ext4_result
-ext4_inode_decode(struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4_inode *inode)
+static enum ext4_result
+ext4_inode_decode_record(
+    struct ext4_fs *fs, uint32_t number, void *buffer, bool orphan, struct ext4_inode *inode)
 {
 	struct ext4_inode_disk *disk;
 	struct ext4_inode decoded;
@@ -120,7 +121,7 @@ ext4_inode_decode(struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4
 	    ext4_le32(&disk->xattr_block_lo) | ((uint64_t)ext4_le16(&disk->xattr_block_hi) << 32);
 	decoded.fast_symlink = (decoded.mode & EXT4_MODE_TYPE) == EXT4_MODE_SYMLINK &&
 	    decoded.blocks_512 == (xattr_block == 0 ? 0 : fs->info.block_size / 512U);
-	if (decoded.mode == 0 || decoded.links == 0) {
+	if (decoded.mode == 0 || (!orphan && decoded.links == 0)) {
 		error = EXT4_NOT_FOUND;
 	} else if (decoded.flags & EXT4_INODE_INLINE_DATA) {
 		error = EXT4_UNSUPPORTED;
@@ -132,6 +133,50 @@ ext4_inode_decode(struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4
 	}
 out:
 	return error;
+}
+
+enum ext4_result
+ext4_inode_decode(struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4_inode *inode)
+{
+	return ext4_inode_decode_record(fs, number, buffer, false, inode);
+}
+
+enum ext4_result
+ext4_inode_decode_orphan(
+    struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4_inode *inode)
+{
+	return ext4_inode_decode_record(fs, number, buffer, true, inode);
+}
+
+enum ext4_result
+ext4_inode_writable(
+    struct ext4_fs *fs, const struct ext4_inode_disk *disk, const struct ext4_inode *inode)
+{
+	size_t xattr_offset;
+	uint16_t extra_size;
+
+	if (inode->flags & ~EXT4_INODE_WRITABLE_FLAGS) {
+		return EXT4_UNSUPPORTED;
+	}
+	if (((inode->flags & EXT4_INODE_EXTENTS) &&
+		!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS)) ||
+	    ((inode->flags & EXT4_INODE_HUGE_FILE) &&
+		!(fs->info.feature_ro_compat & EXT4_FEATURE_RO_HUGE_FILE))) {
+		return EXT4_CORRUPT;
+	}
+	/* Attribute ownership and ACL/security policy need their own transaction
+	 * contract, including releasing external attribute blocks on deletion. */
+	if (ext4_le32(&disk->xattr_block_lo) != 0 || ext4_le16(&disk->xattr_block_hi) != 0) {
+		return EXT4_UNSUPPORTED;
+	}
+	extra_size = fs->inode_size > EXT4_INODE_BASE_SIZE ? ext4_le16(&disk->extra_size) : 0;
+	xattr_offset = EXT4_INODE_BASE_SIZE + extra_size;
+	if (extra_size != 0 && xattr_offset <= fs->inode_size - sizeof(struct ext4_le32) &&
+	    ext4_le32((const struct ext4_le32 *)((const uint8_t *)disk + xattr_offset)) ==
+		EXT4_XATTR_MAGIC) {
+		return EXT4_UNSUPPORTED;
+	}
+	return EXT4_OK;
 }
 
 void

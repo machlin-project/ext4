@@ -8,7 +8,7 @@ fixture-generation command does not prove the corresponding runtime behavior.
 
 ## Portable suites
 
-`make test` runs the reader, malformed-image, file-write, allocation, truncate and journal tests
+`make test` runs the reader, malformed-image, file-write, allocation, truncate, orphan and journal tests
 with ASan/UBSan. The 1 KiB and 4 KiB journal suites use separate volatile and
 persistent device states. They interrupt each write and flush, then reopen the
 surviving medium. Cases retain none, all or alternating pending blocks; partial
@@ -36,6 +36,9 @@ contract, not physical power-loss protection on a particular disk.
 | Journal layouts | Legacy without checksums, checksum v2/v3, 32/64-bit tags, escape records, multiple descriptor blocks, ring wrap and sequence wrap |
 | Persistence | Every write/flush interruption, three pending-write survival patterns, partial writes, durable commit before home writes, all-old or all-new metadata after recovery |
 | Recovery faults | Interrupted replay and retry, allocation/read failures in each distinct ownership phase, no leaks, no writes on already clean media |
+| Orphan recovery | Linked partial truncates and hardlinks; Linux-authored open-unlinked ordinary/sparse files, directories, short/long symlinks and FIFO; inode/data/mapping reclamation, partial-tail zeroing, repeated recovery |
+| Orphan validation | Reserved/free/out-of-range inode numbers, self/pair/tail cycles, zero/unsupported types and flags, xattrs, inode checksum/block-count errors and protected data targets; no cleanup transaction on rejection |
+| Orphan failures and scale | Every replay/recount/cleanup allocation/read, every write/flush cut with three survival patterns and torn writes; a 257-leaf indirect map exceeds atomic journal capacity but completes in batches |
 | Corruption | Corrupt committed payload/descriptor rejects replay, invalid commit discards the incomplete tail; a torn checksummed control block fails closed |
 | Independent replay | debugfs-authored commits, unfinished tail, revokes and later reuse; exact recovered blocks, repeated recovery and e2fsck |
 | Linux roundtrip | Linux mounts/replays our pending log or checks a clean mutation export, commits metadata/growth/truncate, stops without unmount; our core replays the Linux-authored transaction, then contents, owners, mode and e2fsck are checked |
@@ -47,6 +50,10 @@ every operation in the small transaction and recovery sequence.
 The file-write suite additionally injects every allocation/read after its writable
 mount, including validation and snapshot preparation. It does not enumerate every
 identical call made while mapping the journal during mount.
+The orphan suite samples the first and last 32 callbacks of the repeated journal
+mapping phase, then injects every callback through replay, summary reconstruction
+and cleanup. Its large indirect-map case checks successful reclamation beyond the
+atomic credit limit; exhaustive fault cuts use smaller multi-transaction maps.
 
 `ext4-write-test --truncate` runs resize and freeing cases across the selected
 profiles. Truncate exports include the final reused block and three intermediate
@@ -54,6 +61,15 @@ sizes retaining different portions of the fragmented mapping tree; independent
 byte oracles and e2fsck inspect those states as well. `--export-only --export DIR`
 runs the successful export scenarios without repeating the fault loops already
 run by CTest. It is an artifact-generation mode, not the complete test suite.
+
+`ext4-orphan-test` constructs linked-truncate intents in copies of the ordinary
+fixtures. `--pending` instead consumes untouched Linux orphan images. All mutations
+and errors use RAM copies. `--smoke --export DIR` exports successful pending/clean
+pairs for independent inspection. `check_orphans.py` uses e2fsck as a separate
+replayer, checks inode allocation and live contents, and requires a nonrepairing
+e2fsck pass on the core result before any oracle comparison. It measures unrelated
+directory indexing performed by e2fsck separately; unlinked cases must also return
+exactly to the pre-Linux baseline's free-block/inode totals.
 
 Each unsupported format, fail-closed corruption case and unavailable runtime is
 reported separately from successfully recovered transactions. In particular,

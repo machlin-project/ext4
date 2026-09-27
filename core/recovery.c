@@ -440,15 +440,78 @@ ext4_recovery_validate_home(struct ext4_journal *journal)
 	    fresh->inode_size != fs->inode_size || fresh->descriptor_size != fs->descriptor_size ||
 	    fresh->blocks_per_group != fs->blocks_per_group ||
 	    fresh->inodes_per_group != fs->inodes_per_group ||
-	    fresh->checksum_seed != fs->checksum_seed) {
+	    fresh->checksum_seed != fs->checksum_seed || fresh->first_inode != fs->first_inode ||
+	    fresh->journal_inode != fs->journal_inode ||
+	    fresh->reserved_gdt_blocks != fs->reserved_gdt_blocks ||
+	    !ext4_equal(fresh->info.uuid, fs->info.uuid, EXT4_UUID_SIZE)) {
 		error = EXT4_UNSUPPORTED;
 	} else {
 		error = ext4_get_inode(fresh, EXT4_ROOT_INODE, &root);
 		if (error == EXT4_OK && (root.mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
 			error = EXT4_CORRUPT;
 		}
+		if (error == EXT4_OK) {
+			fs->info = fresh->info;
+			fs->last_orphan = fresh->last_orphan;
+		}
 	}
 	ext4_unmount(fresh);
+	return error;
+}
+
+static enum ext4_result
+ext4_recovery_account(struct ext4_fs *fs, struct ext4_recovery_report *report)
+{
+	struct ext4_group group;
+	struct ext4_super_disk *super;
+	struct ext4_transaction *transaction;
+	uint64_t free_blocks = 0;
+	uint64_t free_inodes = 0;
+	uint64_t available_blocks;
+	uint64_t available_inodes;
+	uint32_t index;
+	enum ext4_result error;
+
+	/* Linux's superblock summaries can lag committed allocation changes.
+	 * Reconstruct them from the replayed, checksummed group descriptors only
+	 * during explicit recovery. A clean writable mount still requires a match. */
+	for (index = 0; index < fs->info.groups; index++) {
+		error = ext4_group_get(fs, index, &group);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		available_blocks =
+		    fs->info.blocks - fs->first_data_block - (uint64_t)index * fs->blocks_per_group;
+		available_inodes = fs->info.inodes - (uint64_t)index * fs->inodes_per_group;
+		if (group.free_blocks > available_blocks || group.free_inodes > available_inodes) {
+			return EXT4_CORRUPT;
+		}
+		free_blocks += group.free_blocks;
+		free_inodes += group.free_inodes;
+	}
+	if (free_blocks == fs->info.free_blocks && free_inodes == fs->info.free_inodes) {
+		return EXT4_OK;
+	}
+	error = ext4_transaction_begin(fs->journal, 1, &transaction);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	error = ext4_transaction_super(transaction, &super);
+	if (error != EXT4_OK) {
+		ext4_transaction_cancel(transaction);
+		return error;
+	}
+	ext4_encode32(&super->free_blocks_lo, (uint32_t)free_blocks);
+	if (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
+		ext4_encode32(&super->free_blocks_hi, (uint32_t)(free_blocks >> 32));
+	}
+	ext4_encode32(&super->free_inodes, (uint32_t)free_inodes);
+	error = ext4_transaction_commit(transaction);
+	if (error == EXT4_OK) {
+		fs->info.free_blocks = free_blocks;
+		fs->info.free_inodes = (uint32_t)free_inodes;
+		report->accounting_updated = true;
+	}
 	return error;
 }
 
@@ -475,7 +538,7 @@ ext4_recover(const struct ext4_environment *environment,
 	if (error != EXT4_OK) {
 		return error;
 	}
-	if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER)) {
+	if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER) && fs->last_orphan == 0) {
 		ext4_unmount(fs);
 		error = ext4_mount(environment, &fs);
 		ext4_unmount(fs);
@@ -486,6 +549,7 @@ ext4_recover(const struct ext4_environment *environment,
 		ext4_unmount(fs);
 		return error;
 	}
+	fs->journal = journal;
 	ext4_zero(&scan, sizeof(scan));
 	ext4_zero(&replay, sizeof(replay));
 	scan.journal = journal;
@@ -524,6 +588,17 @@ ext4_recover(const struct ext4_environment *environment,
 		error = ext4_journal_reset(journal, scan.sequence + 1);
 	}
 	if (error == EXT4_OK) {
+		error = ext4_recovery_account(fs, &completed);
+	}
+	if (error == EXT4_OK) {
+		if (fs->last_orphan != 0) {
+			error = ext4_system_ranges_build(fs);
+			if (error == EXT4_OK) {
+				error = ext4_orphan_cleanup(fs, &completed);
+			}
+		}
+	}
+	if (error == EXT4_OK) {
 		error = ext4_journal_finish(journal);
 	}
 out:
@@ -533,7 +608,6 @@ out:
 	if (report != NULL) {
 		*report = completed;
 	}
-	ext4_journal_close(journal);
 	ext4_unmount(fs);
 	return error;
 }

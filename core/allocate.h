@@ -32,6 +32,9 @@ enum ext4_result ext4_allocation_valid_range(
     struct ext4_allocation *allocation, uint64_t block, uint64_t length);
 enum ext4_result ext4_free_blocks(
     struct ext4_allocation *allocation, uint64_t block, uint64_t length);
+enum ext4_result ext4_allocation_super(struct ext4_allocation *allocation);
+enum ext4_result ext4_inode_account(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint64_t size);
 
 struct ext4_map_run {
 	uint64_t physical;
@@ -49,8 +52,16 @@ enum ext4_result ext4_write_map_allocate(struct ext4_allocation *allocation,
     uint64_t *physical, bool *zero);
 /* Validate the entire inode's allocated map before releasing any part of it.
  * Reject shared physical ranges, invalid bitmaps and inconsistent i_blocks.
- * All mapping snapshots must fit the transaction's bounded credit capacity. */
+ * Validation reads the transaction view without enrolling mapping snapshots. */
+enum ext4_result ext4_write_map_validate(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, struct ext4_inode_disk *disk);
 enum ext4_result ext4_write_map_truncate(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t first);
+/* The exclusive owner must validate the complete map before its first step.
+ * Limit bounds data removal; extent cleanup may free two paths of extra nodes.
+ * A successful incomplete step leaves a valid map for the next transaction. */
+enum ext4_result ext4_write_map_trim(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t first, uint32_t limit,
+    bool *done);
 
 #endif

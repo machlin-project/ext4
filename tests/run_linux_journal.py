@@ -32,12 +32,14 @@ def main():
                         help="verify allocation exports and replay a Linux-authored file extension")
     parser.add_argument("--truncate", action="store_true",
                         help="verify truncate exports and replay Linux shrink/grow/reallocation")
+    parser.add_argument("--orphans", action="store_true",
+                        help="generate pending Linux orphan fixtures from checked clean exports")
     parser.add_argument("--case", action="append", default=[],
                         help="select an exact exported image filename (repeatable)")
     args = parser.parse_args()
-    if sum((args.file_writes, args.allocation, args.truncate)) > 1:
-        parser.error("select one of file-write, allocation or truncate exports")
-    clean_exports = args.file_writes or args.allocation or args.truncate
+    if sum((args.file_writes, args.allocation, args.truncate, args.orphans)) > 1:
+        parser.error("select one of file-write, allocation, truncate or orphan modes")
+    clean_exports = args.file_writes or args.allocation or args.truncate or args.orphans
     lab = args.lab.resolve()
     root = Path(__file__).resolve().parent.parent
     output = args.output.resolve()
@@ -82,6 +84,8 @@ def main():
         command.insert(1, "-DEXT4_TEST_ALLOCATION=1")
     if args.truncate:
         command.insert(1, "-DEXT4_TEST_TRUNCATE=1")
+    if args.orphans:
+        command.insert(1, "-DEXT4_TEST_ORPHANS=1")
     with (output / "build.log").open("wb") as log:
         subprocess.run([str(x) for x in command], stdout=log, stderr=subprocess.STDOUT, check=True)
     archives = {}
@@ -147,6 +151,21 @@ def main():
         console = run([runner, kernel, archives[case["block_size"]], "2", "512",
                        "console=hvc0 rdinit=/init panic=-1 loglevel=4", scratch])
         (output / f"{source.stem}.console.log").write_text(console)
+        if args.orphans:
+            for marker in ("LINUX_EXT4_ORPHANS_PENDING", "LINUX_EXT4_COMMITTED_RECOVERY_PENDING",
+                           "LINUX_EXT4_PROBE_RESULT=PASS", f"Linux {module_report['kernel_release']} aarch64"):
+                if marker not in console:
+                    raise RuntimeError(f"missing orphan fixture evidence: {marker}")
+            entries = re.findall(r"LINUX_EXT4_ORPHAN index=(\d+) inode=(\d+) mode=([0-7]+) size=(\d+) blocks=(\d+)", console)
+            if len(entries) != 6 or {int(x[0]) for x in entries} != set(range(6)):
+                raise RuntimeError("incomplete Linux orphan profile")
+            record.update(image=str(scratch), block_size=case["block_size"], source_image=str(source),
+                          output_sha256=digest(scratch), generated=True,
+                          orphans=[dict(index=int(x[0]), inode=int(x[1]), mode=int(x[2], 8),
+                                        size=int(x[3]), blocks_512=int(x[4])) for x in entries])
+            (output / "report.json").write_text(json.dumps(results, indent=2) + "\n")
+            print(f"GENERATED {source.name}: six Linux open-unlinked inode types; recovery not yet checked", flush=True)
+            continue
         verification_marker = ("LINUX_EXT4_TRUNCATE_PASS" if args.truncate else
                                "LINUX_EXT4_ALLOCATION_PASS" if args.allocation else
                                "LINUX_EXT4_FILE_WRITE_PASS" if args.file_writes else "LINUX_EXT4_REPLAY_PASS")
