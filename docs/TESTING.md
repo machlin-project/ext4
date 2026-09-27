@@ -127,6 +127,10 @@ pair. Separate guards verify unchanged media/output on rejection and retained
 identity for hardlink aliases and held sources. The actual indexed fixture is a
 separate rejection suite. `--functional-only` omits the fault/export scenarios;
 it does not stand in for the complete CTest matrix.
+CTest registers each writable image as its own rename test, retaining all 160
+functional sequences and eleven fault operations for that image. This keeps
+per-test timeouts independent of the number of enabled image profiles; CI still
+limits execution to two concurrent tests.
 
 Eleven fault scenarios cover a same-parent file move, a cross-parent populated
 directory move, last-link file/directory/short-symlink/long-symlink replacement,

@@ -671,6 +671,13 @@ are claimed for this change. The owner must serialize core operations; native
 rename locking, authorization, cache coherence, writable adapters, directory
 indexing, whiteouts and ACL/xattr policy remain unaccepted.
 
+The initial rename CI run timed out the two aggregated ten-image suites at 900
+seconds; the small-format and indexed-rejection suites passed. That run is not
+accepted as full CI validation. CTest now schedules each image separately with
+the same complete functional/fault workload, so enabling more profiles does not
+consume one shared per-test deadline. The failed run's output remains under
+`artifacts/checks/rename-ci-artifacts/` and the job log in `artifacts/checks/`.
+
 ## FSKit build evidence
 
 The app and embedded extension compile using the macOS 27 SDK with deployment
