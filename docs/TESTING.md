@@ -186,6 +186,26 @@ splits. Explicit skips identify transitions not applicable to a profile.
 `check_index_faults.py` compares complete old/new directory bytes and object state
 against separate journal-only recovery, including idempotence and source hashes.
 
+`generate_index_fixtures.py --large-dir` uses e2fsprogs to create three trees with
+two internal levels (metadata checksums, indirect maps and legacy group checksums)
+and a full root ready to grow. They retain over 46,000 names each. The separate
+`generate_large_directory_edges.py` copies those verified sources and builds
+underfilled trees with full selected ancestor chains, retaining independently
+hashed names. debugfs frees unused blocks and updates inode accounting; a separate
+wire/checksum encoder writes the retained graph. Nonrepairing e2fsck must accept
+every fixture. Nine graphs occupy 372 through 751 directory blocks, bounding
+exhaustive failure tests without reducing the transitions they exercise.
+
+`large-dir-*` checks complete large graphs, independent lookup/iteration names,
+namespace mutations, root height growth, two internal splits in one transaction,
+and rejection/reuse at maximum height. Compact graphs cover structural damage and
+every allocation/read and write/flush cut of the two growth transitions. An
+isolated in-memory reader tree puts one matching name at successive positions in
+an eight-leaf collision chain spanning both internal levels; it also checks the
+absent result and all lookup resource failures. That modeled collision tree is
+separate from the independently accepted fixture images. The large functional
+probe adds 32 long names; smaller legacy profiles retain their existing workloads.
+
 `generate_index_collisions.py` finds pairs of NAME_MAX byte names with the same
 major hash and independently confirms both through numeric-version debugfs queries.
 `indexed-edges-*` forces the equal hashes across separate leaves with different
@@ -229,6 +249,10 @@ parent. Returned pending Linux transactions are replayed by both the core and
 e2fsprogs. Linux can leave stale primary free-space summaries: the oracle admits
 only the exact summary diagnostics confirmed by independently summed groups;
 the core result must already have correct primary totals and no such diagnostics.
+Large directories use sorted name expectations with binary search. Optional
+extent-collapse advice is admissible only when the exact message is already
+recorded in a successful nonrepairing check of that verified source image; both
+the source and observed advice stay in the report.
 
 `ext4-write-test --truncate` runs resize and freeing cases across the selected
 profiles. Truncate exports include the final reused block and three intermediate

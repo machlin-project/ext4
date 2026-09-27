@@ -2,6 +2,7 @@
 """Check indexed namespace exports with independent ext4 tools and exact byte names."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -16,6 +17,19 @@ MIN_BLOCK_SIZE = 1024
 INODE_INDEX = 0x1000
 HIGH_BYTE_POSITION = 16
 MUTATION_TIME = (1700000050, 0)
+OUTPUT_INLINE_LIMIT = 32768
+
+
+def recorded_output(payload):
+    """Bound success logs; exact name maps and dumped bytes are checked separately."""
+    result = dict(stdout_bytes=len(payload), stdout_sha256=hashlib.sha256(payload).hexdigest())
+    if len(payload) <= OUTPUT_INLINE_LIMIT:
+        result["stdout"] = payload.decode("utf-8", "backslashreplace")
+    else:
+        result["stdout_excerpt"] = (payload[:OUTPUT_INLINE_LIMIT // 2].decode("utf-8", "backslashreplace") +
+                                    "\n[large command output omitted; full byte count and hash recorded]\n" +
+                                    payload[-OUTPUT_INLINE_LIMIT // 2:].decode("utf-8", "backslashreplace"))
+    return result
 
 
 def filename(index):
@@ -80,7 +94,7 @@ def main():
         def run(command, raw=False):
             done = subprocess.run([str(part) for part in command], capture_output=True, timeout=120)
             record["commands"].append(dict(command=[str(part) for part in command], status=done.returncode,
-                                            stdout=done.stdout.decode("utf-8", "backslashreplace"),
+                                            **recorded_output(done.stdout),
                                             stderr=done.stderr.decode("utf-8", "backslashreplace")))
             if done.returncode != 0:
                 save()
@@ -105,7 +119,8 @@ def main():
         before = accounting(run([tools["dumpe2fs"], "-h", source]))
         after = accounting(run([tools["dumpe2fs"], "-h", image]))
         block_size = before["Block size"]
-        added = 700 if block_size == MIN_BLOCK_SIZE else 160
+        large = "large_dir" in fixture["features"]
+        added = 32 if large else 700 if block_size == MIN_BLOCK_SIZE else 160
         old_root = listing(source, "/")
         new_root = listing(image, "/")
         container = stat(image, "/container")
@@ -118,6 +133,7 @@ def main():
         old_hello = stat(source, "/hello.txt")
         hello = stat(image, "/hello.txt")
         old_entries = listing(source, "/indexed")
+        old_peer_entries = listing(source, "/peer")
         new_entries = listing(image, "/indexed")
         expected = dict(old_entries)
         expected.update({filename(index): hello["inode"] for index in range(added)})
@@ -145,20 +161,34 @@ def main():
                 parent["flags"] & INODE_INDEX and parent["size"] > old_parent["size"] and
                 parent["links"] == old_parent["links"] + 1, "Indexed directory identity, growth or link count changed incorrectly")
         require(hello["inode"] == old_hello["inode"] and hello["generation"] == old_hello["generation"] and
-                hello["links"] == len(old_entries) - 3 + added + 1, "Indexed hardlink count or identity is incorrect")
-        for label, candidate in (("source", source), ("written", image)):
-            dump = output / f"{source.stem}-{label}-hello.data"
-            run([tools["debugfs"], "-R", f"dump /hello.txt {dump}", candidate])
-            require(dump.read_bytes() == b"Machlin ext4\n", "Retained file bytes changed")
+                hello["links"] == old_hello["links"] + added -
+                sum(number == hello["inode"] for number in old_peer_entries.values()),
+                "Indexed hardlink count or identity is incorrect")
+        if b"alternate.txt" in old_root:
+            old_alternate = stat(source, "/alternate.txt")
+            alternate = stat(image, "/alternate.txt")
+            removed = sum(number == old_alternate["inode"] for number in old_peer_entries.values())
+            require(alternate == dict(old_alternate, links=old_alternate["links"] - removed,
+                                      ctime=MUTATION_TIME if removed else old_alternate["ctime"]),
+                    "Deleting the peer changed the alternate target incorrectly")
+        targets = {"hello": b"Machlin ext4\n"}
+        if b"alternate.txt" in old_root:
+            targets["alternate"] = b"Alternate ext4 target\n"
+        for target, contents in targets.items():
+            for label, candidate in (("source", source), ("written", image)):
+                dump = output / f"{source.stem}-{label}-{target}.data"
+                run([tools["debugfs"], "-R", f"dump /{target}.txt {dump}", candidate])
+                require(dump.read_bytes() == contents, "Retained file bytes changed")
         htree = run([tools["debugfs"], "-R", "htree_dump /indexed", image])
         levels = re.search(r"Indirect levels:\s+(\d+)", htree)
         version = re.search(r"Hash Version:\s+(\d+)", htree)
         require(levels is not None and version is not None and
-                int(levels[1]) == int(block_size == MIN_BLOCK_SIZE) and
+                int(levels[1]) == (2 if large else int(block_size == MIN_BLOCK_SIZE)) and
                 int(version[1]) == fixture["hash_version"], "Independent htree shape or algorithm is incorrect")
         require(after["Free inodes"] == before["Free inodes"] - 3, "Inode allocation/removal accounting is incorrect")
         require(digest(source) == source_hash and digest(image) == image_hash, "Independent checking changed an input image")
         record.update(passed=True, added_names=added, levels=int(levels[1]), parent=parent,
+                      retained_paths=["/alternate.txt"] if b"alternate.txt" in old_root else [],
                       hello=hello, objects=new_objects, accounting_before=before, accounting_after=after,
                       unchanged_inputs=True, raw_filename_mapping_verified=True)
         save()

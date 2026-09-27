@@ -82,6 +82,11 @@ jobs:
             2>&1 | tee artifacts/checks/index-fixtures.log
           python3 tests/generate_index_fixtures.py --capacity --output artifacts/index-capacity-fixture \
             2>&1 | tee artifacts/checks/index-capacity-fixture.log
+          python3 tests/generate_index_fixtures.py --large-dir --output artifacts/large-directory-fixtures \
+            2>&1 | tee artifacts/checks/large-directory-fixtures.log
+          python3 tests/generate_large_directory_edges.py --fixtures artifacts/large-directory-fixtures \
+            --output artifacts/large-directory-edge-fixtures \
+            2>&1 | tee artifacts/checks/large-directory-edge-fixtures.log
       - name: Generate independently filled block bitmaps
         if: matrix.suite == 'namespace'
         run: |
@@ -110,7 +115,9 @@ jobs:
           if [[ '${{ matrix.suite }}' == indexed ]]; then
             index_options=(-Dindex_fixtures="$PWD/artifacts/index-fixtures" \
               -Dindex_collisions="$PWD/artifacts/index-collisions/vectors.txt" \
-              -Dindex_capacity="$PWD/artifacts/index-capacity-fixture/index-capacity.img")
+              -Dindex_capacity="$PWD/artifacts/index-capacity-fixture/index-capacity.img" \
+              -Dlarge_directory_fixtures="$PWD/artifacts/large-directory-fixtures" \
+              -Dlarge_directory_edges="$PWD/artifacts/large-directory-edge-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == namespace ]]; then
             space_options=(-Dspace_fixtures="$PWD/artifacts/space-fixtures")
@@ -560,6 +567,40 @@ jobs:
               ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           done
           df -h .
+      - name: Independently verify large-directory mutations and recovery
+        if: matrix.suite == 'indexed'
+        run: |
+          exports=artifacts/large-directory-exports
+          mkdir "$exports"
+          for profile in index-large-dir index-large-dir-indirect index-large-dir-gdt; do
+            .build/ext4-index-write-test --export "$exports" \
+              "artifacts/large-directory-fixtures/$profile.img" \
+              2>&1 | tee "artifacts/checks/$profile-functional-exports.log"
+            for transition in grow cascade; do
+              .build/ext4-index-write-test --fault-smoke --large-split "$transition" --export "$exports" \
+                "artifacts/large-directory-edge-fixtures/$profile-$transition.img" \
+                2>&1 | tee "artifacts/checks/$profile-$transition-exports.log"
+            done
+            .build/ext4-index-write-test --capacity --export "$exports" \
+              "artifacts/large-directory-edge-fixtures/$profile-capacity.img" \
+              2>&1 | tee "artifacts/checks/$profile-capacity-exports.log"
+            python3 tests/check_index_capacity.py --fixture artifacts/large-directory-edge-fixtures/report.json \
+              --case "$profile-capacity.img" --image "$exports/indexed-capacity-reused-$profile-capacity.img" \
+              --output "artifacts/large-directory-independent/$profile-capacity" \
+              2>&1 | tee "artifacts/checks/$profile-capacity-independent.log"
+          done
+          .build/ext4-index-write-test --fault-smoke --large-split grow --export "$exports" \
+            artifacts/large-directory-fixtures/index-large-dir-capacity.img \
+            2>&1 | tee artifacts/checks/large-directory-full-root-exports.log
+          python3 tests/check_index_write.py --fixtures artifacts/large-directory-fixtures/report.json \
+            --case index-large-dir.img --case index-large-dir-indirect.img --case index-large-dir-gdt.img \
+            --exports "$exports" --output artifacts/large-directory-independent/functional \
+            2>&1 | tee artifacts/checks/large-directory-functional-independent.log
+          python3 tests/check_index_faults.py --exports "$exports" --recover .build/ext4-recover \
+            --output artifacts/large-directory-independent/splits \
+            2>&1 | tee artifacts/checks/large-directory-splits-independent.log
+          find "$exports" artifacts/large-directory-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Preserve test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -6,6 +6,7 @@ struct ext4_lookup_node {
 	struct ext4_index_range range;
 	uint32_t logical;
 	uint16_t count;
+	uint16_t position;
 };
 
 struct ext4_lookup_state {
@@ -18,8 +19,7 @@ struct ext4_lookup_state {
 	uint32_t hash;
 	uint8_t version;
 	uint8_t levels;
-	struct ext4_lookup_node root;
-	struct ext4_lookup_node node;
+	struct ext4_lookup_node nodes[EXT4_DX_MAX_INDIRECT_LEVELS + 1U];
 	uint8_t *leaf;
 };
 
@@ -187,20 +187,37 @@ static enum ext4_result
 ext4_lookup_leaf(struct ext4_lookup_state *state, uint32_t logical,
     const struct ext4_index_range *range, uint32_t *number)
 {
-	const struct ext4_dx_entry_disk *entries = ext4_lookup_entries(&state->root);
-	uint16_t position;
-
 	if (++state->leaves >= state->blocks) {
 		return EXT4_CORRUPT;
 	}
-	if (state->levels != 0) {
-		for (position = 0; position < state->root.count; position++) {
-			if (ext4_le32(&entries[position].block) == logical) {
-				return EXT4_CORRUPT;
+	return ext4_lookup_scan(state, logical, range, number);
+}
+
+static enum ext4_result
+ext4_lookup_ancestors(const struct ext4_lookup_state *state, uint8_t level, uint32_t logical)
+{
+	const struct ext4_dx_entry_disk *entries;
+	const struct ext4_lookup_node *node;
+	uint8_t ancestor;
+	uint16_t entry;
+
+	for (ancestor = 0; ancestor <= level; ancestor++) {
+		node = &state->nodes[ancestor];
+		if (logical == node->logical) {
+			return EXT4_CORRUPT;
+		}
+		/* Every child of an earlier ancestor is an index node at a shallower
+		 * level. The selected child cannot alias any of those known nodes. */
+		if (ancestor < level) {
+			entries = ext4_lookup_entries(node);
+			for (entry = 0; entry < node->count; entry++) {
+				if (ext4_le32(&entries[entry].block) == logical) {
+					return EXT4_CORRUPT;
+				}
 			}
 		}
 	}
-	return ext4_lookup_scan(state, logical, range, number);
+	return EXT4_OK;
 }
 
 static enum ext4_result
@@ -224,29 +241,31 @@ ext4_lookup_indexed(struct ext4_lookup_state *state, uint32_t *number)
 	struct ext4_index_metadata metadata;
 	struct ext4_index_range range;
 	struct ext4_name_hash hash;
+	struct ext4_lookup_node *root = &state->nodes[0];
+	struct ext4_lookup_node *node;
+	struct ext4_lookup_node *child;
 	uint32_t flags = state->fs->directory_hash_flags;
 	uint32_t logical;
-	uint16_t parent;
-	uint16_t child;
+	uint16_t position;
+	uint8_t level = 0;
 	enum ext4_result error;
 
 	if (state->blocks < 2 ||
 	    !(state->fs->info.feature_compat & EXT4_FEATURE_COMPAT_DIR_INDEX)) {
 		return EXT4_CORRUPT;
 	}
-	error = ext4_lookup_read(state, 0, state->root.buffer);
+	error = ext4_lookup_read(state, 0, root->buffer);
 	if (error == EXT4_OK) {
-		error = ext4_index_decode(
-		    state->fs, state->directory, 0, state->root.buffer, &metadata);
+		error = ext4_index_decode(state->fs, state->directory, 0, root->buffer, &metadata);
 	}
 	if (error != EXT4_OK) {
 		return error;
 	}
-	state->root.count = metadata.count;
-	state->root.range.upper = EXT4_DX_HASH_END;
+	root->count = metadata.count;
+	root->range.upper = EXT4_DX_HASH_END;
 	state->levels = metadata.levels;
 	state->version = metadata.version;
-	error = ext4_lookup_node_validate(state, &state->root);
+	error = ext4_lookup_node_validate(state, root);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -274,55 +293,56 @@ ext4_lookup_indexed(struct ext4_lookup_state *state, uint32_t *number)
 		return error;
 	}
 	state->hash = hash.major;
-	for (parent = ext4_lookup_position(&state->root, state->hash); parent < state->root.count;
-	    parent++) {
-		range = ext4_lookup_range(&state->root, parent);
-		if (!ext4_index_contains(&range, state->hash)) {
-			break;
+	root->position = ext4_lookup_position(root, state->hash);
+	for (;;) {
+		node = &state->nodes[level];
+		position = node->position;
+		if (position >= node->count) {
+			if (level == 0) {
+				return EXT4_NOT_FOUND;
+			}
+			level--;
+			continue;
 		}
-		error = ext4_lookup_child(&state->root, parent, &logical);
+		range = ext4_lookup_range(node, position);
+		if (!ext4_index_contains(&range, state->hash)) {
+			node->position = node->count;
+			continue;
+		}
+		node->position++;
+		error = ext4_lookup_child(node, position, &logical);
+		if (error == EXT4_OK) {
+			error = ext4_lookup_ancestors(state, level, logical);
+		}
 		if (error != EXT4_OK) {
 			return error;
 		}
-		if (state->levels == 0) {
+		if (level == state->levels) {
 			error = ext4_lookup_leaf(state, logical, &range, number);
 			if (error != EXT4_NOT_FOUND) {
 				return error;
 			}
 			continue;
 		}
-		state->node.logical = logical;
-		state->node.range = range;
-		error = ext4_lookup_read(state, logical, state->node.buffer);
+		child = &state->nodes[level + 1U];
+		child->logical = logical;
+		child->range = range;
+		error = ext4_lookup_read(state, logical, child->buffer);
 		if (error == EXT4_OK) {
 			error = ext4_index_decode(
-			    state->fs, state->directory, logical, state->node.buffer, &metadata);
+			    state->fs, state->directory, logical, child->buffer, &metadata);
 		}
 		if (error != EXT4_OK) {
 			return error;
 		}
-		state->node.count = metadata.count;
-		error = ext4_lookup_node_validate(state, &state->node);
+		child->count = metadata.count;
+		error = ext4_lookup_node_validate(state, child);
 		if (error != EXT4_OK) {
 			return error;
 		}
-		for (child = ext4_lookup_position(&state->node, state->hash);
-		    child < state->node.count; child++) {
-			range = ext4_lookup_range(&state->node, child);
-			if (!ext4_index_contains(&range, state->hash)) {
-				break;
-			}
-			error = ext4_lookup_child(&state->node, child, &logical);
-			if (error != EXT4_OK) {
-				return error;
-			}
-			error = ext4_lookup_leaf(state, logical, &range, number);
-			if (error != EXT4_NOT_FOUND) {
-				return error;
-			}
-		}
+		child->position = ext4_lookup_position(child, state->hash);
+		level++;
 	}
-	return EXT4_NOT_FOUND;
 }
 
 enum ext4_result
@@ -335,6 +355,7 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 	size_t capacity;
 	size_t index;
 	uint32_t number;
+	uint8_t levels;
 	bool indexed;
 	enum ext4_result error;
 
@@ -363,7 +384,8 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 		return EXT4_RANGE;
 	}
 	indexed = (directory->flags & EXT4_INODE_INDEX) != 0;
-	capacity = (indexed ? EXT4_DX_MAX_INDIRECT_LEVELS + 2U : 1U) * fs->info.block_size;
+	levels = ext4_index_max_levels(fs);
+	capacity = (indexed ? levels + 2U : 1U) * fs->info.block_size;
 	buffer = fs->environment.allocate(fs->environment.context, capacity);
 	if (buffer == NULL) {
 		return EXT4_NO_MEMORY;
@@ -374,9 +396,10 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 	state.name_length = name_length;
 	state.leaf = buffer;
 	if (indexed) {
-		state.root.buffer = buffer;
-		state.node.buffer = buffer + fs->info.block_size;
-		state.leaf = buffer + 2U * fs->info.block_size;
+		for (index = 0; index <= levels; index++) {
+			state.nodes[index].buffer = buffer + index * fs->info.block_size;
+		}
+		state.leaf = buffer + (levels + 1U) * fs->info.block_size;
 	}
 	error =
 	    indexed ? ext4_lookup_indexed(&state, &number) : ext4_lookup_linear(&state, &number);

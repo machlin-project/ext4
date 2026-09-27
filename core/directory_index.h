@@ -5,8 +5,6 @@
 #include "allocate.h"
 
 #define EXT4_DIRECTORY_MAX_BLOCKS (1U << 20)
-/* An additional level requires the separately negotiated LARGEDIR format. */
-#define EXT4_DX_MAX_INDIRECT_LEVELS 1U
 #define EXT4_DX_HASH_END (UINT64_C(1) << 32)
 
 enum ext4_index_kind { EXT4_INDEX_UNKNOWN, EXT4_INDEX_ROOT, EXT4_INDEX_NODE, EXT4_INDEX_LEAF };
@@ -42,6 +40,7 @@ struct ext4_directory_index {
 	uint8_t version;
 };
 
+uint8_t ext4_index_max_levels(const struct ext4_fs *fs);
 /* Decode one index header without interpreting its child pointers. The buffer
  * and result remain unchanged on failure; checksum verification is read-only. */
 enum ext4_result ext4_index_decode(struct ext4_fs *fs, const struct ext4_inode *inode,

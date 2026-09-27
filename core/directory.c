@@ -38,7 +38,7 @@ ext4_directory_checksum(
 		if (logical == 0) {
 			root = (struct ext4_dx_root_prefix_disk *)buffer;
 			if (ext4_le32(&root->reserved) != 0 || root->info_length != 8 ||
-			    root->indirect_levels > 2) {
+			    root->indirect_levels > EXT4_DX_MAX_INDIRECT_LEVELS) {
 				return EXT4_CORRUPT;
 			}
 			base = sizeof(*root);

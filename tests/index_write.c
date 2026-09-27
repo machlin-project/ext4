@@ -5,6 +5,7 @@
 
 #define ADDED_SMALL 700U
 #define ADDED_LARGE 160U
+#define ADDED_DEEP 32U
 #define TEST_NAME_PREFIX 11U
 #define TEST_HIGH_BYTE_POSITION 16U
 #define INDEX_SMALL_JOURNAL_CREDITS 4U
@@ -201,6 +202,9 @@ functional(struct device *device, const char *exports, const char *path)
 
 	CHECK(clean != NULL);
 	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	if (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_LARGEDIR) {
+		added = ADDED_DEEP;
+	}
 	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
 	parent = lookup(fs, &root, "indexed");
 	peer = lookup(fs, &root, "peer");
@@ -215,7 +219,7 @@ functional(struct device *device, const char *exports, const char *path)
 	tree_shape(fs, &parent, &nodes, &levels);
 	CHECK(parent.size > before && (parent.flags & EXT4_INODE_INDEX));
 	if (device->block_size == EXT4_MIN_BLOCK_SIZE) {
-		CHECK(levels == 1 && nodes > 2);
+		CHECK(levels == ext4_index_max_levels(fs) && nodes > 2);
 	}
 	verify_names(fs, &parent, added, hello.number);
 	writes = device->writes;
@@ -555,18 +559,18 @@ root_capacity(struct device *device, const char *path, const char *exports)
 	uint32_t leaf = UINT32_MAX;
 	uint32_t root_limit;
 	uint32_t node_limit;
+	uint32_t tail;
 
 	device_reset(device, device->base);
-	CHECK(device->metadata_checksum && device->block_size == EXT4_MIN_BLOCK_SIZE);
+	CHECK(device->block_size == EXT4_MIN_BLOCK_SIZE);
 	fs = mount_index(device, &parent, &hello);
 	edge_open(fs, &parent, &view);
-	root_limit = (device->block_size - sizeof(struct ext4_dx_root_prefix_disk) -
-			 sizeof(struct ext4_dx_tail_disk)) /
+	tail = fs->metadata_checksum ? sizeof(struct ext4_dx_tail_disk) : 0;
+	root_limit = (device->block_size - sizeof(struct ext4_dx_root_prefix_disk) - tail) /
 	    sizeof(struct ext4_dx_entry_disk);
-	node_limit = (device->block_size - sizeof(struct ext4_dir_header_disk) -
-			 sizeof(struct ext4_dx_tail_disk)) /
+	node_limit = (device->block_size - sizeof(struct ext4_dir_header_disk) - tail) /
 	    sizeof(struct ext4_dx_entry_disk);
-	CHECK(view.tree.levels == EXT4_DX_MAX_INDIRECT_LEVELS &&
+	CHECK(view.tree.levels == ext4_index_max_levels(fs) &&
 	    view.tree.ranges[0].count == root_limit);
 	for (ordinal = 0; ordinal < ADDED_SMALL && leaf == UINT32_MAX; ordinal++) {
 		filename(name, ordinal);
@@ -577,7 +581,12 @@ root_capacity(struct device *device, const char *path, const char *exports)
 			if (view.tree.ranges[logical].kind == EXT4_INDEX_LEAF &&
 			    ext4_index_contains(&view.tree.ranges[logical], hash.major) &&
 			    view.tree.ranges[view.tree.ranges[logical].parent].count ==
-				node_limit) {
+				node_limit &&
+			    (view.tree.levels == EXT4_DX_LEGACY_INDIRECT_LEVELS ||
+				view.tree
+					.ranges[view.tree.ranges[view.tree.ranges[logical].parent]
+						.parent]
+					.count == node_limit)) {
 				leaf = logical;
 				break;
 			}
@@ -734,8 +743,92 @@ changing_media_guards(struct device *device, uint32_t ordinal)
 	     "writes");
 }
 
+static uint32_t
+large_split_point(struct device *device, const char *kind, uint32_t *blocks, uint32_t *nodes)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode parent;
+	struct ext4_inode hello;
+	struct edge_view view;
+	struct ext4_directory_slot slot;
+	struct ext4_name_hash hash;
+	struct ext4_index_range *range;
+	uint8_t name[EXT4_NAME_MAX + 1];
+	uint32_t tail;
+	uint32_t root_limit;
+	uint32_t node_limit;
+	uint32_t logical;
+	uint32_t ordinal;
+	uint32_t selected = UINT32_MAX;
+	bool grow = strcmp(kind, "grow") == 0;
+
+	device_reset(device, device->base);
+	fs = mount_index(device, &parent, &hello);
+	CHECK(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_LARGEDIR);
+	edge_open(fs, &parent, &view);
+	tail = fs->metadata_checksum ? sizeof(struct ext4_dx_tail_disk) : 0;
+	root_limit = (device->block_size - sizeof(struct ext4_dx_root_prefix_disk) - tail) /
+	    sizeof(struct ext4_dx_entry_disk);
+	node_limit = (device->block_size - sizeof(struct ext4_dir_header_disk) - tail) /
+	    sizeof(struct ext4_dx_entry_disk);
+	CHECK(view.tree.levels ==
+	    (grow ? EXT4_DX_LEGACY_INDIRECT_LEVELS : EXT4_DX_MAX_INDIRECT_LEVELS));
+	CHECK(grow ? view.tree.ranges[0].count == root_limit
+		   : view.tree.ranges[0].count < root_limit);
+	*blocks = view.tree.blocks;
+	*nodes = 0;
+	for (logical = 1; logical < view.tree.blocks; logical++) {
+		*nodes += view.tree.ranges[logical].kind == EXT4_INDEX_NODE;
+	}
+	for (ordinal = 0; ordinal < EDGE_SEARCH_LIMIT && selected == UINT32_MAX; ordinal++) {
+		filename(name, ordinal);
+		EXPECT(ext4_directory_hash(
+			   view.tree.version, view.tree.seed, name, EXT4_NAME_MAX, &hash),
+		    EXT4_OK);
+		for (logical = 1; logical < view.tree.blocks; logical++) {
+			range = &view.tree.ranges[logical];
+			if (range->kind == EXT4_INDEX_LEAF &&
+			    ext4_index_contains(range, hash.major) &&
+			    view.tree.ranges[range->parent].count == node_limit &&
+			    (grow ||
+				view.tree.ranges[view.tree.ranges[range->parent].parent].count ==
+				    node_limit)) {
+				selected = ordinal;
+				break;
+			}
+		}
+	}
+	CHECK(selected != UINT32_MAX);
+	edge_close(&view);
+	slot = edge_slot(fs, &parent, name, EXT4_NAME_MAX, EXT4_DIRECTORY_INSERT);
+	CHECK(slot.repack);
+	ext4_unmount(fs);
+	CHECK(device->live == 0 && device->writes == 0);
+	return selected;
+}
+
 static void
-split_faults(struct device *device, const char *path, const char *exports, bool smoke)
+large_split_shape(struct device *device, uint32_t before_blocks, uint32_t before_nodes)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode parent;
+	struct ext4_inode hello;
+	uint32_t nodes;
+	uint8_t levels;
+
+	fs = mount_index(device, &parent, &hello);
+	tree_shape(fs, &parent, &nodes, &levels);
+	CHECK(levels == EXT4_DX_MAX_INDIRECT_LEVELS && nodes == before_nodes + 2 &&
+	    parent.size == (uint64_t)(before_blocks + 3) * device->block_size);
+	ext4_unmount(fs);
+	CHECK(device->live == 0);
+	printf("PASS deep index transition blocks=%u->%u nodes=%u->%u levels=%u\n", before_blocks,
+	    before_blocks + 3, before_nodes, nodes, levels);
+}
+
+static void
+split_faults(struct device *device, const char *path, const char *exports, bool smoke,
+    const char *large_kind)
 {
 	struct trace baseline;
 	struct trace trace;
@@ -746,6 +839,8 @@ split_faults(struct device *device, const char *path, const char *exports, bool 
 	uint32_t limit;
 	uint32_t recovered;
 	uint32_t torn;
+	uint32_t before_blocks = 0;
+	uint32_t before_nodes = 0;
 	unsigned int kind;
 	unsigned int fault;
 	unsigned int survival;
@@ -754,7 +849,15 @@ split_faults(struct device *device, const char *path, const char *exports, bool 
 
 	CHECK(original != NULL && expected != NULL);
 	memcpy(original, device->base, device->size);
-	find_splits(device, points);
+	if (large_kind == NULL) {
+		find_splits(device, points);
+	} else {
+		for (kind = 0; kind < SPLIT_KIND_COUNT; kind++) {
+			points[kind] = UINT32_MAX;
+		}
+		kind = strcmp(large_kind, "grow") == 0 ? GROW_ROOT : SPLIT_NODE;
+		points[kind] = large_split_point(device, large_kind, &before_blocks, &before_nodes);
+	}
 	for (kind = 0; kind < SPLIT_KIND_COUNT; kind++) {
 		if (points[kind] == UINT32_MAX) {
 			printf("SKIP split=%s: this fixture exercises that transition in another "
@@ -763,13 +866,18 @@ split_faults(struct device *device, const char *path, const char *exports, bool 
 			continue;
 		}
 		memcpy(device->base, original, device->size);
-		prepare_split(device, points[kind]);
+		if (large_kind == NULL) {
+			prepare_split(device, points[kind]);
+		}
 		split_capacity_guards(device, points[kind]);
 		changing_media_guards(device, points[kind]);
 		CHECK(snprintf(prefix, sizeof(prefix), "index-before-%s-", split_names[kind]) > 0);
 		storage_export(device, exports, path, prefix);
 		device_reset(device, device->base);
 		EXPECT(split_attempt(device, points[kind], 0, 0, 0, false, &baseline), EXT4_OK);
+		if (large_kind != NULL) {
+			large_split_shape(device, before_blocks, before_nodes);
+		}
 		memcpy(expected, device->stable, device->size);
 		CHECK(snprintf(prefix, sizeof(prefix), "index-atomic-%s-", split_names[kind]) > 0);
 		storage_export(device, exports, path, prefix);
@@ -842,6 +950,7 @@ main(int argc, char **argv)
 	struct device device;
 	const char *exports = NULL;
 	const char *vectors = NULL;
+	const char *large_kind = NULL;
 	bool faults = false;
 	bool smoke = false;
 	bool capacity = false;
@@ -850,6 +959,10 @@ main(int argc, char **argv)
 	while (argument < argc && argv[argument][0] == '-') {
 		if (strcmp(argv[argument], "--capacity") == 0) {
 			capacity = true;
+		} else if (strcmp(argv[argument], "--large-split") == 0 && argument + 1 < argc) {
+			large_kind = argv[++argument];
+			CHECK(
+			    strcmp(large_kind, "grow") == 0 || strcmp(large_kind, "cascade") == 0);
 		} else if (strcmp(argv[argument], "--edges") == 0 && argument + 1 < argc) {
 			vectors = argv[++argument];
 		} else if (strcmp(argv[argument], "--faults") == 0) {
@@ -866,6 +979,7 @@ main(int argc, char **argv)
 	CHECK(argument < argc);
 	CHECK(vectors == NULL || !faults);
 	CHECK(!capacity || (vectors == NULL && !faults));
+	CHECK(large_kind == NULL || faults);
 	for (; argument < argc; argument++) {
 		printf("IMAGE %s\n", argv[argument]);
 		storage_open(&device, argv[argument]);
@@ -874,7 +988,7 @@ main(int argc, char **argv)
 		} else if (vectors != NULL) {
 			indexed_edges(&device, argv[argument], vectors, exports);
 		} else if (faults) {
-			split_faults(&device, argv[argument], exports, smoke);
+			split_faults(&device, argv[argument], exports, smoke, large_kind);
 		} else {
 			functional(&device, exports, argv[argument]);
 		}

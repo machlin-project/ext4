@@ -4,7 +4,7 @@
 
 #include <inttypes.h>
 
-/* These fixtures have at most one internal HTree level and shallow file maps.
+/* These fixtures have at most two internal HTree levels and shallow file maps.
  * Leave room for mapping and inode reads, but reject entry-by-entry lookup. */
 #define LOOKUP_CALLBACK_LIMIT 32U
 
@@ -17,10 +17,13 @@ struct query {
 
 struct lookup_path {
 	uint8_t *root;
+	uint8_t *parent;
+	uint8_t *upper;
 	uint8_t *node;
 	uint8_t *leaf;
 	uint8_t *next_leaf;
 	uint32_t node_logical;
+	uint32_t upper_logical;
 	uint32_t leaf_logical;
 	struct query query;
 };
@@ -64,6 +67,9 @@ enum lookup_damage {
 	LOOKUP_NODE_ALIAS,
 	LOOKUP_NODE_RANGE,
 	LOOKUP_NODE_CHECKSUM,
+	LOOKUP_UPPER_SELF,
+	LOOKUP_UPPER_ALIAS,
+	LOOKUP_LEAF_AS_UPPER,
 	LOOKUP_DAMAGE_COUNT
 };
 
@@ -228,6 +234,7 @@ first_path(struct device *device, struct ext4_fs *fs)
 	struct ext4_dx_count_disk *counts;
 	struct ext4_dir_entry entry;
 	uint32_t record;
+	uint8_t level;
 
 	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root_inode), EXT4_OK);
 	EXPECT(ext4_lookup(fs, &root_inode, (const uint8_t *)"indexed", sizeof("indexed") - 1U,
@@ -237,9 +244,14 @@ first_path(struct device *device, struct ext4_fs *fs)
 	root = (struct ext4_dx_root_prefix_disk *)path.root;
 	counts = (struct ext4_dx_count_disk *)(path.root + sizeof(*root));
 	entries = (struct ext4_dx_entry_disk *)counts;
-	CHECK(ext4_le16(&counts->count) >= 2);
-	if (root->indirect_levels != 0) {
-		CHECK(root->indirect_levels == 1);
+	CHECK(
+	    ext4_le16(&counts->count) >= 1 && root->indirect_levels <= EXT4_DX_MAX_INDIRECT_LEVELS);
+	path.parent = path.root;
+	for (level = 0; level < root->indirect_levels; level++) {
+		if (path.node != NULL) {
+			path.parent = path.upper = path.node;
+			path.upper_logical = path.node_logical;
+		}
 		path.node_logical = ext4_le32(&entries[0].block);
 		path.node = mapped_block(device, fs, &path.query.directory, path.node_logical);
 		counts =
@@ -307,8 +319,6 @@ lookup_damage(struct device *device, struct ext4_fs *fs)
 {
 	struct lookup_path path = first_path(device, fs);
 	struct ext4_dx_root_prefix_disk *root = (struct ext4_dx_root_prefix_disk *)path.root;
-	struct ext4_dx_entry_disk *root_entries =
-	    (struct ext4_dx_entry_disk *)(path.root + sizeof(*root));
 	struct ext4_dx_entry_disk *entries;
 	struct ext4_dx_count_disk *counts;
 	struct ext4_dir_header_disk *header;
@@ -326,7 +336,8 @@ lookup_damage(struct device *device, struct ext4_fs *fs)
 	enum lookup_damage damage;
 
 	for (damage = 0; damage < LOOKUP_DAMAGE_COUNT; damage++) {
-		if (damage >= LOOKUP_NODE_INODE && path.node == NULL) {
+		if ((damage >= LOOKUP_NODE_INODE && path.node == NULL) ||
+		    (damage >= LOOKUP_UPPER_SELF && path.upper == NULL)) {
 			skips++;
 			continue;
 		}
@@ -341,6 +352,14 @@ lookup_damage(struct device *device, struct ext4_fs *fs)
 		base = logical == 0 ? sizeof(*root) : sizeof(*header);
 		counts = (struct ext4_dx_count_disk *)(buffer + base);
 		entries = (struct ext4_dx_entry_disk *)counts;
+		/* A newly grown large root may have only one child. Add a second
+		 * deliberately invalid entry for the root order/alias guards. */
+		if (ext4_le16(&counts->count) == 1 &&
+		    (damage == LOOKUP_ROOT_ALIAS || damage == LOOKUP_ROOT_ORDER ||
+			damage == LOOKUP_ROOT_EQUAL)) {
+			entries[1] = entries[0];
+			ext4_encode16(&counts->count, 2);
+		}
 		leaf = damage >= LOOKUP_LEAF_SHORT && damage <= LOOKUP_LEAF_RANGE;
 		header = (struct ext4_dir_header_disk *)(leaf ? path.leaf : buffer);
 		record = ext4_directory_record_length(fs, (struct ext4_dir_header_disk *)path.leaf);
@@ -365,8 +384,11 @@ lookup_damage(struct device *device, struct ext4_fs *fs)
 			expected = EXT4_UNSUPPORTED;
 			break;
 		case LOOKUP_LEVEL:
-			root->indirect_levels = EXT4_DX_MAX_INDIRECT_LEVELS + 1U;
-			expected = EXT4_UNSUPPORTED;
+			root->indirect_levels = ext4_index_max_levels(fs) + 1U;
+			expected = fs->metadata_checksum &&
+				root->indirect_levels > EXT4_DX_MAX_INDIRECT_LEVELS
+			    ? EXT4_CORRUPT
+			    : EXT4_UNSUPPORTED;
 			break;
 		case LOOKUP_FLAGS:
 			root->flags = 1;
@@ -465,16 +487,34 @@ lookup_damage(struct device *device, struct ext4_fs *fs)
 			ext4_encode32(&entries[0].block, path.node_logical);
 			break;
 		case LOOKUP_NODE_AS_LEAF:
-			entries[0].block = root_entries[1].block;
+			entries[0].block = ((struct ext4_dx_entry_disk *)(path.parent +
+			    (path.parent == path.root ? sizeof(*root) : sizeof(*header))))[1]
+					       .block;
 			break;
 		case LOOKUP_NODE_RANGE:
-			entries[1].hash = root_entries[1].hash;
+			entries[1].hash = ((struct ext4_dx_entry_disk *)(path.parent +
+			    (path.parent == path.root ? sizeof(*root) : sizeof(*header))))[1]
+					      .hash;
 			break;
 		case LOOKUP_NODE_CHECKSUM:
 			tail = (struct ext4_dx_tail_disk *)(buffer + base +
 			    ext4_le16(&counts->limit) * sizeof(*counts));
 			ext4_encode32(&tail->checksum, ext4_le32(&tail->checksum) ^ 1U);
 			checksum = false;
+			break;
+		case LOOKUP_UPPER_SELF:
+		case LOOKUP_UPPER_ALIAS:
+			buffer = path.upper;
+			logical = path.upper_logical;
+			entries = (struct ext4_dx_entry_disk *)(buffer + sizeof(*header));
+			if (damage == LOOKUP_UPPER_SELF) {
+				ext4_encode32(&entries[0].block, path.upper_logical);
+			} else {
+				entries[1].block = entries[0].block;
+			}
+			break;
+		case LOOKUP_LEAF_AS_UPPER:
+			ext4_encode32(&entries[0].block, path.upper_logical);
 			break;
 		case LOOKUP_DAMAGE_COUNT:
 			CHECK(false);
@@ -492,11 +532,20 @@ lookup_damage(struct device *device, struct ext4_fs *fs)
 		}
 		check_lookup(device, fs, &path.query, expected);
 		restore_block(device, path.root);
+		restore_block(device, path.upper);
 		restore_block(device, path.node);
 		restore_block(device, path.leaf);
 		cases++;
 	}
 	check_lookup(device, fs, &path.query, EXT4_OK);
+	if (root->indirect_levels > EXT4_DX_LEGACY_INDIRECT_LEVELS) {
+		CHECK(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_LARGEDIR);
+		fs->info.feature_incompat &= ~EXT4_FEATURE_INCOMPAT_LARGEDIR;
+		check_lookup(device, fs, &path.query, EXT4_UNSUPPORTED);
+		fs->info.feature_incompat |= EXT4_FEATURE_INCOMPAT_LARGEDIR;
+		check_lookup(device, fs, &path.query, EXT4_OK);
+		cases++;
+	}
 	printf("PASS lookup structure cases=%" PRIu32 " skips=%" PRIu32
 	       " (absent index level or checksum)\n",
 	    cases, skips);
@@ -560,6 +609,116 @@ hash_signedness(struct device *device)
 	    "PASS lookup hash signedness cases=%u explicit_unsigned_skips=%u\n", cases, 3U - cases);
 }
 
+#define COLLISION_UPPER_NODES 2U
+#define COLLISION_LOWER_NODES 4U
+#define COLLISION_LEAVES 8U
+#define COLLISION_FIRST_LOWER (1U + COLLISION_UPPER_NODES)
+#define COLLISION_FIRST_LEAF (COLLISION_FIRST_LOWER + COLLISION_LOWER_NODES)
+#define COLLISION_BLOCKS (COLLISION_FIRST_LEAF + COLLISION_LEAVES)
+
+static void
+large_collision_chain(struct device *device, struct ext4_fs *fs)
+{
+	struct lookup_path path;
+	struct query query;
+	struct ext4_dx_root_prefix_disk *root;
+	struct ext4_dx_entry_disk *entries;
+	struct ext4_dx_count_disk *counts;
+	struct ext4_dir_header_disk *header;
+	struct ext4_dir_tail_disk *tail;
+	struct ext4_name_hash hash;
+	uint8_t *blocks[COLLISION_BLOCKS];
+	uint32_t positions[] = { 0, 3, 4, 7 };
+	uint32_t logical;
+	uint32_t base;
+	uint32_t child;
+	uint32_t index;
+	uint32_t selected;
+	uint32_t usable;
+	uint8_t version;
+
+	if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_LARGEDIR)) {
+		return;
+	}
+	path = first_path(device, fs);
+	query = path.query;
+	CHECK(query.directory.size >= (uint64_t)COLLISION_BLOCKS * fs->info.block_size);
+	for (logical = 0; logical < COLLISION_BLOCKS; logical++) {
+		blocks[logical] = mapped_block(device, fs, &query.directory, logical);
+	}
+	root = (struct ext4_dx_root_prefix_disk *)blocks[0];
+	version = root->hash_version;
+	if (version <= EXT4_HASH_TEA && fs->directory_hash_flags == EXT4_UNSIGNED_DIRECTORY_HASH) {
+		version += EXT4_HASH_LEGACY_UNSIGNED;
+	}
+	EXPECT(
+	    ext4_directory_hash(version, fs->directory_hash_seed, query.name, query.length, &hash),
+	    EXT4_OK);
+	query.directory.size = (uint64_t)COLLISION_BLOCKS * fs->info.block_size;
+	root->indirect_levels = EXT4_DX_MAX_INDIRECT_LEVELS;
+	usable = fs->info.block_size - (fs->metadata_checksum ? sizeof(*tail) : 0);
+	/* An isolated in-memory tree with eight collision leaves. Every odd
+	 * separator carries the same hash through both internal levels. Only one
+	 * leaf contains the name, so lookup must backtrack across empty siblings. */
+	for (logical = 0; logical < COLLISION_BLOCKS; logical++) {
+		base = logical == 0 ? sizeof(*root) : sizeof(*header);
+		memset(blocks[logical] + (logical == 0 ? base : 0), 0,
+		    fs->info.block_size - (logical == 0 ? base : 0));
+		if (logical >= COLLISION_FIRST_LEAF) {
+			header = (struct ext4_dir_header_disk *)blocks[logical];
+			ext4_encode16(&header->record_length, (uint16_t)usable);
+			if (fs->metadata_checksum) {
+				tail = (struct ext4_dir_tail_disk *)(blocks[logical] + usable);
+				ext4_encode16(&tail->record_length, sizeof(*tail));
+				tail->type = EXT4_DIRECTORY_TAIL_TYPE;
+			}
+			leaf_checksum(fs, &query.directory, blocks[logical]);
+			continue;
+		}
+		if (logical != 0) {
+			header = (struct ext4_dir_header_disk *)blocks[logical];
+			ext4_encode16(&header->record_length, (uint16_t)fs->info.block_size);
+		}
+		child = logical == 0 ? 1
+		    : logical < COLLISION_FIRST_LOWER
+		    ? COLLISION_FIRST_LOWER + (logical - 1U) * 2U
+		    : COLLISION_FIRST_LEAF + (logical - COLLISION_FIRST_LOWER) * 2U;
+		entries = (struct ext4_dx_entry_disk *)(blocks[logical] + base);
+		counts = (struct ext4_dx_count_disk *)entries;
+		ext4_encode16(&counts->limit,
+		    (uint16_t)((fs->info.block_size - base -
+				   (fs->metadata_checksum ? sizeof(struct ext4_dx_tail_disk) : 0)) /
+			sizeof(*entries)));
+		ext4_encode16(&counts->count, 2);
+		ext4_encode32(&entries[0].block, child);
+		ext4_encode32(&entries[1].hash, hash.major | 1U);
+		ext4_encode32(&entries[1].block, child + 1U);
+		ext4_index_checksum_set(fs, &query.directory, logical, blocks[logical]);
+	}
+	for (index = 0; index < sizeof(positions) / sizeof(positions[0]); index++) {
+		selected = COLLISION_FIRST_LEAF + positions[index];
+		header = (struct ext4_dir_header_disk *)blocks[selected];
+		ext4_encode32(&header->inode, query.number);
+		header->name_length = (uint8_t)query.length;
+		header->type = EXT4_FT_REGULAR;
+		memcpy(blocks[selected] + sizeof(*header), query.name, query.length);
+		leaf_checksum(fs, &query.directory, blocks[selected]);
+		check_lookup(device, fs, &query, EXT4_OK);
+		if (index + 1U == sizeof(positions) / sizeof(positions[0])) {
+			lookup_faults(device, fs, &query, EXT4_OK);
+		}
+		ext4_encode32(&header->inode, 0);
+		leaf_checksum(fs, &query.directory, blocks[selected]);
+	}
+	lookup_faults(device, fs, &query, EXT4_NOT_FOUND);
+	for (logical = 0; logical < COLLISION_BLOCKS; logical++) {
+		restore_block(device, blocks[logical]);
+	}
+	check_lookup(device, fs, &path.query, EXT4_OK);
+	puts("PASS deep collision lookup crosses both internal levels and preserves failure "
+	     "outputs");
+}
+
 static void
 lookup_arguments(struct device *device, struct ext4_fs *fs)
 {
@@ -619,6 +778,7 @@ lookup_image(const char *image, const char *expected)
 		independent_iteration(&device, fs, expected);
 		lookup_arguments(&device, fs);
 		lookup_damage(&device, fs);
+		large_collision_chain(&device, fs);
 		ext4_unmount(fs);
 		CHECK(device.live == 0 && device.writes == 0 && device.events == 0 &&
 		    memcmp(device.base, device.cache, device.size) == 0 &&

@@ -13,11 +13,12 @@ def selected(case):
 
 def paths(case):
     name = Path(case["image"]).name
-    result = ["/", "/hello.txt", "/indexed", "/lost+found"]
+    result = ["/", "/hello.txt", "/indexed", "/lost+found"] + case.get("retained_paths", [])
     if name.startswith("indexed-written-"):
         return result + ["/indexed/child", "/indexed/created", "/indexed/nested",
                          "/indexed/short-link", "/indexed/long-link", "/container"]
-    result += ["/peer", "/peer/child"]
+    if case.get("has_peer", True):
+        result += ["/peer", "/peer/child"]
     if name.startswith("index-atomic-"):
         result += ["/indexed/child"]
     return result

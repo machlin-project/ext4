@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 
-from check_index_write import entries, filename, MUTATION_TIME
+from check_index_write import entries, filename, MUTATION_TIME, recorded_output
 from check_namespace import inode_fields
 from check_orphans import accounting, digest
 from generate_fixtures import resolve_tools
@@ -55,18 +55,23 @@ def main():
         def run(command, raw=False, allowed=(0,)):
             done = subprocess.run([str(part) for part in command], capture_output=True, timeout=120)
             event = dict(command=[str(part) for part in command], status=done.returncode,
-                         stdout=done.stdout.decode("utf-8", "backslashreplace"),
+                         **recorded_output(done.stdout),
                          stderr=done.stderr.decode("utf-8", "backslashreplace"))
             record["commands"].append(event)
             with (output / "commands.log").open("a") as stream:
                 stream.write(json.dumps(dict(image=image.name, **event)) + "\n")
             require(done.returncode in allowed, f"Independent command failed: {command}")
-            return done.stdout if raw else event["stdout"]
+            return done.stdout if raw else done.stdout.decode("utf-8", "backslashreplace")
 
         def snapshot(candidate):
             run([tools["e2fsck"], "-fn", candidate])
             result = dict(accounting=accounting(run([tools["dumpe2fs"], "-h", candidate])), objects={})
-            paths = ("/", "/indexed", "/peer", "/indexed/child", "/peer/child", "/lost+found", "/hello.txt")
+            root_names = entries(run([tools["debugfs"], "-R", "ls -p /", candidate], raw=True))
+            paths = ["/", "/indexed", "/indexed/child", "/lost+found", "/hello.txt"]
+            if b"peer" in root_names:
+                paths += ["/peer", "/peer/child"]
+            if b"alternate.txt" in root_names:
+                paths += ["/alternate.txt"]
             for path in paths:
                 inode = inode_fields(run([tools["debugfs"], "-R", f"stat {path}", candidate]))
                 require(inode is not None, f"Missing retained inode {path}")
@@ -83,7 +88,8 @@ def main():
                     names = entries(run([tools["debugfs"], "-R", f"ls -p {path}", candidate], raw=True))
                     item["names"] = {name.hex(): number for name, number in names.items()}
                 else:
-                    require(inode["type"] == "regular" and data == b"Machlin ext4\n",
+                    expected_bytes = b"Alternate ext4 target\n" if path == "/alternate.txt" else b"Machlin ext4\n"
+                    require(inode["type"] == "regular" and data == expected_bytes,
                             "Retained hardlink target bytes or type changed")
                 result["objects"][path] = item
             htree = run([tools["debugfs"], "-R", "htree_dump /indexed", candidate])
@@ -122,10 +128,12 @@ def main():
         require(new["accounting"]["Free blocks"] < old["accounting"]["Free blocks"],
                 "Split did not account its new blocks")
         if kind == "root":
-            require(old["index"]["levels"] == 0 and new["index"]["levels"] == 1 and
+            require(old["index"]["levels"] in (0, 1) and
+                    new["index"]["levels"] == old["index"]["levels"] + 1 and
                     new["index"]["root_entries"] == 1, "Expected root height growth did not occur")
         elif kind == "node":
-            require(old["index"]["levels"] == new["index"]["levels"] == 1 and
+            require(old["index"]["levels"] == new["index"]["levels"] and
+                    new["index"]["levels"] in (1, 2) and
                     new["index"]["root_entries"] == old["index"]["root_entries"] + 1,
                     "Expected internal-node split did not occur")
         else:
@@ -151,6 +159,8 @@ def main():
                 record.update(uncommitted=str(source), uncommitted_sha256=protected[source], uncommitted_outcome="old")
         require(all(digest(path) == sha for path, sha in protected.items()), "Checking changed a protected export")
         record.update(passed=True, ordinal=int(ordinal[1]), exact_new_name=name_hex, verified_split=new,
+                      has_peer="/peer" in new["objects"],
+                      retained_paths=[path for path in ("/alternate.txt",) if path in new["objects"]],
                       protected_inputs_unchanged=True, independent_replay_matches=True)
         save()
         print(f"PASS {image.name}: exact split, old/new outcomes, independent replay and idempotence", flush=True)

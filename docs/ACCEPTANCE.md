@@ -71,6 +71,75 @@ review in `artifacts/checks/group-checksum-linux-summary.json` in this repositor
 Complete regression remains pending. Large-volume and native writable behavior
 are not established by these bounded profiles.
 
+## Large-directory development evidence
+
+LARGEDIR feature negotiation admits two internal HTree levels. Lookup follows
+bounded per-level cursors and collision continuations; mutation propagates splits
+through the validated parent chain in one namespace transaction. A full legacy
+root grows only when the feature is enabled. A full root at the negotiated maximum
+height rejects further growth without writes, while existing leaf slack remains
+usable. The existing 1,048,576-block mutation bound remains explicit.
+
+Four e2fsprogs-authored 64 MiB images pass nonrepairing e2fsck and independent
+name/hash/shape checks. Three have over 46,000 entries and two internal levels,
+covering extent maps, indirect maps and CRC16 groups; the fourth has a full
+123-entry root ready to grow. Nine compact derived graphs retain independently
+hashed names and pass nonrepairing e2fsck, covering root growth, cascading splits
+and maximum-height capacity in all three formats. They occupy 372 through 751
+directory blocks, using underfilled nodes to bound exhaustive fault enumeration.
+
+The sanitized build and optimized freestanding 2 KiB frame check pass. All 32
+selected Meson tests pass on their first execution: 25 large-directory tests and
+seven earlier indexed/malformed-image controls. No Meson tests skip; 46 embedded
+applicability notices are recorded separately. Lookup/iteration compares every
+name against debugfs on read-only and writable owners. An isolated eight-leaf
+collision model exercises backtracking across both internal levels, missing
+names and resource failures. Functional mutation includes long names, creation,
+symlinks, cross-parent moves/exchange, dotdot and indexed removal/lifetime.
+
+The six compact growth transitions pass all 3,256 allocation and 13,335 read
+failures and all 1,320 write/flush cuts. Of the cuts, 1,296 recover the complete old
+or new state; 24 torn checksummed primary superblocks explicitly fail closed.
+Every successful transition adds one leaf and two internal nodes in a single
+commit. Evidence is under `artifacts/large-directory-fixtures/`,
+`artifacts/large-directory-edge-fixtures/` and
+`artifacts/checks/large-directory-development-*`.
+
+All 34 exported images pass the independent functional, split/recovery and
+capacity checks: 13 case records, 48 clean nonrepairing e2fsck checks, 14 matching
+e2fsprogs journal replays and 28 successful core replay/idempotence commands.
+Exact byte-name mappings, retained objects, file contents, directory topology and
+allocation accounting agree. Protected inputs and binaries remain unchanged.
+Evidence is under `artifacts/large-directory-independent/` and
+`artifacts/checks/large-directory-independent-summary.json`. The final functional
+report is in its `functional-content/` directory; it additionally verifies exact
+bytes of the alternate hardlink target without repeating mutation or fault runs.
+
+The first Linux attempt stopped in the guest expectation parser's old 4,096-name
+limit, before namespace acceptance. The probe now has an explicit larger bound
+and sorted binary lookup for expected names, avoiding a quadratic comparison.
+Its original failed run remains in the lab under
+`artifacts/ext4-journal/linux-reference/large-directory-functional-linux/`.
+The first pending-journal attempt stopped at the snapshot checker on optional
+extent-collapse advice. The same exact advice already appears in the successful
+nonrepairing checks of the independently authored compact extent fixtures; it
+does not indicate a repair. The checker now admits only advice already recorded
+for that verified clean source, retaining it separately in the roundtrip report.
+All other unexpected diagnostics remain failures. This initial run is retained
+under the lab's `large-directory-pending-linux/` output directory.
+
+All ten final Linux roundtrips pass: three large functional states, six compact
+pending root/cascade transitions and the independently authored full-root growth
+journal. The guest checks exact names and retained objects, replays the portable
+commit where applicable, and commits its own namespace changes. Core and e2fsprogs
+reverse replay agree, including data, metadata and allocation accounting; all
+20 nonrepairing checks return zero and repeat recovery is idempotent. Reports
+are under the lab's `artifacts/ext4-journal/linux-reference/large-directory-*`
+directories, with the accepted functional and compact pending runs suffixed
+`-retry1`. Earlier successful stages were not repeated after the harness fixes.
+The complete 295-test regression remains pending. These bounded profiles do not
+establish large-volume performance or native writes.
+
 ## Meson build acceptance
 
 Meson replaces CMake for the portable library, utilities, tests and CI. The complete
@@ -1055,8 +1124,9 @@ One additional independently generated 64 MiB image has 46,122 directory entries
 a full 123-entry root and 122 full internal nodes. Its test rejects a split that
 would require another index level without changing any device byte. A shorter
 name still reuses leaf space; all 46,123 resulting names, unrelated metadata, data
-and unchanged allocation pass independent inspection and e2fsck. LARGEDIR growth
-itself remains unsupported; this is a tested rejection boundary.
+and unchanged allocation pass independent inspection and e2fsck. This fixture
+does not enable LARGEDIR and retains that tested rejection boundary. The later
+large-directory batch separately negotiates the extra index level.
 
 The real Linux kernel passes 106 cases across the 17 profiles compatible with its
 4 KiB pages: 62 clean functional/collision/compaction states and all 44 committed

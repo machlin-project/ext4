@@ -4,7 +4,8 @@
 paths = {}
 foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'namespace_fixtures', 'xattr_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
-  'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures']
+  'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures',
+  'large_directory_fixtures', 'large_directory_edges']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
 endforeach
@@ -75,6 +76,43 @@ if paths['index_fixtures'] != ''
         args: ['--edges', paths['index_collisions'], image], timeout: 300, suite: 'indexed')
     endif
   endforeach
+endif
+
+if paths['large_directory_fixtures'] != ''
+  foreach profile : ['index-large-dir', 'index-large-dir-indirect', 'index-large-dir-gdt',
+    'index-large-dir-capacity']
+    image = paths['large_directory_fixtures'] / (profile + '.img')
+    test('large-dir-graph-' + profile, programs['directory-index'],
+      args: ['--scan-only', image], timeout: 300, suite: 'indexed')
+    test('large-dir-lookup-' + profile, programs['directory-lookup'],
+      args: [image, paths['large_directory_fixtures'] / (profile + '.lookup')],
+      timeout: 300, suite: 'indexed')
+    if profile != 'index-large-dir-capacity'
+      test('large-dir-write-' + profile, programs['index-write'],
+        args: image, timeout: 600, suite: 'indexed')
+    else
+      test('large-dir-full-root-growth', programs['index-write'],
+        args: ['--fault-smoke', '--large-split', 'grow', image], timeout: 300, suite: 'indexed')
+    endif
+  endforeach
+endif
+if paths['large_directory_edges'] != ''
+  capacities = []
+  foreach profile : ['index-large-dir', 'index-large-dir-indirect', 'index-large-dir-gdt']
+    stem = paths['large_directory_edges'] / profile
+    test('large-dir-structure-' + profile, programs['directory-index'],
+      args: stem + '-cascade.img', timeout: 300, suite: 'indexed')
+    test('large-dir-lookup-cascade-' + profile, programs['directory-lookup'],
+      args: [stem + '-cascade.img', stem + '-cascade.lookup'], timeout: 300, suite: 'indexed')
+    foreach transition : ['grow', 'cascade']
+      test('large-dir-faults-' + transition + '-' + profile, programs['index-write'],
+        args: ['--faults', '--large-split', transition, stem + '-' + transition + '.img'],
+        timeout: 900, suite: 'indexed')
+    endforeach
+    capacities += stem + '-capacity.img'
+  endforeach
+  test('large-dir-capacity', programs['index-write'], args: ['--capacity'] + capacities,
+    timeout: 300, suite: 'indexed')
 endif
 
 reader_names = ['ext4-4k.img', 'ext4-1k.img', 'ext4-indexed.img']

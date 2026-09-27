@@ -609,6 +609,29 @@ build. The twenty normal profiles require all their images; missing profiles fai
 the configured suite. The separate capacity fixture exercises full-root rejection
 and successful record reuse, without enabling LARGEDIR.
 
+The additional large-directory batch has separate fixture paths:
+
+```sh
+python3 tests/generate_index_fixtures.py --large-dir --output artifacts/large-directory-fixtures
+python3 tests/generate_large_directory_edges.py --fixtures artifacts/large-directory-fixtures \
+  --output artifacts/large-directory-edge-fixtures
+meson setup --reconfigure .build-indexed
+meson setup --reconfigure .build-indexed \
+  -Dlarge_directory_fixtures=artifacts/large-directory-fixtures \
+  -Dlarge_directory_edges=artifacts/large-directory-edge-fixtures
+meson compile -C .build-indexed -j 2
+meson test -C .build-indexed --no-rebuild -j 2 --print-errorlogs 'large-dir-*'
+```
+
+Use `--fault-smoke --large-split grow` or `--fault-smoke --large-split cascade`
+with `ext4-index-write-test --export DIR IMAGE` to export a prepared large-index
+transition. `--faults` sweeps resource and storage faults instead. Compact
+`*-capacity.img` images use `--capacity`; the independently authored full-root
+image uses `--large-split grow`. Existing independent split/functional checkers
+accept the deeper graphs. The capacity checker accepts `--case SOURCE_FILENAME`
+to select one verified compact fixture. CI records every independent check after
+one portable regression of the complete batch.
+
 `ext4-index-write-test --export DIR IMAGE` exports the functional result.
 `--fault-smoke --export DIR IMAGE` exports old, complete, committed and uncommitted
 states for each applicable split. `--edges VECTORS --export DIR IMAGE` exports three

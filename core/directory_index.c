@@ -1,6 +1,14 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "directory_index.h"
 
+uint8_t
+ext4_index_max_levels(const struct ext4_fs *fs)
+{
+	return (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_LARGEDIR)
+	    ? EXT4_DX_MAX_INDIRECT_LEVELS
+	    : EXT4_DX_LEGACY_INDIRECT_LEVELS;
+}
+
 bool
 ext4_index_contains(const struct ext4_index_range *range, uint32_t hash)
 {
@@ -74,7 +82,7 @@ ext4_index_decode(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t l
 			return EXT4_CORRUPT;
 		}
 		if (root->flags != 0 || root->hash_version > EXT4_HASH_TEA_UNSIGNED ||
-		    root->indirect_levels > EXT4_DX_MAX_INDIRECT_LEVELS) {
+		    root->indirect_levels > ext4_index_max_levels(fs)) {
 			return EXT4_UNSUPPORTED;
 		}
 		decoded.levels = root->indirect_levels;
@@ -408,124 +416,119 @@ ext4_index_add(struct ext4_directory_index *index, uint32_t leaf, uint32_t hash,
 {
 	struct ext4_allocation *allocation = index->allocation;
 	struct ext4_fs *fs = allocation->fs;
-	struct ext4_index_range *range = &index->ranges[leaf];
+	struct ext4_index_range *range;
 	struct ext4_dx_count_disk *counts;
-	struct ext4_dx_count_disk *root_counts;
 	struct ext4_dx_entry_disk *entries;
-	struct ext4_dx_entry_disk *root_entries;
 	struct ext4_dx_entry_disk *right_entries;
 	struct ext4_dx_entry_disk *original;
 	struct ext4_dx_entry_disk value;
 	struct ext4_dx_root_prefix_disk *root;
 	uint8_t *buffer = NULL;
-	uint8_t *root_buffer = NULL;
 	uint8_t *right_buffer = NULL;
-	uint32_t parent = range->parent;
-	uint32_t base = parent == 0 ? sizeof(*root) : sizeof(struct ext4_dir_header_disk);
+	uint32_t child = leaf;
+	uint32_t parent;
+	uint32_t base;
 	uint32_t right;
 	uint32_t separator;
-	uint16_t position = (uint16_t)(range->entry + 1U);
+	uint16_t position;
 	uint16_t count;
 	uint16_t total;
 	uint16_t cut;
 	uint16_t entry;
-	uint16_t root_count;
-	uint16_t root_position;
+	uint8_t level;
 	enum ext4_result error;
 
-	error = ext4_index_buffer(index, parent, &buffer);
-	if (error != EXT4_OK) {
-		return error;
-	}
-	entries = (struct ext4_dx_entry_disk *)(buffer + base);
-	counts = (struct ext4_dx_count_disk *)entries;
-	count = ext4_le16(&counts->count);
-	if (position > count || ext4_le32(&entries[position - 1].block) != leaf ||
-	    !ext4_index_contains(range, hash & ~1U)) {
-		return EXT4_CORRUPT;
-	}
-	if (count < ext4_le16(&counts->limit)) {
-		ext4_index_entry_insert(entries, count, position, hash, block);
-		ext4_encode16(&counts->count, count + 1);
-		ext4_index_checksum_set(fs, index->inode, parent, buffer);
-		return EXT4_OK;
-	}
-	if (parent == 0) {
-		/* A full shallow root fits, including the new entry, in one node:
-		 * the node has a smaller prefix than the root. */
+	/* Propagate a split through the checked original parent chain. New nodes
+	 * stay private to the transaction; the directory owner publishes them only
+	 * together with its final inode size and allocation accounting. */
+	for (level = 0; level <= index->levels; level++) {
+		range = &index->ranges[child];
+		parent = range->parent;
+		base = parent == 0 ? sizeof(*root) : sizeof(struct ext4_dir_header_disk);
+		position = (uint16_t)(range->entry + 1U);
+		error = ext4_index_buffer(index, parent, &buffer);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		entries = (struct ext4_dx_entry_disk *)(buffer + base);
+		counts = (struct ext4_dx_count_disk *)entries;
+		count = ext4_le16(&counts->count);
+		if (position > count || ext4_le32(&entries[position - 1].block) != child ||
+		    !ext4_index_contains(range, hash & ~1U)) {
+			return EXT4_CORRUPT;
+		}
+		if (count < ext4_le16(&counts->limit)) {
+			ext4_index_entry_insert(entries, count, position, hash, block);
+			ext4_encode16(&counts->count, count + 1);
+			ext4_index_checksum_set(fs, index->inode, parent, buffer);
+			return EXT4_OK;
+		}
+		if (parent == 0) {
+			if (index->levels == ext4_index_max_levels(fs)) {
+				return EXT4_UNSUPPORTED;
+			}
+			/* A full root fits, including the new entry, in one node:
+			 * the node has a smaller prefix than the root. */
+			error = ext4_index_append(index, next, &right, &right_buffer);
+			if (error != EXT4_OK) {
+				return error;
+			}
+			right_entries = (struct ext4_dx_entry_disk *)(right_buffer +
+			    sizeof(struct ext4_dir_header_disk));
+			ext4_copy(right_entries, entries, (size_t)count * sizeof(*entries));
+			ext4_index_entry_insert(right_entries, count, position, hash, block);
+			ext4_index_node_initialize(fs, right_buffer, count + 1);
+			ext4_zero(entries, fs->info.block_size - base);
+			ext4_encode16(&counts->limit,
+			    (uint16_t)((fs->info.block_size - base -
+					   (fs->metadata_checksum ? sizeof(struct ext4_dx_tail_disk)
+								  : 0)) /
+				sizeof(*entries)));
+			ext4_encode16(&counts->count, 1);
+			ext4_encode32(&entries[0].block, right);
+			root = (struct ext4_dx_root_prefix_disk *)buffer;
+			root->indirect_levels = (uint8_t)(index->levels + 1U);
+			ext4_index_checksum_set(fs, index->inode, right, right_buffer);
+			ext4_index_checksum_set(fs, index->inode, 0, buffer);
+			return EXT4_OK;
+		}
 		error = ext4_index_append(index, next, &right, &right_buffer);
 		if (error != EXT4_OK) {
 			return error;
 		}
+		/* All I/O is finished before scratch holds the original entries. Both
+		 * output nodes can now be packed without overlapping their input. */
+		original = (struct ext4_dx_entry_disk *)allocation->scratch;
+		ext4_copy(original, entries, (size_t)count * sizeof(*entries));
 		right_entries = (struct ext4_dx_entry_disk *)(right_buffer +
 		    sizeof(struct ext4_dir_header_disk));
-		ext4_copy(right_entries, entries, (size_t)count * sizeof(*entries));
-		ext4_index_entry_insert(right_entries, count, position, hash, block);
-		ext4_index_node_initialize(fs, right_buffer, count + 1);
+		total = (uint16_t)(count + 1U);
+		cut = total / 2;
+		separator = 0;
 		ext4_zero(entries, fs->info.block_size - base);
-		ext4_encode16(&counts->limit,
-		    (uint16_t)((fs->info.block_size - base -
-				   (fs->metadata_checksum ? sizeof(struct ext4_dx_tail_disk) : 0)) /
-			sizeof(*entries)));
-		ext4_encode16(&counts->count, 1);
-		ext4_encode32(&entries[0].block, right);
-		root = (struct ext4_dx_root_prefix_disk *)buffer;
-		root->indirect_levels = 1;
-		ext4_index_checksum_set(fs, index->inode, right, right_buffer);
-		ext4_index_checksum_set(fs, index->inode, 0, buffer);
-		return EXT4_OK;
-	}
-	error = ext4_index_buffer(index, 0, &root_buffer);
-	if (error != EXT4_OK) {
-		return error;
-	}
-	root_entries = (struct ext4_dx_entry_disk *)(root_buffer + sizeof(*root));
-	root_counts = (struct ext4_dx_count_disk *)root_entries;
-	root_count = ext4_le16(&root_counts->count);
-	root_position = (uint16_t)(index->ranges[parent].entry + 1U);
-	if (root_count == ext4_le16(&root_counts->limit)) {
-		return EXT4_UNSUPPORTED;
-	}
-	if (root_position > root_count ||
-	    ext4_le32(&root_entries[root_position - 1].block) != parent) {
-		return EXT4_CORRUPT;
-	}
-	error = ext4_index_append(index, next, &right, &right_buffer);
-	if (error != EXT4_OK) {
-		return error;
-	}
-	/* All I/O is finished before scratch holds the original entries. Both
-	 * output nodes can now be packed without overlapping their input. */
-	original = (struct ext4_dx_entry_disk *)allocation->scratch;
-	ext4_copy(original, entries, (size_t)count * sizeof(*entries));
-	right_entries =
-	    (struct ext4_dx_entry_disk *)(right_buffer + sizeof(struct ext4_dir_header_disk));
-	total = (uint16_t)(count + 1U);
-	cut = total / 2;
-	separator = 0;
-	ext4_zero(entries, fs->info.block_size - base);
-	for (entry = 0; entry < total; entry++) {
-		if (entry == position) {
-			ext4_encode32(&value.hash, hash);
-			ext4_encode32(&value.block, block);
-		} else {
-			value = original[entry < position ? entry : entry - 1];
-		}
-		if (entry < cut) {
-			entries[entry] = value;
-		} else {
-			right_entries[entry - cut] = value;
-			if (entry == cut) {
-				separator = ext4_le32(&value.hash);
+		for (entry = 0; entry < total; entry++) {
+			if (entry == position) {
+				ext4_encode32(&value.hash, hash);
+				ext4_encode32(&value.block, block);
+			} else {
+				value = original[entry < position ? entry : entry - 1];
+			}
+			if (entry < cut) {
+				entries[entry] = value;
+			} else {
+				right_entries[entry - cut] = value;
+				if (entry == cut) {
+					separator = ext4_le32(&value.hash);
+				}
 			}
 		}
+		ext4_index_node_initialize(fs, buffer, cut);
+		ext4_index_node_initialize(fs, right_buffer, total - cut);
+		ext4_index_checksum_set(fs, index->inode, parent, buffer);
+		ext4_index_checksum_set(fs, index->inode, right, right_buffer);
+		child = parent;
+		hash = separator;
+		block = right;
 	}
-	ext4_index_node_initialize(fs, buffer, cut);
-	ext4_index_node_initialize(fs, right_buffer, total - cut);
-	ext4_index_entry_insert(root_entries, root_count, root_position, separator, right);
-	ext4_encode16(&root_counts->count, root_count + 1);
-	ext4_index_checksum_set(fs, index->inode, parent, buffer);
-	ext4_index_checksum_set(fs, index->inode, right, right_buffer);
-	ext4_index_checksum_set(fs, index->inode, 0, root_buffer);
-	return EXT4_OK;
+	return EXT4_CORRUPT;
 }

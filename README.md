@@ -58,6 +58,9 @@ write and truncate growth, plus the full 256-test regression.
 Legacy CRC16 group descriptors also pass portable checks, independent image
 inspection and Linux mutation/recovery roundtrips, including lazy inode and block
 groups. Full regression of that format package remains pending.
+LARGEDIR lookup and mutation with two internal index levels pass targeted portable
+faults, independent image checks and ten Linux recovery roundtrips. The complete
+295-test regression of this newer package remains pending.
 Generated disk images and reports are not source artifacts.
 
 ## Layout

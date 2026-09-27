@@ -96,6 +96,8 @@ damage_index(struct ext4_allocation *allocation, const struct ext4_inode *inode,
 	uint32_t base = sizeof(*root);
 	uint32_t boundary = 0;
 	uint16_t count;
+	uint8_t levels;
+	uint8_t level;
 	enum ext4_result error;
 
 	error = ext4_write_map_lookup(allocation, inode, disk, 0, &run);
@@ -108,21 +110,24 @@ damage_index(struct ext4_allocation *allocation, const struct ext4_inode *inode,
 	buffer = snapshot;
 	root = (struct ext4_dx_root_prefix_disk *)buffer;
 	entries = (struct ext4_dx_entry_disk *)(buffer + base);
+	levels = root->indirect_levels;
 	if (needs_node(damage)) {
-		CHECK(root->indirect_levels == 1);
-		boundary = ext4_le32(&entries[1].hash);
-		logical = ext4_le32(&entries[0].block);
-		error = ext4_write_map_lookup(allocation, inode, disk, logical, &run);
-		if (error == EXT4_OK) {
-			error = ext4_transaction_buffer(
-			    allocation->transaction, run.physical, &snapshot);
+		CHECK(levels > 0 && levels <= EXT4_DX_MAX_INDIRECT_LEVELS);
+		for (level = 0; level < levels; level++) {
+			boundary = ext4_le32(&entries[1].hash);
+			logical = ext4_le32(&entries[0].block);
+			error = ext4_write_map_lookup(allocation, inode, disk, logical, &run);
+			if (error == EXT4_OK) {
+				error = ext4_transaction_buffer(
+				    allocation->transaction, run.physical, &snapshot);
+			}
+			if (error != EXT4_OK) {
+				return error;
+			}
+			buffer = snapshot;
+			base = sizeof(*header);
+			entries = (struct ext4_dx_entry_disk *)(buffer + base);
 		}
-		if (error != EXT4_OK) {
-			return error;
-		}
-		buffer = snapshot;
-		base = sizeof(*header);
-		entries = (struct ext4_dx_entry_disk *)(buffer + base);
 	}
 	header = (struct ext4_dir_header_disk *)buffer;
 	counts = (struct ext4_dx_count_disk *)(buffer + base);
@@ -159,7 +164,7 @@ damage_index(struct ext4_allocation *allocation, const struct ext4_inode *inode,
 		root->hash_version = UINT8_MAX;
 		break;
 	case DAMAGE_DEPTH:
-		root->indirect_levels = EXT4_DX_MAX_INDIRECT_LEVELS + 1;
+		root->indirect_levels = ext4_index_max_levels(fs) + 1;
 		break;
 	case DAMAGE_FLAGS:
 		root->flags = 1;
@@ -343,7 +348,7 @@ range_boundaries(void)
 }
 
 static void
-check_image(struct device *device)
+check_image(struct device *device, bool scan_only)
 {
 	struct ext4_fs *fs;
 	struct ext4_inode root;
@@ -364,12 +369,26 @@ check_image(struct device *device)
 	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
 	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
 	EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"indexed", 7, &parent), EXT4_OK);
-	EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"peer", 4, &peer), EXT4_OK);
 	live = device->live;
 	EXPECT(attempt(fs, &parent, DAMAGE_NONE, &observed), EXT4_OK);
-	EXPECT(attempt(fs, &peer, DAMAGE_NONE, &other), EXT4_OK);
-	CHECK(memcmp(&observed, &other, sizeof(observed)) == 0);
 	CHECK(observed.leaves > 1 && observed.blocks == 1 + observed.leaves + observed.nodes);
+	if (scan_only) {
+		ext4_unmount(fs);
+		CHECK(device->live == 0 && device->writes == 0 &&
+		    memcmp(device->base, device->cache, device->size) == 0);
+		printf("PASS complete graph blocks=%u leaves=%u nodes=%u levels=%u names=%u\n",
+		    observed.blocks, observed.leaves, observed.nodes, observed.levels,
+		    observed.names);
+		return;
+	}
+	EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"peer", 4, &peer), EXT4_OK);
+	EXPECT(attempt(fs, &peer, DAMAGE_NONE, &other), EXT4_OK);
+	if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_LARGEDIR)) {
+		CHECK(memcmp(&observed, &other, sizeof(observed)) == 0);
+	} else {
+		CHECK(other.leaves > 1 && other.blocks == 1 + other.leaves + other.nodes &&
+		    other.version == observed.version);
+	}
 	for (damage = DAMAGE_DOT_INODE; damage < DAMAGE_COUNT; damage++) {
 		if ((needs_node(damage) && observed.levels == 0) ||
 		    ((damage == DAMAGE_CHECKSUM || damage == DAMAGE_TAIL_RESERVED) &&
@@ -381,6 +400,10 @@ check_image(struct device *device)
 			damage == DAMAGE_FLAGS || damage == DAMAGE_HASH_FLAGS_NEITHER
 		    ? EXT4_UNSUPPORTED
 		    : EXT4_CORRUPT;
+		if (damage == DAMAGE_DEPTH && fs->metadata_checksum &&
+		    ext4_index_max_levels(fs) == EXT4_DX_MAX_INDIRECT_LEVELS) {
+			expected = EXT4_CORRUPT;
+		}
 		/* The dx tail's reserved word is unused, checksum-covered payload;
 		 * its format does not require zero. */
 		if (damage == DAMAGE_TAIL_RESERVED) {
@@ -426,18 +449,25 @@ main(int argc, char **argv)
 {
 	struct device device;
 	const char *exports = NULL;
+	bool scan_only = false;
 	int argument = 1;
 
 	range_boundaries();
-	if (argc > 3 && strcmp(argv[argument], "--export") == 0) {
-		exports = argv[++argument];
+	while (argument < argc && argv[argument][0] == '-') {
+		if (strcmp(argv[argument], "--export") == 0 && argument + 1 < argc) {
+			exports = argv[++argument];
+		} else if (strcmp(argv[argument], "--scan-only") == 0) {
+			scan_only = true;
+		} else {
+			CHECK(false);
+		}
 		argument++;
 	}
 	CHECK(argument < argc);
 	for (; argument < argc; argument++) {
 		printf("IMAGE %s\n", argv[argument]);
 		storage_open(&device, argv[argument]);
-		check_image(&device);
+		check_image(&device, scan_only);
 		storage_export(&device, exports, argv[argument], "index-validated-");
 		storage_close(&device);
 	}

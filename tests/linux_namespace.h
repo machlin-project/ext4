@@ -3,6 +3,7 @@
 #include <sys/statvfs.h>
 
 #define TEST_SYMLINK_INLINE_CAPACITY 60U
+#define TEST_DIRECTORY_ENTRIES_MAX (1U << 20)
 
 _Static_assert(EXT4_NAME_MAX * 2U == 510U, "encoded namespace filename scan width");
 
@@ -11,6 +12,22 @@ struct namespace_entry {
 	unsigned long long inode;
 	bool seen;
 };
+
+static int
+namespace_name_compare(const void *name, const void *value)
+{
+	const struct namespace_entry *entry = value;
+
+	return strcmp(name, entry->name);
+}
+
+static int
+namespace_entry_compare(const void *left, const void *right)
+{
+	const struct namespace_entry *entry = left;
+
+	return namespace_name_compare(entry->name, right);
+}
 
 static unsigned int
 namespace_hex(char byte)
@@ -83,6 +100,7 @@ static void
 namespace_directory_checks(void)
 {
 	struct namespace_entry *expected;
+	struct namespace_entry *matched;
 	struct dirent *entry;
 	struct stat actual;
 	DIR *directory;
@@ -104,7 +122,9 @@ namespace_directory_checks(void)
 		if (fields == EOF) {
 			break;
 		}
-		require(fields == 2 && count >= 2 && count <= 4096, "parse directory expectations");
+		require(fields == 2, "parse directory expectations");
+		require(count >= 2 && count <= TEST_DIRECTORY_ENTRIES_MAX,
+		    "bound directory expectation count");
 		expected = calloc(count, sizeof(*expected));
 		require(expected != NULL, "allocate directory expectation");
 		for (index = 0; index < count; index++) {
@@ -122,6 +142,11 @@ namespace_directory_checks(void)
 				    "validate expected filename byte");
 			}
 		}
+		qsort(expected, count, sizeof(*expected), namespace_entry_compare);
+		for (index = 1; index < count; index++) {
+			require(strcmp(expected[index - 1U].name, expected[index].name) != 0,
+			    "require unique expected names");
+		}
 		snprintf(mounted, sizeof(mounted), "/mnt%s", path);
 		directory = opendir(mounted);
 		require(directory != NULL, mounted);
@@ -133,13 +158,9 @@ namespace_directory_checks(void)
 				require(errno == 0, "enumerate directory");
 				break;
 			}
-			for (index = 0; index < count; index++) {
-				if (strcmp(entry->d_name, expected[index].name) == 0) {
-					break;
-				}
-			}
-			require(index != count && !expected[index].seen &&
-				entry->d_ino == expected[index].inode,
+			matched = bsearch(entry->d_name, expected, count, sizeof(*expected),
+			    namespace_name_compare);
+			require(matched != NULL && !matched->seen && entry->d_ino == matched->inode,
 			    "compare unique directory entry identity");
 			/* Lookup of the mount root's parent crosses into the initramfs.
 			 * Its on-disk dotdot is still checked by enumeration above. */
@@ -149,7 +170,7 @@ namespace_directory_checks(void)
 					actual.st_ino == entry->d_ino,
 				    "verify lookup agrees with enumeration");
 			}
-			expected[index].seen = true;
+			matched->seen = true;
 			observed++;
 		}
 		require(observed == count, "verify complete directory enumeration");

@@ -169,6 +169,17 @@ def verify(case, image, output, tools, recover, run):
     indexed = linux_index.selected(case) or full_blocks
     base = "/indexed" if indexed else ""
     expected = bytes(block_size + 3) + bytes((index * 13 + 0x6c) & 255 for index in range(73))
+    # e2fsck treats collapsing a valid extent tree as an optional optimization,
+    # not a repair. Admit only the exact advice already present in a successful
+    # nonrepairing check of this independently verified clean source image.
+    source_advice = set()
+    observed_advice = {}
+    for command in case.get("commands", []):
+        arguments = command["command"]
+        if (command["status"] == 0 and "-fn" in arguments and
+                Path(arguments[-1]).resolve() == Path(case["image"]).resolve()):
+            source_advice.update(line for line in command.get("stdout", "").splitlines()
+                                 if re.fullmatch(r"Inode \d+ extent tree \(at level \d+\) could be shorter\.  Optimize\? no", line))
 
     def snapshot(candidate, prefix, allow_summary_lag=False):
         check = run([tools / "e2fsck/e2fsck", "-fn", candidate])
@@ -192,6 +203,7 @@ def verify(case, image, output, tools, recover, run):
         diagnostics = {f"{field} count wrong ({value['primary']}, counted={value['group_total']})."
                        for field, value in lag.items()}
         observed_diagnostics = set()
+        observed_advice[prefix] = []
         fix_pending = False
         for line in check.splitlines():
             if not line.strip():
@@ -201,6 +213,8 @@ def verify(case, image, output, tools, recover, run):
                 fix_pending = True
             elif line == "Fix? no" and fix_pending:
                 fix_pending = False
+            elif line in source_advice:
+                observed_advice[prefix].append(line)
             elif re.fullmatch(r"Pass [1-5]: .+", line) or re.fullmatch(
                     re.escape(str(candidate)) + r": \d+/\d+ files \([^\n]+\), \d+/\d+ blocks", line):
                 continue
@@ -310,4 +324,6 @@ def verify(case, image, output, tools, recover, run):
     if digest(image) != stable:
         raise RuntimeError("Repeated recovery changed the Linux namespace result")
     return {"transactions": int(transactions[1]), "verified_namespace": observed,
-            "oracle_primary_summary_lag": lag}
+            "oracle_primary_summary_lag": lag,
+            "source_extent_optimization_advice": sorted(source_advice),
+            "observed_extent_optimization_advice": observed_advice}

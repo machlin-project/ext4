@@ -368,7 +368,9 @@ the checksum, layout, sorted ranges and child bounds of each visited index node,
 then every record and hash range in the selected leaf before publishing an inode.
 Selected child aliases and references from leaves back to index nodes are rejected.
 This is path validation, not the complete graph validation required for mutation.
-The directory traversal owns three block buffers regardless of directory size;
+The directory traversal owns three block buffers for the legacy index limit or
+four when LARGEDIR is enabled, regardless of directory size. A bounded frame array
+retains the cursor at each level while following collision continuations;
 ordinary mapping and inode decoding retain their own bounded scratch allocations.
 Linear directories read each block once per lookup. An older indexed image without
 hash-signedness flags uses that exact-byte linear path instead of guessing which
@@ -408,9 +410,11 @@ Removal preserves the index and coalesces leaf records; a moved indexed director
 updates dotdot with the root's index checksum.
 
 Indexed mutation bounds directory size to 1,048,576 blocks. The temporary graph is bounded to
-24 MiB; there is no recursive traversal. The current index supports a root alone
-or one internal level. A full root at that level requires the unsupported LARGEDIR
-format and cancels without resource writes. Linear directories do not automatically
+24 MiB; there is no recursive traversal. The index supports a root alone, one
+internal level, or two internal levels when the LARGEDIR incompatibility feature
+is present. Splits propagate through the validated original parent chain in one
+transaction; a full root can grow only within that negotiated height. Further
+growth cancels without resource writes. Linear directories do not automatically
 convert to indexed form. These bounds and algorithms are not evidence of accepted
 large-volume performance. Duplicate names, stale generations, invalid dot records,
 exhausted inodes, reserved-space exclusion and journal-credit exhaustion cancel

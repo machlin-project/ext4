@@ -75,9 +75,13 @@ def main():
     parser.add_argument("--tools-root", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--capacity", action="store_true", help="Generate only a full-root capacity fixture")
+    parser.add_argument("--large-dir", action="store_true",
+                        help="Generate LARGEDIR trees and a root ready to grow another level")
     parser.add_argument("--lookup-only", action="store_true",
                         help="Inspect existing verified images and save lookup expectations without changing images")
     args = parser.parse_args()
+    if args.capacity and args.large_dir:
+        parser.error("select one indexed fixture package")
     tools = resolve_tools(args.tools_root)
     output = args.output.resolve()
     if args.lookup_only:
@@ -117,6 +121,28 @@ def main():
         # under any preceding full node would require an additional root slot.
         entries = ((root_entries - 1) * node_entries + 1) * leaf_entries
         profiles = [dict(name="index-capacity", deep=True, entries=entries, parents=("indexed",), capacity=True)]
+    if args.large_dir:
+        profiles = [
+            dict(name="index-large-dir", include={"large_dir"}),
+            dict(name="index-large-dir-indirect", include={"large_dir"},
+                 exclude={"extent", "64bit", "flex_bg"}),
+            dict(name="index-large-dir-gdt", include={"large_dir", "uninit_bg"},
+                 exclude={"metadata_csum"}),
+            dict(name="index-large-dir-capacity", include={"large_dir"},
+                 capacity=True, parents=("indexed",)),
+        ]
+        for profile in profiles:
+            checksummed = "metadata_csum" not in profile.get("exclude", set())
+            tail = INDEX_TAIL_BYTES if checksummed else 0
+            root_entries = (1024 - INDEX_ROOT_PREFIX_BYTES - tail) // INDEX_ENTRY_BYTES
+            node_entries = (1024 - INDEX_NODE_PREFIX_BYTES - tail) // INDEX_ENTRY_BYTES
+            record_bytes = (DIRECTORY_HEADER_BYTES + NAME_MAX + DIRECTORY_ALIGNMENT - 1) & ~(DIRECTORY_ALIGNMENT - 1)
+            leaf_entries = (1024 - (DIRECTORY_TAIL_BYTES if checksummed else 0)) // record_bytes
+            capacity = profile.get("capacity", False)
+            leaves = (root_entries - int(capacity)) * node_entries + 1
+            profile.update(large=True, deep=True, levels=1 if capacity else 2,
+                           entries=leaves * leaf_entries, root_entries=root_entries,
+                           node_entries=node_entries)
     records = []
 
     def save():
@@ -132,20 +158,26 @@ def main():
         tree = output / f"{profile['name']}-tree"
         tree.mkdir()
         (tree / "hello.txt").write_bytes(b"Machlin ext4\n")
-        if profile.get("capacity"):
+        alternate = profile.get("capacity") or profile.get("large")
+        if alternate:
             # Keep each host inode's link count below common host filesystem limits.
             (tree / "alternate.txt").write_bytes(b"Alternate ext4 target\n")
         for parent in parents:
             directory = tree / parent
             directory.mkdir()
             (directory / "child").mkdir()
-            for index in range(entries):
+            parent_entries = 512 if profile.get("large") and parent != "indexed" else entries
+            for index in range(parent_entries):
                 name = f"entry-{index:06d}-".ljust(NAME_MAX, "n")
-                target = "alternate.txt" if profile.get("capacity") and index & 1 else "hello.txt"
+                target = "alternate.txt" if alternate and index & 1 else "hello.txt"
                 os.link(tree / target, directory / name)
         image = output / f"{profile['name']}.img"
+        per_directory = {parent: (512 if profile.get("large") and parent != "indexed" else entries) + 3
+                         for parent in parents}
         record = dict(image=str(image), block_size=block_size, hash_version=HASH_VERSIONS[algorithm],
-                      signedness=signedness, entries_per_directory=entries + 3, commands=[])
+                      signedness=signedness, entries_by_directory=per_directory, commands=[])
+        if len(set(per_directory.values())) == 1:
+            record["entries_per_directory"] = entries + 3
         records.append(record)
 
         def run(command, allowed=(0,)):
@@ -190,6 +222,9 @@ def main():
             record["orphan_file"] = orphan
         directories = {}
         for parent in parents:
+            parent_entries = 512 if profile.get("large") and parent != "indexed" else entries
+            expected_levels = (1 if profile.get("large") and parent != "indexed"
+                               else profile.get("levels", int(bool(profile.get("deep")))))
             stat = run([tools["debugfs"], "-R", f"stat /{parent}", image])
             dump = run([tools["debugfs"], "-R", f"htree_dump /{parent}", image])
             listing = run([tools["debugfs"], "-R", f"ls -p /{parent}", image])
@@ -198,14 +233,16 @@ def main():
             version = int(re.search(r"Hash Version:\s+(\d+)", dump)[1])
             leaves = {int(value) for value in re.findall(r"Reading directory block (\d+),", dump)}
             names = directory_entries(listing)
-            if (not flags & INODE_INDEX or levels != int(bool(profile.get("deep"))) or
+            if (not flags & INODE_INDEX or levels != expected_levels or
                     version != HASH_VERSIONS[algorithm] or len(leaves) < 2 or
-                    len(names) != entries + 3 or len(set(names)) != len(names)):
+                    len(names) != parent_entries + 3 or len(set(names)) != len(names)):
                 save()
                 raise RuntimeError("Indexed fixture did not produce its required tree shape")
             directories[parent] = dict(levels=levels, hash_version=version, leaf_blocks=len(leaves),
                                        entries=len(names))
             if profile.get("capacity"):
+                root_entries = profile.get("root_entries", root_entries)
+                node_entries = profile.get("node_entries", node_entries)
                 counts = [int(value) for value in re.findall(r"Number of entries \(count\):\s+(\d+)", dump)]
                 if not counts or counts[0] != root_entries or node_entries not in counts[1:]:
                     save()

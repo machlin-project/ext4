@@ -19,9 +19,12 @@ def main():
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--tools-root", type=Path)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--case", help="Select one exact source image filename from a fixture package")
     args = parser.parse_args()
     tools = resolve_tools(args.tools_root)
     fixtures = json.loads(args.fixture.read_text())
+    if args.case:
+        fixtures = [fixture for fixture in fixtures if Path(fixture["image"]).name == args.case]
     if len(fixtures) != 1 or not fixtures[0].get("passed"):
         raise RuntimeError("Expected one verified full-root fixture")
     fixture = fixtures[0]
@@ -55,7 +58,10 @@ def main():
     before_counts = accounting(run([tools["dumpe2fs"], "-h", source]))
     after_counts = accounting(run([tools["dumpe2fs"], "-h", image]))
     require(before_counts == after_counts, "Full-root record reuse changed allocation accounting")
-    for path in ("/", "/indexed", "/indexed/child", "/lost+found", "/hello.txt", "/alternate.txt"):
+    paths = ["/", "/indexed", "/indexed/child", "/lost+found", "/hello.txt", "/alternate.txt"]
+    if "/peer" in fixture.get("lookup", {}).get("directories", {}):
+        paths += ["/peer", "/peer/child"]
+    for path in paths:
         before = inode_fields(run([tools["debugfs"], "-R", f"stat {path}", source]))
         after = inode_fields(run([tools["debugfs"], "-R", f"stat {path}", image]))
         require(before is not None and after is not None, f"Missing capacity object {path}")
@@ -69,7 +75,9 @@ def main():
             old_names = entries(run([tools["debugfs"], "-R", f"ls -p {path}", source], raw=True))
             new_names = entries(run([tools["debugfs"], "-R", f"ls -p {path}", image], raw=True))
             if path == "/indexed":
-                require(len(old_names) == fixture["entries_per_directory"], "Capacity baseline lost expected names")
+                require(len(old_names) == (fixture["entries"] if "entries" in fixture else
+                                          fixture["entries_per_directory"]),
+                        "Capacity baseline lost expected names")
                 target = inode_fields(run([tools["debugfs"], "-R", "stat /hello.txt", source]))
                 old_names[b"capacity-reuse"] = target["inode"]
                 report["retained_names"] = len(old_names)
