@@ -30,6 +30,36 @@ in Git. Generated images never enter source history. Unsupported advanced ext4
 features remain visible requirements or explicit scope decisions; they may not be
 silently reclassified to declare the project complete.
 
+## Remaining portable-core work
+
+Use this queue instead of an estimated completion percentage. A block closes only
+when its behavior and independent acceptance are complete; test count is not a
+completion metric. New requirements must be added here explicitly, with their
+effect on the remaining scope. FSKit and LXNU work follows this queue and is not
+counted as portable-core implementation.
+
+| Block | Concrete remaining work | State |
+| --- | --- | --- |
+| Ordinary filesystem operations | Special-file creation/device identity and whiteout; preallocation and hole punching; admitted persistent inode flags | Open; automatic index creation and DIR_NLINK now pass focused, independent and Linux acceptance |
+| Format compatibility | META_BG and SPARSE_SUPER2 geometry; EA_INODE and INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open |
+| Journal compatibility | Checksum v1, asynchronous commit, fast commit and external journals, including interrupted replay and cross-implementation recovery | Open |
+| Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
+
+MMP, quota/project accounting, casefold, encryption and verity also remain
+unsupported compatibility requirements awaiting implementation or an explicit
+product scope decision. They are not accepted merely because mounting rejects
+them safely. They must not disappear from a future readiness claim. The core
+currently requires one serialized resource owner; native operation locking,
+page-cache coordination, ACL authorization and platform lifetime acceptance belong
+to the later adapters, with the core's metadata-transition contracts retained.
+
+Already implemented, with evidence below: ordinary reads and sparse mapping;
+transactional writes and allocation; restartable truncate and final deletion;
+create/link/symlink/mkdir/unlink/rmdir/rename; raw xattr storage and lifetime;
+internal-journal recovery and both orphan representations; HTree creation, lookup
+and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
+the remaining blocks have equal size or that the full core is accepted.
+
 ## Legacy group checksum evidence
 
 `GDT_CSUM` descriptor verification and mutation are implemented with CRC16;
@@ -145,8 +175,49 @@ reverse replay agree, including data, metadata and allocation accounting; all
 are under the lab's `artifacts/ext4-journal/linux-reference/large-directory-*`
 directories, with the accepted functional and compact pending runs suffixed
 `-retry1`. Earlier successful stages were not repeated after the harness fixes.
-The complete 295-test regression remains pending. These bounded profiles do not
-establish large-volume performance or native writes.
+The complete six-job CI regression passes all 295 registered tests exactly once,
+without missing, duplicate, unexpected, skipped or failed Meson results. Its
+independent checks reproduce the functional, split/recovery and capacity cases.
+Evidence is under `artifacts/checks/large-directory-ci-36348971572/`; see the
+[accepted CI run](https://github.com/machlin-project/ext4/actions/runs/36348971572).
+These bounded profiles do not establish large-volume performance or native writes.
+
+## Automatic directory growth evidence
+
+A full one-block linear directory now acquires an HTree root and one or two
+leaves in the insertion transaction. Parent mapping, size, checksums and INDEX
+flag commit together. Indexed parents that exceed 65,000 links atomically enable
+DIR_NLINK and retain the unknown-count sentinel through subsequent namespace
+operations. File hardlink and nonindexed-parent limits remain enforced.
+
+The sanitized and optimized freestanding builds pass, including the 2 KiB frame
+budget. All 25 selected cases pass across the recorded runs: eighteen new cases
+and seven regression controls. The initial compile found an unused local; two
+test-preparation corrections replaced an index-only helper used on a linear
+directory and a 64 KiB reader image without a journal. Only unfinished cases were
+rerun. The final suite covers 1 through 64 KiB blocks, eighteen hash/signedness
+combinations, 180 resource failures and 684 write/flush cuts. Of those cuts, 666
+recover the complete old or new state; eighteen torn checksummed primary
+superblocks fail closed. Compact counter models bound fault enumeration; a
+separate independently authored image contains all 64,998 actual child directories
+at the link-count boundary. Evidence is under `artifacts/checks/directory-growth-development-*`.
+
+Independent checks pass sixteen index conversions, the real link-count overflow
+and twenty-two rename cases, including one- and two-leaf conversions. All 234
+nonrepairing e2fsck checks and 78 journal-only oracle replays return zero; 156 core
+replay/idempotence commands agree on old/new contents, metadata and accounting.
+Reports are under `artifacts/directory-growth-independent/` and
+`artifacts/directory-growth-rename-independent/`.
+
+Three pending-journal roundtrips through Linux pass: extent and indirect index
+creation, and real DIR_NLINK enablement. Linux replays the core commit, verifies
+the namespace and commits new changes; core and oracle reverse replay agree,
+with six nonrepairing checks, three journal-only replays and idempotent repeated
+recovery. Inputs and binaries remain unchanged. Evidence is in
+`artifacts/checks/directory-growth-linux-summary.json` and the lab's
+`artifacts/ext4-journal/linux-reference/directory-growth-pending-linux/`.
+The complete 313-test CI regression remains pending. The reference Linux kernel
+has 4 KiB pages; 64 KiB format acceptance here is portable and independent only.
 
 ## Meson build acceptance
 

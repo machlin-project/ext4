@@ -44,7 +44,7 @@ The portable core reads, lists and transactionally changes inode-body and extern
 xattrs, including copying shared blocks before modification. Attribute batches can
 commit together with inode permissions, ownership and times. Attribute lifetime now
 extends through creation, file writes, truncate, namespace changes and final orphan
-release. The combined 270-test CI regression passes through the legacy group-checksum package,
+release. The combined 295-test CI regression passes through the large-directory package,
 alongside targeted fault and independent checks. Bidirectional Linux
 attribute/ACL/security roundtrips and direct
 Linux replay of core attribute transactions pass on eight format profiles. ACL
@@ -59,8 +59,10 @@ Legacy CRC16 group descriptors also pass portable checks, independent image
 inspection and Linux mutation/recovery roundtrips, including lazy inode and block
 groups. The full 270-test regression of that format package passes.
 LARGEDIR lookup and mutation with two internal index levels pass targeted portable
-faults, independent image checks and ten Linux recovery roundtrips. The complete
-295-test regression of this newer package remains pending.
+faults, independent image checks, ten Linux recovery roundtrips and the complete
+295-test regression. Automatic creation of directory indexes and DIR_NLINK
+overflow also pass focused faults, independent image checks and Linux recovery;
+their complete 313-test regression remains pending.
 Generated disk images and reports are not source artifacts.
 
 ## Layout

@@ -77,8 +77,8 @@ v2 or v3 checksums/tags (legacy means no journal checksums), 64-bit addresses an
 revokes. It bounds the journal to 1,048,576 data blocks, 1,024 data runs and 8,192
 mapping blocks, a writing transaction to 256 snapshots, and recovery to 1,048,576
 records. Exceeding a bound
-is an explicit unsupported result. External journals, checksum v1, async/fast
-commit and general filesystem mutation remain separate work.
+is an explicit unsupported result. External journals, checksum v1 and async/fast
+commit remain separate work.
 Recovery accepts a well-formed revoke even if REVOKE is absent from the saved
 journal feature word: Linux can commit that record before persisting the newly
 enabled bit. Record lengths, checksums, protected/out-of-range targets and the
@@ -414,8 +414,17 @@ Indexed mutation bounds directory size to 1,048,576 blocks. The temporary graph 
 internal level, or two internal levels when the LARGEDIR incompatibility feature
 is present. Splits propagate through the validated original parent chain in one
 transaction; a full root can grow only within that negotiated height. Further
-growth cancels without resource writes. Linear directories do not automatically
-convert to indexed form. These bounds and algorithms are not evidence of accepted
+growth cancels without resource writes. A full single-block linear directory
+automatically converts when DIR_INDEX is enabled. The transaction retains dot and
+dotdot in the new root, hashes and packs all other records and the new name into
+one or two leaves, and publishes mapping, size, allocation and INDEX together.
+It uses the superblock's default algorithm and recorded signedness; without legacy
+signedness flags, the new root explicitly records an unsigned hash version.
+Malformed records, unsupported defaults, exhausted space or credits cancel before
+resource writes. Existing multiblock linear directories retain their linear form,
+as do filesystems without DIR_INDEX. See the
+[directory format](https://docs.kernel.org/filesystems/ext4/directory.html).
+These bounds and algorithms are not evidence of accepted
 large-volume performance. Duplicate names, stale generations, invalid dot records,
 exhausted inodes, reserved-space exclusion and journal-credit exhaustion cancel
 before resource writes; uncertain commits poison the owner. Neither adapter exposes
@@ -449,10 +458,21 @@ cancels the entire private change before any device write.
 A replaced last-link inode enters the same orphan/lifetime path as unlink. A held
 victim remains accessible after its old name resolves to the replacement; otherwise
 bounded cleanup finishes before returning. Replacing one of several hardlinks
-preserves the other names and allocation. Unknown directory link counts and
-whiteout creation are not implemented by this API. Authorization,
+preserves the other names and allocation. Whiteout creation is not implemented
+by this API. Authorization,
 sticky-directory rules and native rename locking remain responsibilities of the
 platform owner; the portable operation cannot authorize itself.
+
+Directory link counts preserve the DIR_NLINK sentinel of one through mkdir,
+rmdir, moves, exchange and replacement. An indexed directory crossing the normal
+65,000-link limit publishes that sentinel and monotonic DIR_NLINK enablement in
+the same transaction as its new child; replay admits this feature enablement but
+rejects clearing it. A private failure changes neither the feature summary nor
+the inode. An empty directory with an unknown count is validated by its complete
+contents before removal or replacement. A sentinel without the filesystem feature
+is corrupt, while ordinary file hardlinks and nonindexed-directory growth retain
+the normal link limit. See the
+[inode link-count format](https://docs.kernel.org/filesystems/ext4/inodes.html).
 
 The opaque `ext4_inode_hold` represents lifetime under the exclusive core owner.
 The platform retains one while a descriptor, mapping or other native object can

@@ -53,6 +53,54 @@ ext4_namespace_type(uint16_t mode)
 }
 
 static enum ext4_result
+ext4_directory_links(struct ext4_allocation *allocation, struct ext4_inode_disk *disk,
+    const struct ext4_inode *inode, int delta, unsigned int children)
+{
+	struct ext4_fs *fs = allocation->fs;
+	uint32_t features;
+	unsigned int links;
+	enum ext4_result error;
+
+	if (inode->links == 1) {
+		return (fs->info.feature_ro_compat & EXT4_FEATURE_RO_DIR_NLINK) ? EXT4_OK
+										: EXT4_CORRUPT;
+	}
+	if (inode->links < 2U + children || (delta < 0 && inode->links < 2 - delta)) {
+		return EXT4_CORRUPT;
+	}
+	links = (unsigned int)((int)inode->links + delta);
+	if (delta > 0 && links > EXT4_LINK_MAX) {
+		if (!(ext4_le32(&disk->flags) & EXT4_INODE_INDEX)) {
+			return EXT4_TOO_MANY_LINKS;
+		}
+		error = ext4_allocation_super(allocation);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		features = ext4_le32(&allocation->super->feature_ro_compat);
+		ext4_encode32(
+		    &allocation->super->feature_ro_compat, features | EXT4_FEATURE_RO_DIR_NLINK);
+		if (fs->metadata_checksum) {
+			ext4_encode32(&allocation->super->checksum,
+			    ext4_crc32c(UINT32_MAX, allocation->super,
+				offsetof(struct ext4_super_disk, checksum)));
+		}
+		links = 1;
+	}
+	ext4_encode16(&disk->links, (uint16_t)links);
+	return EXT4_OK;
+}
+
+static bool
+ext4_directory_links_valid(struct ext4_fs *fs, const struct ext4_inode *inode, bool empty)
+{
+	if (inode->links == 1) {
+		return (fs->info.feature_ro_compat & EXT4_FEATURE_RO_DIR_NLINK) != 0;
+	}
+	return empty ? inode->links == 2 : inode->links >= 2;
+}
+
+static enum ext4_result
 ext4_symlink_initialize(struct ext4_allocation *allocation, struct ext4_inode *inode,
     struct ext4_inode_disk *disk, const uint8_t *target, size_t length)
 {
@@ -98,6 +146,7 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	struct ext4_allocation allocation;
 	uint64_t free_blocks;
 	uint32_t feature_compat;
+	uint32_t feature_ro_compat;
 	uint32_t flags;
 	size_t index;
 	bool ready = false;
@@ -163,16 +212,15 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		error = EXT4_NOT_FOUND;
 		goto cancel;
 	}
+	if (!ext4_directory_links_valid(fs, &parent, false)) {
+		error = EXT4_CORRUPT;
+		goto cancel;
+	}
 	/* The owner supplies the admitted inheritance decision, including an
 	 * explicit empty batch when no parent ACL/security value should pass on. */
 	if (create_mode != 0 && ext4_inode_has_xattrs(fs, parent_disk) &&
 	    !(attributes->fields & EXT4_ATTR_XATTRS)) {
 		error = EXT4_INVALID_ARGUMENT;
-		goto cancel;
-	}
-	if (create_mode == EXT4_MODE_DIRECTORY &&
-	    (parent.links == 1 || parent.links >= EXT4_LINK_MAX)) {
-		error = EXT4_TOO_MANY_LINKS;
 		goto cancel;
 	}
 	ext4_zero(&times, sizeof(times));
@@ -244,7 +292,6 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		if (error == EXT4_OK && create_mode == EXT4_MODE_DIRECTORY) {
 			error = ext4_directory_initialize(
 			    &allocation, &child, child_disk, parent.number);
-			ext4_encode16(&parent_disk->links, parent.links + 1);
 		} else if (error == EXT4_OK && create_mode == EXT4_MODE_SYMLINK) {
 			error = ext4_symlink_initialize(
 			    &allocation, &child, child_disk, link_target, link_length);
@@ -267,6 +314,9 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	}
 	error = ext4_directory_insert(
 	    &allocation, &parent, parent_disk, &slot, child.number, type, name, name_length);
+	if (error == EXT4_OK && create_mode == EXT4_MODE_DIRECTORY) {
+		error = ext4_directory_links(&allocation, parent_disk, &parent, 1, 0);
+	}
 	if (error == EXT4_OK) {
 		ext4_inode_checksum_set(fs, parent.number, parent_disk);
 		ext4_inode_checksum_set(fs, child.number, child_disk);
@@ -278,6 +328,9 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	free_blocks = allocation.free_blocks;
 	feature_compat = allocation.super == NULL ? fs->info.feature_compat
 						  : ext4_le32(&allocation.super->feature_compat);
+	feature_ro_compat = allocation.super == NULL
+	    ? fs->info.feature_ro_compat
+	    : ext4_le32(&allocation.super->feature_ro_compat);
 	ext4_allocation_destroy(&allocation);
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
@@ -286,6 +339,7 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	}
 	fs->info.free_blocks = free_blocks;
 	fs->info.feature_compat = feature_compat;
+	fs->info.feature_ro_compat |= feature_ro_compat & EXT4_FEATURE_RO_DIR_NLINK;
 	if (create_mode != 0) {
 		fs->info.free_inodes--;
 	}
@@ -432,6 +486,10 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 		error = EXT4_NOT_FOUND;
 		goto cancel;
 	}
+	if (!ext4_directory_links_valid(fs, &parent, false)) {
+		error = EXT4_CORRUPT;
+		goto cancel;
+	}
 	error = ext4_allocation_init(&allocation, fs, transaction, &parent);
 	if (error != EXT4_OK) {
 		goto cancel;
@@ -474,8 +532,12 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 		if (error != EXT4_OK) {
 			goto cancel;
 		}
-		if (parent.links < 3 || child.links != 2) {
+		if (!ext4_directory_links_valid(fs, &child, true)) {
 			error = EXT4_CORRUPT;
+			goto cancel;
+		}
+		error = ext4_directory_links(&allocation, parent_disk, &parent, -1, 1);
+		if (error != EXT4_OK) {
 			goto cancel;
 		}
 	}
@@ -504,7 +566,6 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 	}
 	ext4_encode16(&child_disk->links, last ? 0 : child.links - 1);
 	if (remove_directory) {
-		ext4_encode16(&parent_disk->links, parent.links - 1);
 		ext4_encode32(&child_disk->size_lo, 0);
 		ext4_encode32(&child_disk->size_hi, 0);
 	}
@@ -650,23 +711,6 @@ ext4_rename_ancestry(struct ext4_fs *fs, uint32_t moved, uint32_t parent)
 	}
 }
 
-static enum ext4_result
-ext4_rename_links(
-    struct ext4_inode_disk *disk, const struct ext4_inode *inode, int delta, unsigned int children)
-{
-	if (inode->links == 1) {
-		return EXT4_UNSUPPORTED;
-	}
-	if (inode->links < 2U + children || (delta < 0 && inode->links < 2 - delta)) {
-		return EXT4_CORRUPT;
-	}
-	if (delta > 0 && (uint32_t)inode->links > EXT4_LINK_MAX - (unsigned int)delta) {
-		return EXT4_TOO_MANY_LINKS;
-	}
-	ext4_encode16(&disk->links, (uint16_t)((int)inode->links + delta));
-	return EXT4_OK;
-}
-
 enum ext4_result
 ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
     const struct ext4_rename_entry *destination, uint32_t flags, const struct ext4_timestamp *time,
@@ -678,6 +722,7 @@ ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
 	struct ext4_inode_update times;
 	struct ext4_directory_slot space;
 	uint64_t free_blocks;
+	uint32_t feature_ro_compat;
 	unsigned int index;
 	int delta[2] = { 0, 0 };
 	bool directory[2];
@@ -733,6 +778,10 @@ ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
 			error = EXT4_NOT_FOUND;
 			goto cancel;
 		}
+		if (!ext4_directory_links_valid(fs, &state->parents[index], false)) {
+			error = EXT4_CORRUPT;
+			goto cancel;
+		}
 	}
 	error = ext4_allocation_init(&state->allocation, fs, transaction, &state->parents[1]);
 	if (error != EXT4_OK) {
@@ -769,7 +818,7 @@ ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
 		if (!directory[index]) {
 			continue;
 		}
-		if (state->objects[index].links < 2) {
+		if (!ext4_directory_links_valid(fs, &state->objects[index], false)) {
 			error = EXT4_CORRUPT;
 			goto cancel;
 		}
@@ -797,7 +846,7 @@ ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
 			if (error != EXT4_OK) {
 				goto cancel;
 			}
-			if (state->objects[1].links != 2) {
+			if (!ext4_directory_links_valid(fs, &state->objects[1], true)) {
 				error = EXT4_CORRUPT;
 				goto cancel;
 			}
@@ -817,20 +866,6 @@ ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
 			ext4_encode32(&state->object_disks[1]->size_lo, 0);
 			ext4_encode32(&state->object_disks[1]->size_hi, 0);
 		}
-	}
-	if (same_parent) {
-		error = ext4_rename_links(state->parent_disks[0], &state->parents[0],
-		    delta[0] + delta[1], (unsigned int)directory[0] + (unsigned int)directory[1]);
-	} else {
-		error = ext4_rename_links(
-		    state->parent_disks[0], &state->parents[0], delta[0], directory[0]);
-		if (error == EXT4_OK) {
-			error = ext4_rename_links(
-			    state->parent_disks[1], &state->parents[1], delta[1], directory[1]);
-		}
-	}
-	if (error != EXT4_OK) {
-		goto cancel;
 	}
 	if (exists) {
 		error = ext4_directory_replace(&state->allocation, &state->parents[1],
@@ -860,6 +895,21 @@ ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
 			    state->parent_disks[1], &space, state->objects[0].number,
 			    ext4_namespace_type(state->objects[0].mode), destination->name,
 			    destination->name_length);
+		}
+	}
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	if (same_parent) {
+		error = ext4_directory_links(&state->allocation, state->parent_disks[0],
+		    &state->parents[0], delta[0] + delta[1],
+		    (unsigned int)directory[0] + (unsigned int)directory[1]);
+	} else {
+		error = ext4_directory_links(&state->allocation, state->parent_disks[0],
+		    &state->parents[0], delta[0], directory[0]);
+		if (error == EXT4_OK) {
+			error = ext4_directory_links(&state->allocation, state->parent_disks[1],
+			    &state->parents[1], delta[1], directory[1]);
 		}
 	}
 	if (error != EXT4_OK) {
@@ -896,6 +946,9 @@ ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
 		goto cancel;
 	}
 	free_blocks = state->allocation.free_blocks;
+	feature_ro_compat = state->allocation.super == NULL
+	    ? fs->info.feature_ro_compat
+	    : ext4_le32(&state->allocation.super->feature_ro_compat);
 	ext4_allocation_destroy(&state->allocation);
 	ready = false;
 	error = ext4_transaction_commit(transaction);
@@ -904,6 +957,7 @@ ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
 		goto out;
 	}
 	fs->info.free_blocks = free_blocks;
+	fs->info.feature_ro_compat |= feature_ro_compat & EXT4_FEATURE_RO_DIR_NLINK;
 	if (last) {
 		error = ext4_namespace_orphan_complete(
 		    fs, state->objects[1].number, state->objects[1].generation);

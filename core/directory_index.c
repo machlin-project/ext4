@@ -121,7 +121,7 @@ ext4_index_header(struct ext4_directory_index *index, uint32_t logical)
 	if (error != EXT4_OK || logical != 0) {
 		return error;
 	}
-	if (flags == 0) {
+	if (flags == 0 && decoded.version <= EXT4_HASH_TEA) {
 		return EXT4_UNSUPPORTED;
 	}
 	if (flags == (EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH)) {

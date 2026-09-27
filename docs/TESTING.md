@@ -186,6 +186,20 @@ splits. Explicit skips identify transitions not applicable to a profile.
 `check_index_faults.py` compares complete old/new directory bytes and object state
 against separate journal-only recovery, including idempotence and source hashes.
 
+`directory-create-index-*` fills a one-block linear directory and verifies atomic
+conversion to an HTree with one or two leaves, across all writable base profiles.
+The 1/4 KiB cases enumerate preparation and storage failures; the hash case checks
+all six versions with signed, unsigned and absent legacy flags. The no-filetype
+and separately journaled 64 KiB profiles cover their distinct wire encodings.
+`directory-links-*` uses compact in-memory counter models for exhaustive boundary
+faults, then exercises mkdir, rmdir, moves, exchange and replacement with unknown
+parent or empty-victim counts. Models with intentionally inflated counts are never
+claimed as clean filesystem images. `generate_directory_links.py` separately
+authors an e2fsck-clean directory with 64,998 real child directories and no
+DIR_NLINK feature. Its real overflow exports pass the same independent recovery
+checker and Linux roundtrip as index creation. The generator's `--large-block-only`
+mode authors the journaled 64 KiB image in a separate directory.
+
 `generate_index_fixtures.py --large-dir` uses e2fsprogs to create three trees with
 two internal levels (metadata checksums, indirect maps and legacy group checksums)
 and a full root ready to grow. They retain over 46,000 names each. The separate

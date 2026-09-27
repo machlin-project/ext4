@@ -87,6 +87,10 @@ jobs:
           python3 tests/generate_large_directory_edges.py --fixtures artifacts/large-directory-fixtures \
             --output artifacts/large-directory-edge-fixtures \
             2>&1 | tee artifacts/checks/large-directory-edge-fixtures.log
+          python3 tests/generate_directory_links.py --output artifacts/directory-links-fixture \
+            2>&1 | tee artifacts/checks/directory-links-fixture.log
+          python3 tests/generate_directory_links.py --large-block-only --output artifacts/directory-large-block-fixture \
+            2>&1 | tee artifacts/checks/directory-large-block-fixture.log
       - name: Generate independently filled block bitmaps
         if: matrix.suite == 'namespace'
         run: |
@@ -117,7 +121,9 @@ jobs:
               -Dindex_collisions="$PWD/artifacts/index-collisions/vectors.txt" \
               -Dindex_capacity="$PWD/artifacts/index-capacity-fixture/index-capacity.img" \
               -Dlarge_directory_fixtures="$PWD/artifacts/large-directory-fixtures" \
-              -Dlarge_directory_edges="$PWD/artifacts/large-directory-edge-fixtures")
+              -Dlarge_directory_edges="$PWD/artifacts/large-directory-edge-fixtures" \
+              -Ddirectory_links_fixture="$PWD/artifacts/directory-links-fixture/directory-links.img" \
+              -Ddirectory_index_64k_fixture="$PWD/artifacts/directory-large-block-fixture/directory-64k.img")
           fi
           if [[ '${{ matrix.suite }}' == namespace ]]; then
             space_options=(-Dspace_fixtures="$PWD/artifacts/space-fixtures")
@@ -600,6 +606,27 @@ jobs:
             --output artifacts/large-directory-independent/splits \
             2>&1 | tee artifacts/checks/large-directory-splits-independent.log
           find "$exports" artifacts/large-directory-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Independently verify directory creation and link-count overflow
+        if: matrix.suite == 'indexed'
+        run: |
+          exports=artifacts/directory-growth-exports
+          mkdir "$exports"
+          for image in artifacts/fixtures/*.img artifacts/namespace-fixtures/namespace-no-filetype.img; do
+            case "${image##*/}" in ext4-indexed.img|ext4-64k.img) continue ;; esac
+            .build/ext4-index-write-test --create-index --fault-smoke --export "$exports" "$image" \
+              2>&1 | tee "artifacts/checks/directory-create-${image##*/}.log"
+          done
+          .build/ext4-index-write-test --create-index --fault-smoke --export "$exports" \
+            artifacts/directory-large-block-fixture/directory-64k.img \
+            2>&1 | tee artifacts/checks/directory-create-64k.log
+          .build/ext4-index-write-test --directory-links-image --export "$exports" \
+            artifacts/directory-links-fixture/directory-links.img \
+            2>&1 | tee artifacts/checks/directory-links-exports.log
+          python3 tests/check_index_faults.py --exports "$exports" --recover .build/ext4-recover \
+            --output artifacts/directory-growth-independent \
+            2>&1 | tee artifacts/checks/directory-growth-independent.log
+          find "$exports" artifacts/directory-growth-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Preserve test evidence
         if: always()

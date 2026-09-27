@@ -354,9 +354,75 @@ ext4_directory_pack(struct ext4_fs *fs, const struct ext4_inode *parent, uint8_t
 }
 
 static enum ext4_result
+ext4_directory_index_start(struct ext4_allocation *allocation, const struct ext4_inode *parent,
+    struct ext4_inode_disk *disk, struct ext4_directory_index *tree)
+{
+	uint32_t flags;
+	unsigned int word;
+	enum ext4_result error;
+
+	ext4_zero(tree, sizeof(*tree));
+	tree->allocation = allocation;
+	tree->inode = parent;
+	tree->disk = disk;
+	tree->blocks = 1;
+	error = ext4_allocation_super(allocation);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	flags = ext4_le32(&allocation->super->flags) &
+	    (EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH);
+	if (flags == (EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH)) {
+		return EXT4_CORRUPT;
+	}
+	tree->version = allocation->super->default_hash_version;
+	if (tree->version > EXT4_HASH_TEA_UNSIGNED) {
+		return EXT4_UNSUPPORTED;
+	}
+	/* A newly created index can state its unsigned hash explicitly, even on
+	 * older media without a recorded architecture's signedness. */
+	if (tree->version <= EXT4_HASH_TEA && flags != EXT4_SIGNED_DIRECTORY_HASH) {
+		tree->version += EXT4_HASH_LEGACY_UNSIGNED;
+	}
+	for (word = 0; word < 4; word++) {
+		tree->seed[word] = ext4_le32(&allocation->super->hash_seed[word]);
+	}
+	return EXT4_OK;
+}
+
+static void
+ext4_directory_index_root(struct ext4_directory_index *tree, uint8_t *buffer, uint32_t left,
+    uint32_t right, uint32_t separator)
+{
+	struct ext4_fs *fs = tree->allocation->fs;
+	struct ext4_dx_root_prefix_disk *root = (struct ext4_dx_root_prefix_disk *)buffer;
+	struct ext4_dx_count_disk *counts = (struct ext4_dx_count_disk *)(root + 1);
+	struct ext4_dx_entry_disk *entries = (struct ext4_dx_entry_disk *)counts;
+	uint32_t dot_length = offsetof(struct ext4_dx_root_prefix_disk, dotdot);
+	uint32_t tail = fs->metadata_checksum ? sizeof(struct ext4_dx_tail_disk) : 0;
+
+	ext4_zero(buffer, fs->info.block_size);
+	ext4_directory_entry(fs, buffer, dot_length, tree->inode->number, EXT4_FT_DIRECTORY,
+	    (const uint8_t *)".", 1);
+	ext4_directory_entry(fs, buffer + dot_length, fs->info.block_size - dot_length,
+	    tree->parent_number, EXT4_FT_DIRECTORY, (const uint8_t *)"..", 2);
+	root->hash_version = tree->version;
+	root->info_length = sizeof(*root) - offsetof(struct ext4_dx_root_prefix_disk, reserved);
+	ext4_encode16(&counts->limit,
+	    (uint16_t)((fs->info.block_size - sizeof(*root) - tail) / sizeof(*entries)));
+	ext4_encode16(&counts->count, right == 0 ? 1 : 2);
+	ext4_encode32(&entries[0].block, left);
+	if (right != 0) {
+		ext4_encode32(&entries[1].hash, separator);
+		ext4_encode32(&entries[1].block, right);
+	}
+	ext4_index_checksum_set(fs, tree->inode, 0, buffer);
+}
+
+static enum ext4_result
 ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inode *parent,
     struct ext4_inode_disk *disk, struct ext4_directory_slot *slot, uint32_t number,
-    enum ext4_file_type type, const uint8_t *name, size_t name_length)
+    enum ext4_file_type type, const uint8_t *name, size_t name_length, bool convert)
 {
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_directory_index tree;
@@ -365,12 +431,16 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 	struct ext4_name_hash hash;
 	uint8_t *original = NULL;
 	uint8_t *right_buffer = NULL;
+	uint8_t *new_buffer = NULL;
 	void *left_buffer = NULL;
+	void *root_buffer = NULL;
 	uint64_t physical;
+	uint64_t root_physical = 0;
 	uint32_t usable = ext4_directory_usable(fs);
 	uint32_t capacity = usable / ext4_directory_minimum(1) + 1;
 	uint32_t next;
 	uint32_t right = 0;
+	uint32_t left_logical = slot->logical;
 	uint32_t offset;
 	uint32_t length;
 	uint32_t count = 0;
@@ -380,29 +450,33 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 	uint32_t distance;
 	uint32_t best = UINT32_MAX;
 	uint32_t index;
-	uint32_t separator;
+	uint32_t separator = 0;
 	enum ext4_result error;
 
-	error = ext4_index_open(allocation, parent, disk, &tree);
+	error = convert ? ext4_directory_index_start(allocation, parent, disk, &tree)
+			: ext4_index_open(allocation, parent, disk, &tree);
 	if (error != EXT4_OK) {
 		return error;
 	}
 	next = tree.blocks;
-	if (slot->logical >= tree.blocks || tree.ranges[slot->logical].kind != EXT4_INDEX_LEAF) {
+	if (!convert &&
+	    (slot->logical >= tree.blocks || tree.ranges[slot->logical].kind != EXT4_INDEX_LEAF)) {
 		error = EXT4_CORRUPT;
 		goto out;
 	}
-	error = ext4_index_read(&tree, slot->logical, &physical);
+	error = ext4_index_read(&tree, convert ? 0 : slot->logical, &physical);
 	if (error == EXT4_OK) {
-		error = ext4_directory_checksum(fs, parent, slot->logical, allocation->scratch);
+		error = ext4_directory_checksum(
+		    fs, parent, convert ? 0 : slot->logical, allocation->scratch);
 	}
 	if (error != EXT4_OK) {
 		goto out;
 	}
-	if (physical != slot->physical) {
+	if (!convert && physical != slot->physical) {
 		error = EXT4_CORRUPT;
 		goto out;
 	}
+	root_physical = physical;
 	original = fs->environment.allocate(fs->environment.context, fs->info.block_size);
 	entries =
 	    fs->environment.allocate(fs->environment.context, (size_t)capacity * sizeof(*entries));
@@ -425,6 +499,28 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 			entry->type != 0)) {
 			error = EXT4_CORRUPT;
 			goto out;
+		}
+		if (convert &&
+		    (offset == 0 || offset == offsetof(struct ext4_dx_root_prefix_disk, dotdot))) {
+			if ((offset == 0 &&
+				(ext4_le32(&entry->inode) != parent->number ||
+				    entry->name_length != 1 ||
+				    length != offsetof(struct ext4_dx_root_prefix_disk, dotdot) ||
+				    original[offset + sizeof(*entry)] != '.')) ||
+			    (offset != 0 &&
+				(ext4_le32(&entry->inode) == 0 || entry->name_length != 2 ||
+				    original[offset + sizeof(*entry)] != '.' ||
+				    original[offset + sizeof(*entry) + 1] != '.' ||
+				    (parent->number == EXT4_ROOT_INODE &&
+					ext4_le32(&entry->inode) != EXT4_ROOT_INODE))) ||
+			    (entry->type != EXT4_FT_UNKNOWN && entry->type != EXT4_FT_DIRECTORY)) {
+				error = EXT4_CORRUPT;
+				goto out;
+			}
+			if (offset != 0) {
+				tree.parent_number = ext4_le32(&entry->inode);
+			}
+			continue;
 		}
 		if (ext4_le32(&entry->inode) == 0) {
 			continue;
@@ -451,7 +547,7 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 		error = ext4_directory_hash(tree.version, tree.seed, (const uint8_t *)(entry + 1),
 		    entry->name_length, &hash);
 		if (error != EXT4_OK || count + 1U >= capacity ||
-		    !ext4_index_contains(&tree.ranges[slot->logical], hash.major)) {
+		    (!convert && !ext4_index_contains(&tree.ranges[slot->logical], hash.major))) {
 			error = EXT4_CORRUPT;
 			goto out;
 		}
@@ -469,6 +565,13 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 	entries[count].used = ext4_directory_minimum(name_length);
 	total += entries[count++].used;
 	ext4_directory_sort(entries, count);
+	if (convert) {
+		error = ext4_index_append(&tree, &next, &left_logical, &new_buffer);
+		if (error != EXT4_OK) {
+			goto out;
+		}
+		left_buffer = new_buffer;
+	}
 	if (total <= usable) {
 		cut = count;
 	} else {
@@ -492,7 +595,10 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 			goto out;
 		}
 	}
-	error = ext4_transaction_buffer(allocation->transaction, slot->physical, &left_buffer);
+	if (!convert) {
+		error =
+		    ext4_transaction_buffer(allocation->transaction, slot->physical, &left_buffer);
+	}
 	if (error != EXT4_OK) {
 		goto out;
 	}
@@ -503,11 +609,24 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 		    number, type, name, name_length);
 		separator =
 		    entries[cut].hash | (entries[cut - 1].hash == entries[cut].hash ? 1U : 0);
-		error = ext4_index_add(&tree, slot->logical, separator, right, &next);
+		if (!convert) {
+			error = ext4_index_add(&tree, slot->logical, separator, right, &next);
+		}
+	}
+	if (error == EXT4_OK && convert) {
+		error =
+		    ext4_transaction_buffer(allocation->transaction, root_physical, &root_buffer);
+		if (error == EXT4_OK) {
+			ext4_directory_index_root(
+			    &tree, root_buffer, left_logical, right, separator);
+		}
 	}
 	if (error == EXT4_OK) {
 		error = ext4_inode_account(
 		    allocation, parent, disk, (uint64_t)next * fs->info.block_size);
+		if (error == EXT4_OK && convert) {
+			ext4_encode32(&disk->flags, ext4_le32(&disk->flags) | EXT4_INODE_INDEX);
+		}
 	}
 out:
 	if (entries != NULL) {
@@ -536,7 +655,13 @@ ext4_directory_insert(struct ext4_allocation *allocation, const struct ext4_inod
 
 	if (slot->repack) {
 		return ext4_directory_repack(
-		    allocation, parent, disk, slot, number, type, name, name_length);
+		    allocation, parent, disk, slot, number, type, name, name_length, false);
+	}
+	if (slot->physical == 0 && parent->size == fs->info.block_size &&
+	    !(parent->flags & EXT4_INODE_INDEX) &&
+	    (fs->info.feature_compat & EXT4_FEATURE_COMPAT_DIR_INDEX)) {
+		return ext4_directory_repack(
+		    allocation, parent, disk, slot, number, type, name, name_length, true);
 	}
 	if (slot->physical == 0) {
 		error = ext4_write_map_allocate(

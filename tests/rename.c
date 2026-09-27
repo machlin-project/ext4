@@ -610,7 +610,24 @@ malformed(struct device *device)
 									     : 1);
 				expected = scenario == SOURCE_PARENT_LINKS ? EXT4_CORRUPT
 				    : scenario == DESTINATION_LINK_LIMIT   ? EXT4_TOO_MANY_LINKS
-									   : EXT4_UNSUPPORTED;
+									   : EXT4_CORRUPT;
+				if (scenario == DESTINATION_UNKNOWN_LINKS) {
+					struct ext4_super_disk *super;
+
+					/* A sentinel without DIR_NLINK is corrupt. Valid sentinel
+					 * operations are exercised by directory link tests. */
+					super = (struct ext4_super_disk *)(device->cache +
+					    EXT4_SUPER_OFFSET);
+					fs->info.feature_ro_compat &= ~EXT4_FEATURE_RO_DIR_NLINK;
+					ext4_encode32(
+					    &super->feature_ro_compat, fs->info.feature_ro_compat);
+					if (device->metadata_checksum) {
+						ext4_encode32(&super->checksum,
+						    ext4_crc32c(UINT32_MAX, super,
+							offsetof(
+							    struct ext4_super_disk, checksum)));
+					}
+				}
 			}
 			ext4_inode_checksum_set(fs, parents[index].number, disk);
 			break;

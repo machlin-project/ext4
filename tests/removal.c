@@ -428,6 +428,7 @@ directory_slots(struct device *device)
 	struct ext4_inode result;
 	struct ext4_dir_header_disk *entry;
 	struct ext4_timestamp time = { .seconds = 1700000030 };
+	struct ext4_super_disk *super;
 	uint64_t physical;
 	uint64_t free_blocks;
 	uint32_t free_inodes;
@@ -438,6 +439,15 @@ directory_slots(struct device *device)
 
 	device_reset(device, device->base);
 	fs = mount_writer(device, &root);
+	/* This case owns linear first-record deletion and reuse. Indexed
+	 * creation and deletion have separate transition and graph tests. */
+	super = (struct ext4_super_disk *)(device->cache + EXT4_SUPER_OFFSET);
+	fs->info.feature_compat &= ~EXT4_FEATURE_COMPAT_DIR_INDEX;
+	ext4_encode32(&super->feature_compat, fs->info.feature_compat);
+	if (device->metadata_checksum) {
+		ext4_encode32(&super->checksum,
+		    ext4_crc32c(UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum)));
+	}
 	free_blocks = fs->info.free_blocks;
 	free_inodes = fs->info.free_inodes;
 	directory = create(fs, &root, "slots", true);

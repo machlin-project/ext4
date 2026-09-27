@@ -14,6 +14,10 @@ from check_namespace import inode_fields
 from check_orphans import accounting, digest
 from generate_fixtures import resolve_tools
 
+INODE_INDEX = 0x1000
+LINK_MAX = 65000
+SECTOR_SIZE = 512
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -23,7 +27,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     tools = resolve_tools(args.tools_root)
-    images = sorted(args.exports.resolve().glob("index-atomic-*.img"))
+    images = sorted([*args.exports.resolve().glob("index-atomic-*.img"),
+                     *args.exports.resolve().glob("links-atomic-*.img")])
     if not images:
         raise RuntimeError("No atomic indexed-directory exports found")
     output = args.output.resolve()
@@ -34,10 +39,10 @@ def main():
         (output / "report.json").write_text(json.dumps(records, indent=2) + "\n")
 
     for image in images:
-        match = re.fullmatch(r"index-atomic-(leaf|root|node)-(.+)\.img", image.name)
-        if match is None:
+        match = re.fullmatch(r"index-atomic-(leaf|root|node|create)-(.+)\.img", image.name)
+        if match is None and not image.name.startswith("links-atomic-"):
             raise RuntimeError(f"Unrecognized indexed split export: {image.name}")
-        kind = match[1]
+        kind = match[1] if match else "links"
         before = image.with_name(image.name.replace("-atomic-", "-before-", 1))
         pending = image.with_name(image.name.replace("-atomic-", "-pending-", 1))
         uncommitted = image.with_name(image.name.replace("-atomic-", "-uncommitted-", 1))
@@ -65,7 +70,10 @@ def main():
 
         def snapshot(candidate):
             run([tools["e2fsck"], "-fn", candidate])
-            result = dict(accounting=accounting(run([tools["dumpe2fs"], "-h", candidate])), objects={})
+            header = run([tools["dumpe2fs"], "-h", candidate])
+            features = re.search(r"^Filesystem features:\s+(.+)$", header, re.M)
+            require(features is not None, "Missing filesystem feature list")
+            result = dict(accounting=accounting(header), objects={}, features=sorted(features[1].split()))
             root_names = entries(run([tools["debugfs"], "-R", "ls -p /", candidate], raw=True))
             paths = ["/", "/indexed", "/indexed/child", "/lost+found", "/hello.txt"]
             if b"peer" in root_names:
@@ -92,11 +100,17 @@ def main():
                     require(inode["type"] == "regular" and data == expected_bytes,
                             "Retained hardlink target bytes or type changed")
                 result["objects"][path] = item
-            htree = run([tools["debugfs"], "-R", "htree_dump /indexed", candidate])
-            levels = re.search(r"Indirect levels:\s+(\d+)", htree)
-            counts = re.search(r"Number of entries \(count\):\s+(\d+)", htree)
-            require(levels is not None and counts is not None, "Missing independent htree header")
-            result["index"] = dict(levels=int(levels[1]), root_entries=int(counts[1]))
+                if kind == "links" and path == "/indexed" and b"overflow".hex() in item["names"]:
+                    paths.append("/indexed/overflow")
+            if result["objects"]["/indexed"]["inode"]["flags"] & INODE_INDEX:
+                htree = run([tools["debugfs"], "-R", "htree_dump /indexed", candidate])
+                levels = re.search(r"Indirect levels:\s+(\d+)", htree)
+                counts = re.search(r"Number of entries \(count\):\s+(\d+)", htree)
+                require(levels is not None and counts is not None, "Missing independent htree header")
+                result["index"] = dict(levels=int(levels[1]), root_entries=int(counts[1]))
+            else:
+                require(kind == "create", "An existing index lost its inode flag")
+                result["index"] = None
             return result
 
         old = snapshot(before)
@@ -112,22 +126,58 @@ def main():
         name_hex = next(iter(added))
         name = bytes.fromhex(name_hex)
         ordinal = re.match(rb"new-(\d+)-", name)
-        require(ordinal is not None and name == filename(int(ordinal[1])), "Unexpected split name bytes")
-        require(parent_new["names"][name_hex] == hello_old["inode"]["inode"], "Split linked the wrong inode")
+        if kind == "links":
+            require(name == b"overflow", "Unexpected overflow directory name")
+        else:
+            require(ordinal is not None and name == filename(int(ordinal[1])), "Unexpected split name bytes")
+            require(parent_new["names"][name_hex] == hello_old["inode"]["inode"], "Split linked the wrong inode")
         for path in old["objects"]:
             if path not in ("/indexed", "/hello.txt"):
                 require(old["objects"][path] == new["objects"][path], f"Split changed unrelated object {path}")
-        expected_hello = dict(hello_old["inode"], links=hello_old["inode"]["links"] + 1, ctime=MUTATION_TIME)
+        expected_hello = (hello_old["inode"] if kind == "links" else
+                          dict(hello_old["inode"], links=hello_old["inode"]["links"] + 1, ctime=MUTATION_TIME))
         require(hello_new == {**hello_old, "inode": expected_hello}, "Split changed target data, identity or unrelated attributes")
         expected_parent = dict(parent_old["inode"], size=parent_new["inode"]["size"],
                                blocks=parent_new["inode"]["blocks"], mtime=MUTATION_TIME, ctime=MUTATION_TIME)
+        if kind == "create":
+            expected_parent["flags"] |= INODE_INDEX
+        if kind == "links":
+            expected_parent["links"] = 1
         require(parent_new["inode"] == expected_parent and
-                parent_new["inode"]["size"] > parent_old["inode"]["size"] and
-                new["accounting"]["Free inodes"] == old["accounting"]["Free inodes"],
+                (parent_new["inode"]["size"] == parent_old["inode"]["size"] if kind == "links"
+                 else parent_new["inode"]["size"] > parent_old["inode"]["size"]) and
+                new["accounting"]["Free inodes"] == old["accounting"]["Free inodes"] - int(kind == "links"),
                 "Split changed directory metadata or inode accounting incorrectly")
         require(new["accounting"]["Free blocks"] < old["accounting"]["Free blocks"],
                 "Split did not account its new blocks")
-        if kind == "root":
+        if kind == "links":
+            block_size = new["accounting"]["Block size"]
+            child = new["objects"]["/indexed/overflow"]
+            inode = child["inode"]
+            require(parent_old["inode"]["links"] == LINK_MAX and
+                    len(parent_old["names"]) == LINK_MAX and parent_new["mapping"] == parent_old["mapping"] and
+                    parent_new["inode"]["blocks"] == parent_old["inode"]["blocks"] and
+                    "dir_nlink" not in old["features"] and
+                    new["features"] == sorted(old["features"] + ["dir_nlink"]) and
+                    new["accounting"]["Free blocks"] == old["accounting"]["Free blocks"] - 1,
+                    "Link-count overflow changed more than its admitted metadata and child allocation")
+            require((inode["type"], inode["mode"], inode["uid"], inode["gid"], inode["links"],
+                     inode["size"], inode["blocks"]) ==
+                    ("directory", 0o750, 70000, 80000, 2, block_size, block_size // SECTOR_SIZE) and
+                    inode["generation"] != 0 and
+                    all(inode[field] == MUTATION_TIME for field in ("atime", "mtime", "ctime")) and
+                    len(child["mapping"]) == 1 and
+                    parent_new["names"][name_hex] == inode["inode"] and
+                    child["names"] == {b".".hex(): inode["inode"], b"..".hex(): parent_old["inode"]["inode"]} and
+                    new["index"] == old["index"], "Invalid overflow directory identity or topology")
+        elif kind == "create":
+            block_size = new["accounting"]["Block size"]
+            require(old["index"] is None and new["index"] is not None and
+                    new["index"]["levels"] == 0 and new["index"]["root_entries"] in (1, 2) and
+                    parent_old["inode"]["size"] == block_size and
+                    parent_new["inode"]["size"] == (1 + new["index"]["root_entries"]) * block_size,
+                    "Expected linear-to-indexed conversion did not occur")
+        elif kind == "root":
             require(old["index"]["levels"] in (0, 1) and
                     new["index"]["levels"] == old["index"]["levels"] + 1 and
                     new["index"]["root_entries"] == 1, "Expected root height growth did not occur")
@@ -158,9 +208,10 @@ def main():
             else:
                 record.update(uncommitted=str(source), uncommitted_sha256=protected[source], uncommitted_outcome="old")
         require(all(digest(path) == sha for path, sha in protected.items()), "Checking changed a protected export")
-        record.update(passed=True, ordinal=int(ordinal[1]), exact_new_name=name_hex, verified_split=new,
+        require(kind == "links" or old["features"] == new["features"], "Index mutation changed filesystem features")
+        record.update(passed=True, ordinal=None if ordinal is None else int(ordinal[1]), exact_new_name=name_hex, verified_split=new,
                       has_peer="/peer" in new["objects"],
-                      retained_paths=[path for path in ("/alternate.txt",) if path in new["objects"]],
+                      retained_paths=[path for path in ("/alternate.txt", "/indexed/overflow") if path in new["objects"]],
                       protected_inputs_unchanged=True, independent_replay_matches=True)
         save()
         print(f"PASS {image.name}: exact split, old/new outcomes, independent replay and idempotence", flush=True)

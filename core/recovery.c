@@ -354,6 +354,17 @@ ext4_recovery_compat_valid(uint32_t original, uint32_t replayed)
 	return replayed == original || replayed == (original | EXT4_FEATURE_COMPAT_EXT_ATTR);
 }
 
+static bool
+ext4_recovery_ro_compat_valid(uint32_t original, uint32_t replayed)
+{
+	/* A directory link-count overflow can enable DIR_NLINK atomically. The
+	 * orphan-presence marker is maintained separately by recovery. Neither
+	 * clearing DIR_NLINK nor changing another format feature is admitted. */
+	original |= EXT4_FEATURE_RO_ORPHAN_PRESENT;
+	replayed |= EXT4_FEATURE_RO_ORPHAN_PRESENT;
+	return replayed == original || replayed == (original | EXT4_FEATURE_RO_DIR_NLINK);
+}
+
 static enum ext4_result
 ext4_recovery_super(struct ext4_journal *journal)
 {
@@ -372,7 +383,9 @@ ext4_recovery_super(struct ext4_journal *journal)
 		return EXT4_CORRUPT;
 	}
 	if (!ext4_recovery_compat_valid(
-		fs->info.feature_compat, ext4_le32(&super->feature_compat))) {
+		fs->info.feature_compat, ext4_le32(&super->feature_compat)) ||
+	    !ext4_recovery_ro_compat_valid(
+		fs->info.feature_ro_compat, ext4_le32(&super->feature_ro_compat))) {
 		return EXT4_UNSUPPORTED;
 	}
 	/* Replaying a clean superblock must not hide an interrupted recovery. */
@@ -451,8 +464,8 @@ ext4_recovery_validate_home(struct ext4_journal *journal)
 	    fresh->info.block_size != fs->info.block_size ||
 	    fresh->info.inodes != fs->info.inodes || fresh->info.groups != fs->info.groups ||
 	    !ext4_recovery_compat_valid(fs->info.feature_compat, fresh->info.feature_compat) ||
-	    (fresh->info.feature_ro_compat | EXT4_FEATURE_RO_ORPHAN_PRESENT) !=
-		(fs->info.feature_ro_compat | EXT4_FEATURE_RO_ORPHAN_PRESENT) ||
+	    !ext4_recovery_ro_compat_valid(
+		fs->info.feature_ro_compat, fresh->info.feature_ro_compat) ||
 	    (fresh->info.feature_incompat | EXT4_FEATURE_INCOMPAT_RECOVER) !=
 		(fs->info.feature_incompat | EXT4_FEATURE_INCOMPAT_RECOVER) ||
 	    fresh->inode_size != fs->inode_size || fresh->descriptor_size != fs->descriptor_size ||

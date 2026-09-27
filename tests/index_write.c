@@ -682,7 +682,7 @@ changing_device_read(void *context, uint64_t offset, void *buffer, size_t length
 }
 
 static void
-changing_media_guards(struct device *device, uint32_t ordinal)
+changing_media_guards(struct device *device, uint32_t ordinal, bool conversion)
 {
 	struct ext4_fs *fs;
 	struct ext4_inode parent;
@@ -699,7 +699,7 @@ changing_media_guards(struct device *device, uint32_t ordinal)
 	unsigned int kind;
 
 	filename(name, ordinal);
-	for (kind = 0; kind < 3; kind++) {
+	for (kind = 0; kind < (conversion ? 1U : 3U); kind++) {
 		device_reset(device, device->base);
 		fs = mount_index(device, &parent, &hello);
 		EXPECT(ext4_transaction_begin(
@@ -712,18 +712,28 @@ changing_media_guards(struct device *device, uint32_t ordinal)
 		EXPECT(ext4_directory_scan(&allocation, &parent, disk, name, EXT4_NAME_MAX,
 			   EXT4_DIRECTORY_INSERT, 0, &slot),
 		    EXT4_OK);
-		CHECK(slot.repack);
-		EXPECT(ext4_index_open(&allocation, &parent, disk, &tree), EXT4_OK);
+		CHECK(conversion ? slot.physical == 0 : slot.repack);
+		if (!conversion) {
+			EXPECT(ext4_index_open(&allocation, &parent, disk, &tree), EXT4_OK);
+		}
 		memset(&changing_read, 0, sizeof(changing_read));
 		changing_read.kind = kind;
 		changing_read.seed = ext4_inode_seed(fs, &parent);
-		changing_read.logical = kind == 0 ? slot.logical : tree.ranges[slot.logical].parent;
-		EXPECT(ext4_index_read(&tree, changing_read.logical, &physical), EXT4_OK);
+		changing_read.logical = conversion ? 0
+		    : kind == 0			   ? slot.logical
+						   : tree.ranges[slot.logical].parent;
+		if (conversion) {
+			EXPECT(ext4_map_block(fs, &parent, 0, &physical), EXT4_OK);
+		} else {
+			EXPECT(ext4_index_read(&tree, changing_read.logical, &physical), EXT4_OK);
+		}
 		changing_read.offset = physical * device->block_size;
 		/* Leaf scan then repack; index graph and root directory scan, graph
 		 * reopening for split, then enrollment of the edited node snapshot. */
 		changing_read.at = kind == 0 ? 2 : changing_read.logical == 0 ? 4 : 3;
-		ext4_index_close(&tree);
+		if (!conversion) {
+			ext4_index_close(&tree);
+		}
 		ext4_allocation_destroy(&allocation);
 		ext4_transaction_cancel(transaction);
 		fs->environment.read = changing_device_read;
@@ -741,6 +751,102 @@ changing_media_guards(struct device *device, uint32_t ordinal)
 	}
 	puts("PASS changing-media leaf lengths, index counts and child aliases reject without "
 	     "writes");
+}
+
+static uint32_t
+prepare_index_creation(struct device *device)
+{
+	struct ext4_fs *fs;
+	struct ext4_transaction *transaction;
+	struct ext4_allocation allocation;
+	struct ext4_inode_disk *disk;
+	struct ext4_inode root;
+	struct ext4_inode parent;
+	struct ext4_inode peer;
+	struct ext4_inode hello;
+	struct ext4_inode result;
+	struct ext4_inode_update update = attributes();
+	struct ext4_directory_slot slot;
+	uint8_t name[EXT4_NAME_MAX + 1];
+	uint32_t ordinal;
+
+	device_reset(device, device->base);
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	hello = lookup(fs, &root, "hello.txt");
+	EXPECT(ext4_mkdir(fs, root.number, root.generation, (const uint8_t *)"indexed", 7, &update,
+		   &mutation_time, &parent),
+	    EXT4_OK);
+	EXPECT(ext4_mkdir(fs, root.number, root.generation, (const uint8_t *)"peer", 4, &update,
+		   &mutation_time, &peer),
+	    EXT4_OK);
+	EXPECT(ext4_mkdir(fs, parent.number, parent.generation, (const uint8_t *)"child", 5,
+		   &update, &mutation_time, &result),
+	    EXT4_OK);
+	EXPECT(ext4_mkdir(fs, peer.number, peer.generation, (const uint8_t *)"child", 5, &update,
+		   &mutation_time, &result),
+	    EXT4_OK);
+	for (ordinal = 0; ordinal < device->block_size; ordinal++) {
+		EXPECT(ext4_get_inode(fs, parent.number, &parent), EXT4_OK);
+		CHECK(parent.size == device->block_size && !(parent.flags & EXT4_INODE_INDEX));
+		filename(name, ordinal);
+		EXPECT(ext4_transaction_begin(
+			   fs->journal, ext4_journal_credits(fs->journal), &transaction),
+		    EXT4_OK);
+		EXPECT(ext4_edit_inode(
+			   fs, transaction, parent.number, parent.generation, &disk, &parent),
+		    EXT4_OK);
+		EXPECT(ext4_allocation_init(&allocation, fs, transaction, &parent), EXT4_OK);
+		EXPECT(ext4_directory_scan(&allocation, &parent, disk, name, EXT4_NAME_MAX,
+			   EXT4_DIRECTORY_INSERT, 0, &slot),
+		    EXT4_OK);
+		ext4_allocation_destroy(&allocation);
+		ext4_transaction_cancel(transaction);
+		if (slot.physical == 0) {
+			break;
+		}
+		EXPECT(ext4_link(fs, parent.number, parent.generation, name, EXT4_NAME_MAX,
+			   hello.number, hello.generation, &mutation_time, &result),
+		    EXT4_OK);
+	}
+	CHECK(ordinal < device->block_size);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	CHECK(device->live == 0);
+	memcpy(device->base, device->stable, device->size);
+	return ordinal;
+}
+
+static void
+index_creation_shape(struct device *device, uint32_t added)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode parent;
+	struct ext4_inode hello;
+	struct ext4_inode result;
+	uint32_t nodes;
+	uint8_t levels;
+	uint8_t name[EXT4_NAME_MAX + 1];
+	uint32_t ordinal;
+
+	fs = mount_index(device, &parent, &hello);
+	tree_shape(fs, &parent, &nodes, &levels);
+	CHECK((parent.flags & EXT4_INODE_INDEX) && levels == 0 && nodes == 0);
+	CHECK(parent.size == 2U * device->block_size || parent.size == 3U * device->block_size);
+	verify_names(fs, &parent, added, hello.number);
+	for (ordinal = 0; ordinal < added; ordinal++) {
+		filename(name, ordinal);
+		EXPECT(ext4_lookup(fs, &parent, name, EXT4_NAME_MAX, &result), EXT4_OK);
+		CHECK(result.number == hello.number);
+	}
+	result = lookup(fs, &parent, "child");
+	CHECK((result.mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY);
+	result = lookup(fs, &parent, "..");
+	CHECK(result.number == EXT4_ROOT_INODE);
+	ext4_unmount(fs);
+	CHECK(device->live == 0);
+	printf("PASS automatic directory index: blocks=%llu names=%u\n",
+	    (unsigned long long)(parent.size / device->block_size), added);
 }
 
 static uint32_t
@@ -828,7 +934,7 @@ large_split_shape(struct device *device, uint32_t before_blocks, uint32_t before
 
 static void
 split_faults(struct device *device, const char *path, const char *exports, bool smoke,
-    const char *large_kind)
+    const char *large_kind, bool conversion)
 {
 	struct trace baseline;
 	struct trace trace;
@@ -845,11 +951,15 @@ split_faults(struct device *device, const char *path, const char *exports, bool 
 	unsigned int fault;
 	unsigned int survival;
 	unsigned int partial;
+	const char *kind_name;
 	char prefix[64];
 
 	CHECK(original != NULL && expected != NULL);
 	memcpy(original, device->base, device->size);
-	if (large_kind == NULL) {
+	if (conversion) {
+		points[SPLIT_LEAF] = prepare_index_creation(device);
+		points[GROW_ROOT] = points[SPLIT_NODE] = UINT32_MAX;
+	} else if (large_kind == NULL) {
 		find_splits(device, points);
 	} else {
 		for (kind = 0; kind < SPLIT_KIND_COUNT; kind++) {
@@ -860,26 +970,36 @@ split_faults(struct device *device, const char *path, const char *exports, bool 
 	}
 	for (kind = 0; kind < SPLIT_KIND_COUNT; kind++) {
 		if (points[kind] == UINT32_MAX) {
+			if (conversion) {
+				continue;
+			}
 			printf("SKIP split=%s: this fixture exercises that transition in another "
 			       "profile\n",
 			    split_names[kind]);
 			continue;
 		}
-		memcpy(device->base, original, device->size);
-		if (large_kind == NULL) {
+		kind_name = conversion ? "create" : split_names[kind];
+		if (!conversion) {
+			memcpy(device->base, original, device->size);
+		}
+		if (large_kind == NULL && !conversion) {
 			prepare_split(device, points[kind]);
 		}
 		split_capacity_guards(device, points[kind]);
-		changing_media_guards(device, points[kind]);
-		CHECK(snprintf(prefix, sizeof(prefix), "index-before-%s-", split_names[kind]) > 0);
+		changing_media_guards(device, points[kind], conversion);
+		device_reset(device, device->base);
+		CHECK(snprintf(prefix, sizeof(prefix), "index-before-%s-", kind_name) > 0);
 		storage_export(device, exports, path, prefix);
 		device_reset(device, device->base);
 		EXPECT(split_attempt(device, points[kind], 0, 0, 0, false, &baseline), EXT4_OK);
 		if (large_kind != NULL) {
 			large_split_shape(device, before_blocks, before_nodes);
 		}
+		if (conversion) {
+			index_creation_shape(device, points[kind] + 1);
+		}
 		memcpy(expected, device->stable, device->size);
-		CHECK(snprintf(prefix, sizeof(prefix), "index-atomic-%s-", split_names[kind]) > 0);
+		CHECK(snprintf(prefix, sizeof(prefix), "index-atomic-%s-", kind_name) > 0);
 		storage_export(device, exports, path, prefix);
 		CHECK(storage_recover(device, expected, true) && device->writes == 0);
 		recovered = torn = 0;
@@ -914,7 +1034,7 @@ split_faults(struct device *device, const char *path, const char *exports, bool 
 			printf(
 			    "PASS split faults kind=%s ordinal=%u allocations=%u reads=%u cuts=%u "
 			    "recovered=%u torn_super_fail_closed=%u\n",
-			    split_names[kind], points[kind], baseline.allocations, baseline.reads,
+			    kind_name, points[kind], baseline.allocations, baseline.reads,
 			    baseline.events * 6, recovered, torn);
 		}
 		if (exports != NULL) {
@@ -924,8 +1044,7 @@ split_faults(struct device *device, const char *path, const char *exports, bool 
 				   false, &trace),
 			    EXT4_IO);
 			CHECK(trace.committed);
-			CHECK(snprintf(prefix, sizeof(prefix), "index-pending-%s-",
-				  split_names[kind]) > 0);
+			CHECK(snprintf(prefix, sizeof(prefix), "index-pending-%s-", kind_name) > 0);
 			storage_export(device, exports, path, prefix);
 			CHECK(storage_recover(device, expected, true));
 			device_reset(device, device->base);
@@ -933,8 +1052,8 @@ split_faults(struct device *device, const char *path, const char *exports, bool 
 				   false, &trace),
 			    EXT4_IO);
 			CHECK(!trace.committed);
-			CHECK(snprintf(prefix, sizeof(prefix), "index-uncommitted-%s-",
-				  split_names[kind]) > 0);
+			CHECK(snprintf(prefix, sizeof(prefix), "index-uncommitted-%s-", kind_name) >
+			    0);
 			storage_export(device, exports, path, prefix);
 			CHECK(storage_recover(device, expected, false));
 		}
@@ -942,6 +1061,49 @@ split_faults(struct device *device, const char *path, const char *exports, bool 
 	memcpy(device->base, original, device->size);
 	free(expected);
 	free(original);
+}
+
+#include "directory_links.h"
+
+static void
+index_creation_hashes(struct device *device)
+{
+	struct ext4_super_disk *super;
+	struct trace trace;
+	uint8_t *original = malloc(device->size);
+	uint8_t version;
+	uint32_t flags;
+	uint32_t ordinal;
+	uint32_t preserved;
+	unsigned int cases = 0;
+
+	CHECK(original != NULL);
+	memcpy(original, device->base, device->size);
+	for (version = EXT4_HASH_LEGACY; version <= EXT4_HASH_TEA_UNSIGNED; version++) {
+		for (flags = 0; flags <= EXT4_UNSIGNED_DIRECTORY_HASH; flags++) {
+			memcpy(device->base, original, device->size);
+			super = (struct ext4_super_disk *)(device->base + EXT4_SUPER_OFFSET);
+			preserved = ext4_le32(&super->flags) &
+			    ~(EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH);
+			ext4_encode32(&super->flags, preserved | flags);
+			super->default_hash_version = version;
+			if (device->metadata_checksum) {
+				ext4_encode32(&super->checksum,
+				    ext4_crc32c(UINT32_MAX, super,
+					offsetof(struct ext4_super_disk, checksum)));
+			}
+			ordinal = prepare_index_creation(device);
+			device_reset(device, device->base);
+			EXPECT(split_attempt(device, ordinal, 0, 0, 0, false, &trace), EXT4_OK);
+			index_creation_shape(device, ordinal + 1);
+			cases++;
+		}
+	}
+	memcpy(device->base, original, device->size);
+	free(original);
+	printf("PASS index creation hash formats=%u, including explicit unsigned hashes without "
+	       "legacy flags\n",
+	    cases);
 }
 
 int
@@ -954,10 +1116,22 @@ main(int argc, char **argv)
 	bool faults = false;
 	bool smoke = false;
 	bool capacity = false;
+	bool conversion = false;
+	bool links = false;
+	bool real_links = false;
+	bool creation_hashes = false;
 	int argument = 1;
 
 	while (argument < argc && argv[argument][0] == '-') {
-		if (strcmp(argv[argument], "--capacity") == 0) {
+		if (strcmp(argv[argument], "--creation-hashes") == 0) {
+			creation_hashes = true;
+		} else if (strcmp(argv[argument], "--directory-links") == 0) {
+			links = true;
+		} else if (strcmp(argv[argument], "--directory-links-image") == 0) {
+			links = real_links = true;
+		} else if (strcmp(argv[argument], "--create-index") == 0) {
+			conversion = faults = true;
+		} else if (strcmp(argv[argument], "--capacity") == 0) {
 			capacity = true;
 		} else if (strcmp(argv[argument], "--large-split") == 0 && argument + 1 < argc) {
 			large_kind = argv[++argument];
@@ -980,15 +1154,23 @@ main(int argc, char **argv)
 	CHECK(vectors == NULL || !faults);
 	CHECK(!capacity || (vectors == NULL && !faults));
 	CHECK(large_kind == NULL || faults);
+	CHECK(!conversion || (large_kind == NULL && !capacity && vectors == NULL));
+	CHECK(!links || (!faults && !capacity && vectors == NULL && large_kind == NULL));
+	CHECK(!creation_hashes || (!links && !faults && !capacity && vectors == NULL));
 	for (; argument < argc; argument++) {
 		printf("IMAGE %s\n", argv[argument]);
 		storage_open(&device, argv[argument]);
-		if (capacity) {
+		if (creation_hashes) {
+			index_creation_hashes(&device);
+		} else if (links) {
+			directory_links(&device, argv[argument], exports, real_links);
+		} else if (capacity) {
 			root_capacity(&device, argv[argument], exports);
 		} else if (vectors != NULL) {
 			indexed_edges(&device, argv[argument], vectors, exports);
 		} else if (faults) {
-			split_faults(&device, argv[argument], exports, smoke, large_kind);
+			split_faults(
+			    &device, argv[argument], exports, smoke, large_kind, conversion);
 		} else {
 			functional(&device, exports, argv[argument]);
 		}

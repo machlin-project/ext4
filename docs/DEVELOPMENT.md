@@ -632,6 +632,31 @@ accept the deeper graphs. The capacity checker accepts `--case SOURCE_FILENAME`
 to select one verified compact fixture. CI records every independent check after
 one portable regression of the complete batch.
 
+Automatic index creation and the real directory link-count boundary use:
+
+```sh
+python3 tests/generate_directory_links.py --output artifacts/directory-links-fixture
+python3 tests/generate_directory_links.py --large-block-only \
+  --output artifacts/directory-large-block-fixture
+meson setup --reconfigure .build-indexed
+meson setup --reconfigure .build-indexed \
+  -Ddirectory_links_fixture=artifacts/directory-links-fixture/directory-links.img \
+  -Ddirectory_index_64k_fixture=artifacts/directory-large-block-fixture/directory-64k.img
+meson compile -C .build-indexed -j 2
+meson test -C .build-indexed --no-rebuild -j 2 --print-errorlogs \
+  'directory-create-index-*' 'directory-links-*'
+```
+
+`ext4-index-write-test --create-index --fault-smoke --export DIR IMAGE` exports
+one automatic index conversion; `--directory-links-image --export DIR IMAGE`
+uses the real link-count fixture. `check_index_faults.py` validates both export
+families, including committed and uncommitted recovery. The `--directory-links`
+flag uses a compact counter model for faults and deliberately produces no exports.
+The ordinary 64 KiB reader fixture has no journal; use the separately generated
+image above for these mutation checks. The real link-count image is 128 MiB and
+contains 64,998 child directories; the generator's `--verify-only` mode inspects
+it without repeating creation.
+
 `ext4-index-write-test --export DIR IMAGE` exports the functional result.
 `--fault-smoke --export DIR IMAGE` exports old, complete, committed and uncommitted
 states for each applicable split. `--edges VECTORS --export DIR IMAGE` exports three

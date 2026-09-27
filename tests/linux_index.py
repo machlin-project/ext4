@@ -8,7 +8,7 @@ from check_namespace import inode_fields
 
 
 def selected(case):
-    return Path(case["image"]).name.startswith(("indexed-", "index-atomic-"))
+    return Path(case["image"]).name.startswith(("indexed-", "index-atomic-", "links-atomic-"))
 
 
 def paths(case):
@@ -19,7 +19,7 @@ def paths(case):
                          "/indexed/short-link", "/indexed/long-link", "/container"]
     if case.get("has_peer", True):
         result += ["/peer", "/peer/child"]
-    if name.startswith("index-atomic-"):
+    if name.startswith(("index-atomic-", "links-atomic-")):
         result += ["/indexed/child"]
     return result
 
@@ -34,7 +34,7 @@ def retained(case, image, output, tools, run, created, prefix):
             raise RuntimeError(f"Missing retained indexed object {path}")
         expected = old
         if path == "/indexed":
-            expected = dict(old, links=old["links"] + 1, size=new["size"], blocks=new["blocks"],
+            expected = dict(old, links=1 if old["links"] == 1 else old["links"] + 1, size=new["size"], blocks=new["blocks"],
                             mtime=new["mtime"], ctime=new["ctime"])
             if new["size"] < old["size"] or new["blocks"] < old["blocks"]:
                 raise RuntimeError("Linux unexpectedly shrank the indexed directory")

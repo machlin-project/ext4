@@ -5,7 +5,8 @@ paths = {}
 foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'namespace_fixtures', 'xattr_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
   'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures',
-  'large_directory_fixtures', 'large_directory_edges']
+  'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
+  'directory_index_64k_fixture']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
 endforeach
@@ -135,6 +136,36 @@ write_images = []
 foreach name : write_names
   write_images += paths['fixtures'] / name
 endforeach
+if paths['directory_index_64k_fixture'] != ''
+  test('directory-create-index-64k', programs['index-write'],
+    args: ['--create-index', '--fault-smoke', paths['directory_index_64k_fixture']],
+    timeout: 300, suite: 'indexed')
+endif
+if get_option('namespace_tests')
+  test('directory-create-index-no-filetype', programs['index-write'],
+    args: ['--create-index', '--fault-smoke', paths['namespace_fixtures'] / 'namespace-no-filetype.img'],
+    timeout: 300, suite: 'indexed')
+endif
+foreach name : write_names
+  test('directory-create-index-' + name, programs['index-write'],
+    args: ['--create-index', '--fault-smoke', paths['fixtures'] / name],
+    timeout: 300, suite: 'indexed')
+endforeach
+foreach profile : ['1k', '4k']
+  test('directory-create-index-faults-' + profile, programs['index-write'],
+    args: ['--create-index', paths['fixtures'] / ('ext4-' + profile + '.img')],
+    timeout: 600, suite: 'indexed')
+  test('directory-links-faults-' + profile, programs['index-write'],
+    args: ['--directory-links', paths['fixtures'] / ('ext4-' + profile + '.img')],
+    timeout: 600, suite: 'indexed')
+endforeach
+test('directory-create-index-hashes', programs['index-write'],
+  args: ['--creation-hashes', paths['fixtures'] / 'ext4-1k.img'], timeout: 300, suite: 'indexed')
+if paths['directory_links_fixture'] != ''
+  test('directory-links-real-boundary', programs['index-write'],
+    args: ['--directory-links-image', paths['directory_links_fixture']],
+    timeout: 600, suite: 'indexed')
+endif
 test('metadata-checksum', programs['checksum'], timeout: 60, suite: 'core')
 if paths['group_checksum_fixtures'] != ''
   gdt = paths['group_checksum_fixtures']

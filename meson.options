@@ -39,3 +39,7 @@ option('large_directory_fixtures', type: 'string', value: '',
   description: 'Enable e2fsprogs-authored LARGEDIR lookup and mutation images')
 option('large_directory_edges', type: 'string', value: '',
   description: 'Enable bounded LARGEDIR split, capacity and fault images')
+option('directory_links_fixture', type: 'string', value: '',
+  description: 'Enable a real independently authored directory at the link-count boundary')
+option('directory_index_64k_fixture', type: 'string', value: '',
+  description: 'Enable directory index creation on a 64 KiB-block image with an internal journal')

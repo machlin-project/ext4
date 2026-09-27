@@ -19,6 +19,10 @@ from generate_fixtures import resolve_tools
 DATA_BLOCKS = 35
 NAME_MAX = 255
 SECTOR_SIZE = 512
+INODE_INDEX = 0x1000
+DIRECTORY_HEADER_SIZE = 8
+DIRECTORY_TAIL_SIZE = 12
+DIRECTORY_ALIGNMENT = 4
 NAMESPACE_TIME = encoded_time(1700000050, 0)
 
 
@@ -156,7 +160,8 @@ def main():
             counts = accounting(header)
             block_size = counts["Block size"]
             result = dict(accounting=counts, inode_size=int(re.search(
-                r"^Inode size:\s+(\d+)$", header, re.M)[1]))
+                r"^Inode size:\s+(\d+)$", header, re.M)[1]),
+                metadata_checksum="metadata_csum" in header.split())
             paths = {"root": "/", "hello": "/hello.txt", "left": "/left",
                      "source": "/left/source", "destination": destination_path}
             if not test.get("same"):
@@ -244,11 +249,18 @@ def main():
         if growth:
             previous = old["right"]["mapping"]
             current = new["right"]["mapping"]
-            if current[:len(previous)] != previous or len(current) != len(previous) + 1:
+            indexed = bool(new["right"]["inode"]["flags"] & INODE_INDEX)
+            record_size = (DIRECTORY_HEADER_SIZE + NAME_MAX + DIRECTORY_ALIGNMENT - 1) & ~(DIRECTORY_ALIGNMENT - 1)
+            usable = block_size - (DIRECTORY_TAIL_SIZE if old["metadata_checksum"] else 0)
+            total = (len(old["right"]["names"]) - 2 + 1) * record_size
+            growth = (1 if total <= usable else 2) if indexed else 1
+            if current[:len(previous)] != previous or len(current) != len(previous) + growth:
                 raise RuntimeError("Destination growth changed old mappings or added extra blocks")
             expected["right"]["mapping"] = current
-            expected["right"]["inode"]["size"] += block_size
-            expected["right"]["inode"]["blocks"] += sectors
+            expected["right"]["inode"]["size"] += growth * block_size
+            expected["right"]["inode"]["blocks"] += growth * sectors
+            if indexed:
+                expected["right"]["inode"]["flags"] |= INODE_INDEX
         released = target["inode"]["blocks"] if last else 0
         if released % sectors:
             raise RuntimeError("Victim allocation is not a whole filesystem block")
