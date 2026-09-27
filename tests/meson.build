@@ -97,6 +97,7 @@ write_images = []
 foreach name : write_names
   write_images += paths['fixtures'] / name
 endforeach
+test('metadata-checksum', programs['checksum'], timeout: 60, suite: 'core')
 test('image-reader', programs['reader'], args: reader_images, timeout: 300, suite: 'core')
 test('file-read-ranges', programs['read-ranges'], timeout: 60, suite: 'core')
 test('malformed-images', programs['corruption'], args: paths['fixtures'] / 'ext4-4k.img',

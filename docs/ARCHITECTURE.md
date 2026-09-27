@@ -20,6 +20,11 @@ allocation, multiplication and I/O. Metadata checksum verification precedes
 trusting pointers or record lengths. Unsupported incompatible features reject
 mounting; an unknown read-only-compatible feature never permits writing.
 
+CRC32C uses an immutable 1 KiB byte-remainder table. It retains the raw seeded
+state API used by UUID, inode, group and journal checksum chains, with no implicit
+initial or final complement. Byte loads admit unaligned buffers on every target;
+there is no initialization, allocation, mutable global state or CPU-feature probe.
+
 ## I/O and cache contract
 
 Implementation and acceptance proceed through the portable core first, FSKit on

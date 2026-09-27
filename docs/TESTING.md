@@ -358,9 +358,10 @@ a read and a streamed directory API. Its focused tests and warm-cache benchmarks
 pass; complete CI acceptance is pending. The compatibility single-entry API still
 reads and validates a block per returned entry, so adapters need to adopt the visitor
 to obtain streamed enumeration's benefit.
-CRC32C still uses a bitwise fallback; attributed writes can validate the complete
-inode map; each transaction journals data and checkpoints synchronously; writable access is
-serialized by its owner. Measure these costs before choosing optimizations.
+CRC32C now uses an immutable byte-remainder table. Attributed writes can still
+validate the complete inode map; each transaction journals data and checkpoints
+synchronously; writable access is serialized by its owner. Measure these costs
+before choosing further optimizations.
 Buffer reuse, range mapping and bounded metadata caching must preserve validation
 and mutation invalidation. Changes to transaction batching, checkpoint timing or
 concurrency require renewed crash, ordering and lifetime acceptance. Native page
@@ -424,6 +425,19 @@ The 14-pair warm-cache comparison is recorded under
 `artifacts/checks/read-path-benchmark-results/`. It does not measure cold reads,
 CPU time, device-level operations, writable or concurrent workloads, or mounted
 platform behavior. Representative performance acceptance therefore remains open.
+
+`metadata-checksum` compares the optimized CRC32C with bit-serial polynomial
+division, a known check value, all 256 byte remainders and 3,648 combinations of
+seeds, alignment, lengths and streamed partitions through 64 KiB. Empty updates
+preserve the seed. Existing reader, malformed-image, journal and mutation cases
+exercise its use with independent filesystem bytes.
+
+The subsequent 14-pair checksum comparison under
+`artifacts/checks/crc32c-benchmark-results/` uses streamed enumeration and range
+reads in both builds. It changes no callback/allocation counts or content digests.
+The 46,122-entry warm directory median decreases from 76.088 to 49.252 ms. Six
+extent/indirect write exports are byte-identical to the previously independently
+verified images, preserving checksum conventions as well as filesystem contents.
 
 ## Platform suites and remaining coverage
 

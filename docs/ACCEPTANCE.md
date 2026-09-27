@@ -1081,6 +1081,26 @@ Evidence is in `artifacts/checks/read-path-batch-targeted-retry1-summary.json` a
 delegated to the batch's CI run; it has not yet been accepted. The earlier local
 248-test run is not counted as acceptance of these changes.
 
+## Portable checksum execution evidence
+
+The portable CRC32C uses a 1 KiB read-only byte-remainder table instead of bitwise
+division for every input byte. Six focused sanitized tests pass: the dedicated
+checksum test, the reader, malformed images, journal durability, large-write
+functionality and the 4 KiB partial-write fault matrix. The dedicated test compares
+all 256 remainders and 3,648 seeded/aligned/range/stream cases through 64 KiB with
+bit-serial polynomial division and a known CRC32C check value.
+
+All 14 warm-cache benchmark pairs preserve identical work, digests, callback and
+allocation counts, with no writes or leaked allocations. Both builds use the
+streamed/range read APIs, isolating the checksum change. The large-directory
+median decreases from 76.088 to 49.252 ms. This is a warm POSIX image measurement,
+not mounted or cold-device throughput. Three write states on each of two
+extent/indirect profiles are byte-identical to the earlier independently verified
+images. Evidence is in `artifacts/checks/crc32c-development-summary.json`,
+`artifacts/checks/crc32c-benchmark-results/` and
+`artifacts/checks/crc32c-write-export-comparison.json`.
+Full regression is scheduled together with the completed partial-write batch.
+
 ## Namespace on completely allocated block bitmaps
 
 Eight independently generated 8 MiB profiles have no free blocks in any group and
