@@ -1106,12 +1106,13 @@ indexed_guard(struct device *device)
 	CHECK(directory.flags & EXT4_INODE_INDEX);
 	memset(&result, 0xa5, sizeof(result));
 	untouched = result;
-	EXPECT(remove_inode(fs, &directory, "entry", &file, false, &result), EXT4_UNSUPPORTED);
-	EXPECT(remove_inode(fs, &root, "many", &directory, true, &result), EXT4_UNSUPPORTED);
+	EXPECT(remove_inode(fs, &directory, "entry", &file, false, &result), EXT4_NOT_FOUND);
+	EXPECT(remove_inode(fs, &root, "many", &directory, true, &result), EXT4_NOT_EMPTY);
 	CHECK(memcmp(&result, &untouched, sizeof(result)) == 0);
 	CHECK(device->writes == 0 && memcmp(device->cache, device->base, device->size) == 0);
 	ext4_unmount(fs);
-	printf("PASS indexed removal rejects mutation without writes\n");
+	printf(
+	    "PASS indexed removal checks missing names and nonempty directories without writes\n");
 }
 
 int

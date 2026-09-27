@@ -135,6 +135,10 @@ def main():
 
     for case in exports:
         if args.namespace:
+            if "accounting_after" in case:
+                case["accounting"] = case["accounting_after"]
+            elif "verified_split" in case:
+                case["accounting"] = case["verified_split"]["accounting"]
             case["block_size"] = case["accounting"]["Block size"]
             if case["block_size"] > 4096:
                 raise RuntimeError("Select namespace cases supported by the 4 KiB-page reference kernel")
@@ -183,16 +187,18 @@ def main():
             record.update(recover=str(recover), recover_sha256=recover_sha)
         results.append(record)
 
-        def run(command, timeout=90, allowed=(0,)):
+        def run(command, timeout=90, allowed=(0,), raw=False):
             done = subprocess.run([str(x) for x in command], cwd=lab,
-                                  capture_output=True, text=True, errors="backslashreplace", timeout=timeout)
+                                  capture_output=True, timeout=timeout)
+            stdout = done.stdout.decode("utf-8", "backslashreplace")
+            stderr = done.stderr.decode("utf-8", "backslashreplace")
             record["commands"].append({"command": [str(x) for x in command],
-                                       "status": done.returncode, "stdout": done.stdout,
-                                       "stderr": done.stderr})
+                                       "status": done.returncode, "stdout": stdout,
+                                       "stderr": stderr})
             (output / "report.json").write_text(json.dumps(results, indent=2) + "\n")
             if done.returncode not in allowed:
-                raise subprocess.CalledProcessError(done.returncode, command, done.stdout, done.stderr)
-            return done.stdout
+                raise subprocess.CalledProcessError(done.returncode, command, stdout, stderr)
+            return done.stdout if raw else stdout
 
         key = archive_key(case)
         console = run([runner, kernel, archives[key], "2", "512",

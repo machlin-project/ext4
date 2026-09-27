@@ -27,6 +27,15 @@
 #define EXT4_INDIRECT_LEVELS 3U
 #define EXT4_DIRECTORY_TAIL_TYPE 0xdeU
 #define EXT4_DIRECTORY_ALIGNMENT 4U
+#define EXT4_HASH_LEGACY 0U
+#define EXT4_HASH_HALF_MD4 1U
+#define EXT4_HASH_TEA 2U
+#define EXT4_HASH_LEGACY_UNSIGNED 3U
+#define EXT4_HASH_HALF_MD4_UNSIGNED 4U
+#define EXT4_HASH_TEA_UNSIGNED 5U
+#define EXT4_HASH_EOF 0xfffffffeU
+#define EXT4_SIGNED_DIRECTORY_HASH 0x0001U
+#define EXT4_UNSIGNED_DIRECTORY_HASH 0x0002U
 #define EXT4_CRC32C_POLYNOMIAL 0x82f63b78U
 #define EXT4_ORPHAN_MAGIC 0x0b10ca04U
 
@@ -339,6 +348,11 @@ struct ext4_dx_root_prefix_disk {
 struct ext4_dx_count_disk {
 	struct ext4_le16 limit;
 	struct ext4_le16 count;
+	struct ext4_le32 block;
+};
+
+struct ext4_dx_entry_disk {
+	struct ext4_le32 hash;
 	struct ext4_le32 block;
 };
 

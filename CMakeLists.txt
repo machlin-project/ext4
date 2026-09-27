@@ -19,7 +19,8 @@ set(EXT4_CORE_SOURCES
     core/support.c core/mount.c core/inode.c core/read.c core/directory.c
     core/journal.c core/recovery.c core/group.c core/system.c
     core/allocate.c core/map_write.c core/write.c core/orphan.c
-    core/inode_allocate.c core/namespace.c core/lifetime.c)
+    core/inode_allocate.c core/namespace.c core/lifetime.c core/directory_hash.c
+    core/directory_index.c core/directory_write.c)
 add_library(ext4_core STATIC ${EXT4_CORE_SOURCES})
 target_include_directories(ext4_core PUBLIC include)
 target_compile_options(ext4_core PRIVATE
@@ -51,6 +52,48 @@ if(EXT4_SANITIZERS)
 endif()
 
 enable_testing()
+
+add_executable(ext4-directory-hash-test tests/directory_hash.c)
+target_include_directories(ext4-directory-hash-test PRIVATE core)
+target_link_libraries(ext4-directory-hash-test PRIVATE ext4_core)
+target_compile_options(ext4-directory-hash-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
+add_test(NAME directory-hash COMMAND ext4-directory-hash-test)
+
+add_executable(ext4-directory-index-test tests/directory_index.c)
+target_include_directories(ext4-directory-index-test PRIVATE core)
+target_link_libraries(ext4-directory-index-test PRIVATE ext4_posix)
+target_compile_options(ext4-directory-index-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
+add_executable(ext4-index-write-test tests/index_write.c)
+target_include_directories(ext4-index-write-test PRIVATE core)
+target_link_libraries(ext4-index-write-test PRIVATE ext4_posix)
+target_compile_options(ext4-index-write-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
+set(EXT4_INDEX_FIXTURES "" CACHE PATH "Independent indexed-directory images")
+set(EXT4_INDEX_COLLISIONS "" CACHE FILEPATH "Independently verified directory hash collisions")
+set(EXT4_INDEX_CAPACITY "" CACHE FILEPATH "Independent full-root indexed directory image")
+if(EXT4_INDEX_CAPACITY)
+    add_test(NAME indexed-capacity COMMAND ext4-index-write-test --capacity "${EXT4_INDEX_CAPACITY}")
+    set_tests_properties(indexed-capacity PROPERTIES TIMEOUT 300)
+endif()
+if(EXT4_INDEX_FIXTURES)
+    foreach(profile legacy-signed legacy-unsigned half_md4-signed half_md4-unsigned
+            tea-signed tea-unsigned 2k 4k 8k 16k 32k deep deep-unsigned indirect
+            no-checksum no-filetype inode128 checksum-seed orphan-file orphan-file-deep)
+        add_test(NAME "directory-index-${profile}" COMMAND ext4-directory-index-test
+            "${EXT4_INDEX_FIXTURES}/index-${profile}.img")
+        set_tests_properties("directory-index-${profile}" PROPERTIES TIMEOUT 300)
+        add_test(NAME "indexed-write-${profile}" COMMAND ext4-index-write-test
+            "${EXT4_INDEX_FIXTURES}/index-${profile}.img")
+        set_tests_properties("indexed-write-${profile}" PROPERTIES TIMEOUT 300)
+        add_test(NAME "indexed-faults-${profile}" COMMAND ext4-index-write-test --faults
+            "${EXT4_INDEX_FIXTURES}/index-${profile}.img")
+        set_tests_properties("indexed-faults-${profile}" PROPERTIES TIMEOUT 900)
+        if(EXT4_INDEX_COLLISIONS AND NOT profile MATCHES "^(2k|4k|8k|16k|32k)$")
+            add_test(NAME "indexed-edges-${profile}" COMMAND ext4-index-write-test
+                --edges "${EXT4_INDEX_COLLISIONS}" "${EXT4_INDEX_FIXTURES}/index-${profile}.img")
+            set_tests_properties("indexed-edges-${profile}" PROPERTIES TIMEOUT 300)
+        endif()
+    endforeach()
+endif()
 
 add_executable(ext4-reader-test tests/reader.c)
 target_link_libraries(ext4-reader-test PRIVATE ext4_posix)
@@ -124,7 +167,7 @@ function(ext4_add_removal_tests)
     endforeach()
 endfunction()
 ext4_add_removal_tests(${EXT4_WRITE_IMAGES})
-add_test(NAME namespace-removal-indexed-rejection COMMAND ext4-removal-test --indexed
+add_test(NAME namespace-removal-indexed-validation COMMAND ext4-removal-test --indexed
     "${EXT4_FIXTURES}/ext4-indexed.img")
 add_executable(ext4-rename-test tests/rename.c)
 target_include_directories(ext4-rename-test PRIVATE core)
@@ -140,9 +183,9 @@ function(ext4_add_rename_tests)
     endforeach()
 endfunction()
 ext4_add_rename_tests(${EXT4_WRITE_IMAGES})
-add_test(NAME namespace-rename-indexed-rejection COMMAND ext4-rename-test --indexed
+add_test(NAME namespace-rename-indexed COMMAND ext4-rename-test --indexed
     "${EXT4_FIXTURES}/ext4-indexed.img")
-add_test(NAME namespace-indexed-rejection COMMAND ext4-namespace-test --indexed
+add_test(NAME namespace-indexed COMMAND ext4-namespace-test --indexed
     "${EXT4_FIXTURES}/ext4-indexed.img")
 set(EXT4_NAMESPACE_FIXTURES "${CMAKE_SOURCE_DIR}/artifacts/namespace-fixtures" CACHE PATH
     "Independent namespace allocation images")

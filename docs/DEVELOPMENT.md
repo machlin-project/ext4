@@ -247,7 +247,7 @@ ctest --test-dir .build -R '^namespace' --output-on-failure
 ```
 
 `EXT4_NAMESPACE_FIXTURES` selects another fixture directory. The ordinary namespace
-and indexed-rejection tests are always enabled; the modern suite follows
+and basic indexed-directory tests are always enabled; the modern suite follows
 `EXT4_ORPHAN_FILE_TESTS`. To independently inspect one profile after its fault suite:
 
 ```sh
@@ -281,7 +281,7 @@ independent checker and Linux `--namespace` runner consume these outputs;
 usual committed and uncommitted exports.
 
 `ext4-removal-test IMAGE...` runs unlink/rmdir, held-inode lifetime, malformed
-inputs and fault recovery. Its ordinary and indexed-rejection suites are always
+inputs and fault recovery. Its ordinary and indexed-validation suites are always
 configured; small and orphan-file suites follow the corresponding fixture options.
 Use `--smoke --export NEW_EMPTY_DIRECTORY` after the full suite to retain removal
 images, then pass them to `check_namespace.py` with the matching source directory.
@@ -373,6 +373,47 @@ acceptance runs only in a coordinated disposable VM through Machlin lab.
 
 The two platform builds share the same implementation. FSKit acceptance does
 not establish kernel-stack safety, vnode/UBC ownership or LXNU correctness.
+
+## Indexed namespace tests
+
+Generate the indexed and full-root capacity fixtures in new directories, then
+build the probes before generating independently verified collision pairs:
+
+```sh
+python3 tests/generate_index_fixtures.py --output artifacts/index-fixtures
+python3 tests/generate_index_fixtures.py --capacity --output artifacts/index-capacity-fixture
+cmake -S . -B .build-indexed -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DEXT4_INDEX_FIXTURES="$PWD/artifacts/index-fixtures" \
+  -DEXT4_INDEX_COLLISIONS="$PWD/artifacts/index-collisions/vectors.txt" \
+  -DEXT4_INDEX_CAPACITY="$PWD/artifacts/index-capacity-fixture/index-capacity.img"
+cmake --build .build-indexed --parallel 4
+python3 tests/check_directory_hash.py --probe .build-indexed/ext4-directory-hash-test \
+  --output artifacts/index-hash-independent
+python3 tests/generate_index_collisions.py --probe .build-indexed/ext4-directory-hash-test \
+  --output artifacts/index-collisions
+ctest --test-dir .build-indexed -R '^(directory-|indexed-)' --parallel 2 --output-on-failure
+```
+
+Generators and independent checkers accept `--tools-root` for a prepared e2fsprogs
+build. The twenty normal profiles require all their images; missing profiles fail
+the configured suite. The separate capacity fixture exercises full-root rejection
+and successful record reuse, without enabling LARGEDIR.
+
+`ext4-index-write-test --export DIR IMAGE` exports the functional result.
+`--fault-smoke --export DIR IMAGE` exports old, complete, committed and uncommitted
+states for each applicable split. `--edges VECTORS --export DIR IMAGE` exports three
+collision/compaction states for 1 KiB profiles. Use `check_index_write.py`,
+`check_index_faults.py` and `check_index_edges.py` respectively; each refuses an
+existing output directory. The functional/edge checkers accept a repeatable
+`--case SOURCE_FILENAME` to inspect one fixture profile at a time. The CI workflow
+demonstrates all commands and removes temporary images only after their checks.
+
+The existing Linux `--namespace` harness consumes these independently checked
+reports with the explicit prepared recovery executable. Select 1/2/4 KiB profiles;
+use `--pending` only for committed split reports. It verifies byte names and authors
+its reverse transaction inside the indexed parent. Full-root capacity is currently
+tested through the portable writer and independent tools rather than this Linux
+namespace probe.
 
 Use prepared bounded commands for execution workers. Preserve user changes in
 the existing lab and XNU trees. The ongoing VFS refactor is an independent scope;

@@ -226,15 +226,30 @@ to a symlink. The reader rejects an inline length that leaves no terminator spac
 Adapter readlink operations bound allocation by the filesystem block size and
 preserve target bytes; native path traversal limits remain the platform's policy.
 
-The current namespace writer scans linear directories, validating their full maps
-and every record before insertion, even after finding a candidate slot. It reuses
-record slack or appends a zeroed block, preserving legacy name-length encoding and
-metadata checksum tails. Directory size is bounded to 1,048,576 blocks. Existing
-indexed parents explicitly reject mutation. Duplicate names, stale generations,
-invalid dot records, exhausted inodes, reserved-space exclusion and journal-credit
-exhaustion cancel before resource writes; uncertain commits poison the owner.
-Directory indexing remains unsupported for mutation, and neither adapter exposes
-mutations.
+The namespace writer validates the complete directory map and every record before
+mutation, even after finding a candidate slot. Linear directories reuse record
+slack or append a zeroed block. Existing indexed directories validate every index
+edge, hash interval, child ownership and checksum before choosing an eligible leaf.
+The hash implementation handles legacy, half-MD4 and TEA, each with signed and
+unsigned byte variants. Filename bytes need not be UTF-8.
+
+An indexed insertion reuses record slack, compacts a fragmented leaf, or splits
+the leaf at a balanced record boundary. Equal hashes retain the collision
+continuation bit. Separator insertion, internal-node splitting, root height growth,
+new block allocation and inode accounting share the namespace transaction.
+Checksums and structural bounds are checked again on fresh buffers before editing.
+Removal preserves the index and coalesces leaf records; a moved indexed directory
+updates dotdot with the root's index checksum.
+
+Directory size is bounded to 1,048,576 blocks. The temporary graph is bounded to
+24 MiB; there is no recursive traversal. The current index supports a root alone
+or one internal level. A full root at that level requires the unsupported LARGEDIR
+format and cancels without resource writes. Linear directories do not automatically
+convert to indexed form. These bounds and algorithms are not evidence of accepted
+large-volume performance. Duplicate names, stale generations, invalid dot records,
+exhausted inodes, reserved-space exclusion and journal-credit exhaustion cancel
+before resource writes; uncertain commits poison the owner. Neither adapter exposes
+mutations yet.
 
 `ext4_unlink` and `ext4_rmdir` verify the named target's inode number and generation
 under that same owner. The complete parent directory is validated before removing
@@ -264,8 +279,8 @@ cancels the entire private change before any device write.
 A replaced last-link inode enters the same orphan/lifetime path as unlink. A held
 victim remains accessible after its old name resolves to the replacement; otherwise
 bounded cleanup finishes before returning. Replacing one of several hardlinks
-preserves the other names and allocation. Directory indexing, unknown directory
-link counts and whiteout creation are not implemented by this API. Authorization,
+preserves the other names and allocation. Unknown directory link counts and
+whiteout creation are not implemented by this API. Authorization,
 sticky-directory rules and native rename locking remain responsibilities of the
 platform owner; the portable operation cannot authorize itself.
 

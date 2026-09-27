@@ -25,16 +25,18 @@ contract, not physical power-loss protection on a particular disk.
 | Write admission | Stale generation, invalid fields/types/ranges, unsupported xattrs/flags, metadata-target exclusion; no writes before successful validation |
 | Namespace creation | Regular files, mkdir dot/dotdot and parent link counts, full-width owners and precise captured times, nested hard links and hard links to symlinks, sparse writes through new aliases |
 | Symlink creation | Lengths 1/59/60/61 and block-size-minus-one, opaque non-UTF-8 bytes, zeroed terminator/tail, inline versus mapped accounting, hardlink identity, precise metadata and readonly remount |
-| Symlink validation | Empty/NUL/oversized targets, stale/duplicate/indexed destinations, inode and journal exhaustion, mapped-target ENOSPC versus successful inline creation, checksummed invalid inline lengths |
+| Symlink validation | Empty/NUL/oversized targets, stale/duplicate destinations, malformed indexed parents, inode and journal exhaustion, mapped-target ENOSPC versus successful inline creation, checksummed invalid inline lengths |
 | Namespace allocation | Full-directory append, lazy inode bitmap/table ownership, group transitions, all inodes exhausted, hard links after exhaustion, cleared released records, generation increment/wrap and inherited inode flags |
-| Namespace validation | Invalid/duplicate names, stale parent/target, directory hard links, indexed/immutable parents, link limits, malformed records/dot entries, inode bitmap/count/high-water corruption and small-journal credit exhaustion |
+| Namespace validation | Invalid/duplicate names, stale parent/target, directory hard links, malformed indexed and immutable parents, link limits, malformed records/dot entries, inode bitmap/count/high-water corruption and small-journal credit exhaustion |
 | Namespace failures | Every allocation/read after mount and every write/flush cut for create/mkdir/link and short/long/maximum symlinks in existing and appended blocks and at an inode-group transition; full-resource old/new comparison, with durable commits forced to the new state |
 | Removal | Last and nonlast hardlinks, nonempty and empty directories, dot/dotdot ownership, short/long symlinks, first records in later blocks, free-record reuse, coalescing and empty multiblock directory reclamation |
 | Removal validation | Invalid names/arguments, stale parent/target generation, mismatched target identity, readonly/type errors, indexed directories, malformed late/duplicate entries, immutable objects, protected target mappings and minimum cleanup credits; no mutation on rejection |
 | Held unlinked objects | Shared hold identity/refcounts, reads/writes/setattr/truncate after unlink, independent linked truncate while orphans remain, held directories/symlinks, no early inode reuse, generation advance after release, nonhead orphan removal, sync markers and unmount without implicit writes |
 | Removal and release failures | Every operation allocation/read and every write/flush cut for unlink/rmdir, held unlinked truncate and final release at the head or inside the orphan list; consumed-reference error poisoning, leak balance, committed deletion completion and whole-resource comparison outside the journal |
 | Rename | Same/cross-parent moves, both directory-record orders, regular files/directories/inline and mapped symlinks, replacement of held victims, mixed-type and populated-directory exchange, dotdot/parent links, unchanged source identity and captured times |
-| Rename validation | Same-inode hardlink no-op, NOREPLACE, stale identities, invalid names/arguments, nonempty replacement, descendant moves, malformed ancestry cycles/types, late corrupt/duplicate entries, parent link limits, indexed rejection, cleanup-credit exhaustion and reserved-space rejection with successful record reuse |
+| Rename validation | Same-inode hardlink no-op, NOREPLACE, stale identities, invalid names/arguments, nonempty replacement, descendant moves, malformed ancestry cycles/types, late corrupt/duplicate entries, parent link limits, indexed move/exchange, cleanup-credit exhaustion and reserved-space rejection with successful record reuse |
+| Indexed namespace | Six independent hash variants, complete index-graph validation, leaf compaction/splitting, root growth, internal-node splits, real colliding names, empty leading collision leaves, indexed moves/exchange/removal and modern orphan-file combinations |
+| Indexed recovery | Every allocation/read failure and write/flush cut during three split transitions, changing-read structural corruption, private cancellation on capacity limits, exact committed/uncommitted replay against e2fsprogs |
 | Rename failures | Every allocation/read and every write/flush cut for eleven move/replacement/exchange/growth cases, including 35-block victims, retained hardlinks and held victim release; exact old/new resource comparison outside the journal and independent replay of both commit outcomes |
 | Allocation and growth | Unaligned initial writes, sparse gaps, written allocations beyond EOF, deterministic fragmented insertion, extent root/leaf/parent splits, and direct through triple-indirect boundaries |
 | Unwritten conversion | Independent debugfs allocation with deliberately nonzero backing bytes; partial writes preserve zero semantics and split/merge extent records |
@@ -82,7 +84,8 @@ add legacy indirect mapping, absent checksums, absent FILETYPE, 128-byte inodes
 and uninitialized inode tables. `--groups` fills the first inode group
 before faulting the next creation; `--exhaust` fills all eight groups with long
 names, growing the parent through legacy indirect blocks. An actual indexed
-directory is a separate unsupported-operation test, not an accepted write case.
+directory separately exercises create/mkdir/link/symlink; the dedicated indexed
+matrix adds growth, structural validation and recovery.
 
 `--symlinks` adds inline and block-backed targets, including a hardlinked binary
 target and the maximum permitted length. It combines with `--groups` to exercise
@@ -124,13 +127,16 @@ identity, metadata and bytes remain intact.
 parent identity, entry creation order, source type, replacement, lifetime and
 exchange, including every mixed non-directory replacement and every exchange type
 pair. Separate guards verify unchanged media/output on rejection and retained
-identity for hardlink aliases and held sources. The actual indexed fixture is a
-separate rejection suite. `--functional-only` omits the fault/export scenarios;
+identity for hardlink aliases and held sources. The actual indexed fixture separately
+checks missing sources, indexed destinations, mixed exchange and child rename.
+`--functional-only` omits the fault/export scenarios;
 it does not stand in for the complete CTest matrix.
 CTest registers each writable image as its own rename test, retaining all 160
 functional sequences and eleven fault operations for that image. This keeps
 per-test timeouts independent of the number of enabled image profiles; CI still
-limits execution to two concurrent tests.
+limits execution to two concurrent tests. Removal also schedules each image
+separately, retaining its complete fault matrix. It has a separate CI job so its
+runtime and independent checks do not consume the namespace job's whole deadline.
 
 Eleven fault scenarios cover a same-parent file move, a cross-parent populated
 directory move, last-link file/directory/short-symlink/long-symlink replacement,
@@ -150,12 +156,33 @@ idempotence and unchanged protected input hashes. Linux roundtrips consume those
 checked expectations and require the complete renamed tree to remain unchanged
 after Linux creates additional objects and commits its own journal transaction.
 
+`generate_index_fixtures.py` builds twenty independently checked indexed profiles.
+`directory-index-*` validates complete graphs and malformed structures;
+`indexed-write-*` exercises namespace operations and tree growth;
+`indexed-faults-*` enumerates failures at leaf splits, root growth and internal-node
+splits. Explicit skips identify transitions not applicable to a profile.
+`check_index_write.py` verifies byte-name mappings, attributes, links and accounting.
+`check_index_faults.py` compares complete old/new directory bytes and object state
+against separate journal-only recovery, including idempotence and source hashes.
+
+`generate_index_collisions.py` finds pairs of NAME_MAX byte names with the same
+major hash and independently confirms both through numeric-version debugfs queries.
+`indexed-edges-*` forces the equal hashes across separate leaves with different
+target inodes, then renames/removes the leading name while retaining the continuation.
+It also creates separated free record gaps whose combined capacity fits a long
+name; insertion must compact without growing the directory or allocating blocks.
+The independent edge checker verifies both collision states and the compacted
+image, including the empty leading leaf, exact identities and accounting.
+
 The Linux namespace probe reads expectations independently decoded from the
 checked clean image. It checks stat, lookup, complete readdir, file bytes and
 exact/truncated readlink results without a returned terminator,
 then creates and links new objects and commits a cross-directory rename. On an
 inode-exhausted image it first requires ENOSPC and then reuses the only released
-inode. Returned pending Linux transactions are replayed by both the core and
+inode. Expected names are encoded as hex bytes, preserving non-UTF8 names without
+whitespace or Unicode line-separator ambiguity. Indexed cases verify every name
+through Linux lookup and create Linux's additional objects inside the indexed
+parent. Returned pending Linux transactions are replayed by both the core and
 e2fsprogs. Linux can leave stale primary free-space summaries: the oracle admits
 only the exact summary diagnostics confirmed by independently summed groups;
 the core result must already have correct primary totals and no such diagnostics.

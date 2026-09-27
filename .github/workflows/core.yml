@@ -23,7 +23,7 @@ jobs:
       matrix:
         include:
           - suite: core
-            test-filter: -E '^(orphan-file|namespace)'
+            test-filter: -E '^(orphan-file|namespace|directory-|indexed-)'
           - suite: orphan-file
             test-filter: -R '^orphan-file'
           - suite: namespace
@@ -32,6 +32,8 @@ jobs:
             test-filter: -R '^namespace-removal'
           - suite: rename
             test-filter: -R '^namespace-rename'
+          - suite: indexed
+            test-filter: -R '^(directory-|indexed-)'
     env:
       CC: clang
     defaults:
@@ -81,12 +83,32 @@ jobs:
             2>&1 | tee artifacts/checks/orphan-file-maximum-fixtures.log
           python3 tests/generate_namespace_fixtures.py --output artifacts/namespace-fixtures \
             2>&1 | tee artifacts/checks/namespace-fixtures.log
+      - name: Generate independent indexed images
+        if: matrix.suite == 'indexed'
+        run: |
+          python3 tests/generate_index_fixtures.py --output artifacts/index-fixtures \
+            2>&1 | tee artifacts/checks/index-fixtures.log
+          python3 tests/generate_index_fixtures.py --capacity --output artifacts/index-capacity-fixture \
+            2>&1 | tee artifacts/checks/index-capacity-fixture.log
       - name: Build sanitized and freestanding core
         run: |
+          index_options=()
+          if [[ '${{ matrix.suite }}' == indexed ]]; then
+            index_options=(-DEXT4_INDEX_FIXTURES="$PWD/artifacts/index-fixtures" \
+              -DEXT4_INDEX_COLLISIONS="$PWD/artifacts/index-collisions/vectors.txt" \
+              -DEXT4_INDEX_CAPACITY="$PWD/artifacts/index-capacity-fixture/index-capacity.img")
+          fi
           cmake -S . -B .build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DEXT4_EXTENDED_TESTS=ON -DEXT4_INODE128_TEST=ON -DEXT4_UNWRITTEN_TESTS=ON \
-            -DEXT4_ORPHAN_FILE_TESTS=ON -DEXT4_NAMESPACE_TESTS=ON
+            -DEXT4_ORPHAN_FILE_TESTS=ON -DEXT4_NAMESPACE_TESTS=ON "${index_options[@]}"
           cmake --build .build --parallel 2 2>&1 | tee artifacts/checks/build.log
+      - name: Independently verify directory hashes and collision vectors
+        if: matrix.suite == 'indexed'
+        run: |
+          python3 tests/check_directory_hash.py --probe .build/ext4-directory-hash-test \
+            --output artifacts/index-hash-independent 2>&1 | tee artifacts/checks/index-hash-independent.log
+          python3 tests/generate_index_collisions.py --probe .build/ext4-directory-hash-test \
+            --output artifacts/index-collisions 2>&1 | tee artifacts/checks/index-collisions.log
       - name: Run conformance and fault tests
         run: ctest --test-dir .build --parallel 2 ${{ matrix.test-filter }} --output-on-failure --output-junit "$PWD/artifacts/core-tests.xml"
       - name: Export and independently verify file writes
@@ -316,6 +338,45 @@ jobs:
               find "$exports" "$checked" -type f \
                 ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
             done
+          done
+          df -h .
+      - name: Independently verify indexed namespace and split recovery
+        if: matrix.suite == 'indexed'
+        run: |
+          mkdir artifacts/index-capacity-exports
+          .build/ext4-index-write-test --capacity --export artifacts/index-capacity-exports \
+            artifacts/index-capacity-fixture/index-capacity.img 2>&1 | tee artifacts/checks/index-capacity-exports.log
+          python3 tests/check_index_capacity.py --fixture artifacts/index-capacity-fixture/report.json \
+            --image artifacts/index-capacity-exports/indexed-capacity-reused-index-capacity.img \
+            --output artifacts/index-capacity-independent \
+            2>&1 | tee artifacts/checks/index-capacity-independent.log
+          for image in artifacts/index-fixtures/*.img; do
+            name="${image##*/}"
+            profile="${name%.img}"
+            exports="artifacts/index-exports/$profile"
+            checked="artifacts/index-independent/$profile"
+            mkdir -p "$exports"
+            .build/ext4-index-write-test --export "$exports" "$image" \
+              2>&1 | tee "artifacts/checks/index-$profile-functional.log"
+            python3 tests/check_index_write.py --fixtures artifacts/index-fixtures/report.json \
+              --case "$name" --exports "$exports" --output "$checked-functional" \
+              2>&1 | tee "artifacts/checks/index-$profile-functional-independent.log"
+            .build/ext4-index-write-test --fault-smoke --export "$exports" "$image" \
+              2>&1 | tee "artifacts/checks/index-$profile-split-exports.log"
+            python3 tests/check_index_faults.py --exports "$exports" --recover .build/ext4-recover \
+              --output "$checked-splits" 2>&1 | tee "artifacts/checks/index-$profile-splits-independent.log"
+            case "$name" in
+              index-2k.img|index-4k.img|index-8k.img|index-16k.img|index-32k.img) ;;
+              *)
+                .build/ext4-index-write-test --edges artifacts/index-collisions/vectors.txt \
+                  --export "$exports" "$image" 2>&1 | tee "artifacts/checks/index-$profile-edges.log"
+                python3 tests/check_index_edges.py --fixtures artifacts/index-fixtures/report.json \
+                  --vectors artifacts/index-collisions/report.json --case "$name" --exports "$exports" \
+                  --output "$checked-edges" 2>&1 | tee "artifacts/checks/index-$profile-edges-independent.log"
+                ;;
+            esac
+            find "$exports" "$checked"-* -type f \
+              ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           done
           df -h .
       - name: Preserve test evidence

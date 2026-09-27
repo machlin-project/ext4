@@ -11,6 +11,8 @@ import subprocess
 from check_namespace import inode_fields, symlink_bytes
 from check_orphans import accounting, digest
 from check_rename import entries
+from check_index_write import entries as byte_entries
+import linux_index
 
 
 def node_name(index):
@@ -36,6 +38,8 @@ def rename_objects(case):
 
 def symlink_paths(case):
     name = Path(case["image"]).name
+    if name.startswith("indexed-written-"):
+        return ["/indexed/short-link", "/indexed/long-link"]
     if case.get("verified_rename"):
         return [path for path, value in rename_objects(case).items()
                 if value["inode"]["type"] == "symlink"]
@@ -55,14 +59,15 @@ def prepare(case, tree, tools):
         raise RuntimeError("Namespace oracle image changed after independent verification")
     commands = []
 
-    def run(command):
+    def run(command, raw=False):
         result = subprocess.run([str(x) for x in command], capture_output=True,
-                                text=True, errors="backslashreplace", timeout=90)
+                                timeout=90)
         commands.append({"command": [str(x) for x in command], "status": result.returncode,
-                         "stdout": result.stdout, "stderr": result.stderr})
+                         "stdout": result.stdout.decode("utf-8", "backslashreplace"),
+                         "stderr": result.stderr.decode("utf-8", "backslashreplace")})
         (tree.parent / f"{tree.name}-expectations.json").write_text(json.dumps(commands, indent=2) + "\n")
         result.check_returncode()
-        return result.stdout
+        return result.stdout if raw else result.stdout.decode("utf-8", "backslashreplace")
 
     exhaust = image.name.startswith("exhaust-")
     basic = image.name.startswith("basic-")
@@ -70,10 +75,15 @@ def prepare(case, tree, tools):
     data_paths = ["/hello.txt"]
     links = symlink_paths(case)
     renamed = rename_objects(case)
+    indexed = linux_index.selected(case)
     link_lines = []
     expected = tree / "expected"
     expected.mkdir()
-    if renamed:
+    if indexed:
+        paths = linux_index.paths(case)
+        if image.name.startswith("indexed-written-"):
+            data_paths += ["/indexed/created"]
+    elif renamed:
         paths = list(renamed)
         data_paths = [path for path, value in renamed.items() if value["inode"]["type"] == "regular"]
     elif basic:
@@ -92,7 +102,7 @@ def prepare(case, tree, tools):
             data_paths += ["/kept-name"]
     else:
         paths += ["/atomic-entry"]
-    (tree / "namespace-options").write_text(f"{int(exhaust)} {int(basic)}\n")
+    (tree / "namespace-options").write_text(f"{int(exhaust)} {int(basic)} {int(indexed)}\n")
     inode_lines = []
     directories = []
     kinds = {"regular": stat.S_IFREG, "directory": stat.S_IFDIR, "symlink": stat.S_IFLNK}
@@ -110,16 +120,9 @@ def prepare(case, tree, tools):
             values += [seconds + ((extra & 3) << 32), extra >> 2]
         inode_lines.append(" ".join(str(value) for value in values))
         if kind[1] == "directory":
-            listing = run([tools / "debugfs/debugfs", "-R", f"ls -p {path}", image])
-            entries = []
-            for line in listing.splitlines():
-                if not line.strip():
-                    continue
-                fields = line.split("/")
-                if len(fields) != 8 or not fields[5] or any(c.isspace() for c in fields[5]):
-                    raise RuntimeError(f"Invalid namespace oracle listing: {line!r}")
-                entries.append(f"{fields[5]} {int(fields[1])}")
-            directories += [f"{path} {len(entries)}", *entries]
+            listing = byte_entries(run([tools / "debugfs/debugfs", "-R", f"ls -p {path}", image], raw=True))
+            encoded = [f"{name.hex()} {number}" for name, number in listing.items()]
+            directories += [f"{path} {len(encoded)}", *encoded]
         elif kind[1] == "symlink":
             if path not in links:
                 raise RuntimeError(f"Unexpected symbolic link in namespace oracle: {path}")
@@ -152,6 +155,8 @@ def verify(case, image, output, tools, recover, run):
     # Replay only the journal and orphan cleanup. The following -fn performs no repairs.
     run([tools / "e2fsck/e2fsck", "-y", "-E", "journal_only", oracle], allowed=(0, 1))
     block_size = case["block_size"]
+    indexed = linux_index.selected(case)
+    base = "/indexed" if indexed else ""
     expected = bytes(block_size + 3) + bytes((index * 13 + 0x6c) & 255 for index in range(73))
 
     def snapshot(candidate, prefix, allow_summary_lag=False):
@@ -193,7 +198,7 @@ def verify(case, image, output, tools, recover, run):
         if observed_diagnostics != diagnostics or fix_pending:
             raise RuntimeError("Journal-only oracle accounting diagnostics disagree with group totals")
         inodes = {}
-        for path in ("/", "/linux-dir", "/linux-dir/renamed", "/linux-link", "/linux-symlink"):
+        for path in (base + "/", base + "/linux-dir", base + "/linux-dir/renamed", base + "/linux-link", base + "/linux-symlink"):
             inodes[path] = inode_fields(run([tools / "debugfs/debugfs", "-R", f"stat {path}", candidate]))
         retained_links = {}
         for path in symlink_paths(case):
@@ -206,16 +211,16 @@ def verify(case, image, output, tools, recover, run):
             if inode != original_inode or target != expected_target:
                 raise RuntimeError("Linux roundtrip changed the core-created symbolic link")
             retained_links[path] = target.hex()
-        file = inodes["/linux-dir/renamed"]
-        if file is None or file != inodes["/linux-link"] or (
+        file = inodes[base + "/linux-dir/renamed"]
+        if file is None or file != inodes[base + "/linux-link"] or (
                 file["uid"], file["gid"], file["mode"], file["links"], file["size"], file["blocks"]) != (
                     12345, 23456, 0o600, 2, len(expected), block_size // 512):
             raise RuntimeError("Linux-created file lost hardlink identity, allocation or attributes")
         data = output / f"{prefix}-{image.stem}.contents"
-        run([tools / "debugfs/debugfs", "-R", f"dump /linux-dir/renamed {data}", candidate])
+        run([tools / "debugfs/debugfs", "-R", f"dump {base}/linux-dir/renamed {data}", candidate])
         if data.read_bytes() != expected:
             raise RuntimeError("Linux-created file has incorrect sparse or written bytes")
-        link = run([tools / "debugfs/debugfs", "-R", "stat /linux-symlink", candidate])
+        link = run([tools / "debugfs/debugfs", "-R", f"stat {base}/linux-symlink", candidate])
         if 'Fast link dest: "linux-dir/renamed"' not in link:
             raise RuntimeError("Linux-created symlink was lost during replay")
         expected_free = case["accounting"]["Free inodes"]
@@ -224,7 +229,7 @@ def verify(case, image, output, tools, recover, run):
         if counts["Free inodes"] != expected_free:
             raise RuntimeError("Linux inode reuse or primary free-inode reconstruction disagrees")
         names = {}
-        for path in ("/", "/linux-dir"):
+        for path in (base + "/", base + "/linux-dir"):
             names[path] = run([tools / "debugfs/debugfs", "-R", f"ls -p {path}", candidate])
         retained_alias = None
         retained_rename = {}
@@ -278,9 +283,10 @@ def verify(case, image, output, tools, recover, run):
                 run([tools / "debugfs/debugfs", "-R", f"dump /kept-name {retained_data}", candidate])
                 if retained_data.read_bytes() != original_data.read_bytes():
                     raise RuntimeError("Linux changed bytes reachable through the remaining hardlink")
+        retained_index = linux_index.retained(case, candidate, output, tools, run, inodes, prefix) if indexed else {}
         return {"inodes": inodes, "directories": names, "accounting": counts,
                 "retained_symlinks": retained_links, "retained_alias": retained_alias,
-                "retained_rename": retained_rename}, lag
+                "retained_rename": retained_rename, "retained_index": retained_index}, lag
 
     observed, _ = snapshot(image, "core")
     independent, lag = snapshot(oracle, "oracle", allow_summary_lag=True)

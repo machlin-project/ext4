@@ -31,8 +31,9 @@ Atomic creation, mkdir, symlinks, hard links, removal and rename now have portab
 fault, independent image and Linux tests. Rename includes replacement, NOREPLACE,
 EXCHANGE and cross-parent directory moves. The serialized core retains
 open-unlinked or replaced inodes until their last hold is released.
-Indexed-directory mutation, ACLs/xattrs and Linux
-capability policy remain unimplemented. Both platform adapters remain
+Indexed-directory mutation now passes portable functional/fault tests, independent
+e2fsprogs checks and Linux roundtrips, including collisions and bounded tree growth.
+ACLs/xattrs and Linux capability policy remain unimplemented. Both platform adapters remain
 read-only; FSKit has not been mounted. Read
 [the acceptance matrix](docs/ACCEPTANCE.md) before using an image with this code.
 Generated disk images and reports are not source artifacts.

@@ -17,6 +17,11 @@ struct ext4_block_path {
 	uint16_t count;
 };
 
+struct ext4_name_hash {
+	uint32_t major;
+	uint32_t minor;
+};
+
 #define EXT4_ORPHAN_FILE_MAX_BLOCKS 512U
 #define EXT4_ORPHAN_FILE_MAX_ENTRIES (1U << 20)
 
@@ -106,6 +111,11 @@ enum ext4_result ext4_edit_inode(struct ext4_fs *fs, struct ext4_transaction *tr
     uint32_t number, uint32_t generation, struct ext4_inode_disk **disk, struct ext4_inode *inode);
 uint32_t ext4_directory_record_length(
     struct ext4_fs *fs, const struct ext4_dir_header_disk *header);
+/* The caller resolves the on-disk signedness policy into a hash version.
+ * Seed words are host-order; NULL/all-zero uses the specified default seed.
+ * Failure leaves result unchanged. This hashes bytes without name normalization. */
+enum ext4_result ext4_directory_hash(uint8_t version, const uint32_t seed[4], const uint8_t *name,
+    size_t length, struct ext4_name_hash *result);
 enum ext4_result ext4_directory_checksum(
     struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical, uint8_t *buffer);
 enum ext4_result ext4_orphan_cleanup(struct ext4_fs *fs, struct ext4_recovery_report *report);

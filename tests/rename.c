@@ -638,7 +638,7 @@ malformed(struct device *device)
 }
 
 static void
-indexed_guard(struct device *device)
+indexed_operations(struct device *device)
 {
 	struct ext4_fs *fs;
 	struct ext4_inode root;
@@ -649,30 +649,48 @@ indexed_guard(struct device *device)
 	struct ext4_rename_entry source;
 	struct ext4_rename_entry destination;
 	struct ext4_timestamp time = { .seconds = 1700000050 };
+	unsigned int operation;
 
-	fs = mount_writer(device, &root);
-	EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"many", 4, &directory), EXT4_OK);
-	EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"hello.txt", 9, &file), EXT4_OK);
-	CHECK(directory.flags & EXT4_INODE_INDEX);
-	memset(&result, 0xa5, sizeof(result));
-	untouched = result;
-	source = entry(&directory, "entry", &file);
-	destination = entry(&root, "absent", NULL);
-	EXPECT(ext4_rename(fs, &source, &destination, 0, &time, &result), EXT4_UNSUPPORTED);
-	source = entry(&root, "hello.txt", &file);
-	destination = entry(&directory, "absent", NULL);
-	EXPECT(ext4_rename(fs, &source, &destination, 0, &time, &result), EXT4_UNSUPPORTED);
-	destination = entry(&root, "many", &directory);
-	EXPECT(ext4_rename(fs, &source, &destination, EXT4_RENAME_EXCHANGE, &time, &result),
-	    EXT4_UNSUPPORTED);
-	source = destination;
-	destination = entry(&root, "absent", NULL);
-	EXPECT(ext4_rename(fs, &source, &destination, 0, &time, &result), EXT4_UNSUPPORTED);
-	CHECK(device->writes == 0 && memcmp(device->cache, device->base, device->size) == 0 &&
-	    memcmp(&result, &untouched, sizeof(result)) == 0);
-	ext4_unmount(fs);
-	CHECK(device->live == 0);
-	printf("PASS indexed rename rejects parent and child mutation without writes\n");
+	for (operation = 0; operation < 4; operation++) {
+		device_reset(device, device->base);
+		fs = mount_writer(device, &root);
+		EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"many", 4, &directory), EXT4_OK);
+		EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"hello.txt", 9, &file), EXT4_OK);
+		CHECK(directory.flags & EXT4_INODE_INDEX);
+		memset(&result, 0xa5, sizeof(result));
+		untouched = result;
+		if (operation == 0) {
+			source = entry(&directory, "entry", &file);
+			destination = entry(&root, "absent", NULL);
+			EXPECT(ext4_rename(fs, &source, &destination, 0, &time, &result),
+			    EXT4_NOT_FOUND);
+			CHECK(device->writes == 0 &&
+			    memcmp(&result, &untouched, sizeof(result)) == 0 &&
+			    memcmp(device->cache, device->base, device->size) == 0);
+		} else {
+			source = operation == 3 ? entry(&root, "many", &directory)
+						: entry(&root, "hello.txt", &file);
+			destination = operation == 1 ? entry(&directory, "absent", NULL)
+			    : operation == 2	     ? entry(&root, "many", &directory)
+						     : entry(&root, "absent", NULL);
+			EXPECT(ext4_rename(fs, &source, &destination,
+				   operation == 2 ? EXT4_RENAME_EXCHANGE : 0, &time, &result),
+			    EXT4_OK);
+			EXPECT(ext4_lookup(fs, operation == 1 ? &directory : &root,
+				   destination.name, destination.name_length, &result),
+			    EXT4_OK);
+			CHECK(result.number == source.inode);
+			EXPECT(ext4_get_inode(fs, directory.number, &directory), EXT4_OK);
+			CHECK(directory.flags & EXT4_INODE_INDEX);
+			EXPECT(ext4_lookup(fs, &directory, (const uint8_t *)"..", 2, &result),
+			    EXT4_OK);
+			CHECK(result.number == root.number);
+			EXPECT(ext4_sync(fs), EXT4_OK);
+		}
+		ext4_unmount(fs);
+		CHECK(device->live == 0);
+	}
+	printf("PASS indexed rename insertion, exchange, directory move and missing source\n");
 }
 
 enum rename_operation {
@@ -1117,7 +1135,7 @@ main(int argc, char **argv)
 	for (; argument < argc; argument++) {
 		storage_open(&device, argv[argument]);
 		if (indexed) {
-			indexed_guard(&device);
+			indexed_operations(&device);
 			storage_close(&device);
 			continue;
 		}

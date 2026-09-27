@@ -943,7 +943,8 @@ malformed(struct device *device)
 			break;
 		case INDEXED_PARENT:
 			ext4_encode32(&parent_disk->flags, root.flags | EXT4_INODE_INDEX);
-			expected = EXT4_UNSUPPORTED;
+			/* Setting INDEX on a linear directory does not create an htree. */
+			expected = EXT4_CORRUPT;
 			break;
 		case IMMUTABLE_PARENT:
 			ext4_encode32(&parent_disk->flags, root.flags | EXT4_INODE_IMMUTABLE);
@@ -1210,27 +1211,34 @@ group_fixture(struct device *device)
 }
 
 static void
-indexed_guard(struct device *device)
+indexed_operations(struct device *device)
 {
-	struct ext4_fs *fs = mount_writer(device);
-	struct ext4_inode root = root_inode(fs);
-	struct ext4_inode directory = lookup(fs, &root, "many");
-	struct ext4_inode target = lookup(fs, &root, "hello.txt");
+	struct ext4_fs *fs;
+	struct ext4_inode root;
+	struct ext4_inode directory;
+	struct ext4_inode target;
 	struct ext4_inode result;
-	struct ext4_inode untouched;
+	struct ext4_inode observed;
 	unsigned int operation;
 
-	CHECK(directory.flags & EXT4_INODE_INDEX);
-	memset(&result, 0xa5, sizeof(result));
-	untouched = result;
 	for (operation = CREATE_FILE; operation <= CREATE_SYMLINK_MAXIMUM; operation++) {
-		EXPECT(operate(fs, &directory, &target, (enum operation)operation, &result),
-		    EXT4_UNSUPPORTED);
-		CHECK(memcmp(&result, &untouched, sizeof(result)) == 0);
+		device_reset(device, device->base);
+		fs = mount_writer(device);
+		root = root_inode(fs);
+		directory = lookup(fs, &root, "many");
+		target = lookup(fs, &root, "hello.txt");
+		CHECK(directory.flags & EXT4_INODE_INDEX);
+		EXPECT(
+		    operate(fs, &directory, &target, (enum operation)operation, &result), EXT4_OK);
+		observed = lookup(fs, &directory, "atomic-entry");
+		CHECK(observed.number == result.number && observed.generation == result.generation);
+		EXPECT(ext4_get_inode(fs, directory.number, &directory), EXT4_OK);
+		CHECK(directory.flags & EXT4_INODE_INDEX);
+		EXPECT(ext4_sync(fs), EXT4_OK);
+		ext4_unmount(fs);
+		CHECK(device->live == 0);
 	}
-	CHECK(device->writes == 0 && memcmp(device->base, device->cache, device->size) == 0);
-	ext4_unmount(fs);
-	printf("PASS indexed namespace mutations rejected without writes\n");
+	printf("PASS indexed creation, links and symlinks preserve the directory index\n");
 }
 
 int
@@ -1269,7 +1277,7 @@ main(int argc, char **argv)
 	for (; argument < argc; argument++) {
 		storage_open(&device, argv[argument]);
 		if (indexed) {
-			indexed_guard(&device);
+			indexed_operations(&device);
 			storage_close(&device);
 			continue;
 		}

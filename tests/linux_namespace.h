@@ -4,11 +4,23 @@
 
 #define TEST_SYMLINK_INLINE_CAPACITY 60U
 
+_Static_assert(EXT4_NAME_MAX * 2U == 510U, "encoded namespace filename scan width");
+
 struct namespace_entry {
 	char name[EXT4_NAME_MAX + 1];
 	unsigned long long inode;
 	bool seen;
 };
+
+static unsigned int
+namespace_hex(char byte)
+{
+	if (byte >= '0' && byte <= '9') {
+		return (unsigned int)(byte - '0');
+	}
+	require(byte >= 'a' && byte <= 'f', "decode expected filename byte");
+	return (unsigned int)(byte - 'a' + 10);
+}
 
 static void
 namespace_inode_checks(void)
@@ -77,6 +89,9 @@ namespace_directory_checks(void)
 	FILE *input;
 	char path[512];
 	char mounted[sizeof(path) + 4];
+	char encoded[EXT4_NAME_MAX * 2U + 1U];
+	size_t length;
+	size_t byte;
 	unsigned int count;
 	unsigned int index;
 	unsigned int observed;
@@ -93,9 +108,19 @@ namespace_directory_checks(void)
 		expected = calloc(count, sizeof(*expected));
 		require(expected != NULL, "allocate directory expectation");
 		for (index = 0; index < count; index++) {
-			require(fscanf(input, "%255s %llu", expected[index].name,
-				    &expected[index].inode) == 2,
+			require(fscanf(input, "%510s %llu", encoded, &expected[index].inode) == 2,
 			    "parse expected directory entry");
+			length = strlen(encoded);
+			require(length > 0 && length <= EXT4_NAME_MAX * 2U && (length & 1U) == 0,
+			    "bound encoded directory entry");
+			for (byte = 0; byte < length / 2; byte++) {
+				expected[index].name[byte] =
+				    (char)((namespace_hex(encoded[byte * 2]) << 4) |
+					namespace_hex(encoded[byte * 2 + 1]));
+				require(expected[index].name[byte] != 0 &&
+					expected[index].name[byte] != '/',
+				    "validate expected filename byte");
+			}
 		}
 		snprintf(mounted, sizeof(mounted), "/mnt%s", path);
 		directory = opendir(mounted);
@@ -251,9 +276,16 @@ check_namespace(uint32_t block_size)
 	FILE *input;
 	char path[EXT4_NAME_MAX + sizeof("/mnt/")];
 	char link_target[64];
+	char file_path[64];
+	char directory_path[64];
+	char link_path[64];
+	char symlink_path[64];
+	char renamed_path[64];
+	const char *parent_path;
 	uint8_t payload[73];
 	unsigned int exhaust;
 	unsigned int basic;
+	unsigned int indexed;
 	unsigned int index;
 	int fd;
 	int directory;
@@ -261,8 +293,16 @@ check_namespace(uint32_t block_size)
 
 	input = fopen("/namespace-options", "r");
 	require(input != NULL, "open namespace options");
-	require(fscanf(input, "%u %u", &exhaust, &basic) == 2, "read namespace options");
+	require(
+	    fscanf(input, "%u %u %u", &exhaust, &basic, &indexed) == 3, "read namespace options");
 	require(fclose(input) == 0, "close namespace options");
+	require(!indexed || (!exhaust && !basic), "validate indexed namespace options");
+	parent_path = indexed ? "/mnt/indexed" : "/mnt";
+	snprintf(file_path, sizeof(file_path), "%s/linux-file", parent_path);
+	snprintf(directory_path, sizeof(directory_path), "%s/linux-dir", parent_path);
+	snprintf(link_path, sizeof(link_path), "%s/linux-link", parent_path);
+	snprintf(symlink_path, sizeof(symlink_path), "%s/linux-symlink", parent_path);
+	snprintf(renamed_path, sizeof(renamed_path), "%s/linux-dir/renamed", parent_path);
 	namespace_inode_checks();
 	namespace_directory_checks();
 	namespace_data_checks();
@@ -289,7 +329,7 @@ check_namespace(uint32_t block_size)
 		require(stat(path, &released) == 0 && unlink(path) == 0,
 		    "release one core-allocated inode in Linux");
 	}
-	fd = open("/mnt/linux-file", O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, TEST_MODE);
+	fd = open(file_path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, TEST_MODE);
 	require(
 	    fd >= 0 && fstat(fd, &created) == 0, "Linux create after portable namespace changes");
 	if (exhaust) {
@@ -303,10 +343,10 @@ check_namespace(uint32_t block_size)
 		}
 		puts("LINUX_EXT4_NAMESPACE_REUSE_PASS");
 	}
-	require(mkdir("/mnt/linux-dir", 0750) == 0, "Linux mkdir after portable allocation");
-	require(link("/mnt/linux-file", "/mnt/linux-link") == 0, "Linux cross-directory hardlink");
-	require(rename("/mnt/linux-file", "/mnt/linux-dir/renamed") == 0, "Linux rename new inode");
-	require(symlink("linux-dir/renamed", "/mnt/linux-symlink") == 0, "Linux create symlink");
+	require(mkdir(directory_path, 0750) == 0, "Linux mkdir after portable allocation");
+	require(link(file_path, link_path) == 0, "Linux cross-directory hardlink");
+	require(rename(file_path, renamed_path) == 0, "Linux rename new inode");
+	require(symlink("linux-dir/renamed", symlink_path) == 0, "Linux create symlink");
 	require(fchown(fd, TEST_UID, TEST_GID) == 0 && fchmod(fd, TEST_MODE) == 0,
 	    "Linux set created file owners and permissions");
 	for (index = 0; index < sizeof(payload); index++) {
@@ -315,8 +355,8 @@ check_namespace(uint32_t block_size)
 	require(pwrite(fd, payload, sizeof(payload), (off_t)block_size + 3) == sizeof(payload),
 	    "Linux sparse write to created file");
 	require(fsync(fd) == 0, "Linux fsync namespace data and metadata");
-	directory = open("/mnt/linux-dir", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-	root = open("/mnt", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	directory = open(directory_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	root = open(parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	require(directory >= 0 && root >= 0 && fsync(directory) == 0 && fsync(root) == 0,
 	    "Linux fsync both namespace parents");
 	puts("LINUX_EXT4_COMMITTED_RECOVERY_PENDING");

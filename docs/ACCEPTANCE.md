@@ -11,7 +11,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Eleven read profiles pass; broader format and size coverage pending |
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
-| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir/rename pass portable, independent and Linux checks; core holds retain open-unlinked or replaced objects; indexed mutation and platform writes pending |
+| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir/rename and bounded indexed mutation pass portable, independent and Linux checks; core holds retain open-unlinked or replaced objects; platform writes and broader capacity/concurrency acceptance pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine, legacy lists and modern orphan files pass portable faults, independent recovery and Linux reuse; advanced journal formats and platform write integration remain pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; ACLs/xattrs and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
@@ -576,7 +576,8 @@ FILETYPE-absent skip. Late invalid records, duplicate names, wrong dotdot, immut
 objects, protected target mappings and inconsistent entry types reject without
 mutation. Invalid arguments, stale identities, readonly/type errors and journals
 too small for restartable cleanup also leave media and output unchanged. A real
-indexed directory separately rejects mutation; indexed writes are not accepted.
+indexed directory separately rejected mutation at this checkpoint; the later
+indexed writer has its own evidence below.
 
 All four removal CTest suites pass under optimized ASan/UBSan. The earlier
 29-suite regression also passes with the same core, covering the reader, writers,
@@ -611,7 +612,8 @@ inspection includes FSKit debug dylibs as well as their launcher executables and
 is recorded in `artifacts/checks/removal-platform-builds.json`. These new binaries
 have compilation evidence only. Both adapters remain read-only; native object
 lifetime, cache coherence, authorization, writable mounts and LXNU policy remain
-unaccepted. Indexed mutation and ACL/xattr handling remain required work.
+unaccepted. Indexed mutation is covered separately below; ACL/xattr handling
+remains required work.
 
 ## Portable rename evidence
 
@@ -641,8 +643,8 @@ persistence tests, not physical-device power-loss tests.
 Malformed guards pass 335 cases, with three checksum-absent skips. They cover
 ancestry cycles, invalid parent types, wrong dotdot, late malformed records,
 duplicate queried names, invalid parent link counts, immutable parents and directory
-checksums. An actual indexed directory separately rejects four mutation paths
-without writes. All three rename fault suites and the earlier 32-suite regression
+checksums. At this checkpoint an actual indexed directory separately rejected
+four mutation paths without writes. All three rename fault suites and the earlier 32-suite regression
 pass under optimized ASan/UBSan. The expanded functional/indexed matrix passes
 separately with the final tests. Reports are `artifacts/rename-fault1-regression.xml`,
 `artifacts/rename-existing-regression.xml` and `artifacts/checks/rename-final-*`.
@@ -668,8 +670,8 @@ The final FSKit extension remains read-only and does not link the unused namespa
 object; the universal core library contains the new API. Platform build evidence
 is in `artifacts/checks/rename-platform-builds.json`. No new mounted native tests
 are claimed for this change. The owner must serialize core operations; native
-rename locking, authorization, cache coherence, writable adapters, directory
-indexing, whiteouts and ACL/xattr policy remain unaccepted.
+rename locking, authorization, cache coherence, writable adapters, whiteouts and
+ACL/xattr policy remain unaccepted. Later indexed mutation has separate evidence below.
 
 The initial rename CI run timed out the two aggregated ten-image suites at 900
 seconds; the small-format and indexed-rejection suites passed. That run is not
@@ -685,6 +687,68 @@ its 900-second deadline, with 13 of 14 namespace tests passing. No assertion or
 sanitizer failure appeared in that timeout output. Its logs and reviewed reports
 are under `artifacts/checks/rename-profile-ci-*`. Removal is now scheduled per
 image in its own CI job as well; this scheduling change still needs its own CI result.
+
+## Indexed namespace development evidence
+
+`generate_index_fixtures.py` independently builds 20 profiles with all six hash
+variants, 1 through 32 KiB blocks, shallow and internal-node indexes, indirect
+mapping, missing checksums or FILETYPE, 128-byte inodes, explicit checksum seeds,
+and shallow/deep indexes combined with a modern orphan file.
+Every source passes nonrepairing e2fsck and explicit feature/tree checks. The hash
+implementation agrees with 1,608 independent numeric-version debugfs queries,
+including high-byte names, length boundaries and four seeds.
+
+The 76-test sanitized matrix passes graph validation, functional writes,
+split faults, collisions, compaction and hash guards. Functional tests add 11,300
+NAME_MAX byte names across the 20 profiles, forcing leaf splits, root growth and internal-node splits. They
+also cover creation, symlinks, cross-parent rename/exchange, indexed dotdot changes,
+empty indexed removal and retained inode lifetime. Independent e2fsprogs inspection
+checks exact name-to-inode mappings, metadata, link counts, symlink bytes, tree
+shape and accounting; all 20 outputs pass e2fsck. The separate 59-test regression
+of earlier behavior also passes with the same core.
+
+The fault matrix covers 47 leaf/root/node transitions: 6,048 allocation failures,
+6,966 read failures and 8,562 write/flush cuts. Of those cuts, 8,313 recover to the
+required old/new image outside the journal; 249 deliberately torn primary
+superblocks fail closed. Thirteen inapplicable transition/profile combinations are
+reported separately. An additional 141 checks reject checksummed structural changes
+between reads without writes. Independent replay of 47 committed/uncommitted pairs
+agrees with the core, including exact directory bytes, mappings, objects, accounting
+and repeat-recovery idempotence. All 188 split exports retain their hashes.
+
+Fifteen 1 KiB profiles force real equal-hash names into distinct leaves and target
+inodes. Lookup/rename/removal preserves the remaining continuation after its leading
+leaf becomes empty. Fragmented record gaps compact without allocating blocks or
+growing the directory. All 45 resulting collision/deletion/compaction images pass
+independent exact-name, inode, accounting and e2fsck checks. Ninety-four separate
+capacity guards cancel leaf/root/node splits with four journal credits or all
+remaining blocks reserved, without writes, changed output or leaked allocation.
+This reserved-pool test does not claim a completely allocated block bitmap.
+
+One additional independently generated 64 MiB image has 46,122 directory entries,
+a full 123-entry root and 122 full internal nodes. Its test rejects a split that
+would require another index level without changing any device byte. A shorter
+name still reuses leaf space; all 46,123 resulting names, unrelated metadata, data
+and unchanged allocation pass independent inspection and e2fsck. LARGEDIR growth
+itself remains unsupported; this is a tested rejection boundary.
+
+The real Linux kernel passes 106 cases across the 17 profiles compatible with its
+4 KiB pages: 62 clean functional/collision/compaction states and all 44 committed
+split states. It checks exact byte-name lookup/readdir and retained objects, then
+creates, links and renames new objects inside the indexed parent. Core and e2fsprogs
+reverse replay agree on the Linux-authored journal, with exact retained names,
+attributes, data and accounting. The changed namespace harness also passes an
+earlier linear rename control. Larger block profiles and the full-root capacity
+fixture have portable/e2fsprogs evidence, not Linux runtime coverage.
+
+Evidence is in `artifacts/index-expanded-tests.xml`,
+`artifacts/index-root-capacity.xml`, `artifacts/index-existing-regression.xml`,
+`artifacts/index-*-independent/` and `artifacts/checks/index-*.json`. Linux reports
+and actual kernel console markers are in the lab's
+`artifacts/ext4-journal/linux-reference/index-linux-*` directories. CI for the new
+indexed matrix is pending publication. These results establish the bounded portable
+profile; large-volume performance, automatic indexing of linear directories,
+writable adapters, native concurrency and policy remain separate requirements.
 
 ## FSKit build evidence
 
