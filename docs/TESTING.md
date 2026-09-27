@@ -41,6 +41,7 @@ contract, not physical power-loss protection on a particular disk.
 | Allocation and growth | Unaligned initial writes, sparse gaps, written allocations beyond EOF, deterministic fragmented insertion, extent root/leaf/parent splits, and direct through triple-indirect boundaries |
 | Unwritten conversion | Independent debugfs allocation with deliberately nonzero backing bytes; partial writes preserve zero semantics and split/merge extent records |
 | Free-space ownership | Group and superblock counters, inode data/mapping block counts, lazy bitmaps, short final groups, exhaustion to zero free blocks, reserved-space rejection, late credit failure with no writes |
+| Full-block namespace | Independently filled bitmaps; create/mkdir/inline and mapped symlink/link/rename ENOSPC in linear and indexed parents; record reuse, existing-block overwrite and sparse growth; rollback after allocating the only available block; successful mkdir after releasing two blocks |
 | Allocator corruption | Damaged bitmap CRC, forged free system blocks with matching checksums/counters, and inconsistent bitmap/free-count pairs; journal data and mapping blocks stay protected |
 | Allocation failures | Every allocation/read in bounded growth and mapping promotion; every write/flush cut with three survival patterns and partial writes; all blocks outside the journal match the complete old or new image |
 | Truncate | Partial/aligned/zero sizes, fragmented trees with surviving branches, repeated shrink/grow, root collapse, unwritten preallocation, direct/single/double/triple path release, maximum sparse size, hardlink identity and zeroed reuse after disk exhaustion |
@@ -51,6 +52,7 @@ contract, not physical power-loss protection on a particular disk.
 | File mutation failures | Every allocation/read in the small overwrite, every write/flush cut through clean finish, torn writes and three survival patterns; consistent inode and data together after recovery, poisoned-instance read/write rejection |
 | Transaction ownership | One active writer/transaction, duplicate buffer identity, credit exhaustion, cancellation, empty commit, protected journal/control ranges |
 | Journal layouts | Legacy without checksums, checksum v2/v3, 32/64-bit tags, escape records, multiple descriptor blocks, ring wrap and sequence wrap |
+| Revoke advertisement | Committed revokes before the feature bit is durable; 32/64-bit targets, checksum variations, later reuse across sequence wrap, and malformed-record rejection before writes |
 | Persistence | Every write/flush interruption, three pending-write survival patterns, partial writes, durable commit before home writes, all-old or all-new metadata after recovery |
 | Recovery faults | Interrupted replay and retry, allocation/read failures in each distinct ownership phase, no leaks, no writes on already clean media |
 | Orphan recovery | Linked partial truncates and hardlinks; Linux-authored open-unlinked ordinary/sparse files, directories, short/long symlinks and FIFO; inode/data/mapping reclamation, partial-tail zeroing, repeated recovery |

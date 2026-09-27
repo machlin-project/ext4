@@ -686,7 +686,8 @@ passed. The overall run still failed: the aggregated ordinary removal test reach
 its 900-second deadline, with 13 of 14 namespace tests passing. No assertion or
 sanitizer failure appeared in that timeout output. Its logs and reviewed reports
 are under `artifacts/checks/rename-profile-ci-*`. Removal is now scheduled per
-image in its own CI job as well; this scheduling change still needs its own CI result.
+image in its own CI job as well; the later indexed CI run below passes that
+scheduling change together with all earlier suites.
 
 ## Indexed namespace development evidence
 
@@ -745,10 +746,69 @@ Evidence is in `artifacts/index-expanded-tests.xml`,
 `artifacts/index-root-capacity.xml`, `artifacts/index-existing-regression.xml`,
 `artifacts/index-*-independent/` and `artifacts/checks/index-*.json`. Linux reports
 and actual kernel console markers are in the lab's
-`artifacts/ext4-journal/linux-reference/index-linux-*` directories. CI for the new
-indexed matrix is pending publication. These results establish the bounded portable
+`artifacts/ext4-journal/linux-reference/index-linux-*` directories. All six published
+CI jobs pass: 159 CTest tests with no failed or skipped tests, plus the independent
+hash, collision, functional, split, edge and capacity checks. Explicit applicability
+skips within tests remain separate from their CTest result. Downloaded reports and
+reviewed artifact hashes are in `artifacts/checks/index-ci-manifest.json`.
+These results establish the bounded portable
 profile; large-volume performance, automatic indexing of linear directories,
 writable adapters, native concurrency and policy remain separate requirements.
+
+## Namespace on completely allocated block bitmaps
+
+Eight independently generated 8 MiB profiles have no free blocks in any group and
+no reserved-block pool. They cover 1/4 KiB blocks, indirect mapping, absent metadata
+checksums or FILETYPE, 128-byte inodes, an explicit checksum seed and a modern orphan
+file. Both linear and indexed parents must grow for the selected long name.
+
+The eight sanitized `namespace-space-*` tests pass 96 failed namespace operations
+without writes, changed output or leaked allocation. An empty file, inline symlink,
+hardlink and rename still fit existing directory records; an existing data block
+can be overwritten. Sparse growth reads as zero without allocating a block, while
+a write to that hole reports ENOSPC. Releasing just one block is insufficient for
+mkdir plus parent growth: both linear and indexed cases cancel their prepared
+allocation. Releasing two blocks allows the same operation to finish and fills the
+filesystem again. Clean recovery is idempotent.
+
+Independent e2fsprogs checks pass all 32 prepared/reused/created states with exact
+names, identities, attributes, data, block/inode accounting and nonrepairing e2fsck.
+All 40 source/export hashes remain unchanged by inspection. Reports are in
+`artifacts/space-tests-first.xml`, `artifacts/space-independent-final/` and
+`artifacts/checks/space-*`.
+
+The actual Linux reference kernel passes all 32 states. It checks the retained
+objects, observes zero free blocks, rejects mkdir and mapped symlink allocation,
+and overwrites an existing block without allocation. It then truncates the filler
+to release blocks, creates new indexed objects and leaves a committed journal.
+Portable recovery and separate e2fsprogs replay agree on all retained names,
+attributes, contents and exact allocation accounting. Every case contains three
+recovered transactions; repeat recovery is idempotent and the inputs retain their
+hashes. Reports and guest console markers are in the lab under
+`artifacts/ext4-journal/linux-reference/space-linux-fixed/`.
+
+The initial Linux smoke found a recovery error: a committed revoke can precede
+the durable REVOKE feature advertisement in the journal superblock. Recovery now
+accepts the checked record independently of that bit. A regression first failed
+against the earlier implementation, then passed 192 checks across checksum and
+address-width profiles, advertised/unadvertised records, later block reuse and
+transaction sequence wrap. Eight checksum-absent cases are explicitly inapplicable.
+Malformed lengths, protected/out-of-range targets and bad checksums still fail
+before writes. The exact saved failing Linux journal now matches independent
+replay, including its data and accounting; the original image remains unchanged.
+Evidence is in `artifacts/revoke-space-green.xml`,
+`artifacts/space-recovery-fixed-retained/` and `artifacts/checks/revoke-*`.
+
+Published CI coverage for the additional capacity cases remains pending. This
+bounded profile does not establish large-volume performance or writable native
+behavior.
+
+The indexed core and recovery correction also compile into both unsigned kext
+architectures and the universal FSKit core. Symbol inspection confirms indexed
+operations and recovery are present in those core products, with no unresolved
+internal ext4 symbols in either kext. Reports are in
+`artifacts/checks/space-platform-builds.json`. Both adapters remain read-only;
+these builds add no installed or mounted native acceptance.
 
 ## FSKit build evidence
 

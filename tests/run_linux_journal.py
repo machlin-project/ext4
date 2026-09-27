@@ -237,6 +237,8 @@ def main():
         if args.namespace:
             if Path(case["image"]).name.startswith("exhaust-") and "LINUX_EXT4_NAMESPACE_REUSE_PASS" not in console:
                 raise RuntimeError("Missing Linux reuse evidence after inode exhaustion")
+            if case.get("verified_space") is not None and "LINUX_EXT4_FULL_BLOCKS_PASS" not in console:
+                raise RuntimeError("Missing Linux full-block ENOSPC, overwrite and reuse evidence")
             record.update(linux_namespace.verify(case, scratch, output, tools, recover, run))
             if digest(source) != expected_sha:
                 raise RuntimeError("Namespace roundtrip changed its protected source image")

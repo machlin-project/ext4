@@ -232,7 +232,8 @@ enum ext4_result ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t gen
  * Create/mkdir require permissions, UID/GID and atime/mtime/ctime; birth time is
  * optional and must be representable. They create an empty regular file or a
  * directory containing dot/dotdot. Parent ctime/mtime change to directory_time.
- * Existing names, dot/dotdot and indexed directories are rejected before writes.
+ * Existing names and dot/dotdot are rejected before writes. Linear and bounded
+ * indexed directories use the same transaction and admitted attribute contract.
  * Allocation, directory records, link counts and timestamps commit atomically.
  * Outputs change only on success; uncertain commits require explicit recovery. */
 enum ext4_result ext4_create(struct ext4_fs *fs, uint32_t directory, uint32_t generation,

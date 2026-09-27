@@ -268,6 +268,44 @@ namespace_exhausted_name(char *path, size_t capacity, unsigned int index)
 }
 
 static void
+namespace_full_blocks(uint32_t block_size)
+{
+	struct stat inode;
+	struct statvfs counts;
+	char target[TEST_SYMLINK_INLINE_CAPACITY + 1];
+	int fd;
+
+	require(statvfs("/mnt", &counts) == 0 && counts.f_bfree == 0 && counts.f_bavail == 0,
+	    "verify Linux sees completely allocated block bitmaps");
+	errno = 0;
+	require(mkdir("/mnt/no-space-directory", 0750) == -1 && errno == ENOSPC,
+	    "verify Linux mkdir block exhaustion");
+	memset(target, 'L', sizeof(target) - 1);
+	target[sizeof(target) - 1] = 0;
+	errno = 0;
+	require(symlink(target, "/mnt/no-space-symlink") == -1 && errno == ENOSPC,
+	    "verify Linux mapped symlink block exhaustion");
+	errno = 0;
+	require(lstat("/mnt/no-space-directory", &inode) == -1 && errno == ENOENT,
+	    "failed Linux mkdir leaves no name");
+	errno = 0;
+	require(lstat("/mnt/no-space-symlink", &inode) == -1 && errno == ENOENT,
+	    "failed Linux symlink leaves no name");
+	fd = open("/mnt/target", O_WRONLY | O_CLOEXEC | O_SYNC);
+	require(
+	    fd >= 0 && pwrite(fd, "Z", 1, block_size - 1) == 1 && fsync(fd) == 0 && close(fd) == 0,
+	    "Linux overwrites an allocated block on a full filesystem");
+	require(statvfs("/mnt", &counts) == 0 && counts.f_bfree == 0,
+	    "Linux failed namespace and successful overwrite preserve full allocation");
+	fd = open("/mnt/filler", O_WRONLY | O_CLOEXEC);
+	require(fd >= 0 && ftruncate(fd, 0) == 0 && fsync(fd) == 0 && close(fd) == 0,
+	    "Linux frees full-disk capacity through truncate");
+	require(statvfs("/mnt", &counts) == 0 && counts.f_bfree > 0,
+	    "Linux exposes the released blocks for namespace reuse");
+	puts("LINUX_EXT4_FULL_BLOCKS_PASS");
+}
+
+static void
 check_namespace(uint32_t block_size)
 {
 	struct stat released;
@@ -286,6 +324,7 @@ check_namespace(uint32_t block_size)
 	unsigned int exhaust;
 	unsigned int basic;
 	unsigned int indexed;
+	unsigned int full_blocks;
 	unsigned int index;
 	int fd;
 	int directory;
@@ -293,10 +332,11 @@ check_namespace(uint32_t block_size)
 
 	input = fopen("/namespace-options", "r");
 	require(input != NULL, "open namespace options");
-	require(
-	    fscanf(input, "%u %u %u", &exhaust, &basic, &indexed) == 3, "read namespace options");
+	require(fscanf(input, "%u %u %u %u", &exhaust, &basic, &indexed, &full_blocks) == 4,
+	    "read namespace options");
 	require(fclose(input) == 0, "close namespace options");
 	require(!indexed || (!exhaust && !basic), "validate indexed namespace options");
+	require(!full_blocks || indexed, "validate full-block namespace options");
 	parent_path = indexed ? "/mnt/indexed" : "/mnt";
 	snprintf(file_path, sizeof(file_path), "%s/linux-file", parent_path);
 	snprintf(directory_path, sizeof(directory_path), "%s/linux-dir", parent_path);
@@ -316,6 +356,9 @@ check_namespace(uint32_t block_size)
 		    "verify hardlink to symlink");
 	}
 	puts("LINUX_EXT4_NAMESPACE_PASS");
+	if (full_blocks) {
+		namespace_full_blocks(block_size);
+	}
 	if (exhaust) {
 		require(statvfs("/mnt", &counts) == 0 && counts.f_ffree == 0,
 		    "verify Linux sees inode exhaustion");

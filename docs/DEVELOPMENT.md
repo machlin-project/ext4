@@ -374,6 +374,34 @@ acceptance runs only in a coordinated disposable VM through Machlin lab.
 The two platform builds share the same implementation. FSKit acceptance does
 not establish kernel-stack safety, vnode/UBC ownership or LXNU correctness.
 
+## Full-block namespace capacity
+
+Generate small filesystems whose block bitmaps are actually full, then exercise
+namespace failure rollback and reuse of existing space:
+
+```sh
+python3 tests/generate_space_fixtures.py --tools-root ../lab/vendor/e2fsprogs-ext4/build \
+  --output artifacts/space-fixtures
+cmake -S . -B .build-space -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DEXT4_SPACE_FIXTURES="$PWD/artifacts/space-fixtures"
+cmake --build .build-space --parallel 2
+ctest --test-dir .build-space -R '^namespace-space-' --output-on-failure
+mkdir artifacts/space-exports
+.build-space/ext4-space-test --export artifacts/space-exports artifacts/space-fixtures/*.img
+python3 tests/check_space.py --fixtures artifacts/space-fixtures/report.json \
+  --exports artifacts/space-exports --tools-root ../lab/vendor/e2fsprogs-ext4/build \
+  --output artifacts/space-independent
+```
+
+The independent checker produces `linux-inputs.json` for the existing
+`run_linux_journal.py --namespace` harness. Run that harness from the explicit lab
+directory, with absolute paths to this input, the pinned module report and the
+prepared recovery executable. Its full-block mode verifies Linux ENOSPC and
+existing-block overwrite, truncates the filler to release capacity, then performs
+the indexed namespace roundtrip. Core and independent reverse replay compare exact
+retained objects and released/allocated block accounting. Use a new output directory
+for every fixture/check/VM run so failures remain reviewable.
+
 ## Indexed namespace tests
 
 Generate the indexed and full-root capacity fixtures in new directories, then

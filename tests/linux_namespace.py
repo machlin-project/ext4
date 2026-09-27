@@ -13,6 +13,7 @@ from check_orphans import accounting, digest
 from check_rename import entries
 from check_index_write import entries as byte_entries
 import linux_index
+import linux_space
 
 
 def node_name(index):
@@ -38,6 +39,8 @@ def rename_objects(case):
 
 def symlink_paths(case):
     name = Path(case["image"]).name
+    if linux_space.selected(case):
+        return ["/room/short-link"] if case["space_state"] == "reused" else []
     if name.startswith("indexed-written-"):
         return ["/indexed/short-link", "/indexed/long-link"]
     if case.get("verified_rename"):
@@ -75,11 +78,18 @@ def prepare(case, tree, tools):
     data_paths = ["/hello.txt"]
     links = symlink_paths(case)
     renamed = rename_objects(case)
-    indexed = linux_index.selected(case)
+    full_blocks = linux_space.selected(case)
+    indexed = linux_index.selected(case) or full_blocks
     link_lines = []
     expected = tree / "expected"
     expected.mkdir()
-    if indexed:
+    if full_blocks:
+        paths = linux_space.paths(case)
+        data_paths = [path for path, item in case["verified_space"]["objects"].items()
+                      if item["inode"]["type"] == "regular"]
+        if case["space_state"] == "reused":
+            data_paths += ["/room/renamed"]
+    elif indexed:
         paths = linux_index.paths(case)
         if image.name.startswith("indexed-written-"):
             data_paths += ["/indexed/created"]
@@ -102,7 +112,7 @@ def prepare(case, tree, tools):
             data_paths += ["/kept-name"]
     else:
         paths += ["/atomic-entry"]
-    (tree / "namespace-options").write_text(f"{int(exhaust)} {int(basic)} {int(indexed)}\n")
+    (tree / "namespace-options").write_text(f"{int(exhaust)} {int(basic)} {int(indexed)} {int(full_blocks)}\n")
     inode_lines = []
     directories = []
     kinds = {"regular": stat.S_IFREG, "directory": stat.S_IFDIR, "symlink": stat.S_IFLNK}
@@ -155,7 +165,8 @@ def verify(case, image, output, tools, recover, run):
     # Replay only the journal and orphan cleanup. The following -fn performs no repairs.
     run([tools / "e2fsck/e2fsck", "-y", "-E", "journal_only", oracle], allowed=(0, 1))
     block_size = case["block_size"]
-    indexed = linux_index.selected(case)
+    full_blocks = linux_space.selected(case)
+    indexed = linux_index.selected(case) or full_blocks
     base = "/indexed" if indexed else ""
     expected = bytes(block_size + 3) + bytes((index * 13 + 0x6c) & 255 for index in range(73))
 
@@ -283,10 +294,12 @@ def verify(case, image, output, tools, recover, run):
                 run([tools / "debugfs/debugfs", "-R", f"dump /kept-name {retained_data}", candidate])
                 if retained_data.read_bytes() != original_data.read_bytes():
                     raise RuntimeError("Linux changed bytes reachable through the remaining hardlink")
-        retained_index = linux_index.retained(case, candidate, output, tools, run, inodes, prefix) if indexed else {}
+        retained_index = linux_index.retained(case, candidate, output, tools, run, inodes, prefix) if indexed and not full_blocks else {}
+        retained_space = linux_space.retained(case, candidate, output, tools, run, inodes, prefix, counts) if full_blocks else {}
         return {"inodes": inodes, "directories": names, "accounting": counts,
                 "retained_symlinks": retained_links, "retained_alias": retained_alias,
-                "retained_rename": retained_rename, "retained_index": retained_index}, lag
+                "retained_rename": retained_rename, "retained_index": retained_index,
+                "retained_space": retained_space}, lag
 
     observed, _ = snapshot(image, "core")
     independent, lag = snapshot(oracle, "oracle", allow_summary_lag=True)

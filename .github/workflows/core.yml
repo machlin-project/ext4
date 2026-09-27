@@ -90,17 +90,26 @@ jobs:
             2>&1 | tee artifacts/checks/index-fixtures.log
           python3 tests/generate_index_fixtures.py --capacity --output artifacts/index-capacity-fixture \
             2>&1 | tee artifacts/checks/index-capacity-fixture.log
+      - name: Generate independently filled block bitmaps
+        if: matrix.suite == 'namespace'
+        run: |
+          python3 tests/generate_space_fixtures.py --output artifacts/space-fixtures \
+            2>&1 | tee artifacts/checks/space-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
+          space_options=()
           if [[ '${{ matrix.suite }}' == indexed ]]; then
             index_options=(-DEXT4_INDEX_FIXTURES="$PWD/artifacts/index-fixtures" \
               -DEXT4_INDEX_COLLISIONS="$PWD/artifacts/index-collisions/vectors.txt" \
               -DEXT4_INDEX_CAPACITY="$PWD/artifacts/index-capacity-fixture/index-capacity.img")
           fi
+          if [[ '${{ matrix.suite }}' == namespace ]]; then
+            space_options=(-DEXT4_SPACE_FIXTURES="$PWD/artifacts/space-fixtures")
+          fi
           cmake -S . -B .build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DEXT4_EXTENDED_TESTS=ON -DEXT4_INODE128_TEST=ON -DEXT4_UNWRITTEN_TESTS=ON \
-            -DEXT4_ORPHAN_FILE_TESTS=ON -DEXT4_NAMESPACE_TESTS=ON "${index_options[@]}"
+            -DEXT4_ORPHAN_FILE_TESTS=ON -DEXT4_NAMESPACE_TESTS=ON "${index_options[@]}" "${space_options[@]}"
           cmake --build .build --parallel 2 2>&1 | tee artifacts/checks/build.log
       - name: Independently verify directory hashes and collision vectors
         if: matrix.suite == 'indexed'
@@ -298,6 +307,17 @@ jobs:
             done
           done
           df -h .
+      - name: Independently verify namespace on full block bitmaps
+        if: matrix.suite == 'namespace'
+        run: |
+          mkdir artifacts/space-exports
+          .build/ext4-space-test --export artifacts/space-exports artifacts/space-fixtures/*.img \
+            2>&1 | tee artifacts/checks/space-exports.log
+          python3 tests/check_space.py --fixtures artifacts/space-fixtures/report.json \
+            --exports artifacts/space-exports --output artifacts/space-independent \
+            2>&1 | tee artifacts/checks/space-independent.log
+          find artifacts/space-exports artifacts/space-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Independently verify unlink and rmdir transactions
         if: matrix.suite == 'removal'
         run: |

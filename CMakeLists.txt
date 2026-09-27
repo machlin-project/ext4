@@ -53,6 +53,19 @@ endif()
 
 enable_testing()
 
+add_executable(ext4-space-test tests/space.c)
+target_include_directories(ext4-space-test PRIVATE core)
+target_link_libraries(ext4-space-test PRIVATE ext4_posix)
+target_compile_options(ext4-space-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
+set(EXT4_SPACE_FIXTURES "" CACHE PATH "Independent fully allocated namespace images")
+if(EXT4_SPACE_FIXTURES)
+    foreach(profile 1k 4k indirect no-checksum no-filetype inode128 checksum-seed orphan-file)
+        add_test(NAME "namespace-space-${profile}" COMMAND ext4-space-test
+            "${EXT4_SPACE_FIXTURES}/space-${profile}.img")
+        set_tests_properties("namespace-space-${profile}" PROPERTIES TIMEOUT 300)
+    endforeach()
+endif()
+
 add_executable(ext4-directory-hash-test tests/directory_hash.c)
 target_include_directories(ext4-directory-hash-test PRIVATE core)
 target_link_libraries(ext4-directory-hash-test PRIVATE ext4_core)
