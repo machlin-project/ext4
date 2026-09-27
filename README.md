@@ -37,10 +37,11 @@ The portable core reads, lists and transactionally changes inode-body and extern
 xattrs, including copying shared blocks before modification. Attribute batches can
 commit together with inode permissions, ownership and times. Attribute lifetime now
 extends through creation, file writes, truncate, namespace changes and final orphan
-release. Targeted fault and independent checks pass; the combined regression and
-broader Linux metadata roundtrips remain separate acceptance work. ACL enforcement
-and Linux capability policy are not implemented. Work proceeds through portable-core acceptance, then FSKit integration
-on stock macOS, then LXNU policy.
+release. The combined 227-test regression passes alongside targeted fault and
+independent checks. Bidirectional Linux attribute/ACL/security roundtrips and direct
+Linux replay of core attribute transactions pass on eight format profiles. ACL
+enforcement and Linux capability policy are not implemented. Work proceeds through
+portable-core acceptance, then FSKit integration on stock macOS, then LXNU policy.
 Both platform adapters remain
 read-only; FSKit has not been mounted. Read
 [the acceptance matrix](docs/ACCEPTANCE.md) before using an image with this code.

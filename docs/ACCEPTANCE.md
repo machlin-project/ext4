@@ -17,7 +17,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir/rename and bounded indexed mutation pass portable, independent and Linux checks; core holds retain open-unlinked or replaced objects; platform writes and broader capacity/concurrency acceptance pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine, legacy lists and modern orphan files pass portable faults, independent recovery and Linux reuse; advanced journal formats and platform write integration remain pending |
-| Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list and atomic attribute batches pass portable and independent checks; mutation lifetime integration, ACL enforcement, Linux xattr roundtrips and platform policy pending |
+| Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list, atomic attribute batches and mutation lifetime integration pass portable tests and targeted independent checks; bidirectional Linux attribute/ACL/security checks and direct replay of core attribute transactions pass eight profiles; the linked-truncate e2fsck defect remains explicit below; ACL enforcement and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
 | LXNU policy | CAP_FSETID and privilege removal, xattrs, mixed-ABI races, inherited descriptions and attachment restrictions | Not implemented |
@@ -226,8 +226,59 @@ profiles have portable/independent checks but no Linux runtime result. Linux evi
 is in `artifacts/xattr-lifetime-linux-truncate-first/` and
 `artifacts/xattr-lifetime-linux-truncate-remaining/`.
 
-These targeted results do not replace the combined regression, broader bidirectional
-Linux xattr/ACL/security tests, performance acceptance or writable platform integration.
+The combined 227-test regression also passes under ASan/UBSan, with zero failed or
+JUnit-skipped tests and all 104 fixture/expected-file hashes unchanged. Build,
+style and optimized freestanding checks pass. Evidence is in
+`artifacts/checks/xattr-lifetime-regression-summary.json`. All six published CI jobs
+also pass, registering the same 227 tests. Downloaded artifacts independently
+confirm 360 final-release states and 410 first-attribute states. Inode-body checks
+on 128-byte inodes and checksum-only revoke cases on checksum-free journals retain
+explicit applicability skips inside test output; they are not extra passes.
+The reviewed CI evidence is in `artifacts/checks/xattr-lifetime-ci-manifest.json`.
+This does not complete broader bidirectional Linux xattr/ACL/security tests,
+performance acceptance or writable platform integration.
+
+## Linux attribute interoperability
+
+Twenty-four images pass a complete Linux/core/Linux attribute roundtrip:
+the original independent fixture, a core metadata mutation and core-created
+attributed objects on each of eight profiles. These cover 1/4 KiB blocks, indirect
+mapping, checksum-free and checksum-seed formats, 128/512-byte inodes and orphan
+files. Linux verifies all names and values, inode identities and file
+contents before modifying shared attributes, chmod/ACL state and inherited ACLs.
+It creates user/trusted attributes and a valid file capability, and checks ACL
+read/write decisions and trusted-namespace visibility under an unprivileged UID.
+These are Linux policy checks; the portable core continues to store opaque metadata.
+
+Linux then stops with committed journal transactions pending. Both the portable
+recovery engine and independent e2fsck replay preserve the exact expected state.
+The core reads every attribute under read-only and writable owners, then atomically
+changes Linux-created attributes and ownership while removing the ACL and capability.
+A second Linux boot verifies the returned image, followed by clean unmount and
+nonrepairing e2fsck. Each image replays two Linux-authored transactions; protected
+sources and the prepared recovery/reader executables remain unchanged.
+Evidence is in `artifacts/xattr-linux-verified-command/report.json` and
+`artifacts/xattr-linux-remaining/report.json`, with reviewed summaries under
+`artifacts/checks/`.
+
+Another 48 cases start with a committed core attribute transaction waiting for
+recovery: creation, shared-block copy-on-write, detachment, final block release,
+replacement and compound metadata mutation on every profile. Linux directly
+replays that log before checking the independently expected state, then completes
+the same Linux/core/Linux cycle. All 48 pass, including exact pending-input identity,
+unchanged source hashes, core/oracle recovery and returned Linux state. Evidence is
+in `artifacts/xattr-linux-pending/report.json` and
+`artifacts/checks/xattr-linux-pending-summary.json`.
+
+Across the two input modes, 72 complete cycles execute 144 guest boots identifying
+Linux 6.12.94-0-virt aarch64 and replay 144 Linux-authored transactions through the
+portable recovery engine. The 48 pending-input cases additionally verify Linux
+replay of the core-authored transaction. No checker command fails in these runs.
+
+The first guest compilation failure and a separate command-transcription error are
+preserved outside these successful results. The 16/64 KiB-block profiles have no
+Linux runtime result with this 4 KiB-page reference kernel. This evidence does not
+accept platform ACL/capability enforcement or writable adapters.
 
 ## Journal evidence
 

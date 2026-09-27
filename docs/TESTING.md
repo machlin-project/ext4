@@ -268,6 +268,23 @@ known e2fsck attribute-loss failure; `--keep-going` collects later evidence with
 changing its failed status or exit code. Linux recovery is independent evidence for
 the affected case, not permission to discard that failure.
 
+`run_linux_journal.py --xattrs --recover PATH --xattr-reader PATH` consumes
+independently checked image manifests. Run it from the explicit Machlin lab
+directory with the pinned Linux module report and a new output directory.
+`linux_xattrs.py` derives complete inode, namespace, data and raw attribute
+expectations with e2fsprogs. The guest checks exact get/list results, empty/binary
+values, long/UTF-8 names, compact-to-userspace ACL conversion and Linux namespace
+visibility. It mutates existing attributes, creates ACL/capability metadata and
+leaves a committed journal for portable and independent recovery.
+
+The portable `ext4-xattr-test --verify IMAGE EXPECTED` checks these Linux-authored
+values under both read-only and writable owners. Its `--roundtrip OUTPUT IMAGE
+EXPECTED` mode atomically changes attributes and owner/mode metadata on the
+Linux-created file. The harness returns that image to Linux for complete verification
+and clean unmount. `--pending` additionally selects a checked committed core log as
+the first Linux input. An unsupported reference-kernel block size is rejected
+explicitly; it is not counted as a successful Linux case.
+
 ## Portable performance acceptance
 
 Functional and crash-test passes do not establish throughput, latency or scaling.
@@ -300,6 +317,25 @@ and mutation invalidation. Changes to transaction batching, checkpoint timing or
 concurrency require renewed crash, ordering and lifetime acceptance. Native page
 cache ownership stays in the adapters. These requirements remain pending until
 the generated measurements and representative application workloads are reviewed.
+
+An initial read-only probe confirms the public directory lookup cost on three
+independently generated indexed images. It links the optimized freestanding core
+without sanitizers, then counts POSIX resource callbacks and environment
+allocations for a lookup of an absent name after complete enumeration:
+
+| Directory entries | Directory blocks | Read callbacks | Allocations |
+| --- | --- | --- | --- |
+| 99 | 33 | 131 | 231 |
+| 515 | 174 | 688 | 1,204 |
+| 46,122 | 15,497 | 61,618 | 107,741 |
+
+All three images remain unchanged, with zero writes and balanced allocations.
+The results are in `artifacts/checks/core-read-cost-report.json`; the probe source,
+compiler options and identities are retained alongside that report. An earlier
+input-selection mistake is preserved separately and excluded from these counts.
+These are software operation counts, not physical-device I/O, throughput or a
+comparison with Linux. They establish a concrete scaling problem to address with
+indexed lookup and reusable directory-reading state.
 
 ## Platform suites and remaining coverage
 

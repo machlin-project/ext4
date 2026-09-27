@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "storage.h"
 
-#define XATTR_TEST_CASES 32U
-#define XATTR_TEST_PATH_BYTES 64U
+#define XATTR_TEST_CASES 128U
+#define XATTR_TEST_PATH_BYTES 128U
 #define XATTR_TEST_PAYLOAD_BYTES 128U
 #define XATTR_TEST_BINARY_BYTES 600U
 #define XATTR_TEST_SHARED_VALUE_BYTES 32U
@@ -47,7 +47,7 @@ load_cases(const char *path, struct xattr_case *cases)
 	CHECK(input != NULL);
 	for (;;) {
 		CHECK(count < XATTR_TEST_CASES);
-		fields = fscanf(input, "%63s %d %510s %127s", cases[count].path,
+		fields = fscanf(input, "%127s %d %510s %127s", cases[count].path,
 		    &cases[count].name_index, hex, name);
 		if (fields == EOF) {
 			break;
@@ -84,14 +84,25 @@ load_cases(const char *path, struct xattr_case *cases)
 static struct ext4_inode
 lookup(struct ext4_fs *fs, const char *name)
 {
-	struct ext4_inode root;
+	struct ext4_inode parent;
 	struct ext4_inode result;
+	const char *component;
+	const char *end;
+	size_t length;
 
-	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &parent), EXT4_OK);
 	CHECK(name[0] == '/');
-	EXPECT(
-	    ext4_lookup(fs, &root, (const uint8_t *)name + 1, strlen(name) - 1, &result), EXT4_OK);
-	return result;
+	component = name + 1;
+	while (*component != 0) {
+		end = strchr(component, '/');
+		length = end == NULL ? strlen(component) : (size_t)(end - component);
+		CHECK(length != 0);
+		EXPECT(
+		    ext4_lookup(fs, &parent, (const uint8_t *)component, length, &result), EXT4_OK);
+		parent = result;
+		component += length + (end != NULL);
+	}
+	return parent;
 }
 
 static void
@@ -433,6 +444,55 @@ corruption(struct device *device, struct ext4_fs *fs)
 
 #include "xattr_edges.h"
 
+static void
+return_linux_attributes(struct device *device, struct ext4_fs *fs, const char *output)
+{
+	uint8_t value[700];
+	uint8_t small[13];
+	struct ext4_inode inode;
+	struct ext4_inode result;
+	struct ext4_xattr_change changes[] = {
+		{ EXT4_XATTR_REPLACE, EXT4_XATTR_USER, (const uint8_t *)"binary", 6, value,
+		    sizeof(value) },
+		{ EXT4_XATTR_REMOVE, EXT4_XATTR_USER, (const uint8_t *)"empty", 5, NULL, 0 },
+		{ EXT4_XATTR_CREATE, EXT4_XATTR_USER, (const uint8_t *)"return", 6, small,
+		    sizeof(small) },
+		{ EXT4_XATTR_REMOVE, EXT4_XATTR_POSIX_ACL_ACCESS, NULL, 0, NULL, 0 },
+		{ EXT4_XATTR_REMOVE, EXT4_XATTR_SECURITY, (const uint8_t *)"capability", 10, NULL,
+		    0 },
+	};
+	struct ext4_inode_update update = {
+		.fields = EXT4_ATTR_PERMISSIONS | EXT4_ATTR_UID | EXT4_ATTR_GID |
+		    EXT4_ATTR_CHANGE_TIME | EXT4_ATTR_XATTRS,
+		.uid = 54321,
+		.gid = 65432,
+		.permissions = 0600,
+		.change_time = { .seconds = 1700000090 },
+		.xattrs = changes,
+		.xattr_count = sizeof(changes) / sizeof(changes[0]),
+	};
+	FILE *stream;
+	size_t index;
+
+	for (index = 0; index < sizeof(value); index++) {
+		value[index] = (uint8_t)(index * 31U + 0x49U);
+	}
+	for (index = 0; index < sizeof(small); index++) {
+		small[index] = (uint8_t)(index * 31U + 0x49U);
+	}
+	inode = lookup(fs, "/linux-xattr-file");
+	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &result), EXT4_OK);
+	CHECK(result.number == inode.number && result.generation == inode.generation &&
+	    result.uid == update.uid && result.gid == update.gid &&
+	    (result.mode & EXT4_MODE_PERMISSIONS) == update.permissions);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	CHECK(memcmp(device->cache, device->stable, device->size) == 0);
+	stream = fopen(output, "wbx");
+	CHECK(stream != NULL);
+	CHECK(fwrite(device->stable, 1, device->size, stream) == device->size);
+	CHECK(fclose(stream) == 0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -448,53 +508,80 @@ main(int argc, char **argv)
 	size_t count;
 	size_t index;
 	const char *exports = NULL;
+	const char *roundtrip = NULL;
 	const uint8_t *binary = NULL;
+	bool verify_only = false;
 	int argument = 1;
 
-	CHECK((argc == 3 || argc == 5) && cases != NULL);
-	if (argc == 5) {
-		CHECK(strcmp(argv[1], "--export") == 0);
+	CHECK(argc >= 3 && cases != NULL);
+	if (strcmp(argv[argument], "--export") == 0) {
+		CHECK(argc == 5);
 		exports = argv[2];
 		argument += 2;
+	} else if (strcmp(argv[argument], "--verify") == 0) {
+		CHECK(argc == 4);
+		verify_only = true;
+		argument++;
+	} else if (strcmp(argv[argument], "--roundtrip") == 0) {
+		CHECK(argc == 5);
+		verify_only = true;
+		roundtrip = argv[2];
+		argument += 2;
 	}
+	CHECK(argument + 2 == argc);
 	count = load_cases(argv[argument + 1], cases);
-	for (index = 0; index < count; index++) {
-		if (strcmp(cases[index].path, "/block") == 0) {
-			CHECK(cases[index].value_size == XATTR_TEST_BINARY_BYTES);
-			binary = cases[index].value;
+	if (!verify_only) {
+		for (index = 0; index < count; index++) {
+			if (strcmp(cases[index].path, "/block") == 0) {
+				CHECK(cases[index].value_size == XATTR_TEST_BINARY_BYTES);
+				binary = cases[index].value;
+			}
 		}
+		CHECK(binary != NULL);
 	}
-	CHECK(binary != NULL);
 	storage_open(&device, argv[argument]);
 	EXPECT(ext4_mount(&device.environment, &fs), EXT4_OK);
 	functional(&device, fs, cases, count);
-	faults(&device, fs);
-	corruption(&device, fs);
-	body_corruption(&device, fs);
-	positive_edges(&device, fs, binary, exports, argv[argument]);
+	if (!verify_only) {
+		faults(&device, fs);
+		corruption(&device, fs);
+		body_corruption(&device, fs);
+		positive_edges(&device, fs, binary, exports, argv[argument]);
+	}
 	ext4_unmount(fs);
 	CHECK(device.live == 0 && device.writes == 0 &&
 	    memcmp(device.cache, device.base, device.size) == 0);
 	EXPECT(ext4_mount_writable(&device.environment, &device.writer, &fs), EXT4_OK);
 	functional(&device, fs, cases, count);
-	faults(&device, fs);
-	inode = lookup(fs, "/many");
-	memset(&unchanged, 0xa5, sizeof(unchanged));
-	result = unchanged;
-	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &result),
-	    EXT4_INVALID_ARGUMENT);
-	CHECK(memcmp(&result, &unchanged, sizeof(result)) == 0);
+	if (!verify_only) {
+		faults(&device, fs);
+		inode = lookup(fs, "/many");
+		memset(&unchanged, 0xa5, sizeof(unchanged));
+		result = unchanged;
+		EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &result),
+		    EXT4_INVALID_ARGUMENT);
+		CHECK(memcmp(&result, &unchanged, sizeof(result)) == 0);
+	}
+	if (roundtrip != NULL) {
+		return_linux_attributes(&device, fs, roundtrip);
+	}
 	ext4_unmount(fs);
-	CHECK(device.live == 0 && device.writes == 0 && device.events == 0 &&
-	    memcmp(device.cache, device.base, device.size) == 0 &&
-	    memcmp(device.stable, device.base, device.size) == 0);
+	CHECK(device.live == 0);
+	if (roundtrip == NULL) {
+		CHECK(device.writes == 0 && device.events == 0 &&
+		    memcmp(device.cache, device.base, device.size) == 0 &&
+		    memcmp(device.stable, device.base, device.size) == 0);
+	}
 	storage_close(&device);
 	for (index = 0; index < count; index++) {
 		free(cases[index].value);
 	}
 	free(cases);
-	printf("PASS xattr reader: %s; independent values/list, read faults, malformed records and "
-	       "readonly behavior\n",
+	printf("PASS xattr %s: %s; exact independent values/list under read-only and writable "
+	       "owners\n",
+	    roundtrip != NULL ? "Linux return transaction"
+		: verify_only ? "value verification"
+			      : "reader",
 	    argv[argument]);
 	return 0;
 }

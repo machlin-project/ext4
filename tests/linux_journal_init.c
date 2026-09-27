@@ -57,6 +57,9 @@ decode_le32(const struct ext4_le32 *field)
 #ifdef EXT4_TEST_XATTR_TRUNCATE
 #include "linux_xattr_truncate.h"
 #endif
+#ifdef EXT4_TEST_XATTRS
+#include "linux_xattrs.h"
+#endif
 
 #ifdef EXT4_TEST_FILE_WRITES
 static void
@@ -374,7 +377,7 @@ main(void)
 	require((decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_RECOVER) == 0,
 	    "verify cleanly finished writable filesystem");
 #elif !defined(EXT4_TEST_LIVE_TRUNCATE) && !defined(EXT4_TEST_NAMESPACE) &&                        \
-    !defined(EXT4_TEST_XATTR_TRUNCATE)
+    !defined(EXT4_TEST_XATTR_TRUNCATE) && !defined(EXT4_TEST_XATTRS)
 	require((decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_RECOVER) != 0,
 	    "verify journal requires recovery");
 #endif
@@ -399,6 +402,10 @@ main(void)
 #endif
 #ifdef EXT4_TEST_XATTR_TRUNCATE
 	check_xattr_truncate(block_size);
+	return 1;
+#endif
+#ifdef EXT4_TEST_XATTRS
+	check_xattrs();
 	return 1;
 #endif
 #ifdef EXT4_TEST_FILE_WRITES

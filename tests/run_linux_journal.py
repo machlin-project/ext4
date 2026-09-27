@@ -13,6 +13,7 @@ import subprocess
 
 from check_allocation import expected_contents
 import linux_namespace
+import linux_xattrs
 
 
 def digest(path):
@@ -41,26 +42,34 @@ def main():
                         help="verify independently checked namespace exports and Linux inode reuse")
     parser.add_argument("--xattr-truncate", action="store_true",
                         help="verify Linux preserves external attributes when recovering a linked truncate")
+    parser.add_argument("--xattrs", action="store_true",
+                        help="verify raw attributes and ACLs through Linux/core/Linux mutation roundtrips")
+    parser.add_argument("--xattr-reader", type=Path,
+                        help="exact portable attribute test executable (required for --xattrs)")
     parser.add_argument("--pending", action="store_true",
-                        help="with --namespace, mount the exported pending journal instead of its clean result")
+                        help="with --namespace or --xattrs, mount a pending journal instead of its clean result")
     parser.add_argument("--recover", type=Path,
                         help="portable recovery executable (required for --namespace)")
     parser.add_argument("--case", action="append", default=[],
                         help="select an exact exported image filename (repeatable)")
     args = parser.parse_args()
     if sum((args.file_writes, args.allocation, args.truncate, args.orphans,
-            args.live_truncate, args.namespace, args.xattr_truncate)) > 1:
+            args.live_truncate, args.namespace, args.xattr_truncate, args.xattrs)) > 1:
         parser.error("select one mutation verification mode")
-    if args.pending and not args.namespace:
-        parser.error("--pending requires --namespace")
-    if args.namespace and args.recover is None:
-        parser.error("--namespace requires the exact prepared --recover executable")
+    if args.pending and not (args.namespace or args.xattrs):
+        parser.error("--pending requires --namespace or --xattrs")
+    if (args.namespace or args.xattrs) and args.recover is None:
+        parser.error("namespace/attribute modes require the exact prepared --recover executable")
+    if args.xattrs and args.xattr_reader is None:
+        parser.error("--xattrs requires the exact prepared --xattr-reader executable")
     clean_exports = (args.file_writes or args.allocation or args.truncate or args.orphans or
-                     args.live_truncate or args.namespace or args.xattr_truncate)
+                     args.live_truncate or args.namespace or args.xattr_truncate or args.xattrs)
     lab = args.lab.resolve()
     root = Path(__file__).resolve().parent.parent
     recover = args.recover.resolve() if args.recover else root / ".build/ext4-recover"
-    recover_sha = digest(recover) if not args.orphans and (args.namespace or not args.prepare_only) else None
+    recover_sha = digest(recover) if not args.orphans and (args.namespace or args.xattrs or not args.prepare_only) else None
+    reader = args.xattr_reader.resolve() if args.xattrs else None
+    reader_sha = digest(reader) if reader else None
     output = args.output.resolve()
     if Path.cwd().resolve() != lab:
         parser.error("run from the explicit Machlin lab working directory")
@@ -111,8 +120,12 @@ def main():
         command.insert(1, "-DEXT4_TEST_NAMESPACE=1")
     if args.xattr_truncate:
         command.insert(1, "-DEXT4_TEST_XATTR_TRUNCATE=1")
+    if args.xattrs:
+        command.insert(1, "-DEXT4_TEST_XATTRS=1")
     with (output / "build.log").open("wb") as log:
         subprocess.run([str(x) for x in command], stdout=log, stderr=subprocess.STDOUT, check=True)
+    (output / "probe-build.json").write_text(json.dumps(dict(
+        command=[str(x) for x in command], executable=str(probe), sha256=digest(probe)), indent=2) + "\n")
     archives = {}
     if clean_exports:
         exports = json.loads(args.exports.resolve().read_text())
@@ -134,11 +147,17 @@ def main():
     tools = lab / "vendor/e2fsprogs-ext4/build"
 
     def archive_key(case):
-        if args.namespace:
+        if args.namespace or args.xattrs:
             return Path(case["image"]).stem
         if args.live_truncate:
             return (case["block_size"], case["target"], case["inode"]["blocks"])
         return case["block_size"]
+
+    def archive_tree(tree, archive):
+        listing = "\n".join(str(path.relative_to(tree)) for path in sorted(tree.rglob("*"))) + "\n"
+        with archive.open("wb") as stream:
+            subprocess.run(["/usr/bin/cpio", "-o", "-H", "newc"], cwd=tree,
+                           input=listing.encode(), stdout=stream, check=True)
 
     for case in exports:
         if args.namespace:
@@ -152,8 +171,10 @@ def main():
             if args.pending and (not case.get("pending") or case.get("recovered_outcome") != "new"):
                 raise RuntimeError("Pending namespace mode requires a checked committed namespace export")
         block_size = case["block_size"]
-        if args.xattr_truncate and block_size > 4096:
+        if (args.xattr_truncate or args.xattrs) and block_size > 4096:
             raise RuntimeError("Select xattr cases supported by the 4 KiB-page reference kernel")
+        if args.xattrs and args.pending and (not case.get("pending") or case.get("recovered_outcome") != "new"):
+            raise RuntimeError("Pending attribute mode requires a checked committed export")
         key = archive_key(case)
         if key in archives:
             continue
@@ -169,16 +190,15 @@ def main():
             (tree / "live-truncate").write_text(f"{empty} {empty} {case['inode']['blocks']}\n")
         if args.namespace:
             linux_namespace.prepare(case, tree, tools)
+        if args.xattrs:
+            linux_xattrs.prepare(case, tree, tools)
         for name, record in module_report["modules"].items():
             source = lab / record["path"]
             if digest(source) != record["sha256"]:
                 raise RuntimeError(f"module changed: {source}")
             shutil.copyfile(source, tree / "modules" / f"{name}.ko")
-        listing = "\n".join(str(path.relative_to(tree)) for path in sorted(tree.rglob("*"))) + "\n"
         archive = output / f"initramfs-{tree.name.removeprefix('root-')}.cpio"
-        with archive.open("wb") as stream:
-            subprocess.run(["/usr/bin/cpio", "-o", "-H", "newc"], cwd=tree,
-                           input=listing.encode(), stdout=stream, check=True)
+        archive_tree(tree, archive)
         archives[key] = archive
     if args.prepare_only:
         print(f"Prepared Linux probe and {len(archives)} initramfs archives in {output}")
@@ -194,6 +214,8 @@ def main():
         record = {"case": source.name, "input_sha256": digest(source), "commands": []}
         if not args.orphans:
             record.update(recover=str(recover), recover_sha256=recover_sha)
+        if args.xattrs:
+            record.update(attribute_reader=str(reader), attribute_reader_sha256=reader_sha)
         results.append(record)
 
         def run(command, timeout=90, allowed=(0,), raw=False):
@@ -245,7 +267,8 @@ def main():
             (output / "report.json").write_text(json.dumps(results, indent=2) + "\n")
             print(f"GENERATED {source.name}: six Linux open-unlinked inode types; recovery not yet checked", flush=True)
             continue
-        verification_marker = ("LINUX_EXT4_NAMESPACE_PASS" if args.namespace else
+        verification_marker = ("LINUX_EXT4_XATTR_PASS" if args.xattrs else
+                               "LINUX_EXT4_NAMESPACE_PASS" if args.namespace else
                                "LINUX_EXT4_LIVE_TRUNCATE_PASS" if args.live_truncate else
                                "LINUX_EXT4_TRUNCATE_PASS" if args.truncate else
                                "LINUX_EXT4_ALLOCATION_PASS" if args.allocation else
@@ -260,6 +283,35 @@ def main():
             raise RuntimeError("Linux did not leave a pending journal for the reverse roundtrip")
         if digest(recover) != recover_sha:
             raise RuntimeError("Recovery executable changed during the roundtrip")
+        if args.xattrs:
+            if digest(reader) != reader_sha:
+                raise RuntimeError("Attribute executable changed during the roundtrip")
+            checked = linux_xattrs.verify(case, scratch, output, tools, recover, reader, run)
+            returned = Path(checked["returned_image"])
+            return_tree = output / f"root-returned-{case['image'].split('/')[-1]}"
+            original_tree = output / f"root-{archive_key(case)}"
+            shutil.copytree(original_tree, return_tree)
+            shutil.rmtree(return_tree / "expected")
+            return_case = dict(image=str(returned), input_sha256=digest(returned))
+            linux_xattrs.prepare(return_case, return_tree, tools, verify_only=True)
+            return_archive = output / f"initramfs-{return_tree.name}.cpio"
+            archive_tree(return_tree, return_archive)
+            console = run([runner, kernel, return_archive, "2", "512",
+                           "console=hvc0 rdinit=/init panic=-1 loglevel=4", returned])
+            (output / f"{source.stem}-returned.console.log").write_text(console)
+            for marker in ("LINUX_EXT4_XATTR_RETURN_PASS", "LINUX_EXT4_PROBE_RESULT=PASS",
+                           f"Linux {module_report['kernel_release']} aarch64"):
+                if marker not in console:
+                    raise RuntimeError(f"Missing Linux returned-attribute evidence: {marker}")
+            final = linux_xattrs.snapshot(returned, output / f"final-{source.stem}-checked", tools, run)
+            if final != checked["returned_state"]:
+                raise RuntimeError("Linux verification changed the returned inode/attribute state")
+            if digest(source) != expected_sha or digest(reader) != reader_sha or digest(recover) != recover_sha:
+                raise RuntimeError("Attribute roundtrip changed a protected source or executable")
+            record.update(checked, returned_sha256=digest(returned), linux_return_verified=True, passed=True)
+            (output / "report.json").write_text(json.dumps(results, indent=2) + "\n")
+            print(f"PASS {source.name}: Linux attributes/ACLs, core/oracle replay, core mutation and Linux return", flush=True)
+            continue
         if args.namespace:
             if Path(case["image"]).name.startswith("exhaust-") and "LINUX_EXT4_NAMESPACE_REUSE_PASS" not in console:
                 raise RuntimeError("Missing Linux reuse evidence after inode exhaustion")
