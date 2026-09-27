@@ -61,6 +61,11 @@ mapping blocks, a writing transaction to 256 snapshots, and recovery to 1,048,57
 records. Exceeding a bound
 is an explicit unsupported result. External journals, checksum v1, async/fast
 commit and general filesystem mutation remain separate work.
+Recovery accepts a well-formed revoke even if REVOKE is absent from the saved
+journal feature word: Linux can commit that record before persisting the newly
+enabled bit. Record lengths, checksums, protected/out-of-range targets and the
+transaction commit remain mandatory. Revoke semantics never depend on that bit
+being durable, and later committed reuse still supersedes an earlier revoke.
 The internal block transaction interface is not an application or driver ioctl.
 Platform adapters remain read-only until their metadata ownership, native cache
 integration and durable device-barrier paths are implemented and tested.

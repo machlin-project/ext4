@@ -172,9 +172,9 @@ ext4_recovery_revoke(struct ext4_recovery_scan *scan)
 	    journal->fs->info.block_size - (journal->checksum ? sizeof(struct ext4_be32) : 0);
 	enum ext4_result error;
 
-	if (!(journal->features & EXT4_JBD_REVOKE_FEATURE)) {
-		return EXT4_CORRUPT;
-	}
+	/* Linux can commit its first revoke before the feature bit reaches the
+	 * durable journal superblock. The record type defines this supported
+	 * operation; its lengths, checksum, targets and commit still need checking. */
 	if (end < offset || end > limit || (end - offset) % stride != 0 ||
 	    !ext4_journal_checksum_valid(
 		journal, journal->work, journal->fs->info.block_size - sizeof(struct ext4_be32))) {

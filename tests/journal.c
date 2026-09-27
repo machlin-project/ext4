@@ -838,6 +838,8 @@ test_ownership(struct device *device)
 	printf("PASS transaction ownership, cancellation, credits and protected ranges\n");
 }
 
+#include "journal_revoke.h"
+
 int
 main(int argc, char **argv)
 {
@@ -861,6 +863,7 @@ main(int argc, char **argv)
 		test_recovery_faults(&device);
 		test_corruption(&device);
 		test_malformed_records(&device);
+		test_revoke_advertisement(&device);
 		test_wrap(&device);
 		test_multiple_descriptors(&device);
 	}
