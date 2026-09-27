@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
+#include "allocate.h"
 #include "storage.h"
 
 #define RANGE_BLOCKS 269U
@@ -535,6 +536,361 @@ linux_read(struct device *device)
 	puts("PASS portable reads of Linux preallocation and hole punching");
 }
 
+static void
+capacity(struct device *device, bool full, bool external, bool seed_only, const char *exports,
+    const char *path)
+{
+	struct ext4_inode inode;
+	struct ext4_inode root;
+	struct ext4_inode reserve;
+	struct ext4_inode result;
+	struct ext4_fs *fs = mount_file(device, &inode);
+	struct ext4_inode_update update = attributes(NULL);
+	struct ext4_extent_header_disk *header;
+	uint32_t blocks = full ? 2U : 2U * EXT4_ORPHAN_BATCH_BLOCKS + 5U;
+	/* One reservation spans the gap between the fixture's released ranges,
+	 * consuming two records. The external leaf is still completely full. */
+	uint32_t runs = external
+	    ? (device->block_size - sizeof(*header)) / sizeof(struct ext4_extent_disk) - 1U
+	    : 4U;
+	uint32_t owned_blocks = runs * blocks + (external ? 1U : 0U);
+	size_t length = ((size_t)runs * (blocks + 1U) - 1U) * device->block_size;
+	uint8_t *expected = calloc(length, 1);
+	uint8_t *before = malloc(device->size);
+	uint64_t completed;
+	size_t written;
+	size_t offset;
+	uint32_t index;
+	uint32_t writes;
+	uint32_t fallbacks = 0;
+	uint8_t value;
+	enum ext4_result error;
+
+	CHECK(expected != NULL && before != NULL && (inode.flags & EXT4_INODE_EXTENTS));
+	CHECK(fs->info.free_blocks == 0);
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(ext4_lookup(fs, &root, (const uint8_t *)(full ? "reserve" : "filler"), full ? 7 : 6,
+		   &reserve),
+	    EXT4_OK);
+	if (full) {
+		EXPECT(ext4_truncate(fs, reserve.number, reserve.generation, 0, &update, &result),
+		    EXT4_OK);
+		if (external) {
+			EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"filler", 6, &reserve),
+			    EXT4_OK);
+			EXPECT(ext4_fallocate(fs, reserve.number, reserve.generation, 0,
+				   (uint64_t)(owned_blocks - 8U) * device->block_size,
+				   EXT4_FALLOC_KEEP_SIZE | EXT4_FALLOC_PUNCH_HOLE, &update,
+				   &completed),
+			    EXT4_OK);
+			CHECK(completed == (uint64_t)(owned_blocks - 8U) * device->block_size);
+		}
+	} else {
+		EXPECT(ext4_fallocate(fs, reserve.number, reserve.generation, 0,
+			   (uint64_t)4U * blocks * device->block_size,
+			   EXT4_FALLOC_KEEP_SIZE | EXT4_FALLOC_PUNCH_HOLE, &update, &completed),
+		    EXT4_OK);
+		CHECK(completed == (uint64_t)4U * blocks * device->block_size);
+	}
+	CHECK(fs->info.free_blocks == owned_blocks);
+	for (index = 0; index < runs; index++) {
+		EXPECT(ext4_fallocate(fs, inode.number, inode.generation,
+			   (uint64_t)index * (blocks + 1U) * device->block_size,
+			   (uint64_t)blocks * device->block_size, 0, &update, &completed),
+		    EXT4_OK);
+		CHECK(completed == (uint64_t)blocks * device->block_size);
+	}
+	contents(fs, &inode, expected, length);
+	header = (struct ext4_extent_header_disk *)inode.block_data;
+	CHECK(ext4_le16(&header->depth) == (external ? 1 : 0) &&
+	    ext4_le16(&header->entries) == (external ? 1 : runs));
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	CHECK(fs->info.free_blocks == 0);
+	storage_export(device, exports, path, "range-capacity-reserved-");
+	for (index = 0; !seed_only && index < runs; index++) {
+		offset = ((size_t)index * (blocks + 1U) + 1U) * device->block_size + 7U;
+		value = (uint8_t)(0xd1U + index);
+		memcpy(before, device->cache, device->size);
+		writes = device->writes;
+		error = ext4_write(
+		    fs, inode.number, inode.generation, offset, &value, 1, &update, &written);
+		if (external && error == EXT4_OK) {
+			/* The single-block fragment converts without splitting its record. */
+			CHECK(written == 1);
+		} else {
+			EXPECT(error, EXT4_NO_SPACE);
+			CHECK(written == 0 && device->writes == writes &&
+			    memcmp(before, device->cache, device->size) == 0);
+			fallbacks++;
+		}
+		EXPECT(ext4_write_partial(fs, inode.number, inode.generation, offset, &value, 1,
+			   &update, &written),
+		    EXT4_OK);
+		CHECK(written == 1);
+		expected[offset] = value;
+		contents(fs, &inode, expected, length);
+		CHECK(inode.blocks_512 == owned_blocks * (device->block_size / EXT4_SECTOR_SIZE));
+		CHECK(fs->info.free_blocks == 0);
+	}
+	CHECK(seed_only || fallbacks >= runs - (external ? 1U : 0U));
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	if (!seed_only) {
+		storage_export(device, exports, path, "range-capacity-written-");
+	}
+	ext4_unmount(fs);
+	free(before);
+	free(expected);
+	if (!seed_only) {
+		puts("PASS writes into preallocation without free metadata space or stale-data "
+		     "exposure");
+	}
+}
+
+struct capacity_trace {
+	struct device *device;
+	uint32_t commits;
+	uint32_t durable_commits;
+	bool pending;
+};
+
+static void
+capacity_keep_size(struct device *device, const char *exports, const char *path)
+{
+	struct ext4_inode inode;
+	struct ext4_inode root;
+	struct ext4_inode reserve;
+	struct ext4_inode result;
+	struct ext4_fs *fs = mount_file(device, &inode);
+	struct ext4_inode_update update = attributes(NULL);
+	uint8_t *before = malloc(device->size);
+	uint8_t value = 0xe3;
+	uint64_t completed;
+	size_t written;
+	uint32_t index;
+	uint32_t writes;
+
+	CHECK(before != NULL && fs->info.free_blocks == 0);
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"reserve", 7, &reserve), EXT4_OK);
+	EXPECT(ext4_truncate(fs, reserve.number, reserve.generation, 0, &update, &result), EXT4_OK);
+	for (index = 0; index < 4; index++) {
+		EXPECT(ext4_fallocate(fs, inode.number, inode.generation,
+			   (uint64_t)index * 3U * device->block_size, 2U * device->block_size,
+			   EXT4_FALLOC_KEEP_SIZE, &update, &completed),
+		    EXT4_OK);
+		CHECK(completed == 2U * device->block_size);
+	}
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	CHECK(fs->info.free_blocks == 0);
+	memcpy(before, device->cache, device->size);
+	writes = device->writes;
+	for (index = 0; index < 4; index++) {
+		EXPECT(ext4_write_partial(fs, inode.number, inode.generation,
+			   ((uint64_t)index * 3U + 1U) * device->block_size + 7U, &value, 1,
+			   &update, &written),
+		    EXT4_NO_SPACE);
+		CHECK(written == 0 && !fs->aborted && device->writes == writes &&
+		    memcmp(before, device->cache, device->size) == 0);
+	}
+	EXPECT(ext4_get_inode(fs, inode.number, &inode), EXT4_OK);
+	CHECK(inode.size == 0 && inode.blocks_512 == 8U * (device->block_size / EXT4_SECTOR_SIZE));
+	storage_export(device, exports, path, "range-capacity-keep-");
+	ext4_unmount(fs);
+	free(before);
+	puts("PASS KEEP_SIZE conversion needing metadata space rejects unchanged beyond EOF");
+}
+
+static enum ext4_result
+capacity_trace_write(void *context, uint64_t offset, const void *buffer, size_t length)
+{
+	struct capacity_trace *trace = context;
+	const struct ext4_jbd_header *header = buffer;
+	enum ext4_result error = device_write(trace->device, offset, buffer, length);
+
+	if (error == EXT4_OK && trace->device->journal_blocks[offset / trace->device->block_size] &&
+	    ext4_be32(&header->magic) == EXT4_JBD_MAGIC &&
+	    ext4_be32(&header->type) == EXT4_JBD_COMMIT) {
+		trace->commits++;
+		trace->pending = true;
+	}
+	return error;
+}
+
+static enum ext4_result
+capacity_trace_flush(void *context)
+{
+	struct capacity_trace *trace = context;
+	enum ext4_result error = device_flush(trace->device);
+
+	if (trace->pending && (error == EXT4_OK || trace->device->survival == 1)) {
+		trace->durable_commits = trace->commits;
+	}
+	trace->pending = false;
+	return error;
+}
+
+static bool
+capacity_recover(struct device *device, size_t length, size_t offset, bool committed)
+{
+	struct ext4_recovery_report report;
+	struct ext4_super_disk *super;
+	struct ext4_fs *fs;
+	struct ext4_inode root;
+	struct ext4_inode inode;
+	uint8_t *expected = calloc(length, 1);
+	uint8_t value;
+	size_t count;
+	enum ext4_result error;
+
+	CHECK(expected != NULL);
+	device_reset(device, device->stable);
+	error = ext4_recover(&device->environment, &device->writer, &report);
+	if (error == EXT4_CORRUPT) {
+		super = (struct ext4_super_disk *)(device->cache + EXT4_SUPER_OFFSET);
+		CHECK(device->metadata_checksum && device->writes == 0 &&
+		    ext4_le32(&super->checksum) !=
+			ext4_crc32c(UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum)));
+		free(expected);
+		return false;
+	}
+	EXPECT(error, EXT4_OK);
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"empty", 5, &inode), EXT4_OK);
+	EXPECT(ext4_read(fs, &inode, offset, &value, 1, &count), EXT4_OK);
+	CHECK(count == 1 && (value == 0 || value == 0xe3) && (!committed || value == 0xe3));
+	expected[offset] = value;
+	contents(fs, &inode, expected, length);
+	CHECK(fs->info.free_blocks == 0 && inode.mode == (EXT4_MODE_REGULAR | 0640) &&
+	    inode.links == 1 &&
+	    inode.blocks_512 ==
+		4U * (2U * EXT4_ORPHAN_BATCH_BLOCKS + 5U) *
+		    (device->block_size / EXT4_SECTOR_SIZE));
+	CHECK(inode.modify_time.seconds == RANGE_SECONDS + (value == 0 ? 0 : 9) &&
+	    inode.change_time.seconds == RANGE_SECONDS + 1 + (value == 0 ? 0 : 9));
+	ext4_unmount(fs);
+	CHECK(device->live == 0 && memcmp(device->cache, device->stable, device->size) == 0);
+	free(expected);
+	return true;
+}
+
+static void
+capacity_faults(struct device *device, const char *path)
+{
+	struct ext4_inode inode;
+	struct ext4_fs *fs;
+	struct ext4_inode_update update = attributes(NULL);
+	struct ext4_extent_header_disk *header;
+	struct ext4_extent_disk *entries;
+	struct capacity_trace trace;
+	uint8_t *original = device->base;
+	uint8_t *prepared = malloc(device->size);
+	uint8_t value = 0xe3;
+	uint64_t physical;
+	size_t length;
+	size_t offset = device->block_size + 7U;
+	size_t completed;
+	uint32_t index;
+	uint32_t phase;
+	uint32_t count;
+	uint32_t position;
+	uint32_t allocations;
+	uint32_t reads;
+	uint32_t events;
+	uint32_t commits;
+	uint32_t partial;
+	uint32_t survival;
+	uint32_t cuts = 0;
+	uint32_t recovered = 0;
+	bool committed;
+	enum ext4_result error;
+
+	CHECK(prepared != NULL);
+	capacity(device, false, false, true, NULL, path);
+	fs = mount_file(device, &inode);
+	length = (size_t)inode.size;
+	header = (struct ext4_extent_header_disk *)inode.block_data;
+	entries = (struct ext4_extent_disk *)(header + 1);
+	CHECK(ext4_le16(&header->depth) == 0 && ext4_le16(&header->entries) == 4);
+	for (index = 0; index < 4; index++) {
+		CHECK(ext4_le16(&entries[index].length) > EXT4_EXTENT_UNWRITTEN_LIMIT);
+		physical = ext4_le32(&entries[index].physical_lo) |
+		    (uint64_t)ext4_le16(&entries[index].physical_hi) << 32;
+		memset(device->cache + physical * device->block_size, 0xd3,
+		    (ext4_le16(&entries[index].length) - EXT4_EXTENT_UNWRITTEN_LIMIT) *
+			device->block_size);
+	}
+	ext4_unmount(fs);
+	memcpy(prepared, device->cache, device->size);
+	device->base = prepared;
+	device_reset(device, prepared);
+	update.modify_time.seconds += 9;
+	update.change_time.seconds += 9;
+	fs = mount_file(device, &inode);
+	trace = (struct capacity_trace){ .device = device };
+	fs->journal->writer =
+	    (struct ext4_write_environment){ &trace, capacity_trace_write, capacity_trace_flush };
+	device->allocations = device->reads = 0;
+	EXPECT(ext4_write_partial(
+		   fs, inode.number, inode.generation, offset, &value, 1, &update, &completed),
+	    EXT4_OK);
+	CHECK(completed == 1 && trace.commits >= 4 && trace.durable_commits == trace.commits);
+	allocations = device->allocations;
+	reads = device->reads;
+	events = device->events;
+	commits = trace.commits;
+	ext4_unmount(fs);
+	CHECK(capacity_recover(device, length, offset, true));
+	for (phase = 0; phase < 2; phase++) {
+		count = phase == 0 ? allocations : reads;
+		for (position = 1; position <= count; position++) {
+			device_reset(device, prepared);
+			fs = mount_file(device, &inode);
+			trace = (struct capacity_trace){ .device = device };
+			fs->journal->writer = (struct ext4_write_environment){ &trace,
+				capacity_trace_write, capacity_trace_flush };
+			device->allocations = device->reads = 0;
+			device->fail_allocation = phase == 0 ? position : 0;
+			device->fail_read = phase == 1 ? position : 0;
+			error = ext4_write_partial(fs, inode.number, inode.generation, offset,
+			    &value, 1, &update, &completed);
+			EXPECT(error, phase == 0 ? EXT4_NO_MEMORY : EXT4_IO);
+			CHECK(completed == 0);
+			ext4_unmount(fs);
+			CHECK(capacity_recover(
+			    device, length, offset, trace.durable_commits == commits));
+		}
+	}
+	for (position = 1; position <= events; position++) {
+		for (partial = 0; partial < 2; partial++) {
+			for (survival = 0; survival < 3; survival++) {
+				device_reset(device, prepared);
+				fs = mount_file(device, &inode);
+				trace = (struct capacity_trace){ .device = device };
+				fs->journal->writer = (struct ext4_write_environment){ &trace,
+					capacity_trace_write, capacity_trace_flush };
+				device->stop_at = position;
+				device->partial = partial != 0;
+				device->survival = survival;
+				EXPECT(ext4_write_partial(fs, inode.number, inode.generation,
+					   offset, &value, 1, &update, &completed),
+				    EXT4_IO);
+				CHECK(completed == 0 && fs->aborted && device->off);
+				committed = trace.durable_commits == commits;
+				ext4_unmount(fs);
+				recovered +=
+				    capacity_recover(device, length, offset, committed) ? 1U : 0U;
+				cuts++;
+			}
+		}
+	}
+	device->base = original;
+	free(prepared);
+	printf("PASS full-space conversion faults: allocations=%u reads=%u commits=%u cuts=%u "
+	       "recovered=%u torn_super_fail_closed=%u\n",
+	    allocations, reads, commits, cuts, recovered, cuts - recovered);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -542,6 +898,11 @@ main(int argc, char **argv)
 	const char *exports = NULL;
 	bool fault_mode = false;
 	bool read_mode = false;
+	bool capacity_mode = false;
+	bool full_capacity = false;
+	bool capacity_fault_mode = false;
+	bool capacity_tree = false;
+	bool capacity_keep = false;
 	int index = 1;
 
 	while (index < argc && argv[index][0] == '-') {
@@ -551,6 +912,19 @@ main(int argc, char **argv)
 		} else if (strcmp(argv[index], "--linux-read") == 0) {
 			read_mode = true;
 			index++;
+		} else if (strcmp(argv[index], "--capacity") == 0 ||
+		    strcmp(argv[index], "--capacity-full") == 0 ||
+		    strcmp(argv[index], "--capacity-tree") == 0) {
+			capacity_mode = true;
+			full_capacity = strcmp(argv[index], "--capacity") != 0;
+			capacity_tree = strcmp(argv[index], "--capacity-tree") == 0;
+			index++;
+		} else if (strcmp(argv[index], "--capacity-faults") == 0) {
+			capacity_fault_mode = true;
+			index++;
+		} else if (strcmp(argv[index], "--capacity-keep") == 0) {
+			capacity_keep = true;
+			index++;
 		} else {
 			CHECK(strcmp(argv[index], "--export") == 0 && index + 2 < argc);
 			exports = argv[index + 1];
@@ -559,8 +933,27 @@ main(int argc, char **argv)
 	}
 	CHECK(index < argc && !(fault_mode && exports != NULL));
 	CHECK(!read_mode || (!fault_mode && exports == NULL));
+	CHECK(!capacity_mode || (!fault_mode && !read_mode));
+	CHECK(!capacity_fault_mode ||
+	    (!capacity_mode && !fault_mode && !read_mode && exports == NULL));
 	for (; index < argc; index++) {
 		storage_open(&device, argv[index]);
+		if (capacity_keep) {
+			capacity_keep_size(&device, exports, argv[index]);
+			storage_close(&device);
+			continue;
+		}
+		if (capacity_fault_mode) {
+			capacity_faults(&device, argv[index]);
+			storage_close(&device);
+			continue;
+		}
+		if (capacity_mode) {
+			capacity(
+			    &device, full_capacity, capacity_tree, false, exports, argv[index]);
+			storage_close(&device);
+			continue;
+		}
 		if (read_mode) {
 			linux_read(&device);
 			storage_close(&device);

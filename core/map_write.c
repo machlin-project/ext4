@@ -393,6 +393,89 @@ ext4_extent_install(struct ext4_allocation *allocation, const struct ext4_inode 
 }
 
 static enum ext4_result
+ext4_unwritten_entry(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk, uint32_t logical, struct ext4_extent_path *path,
+    struct ext4_extent_disk **result)
+{
+	struct ext4_extent_header_disk *header;
+	struct ext4_extent_disk *entries;
+	uint64_t start;
+	uint16_t index;
+	enum ext4_result error;
+
+	*result = NULL;
+	if (!(inode->flags & EXT4_INODE_EXTENTS)) {
+		return EXT4_OK;
+	}
+	error = ext4_extent_path_get(allocation, inode, disk, logical, path);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	header = (struct ext4_extent_header_disk *)path->nodes[path->levels - 1];
+	entries = (struct ext4_extent_disk *)(header + 1);
+	for (index = 0; index < ext4_le16(&header->entries); index++) {
+		start = ext4_le32(&entries[index].logical);
+		if (logical >= start && logical - start < ext4_extent_length(&entries[index]) &&
+		    ext4_le16(&entries[index].length) > EXT4_EXTENT_UNWRITTEN_LIMIT) {
+			*result = &entries[index];
+			break;
+		}
+	}
+	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_write_map_unwritten(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk, uint32_t logical, struct ext4_unwritten_extent *range)
+{
+	struct ext4_extent_path path;
+	struct ext4_extent_disk *entry;
+	enum ext4_result error;
+
+	ext4_zero(range, sizeof(*range));
+	error = ext4_unwritten_entry(allocation, inode, disk, logical, &path, &entry);
+	if (error == EXT4_OK && entry != NULL) {
+		range->logical = ext4_le32(&entry->logical);
+		range->physical = ext4_extent_physical(entry);
+		range->length = ext4_extent_length(entry);
+	}
+	return error;
+}
+
+enum ext4_result
+ext4_write_map_initialize(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk, const struct ext4_unwritten_extent *range)
+{
+	struct ext4_fs *fs = allocation->fs;
+	struct ext4_extent_path path;
+	struct ext4_extent_disk *entry;
+	struct ext4_extent_header_disk *header;
+	struct ext4_le32 *tail;
+	uint8_t *node;
+	size_t tail_offset;
+	enum ext4_result error;
+
+	error = ext4_unwritten_entry(allocation, inode, disk, range->logical, &path, &entry);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (entry == NULL || ext4_le32(&entry->logical) != range->logical ||
+	    ext4_extent_physical(entry) != range->physical ||
+	    ext4_extent_length(entry) != range->length) {
+		return EXT4_CORRUPT;
+	}
+	ext4_encode16(&entry->length, (uint16_t)range->length);
+	if (path.levels > 1 && fs->metadata_checksum) {
+		node = path.nodes[path.levels - 1];
+		header = (struct ext4_extent_header_disk *)node;
+		tail_offset = sizeof(*header) + ext4_le16(&header->maximum) * sizeof(*entry);
+		tail = (struct ext4_le32 *)(node + tail_offset);
+		ext4_encode32(tail, ext4_crc32c(ext4_inode_seed(fs, inode), node, tail_offset));
+	}
+	return EXT4_OK;
+}
+
+static enum ext4_result
 ext4_extent_new(struct ext4_allocation *allocation, uint16_t depth, uint64_t *block, uint8_t **node)
 {
 	struct ext4_fs *fs = allocation->fs;

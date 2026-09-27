@@ -395,6 +395,9 @@ check_namespace(uint32_t block_size)
 	int fd;
 	int directory;
 	int root;
+	uint8_t existing = 0;
+	struct stat before_capacity;
+	struct stat after_capacity;
 
 	input = fopen("/namespace-options", "r");
 	require(input != NULL, "open namespace options");
@@ -423,6 +426,30 @@ check_namespace(uint32_t block_size)
 		    "verify hardlink to symlink");
 	}
 	puts("LINUX_EXT4_NAMESPACE_PASS");
+	if (ranges == 3) {
+		require(statvfs("/mnt", &counts) == 0 && counts.f_bfree == 0,
+		    "Linux sees physically full preallocation image");
+		fd = open("/mnt/empty", O_RDWR | O_CLOEXEC);
+		require(fd >= 0 && fstat(fd, &before_capacity) == 0 &&
+			pread(fd, &existing, 1, block_size + 7U) == 1,
+		    "Linux reads preallocated byte before full-disk write");
+		/* Different bytes make a silently lost write observable after replay. */
+		existing ^= 0x5aU;
+		require(pwrite(fd, &existing, 1, block_size + 7U) == 1 && fsync(fd) == 0 &&
+			fstat(fd, &after_capacity) == 0 && close(fd) == 0,
+		    "Linux writes existing preallocation with no free blocks");
+		require(before_capacity.st_size == after_capacity.st_size &&
+			before_capacity.st_blocks == after_capacity.st_blocks &&
+			statvfs("/mnt", &counts) == 0 && counts.f_bfree == 0,
+		    "Linux preserves capacity allocation and EOF");
+		puts("LINUX_EXT4_PREALLOCATED_FULL_WRITE_PASS");
+		/* Release only after the full-disk write, so ordinary reverse journal
+		 * operations can run on this same initially full resource. */
+		fd = open("/mnt/filler", O_WRONLY | O_TRUNC | O_CLOEXEC);
+		require(fd >= 0 && fsync(fd) == 0 && close(fd) == 0 &&
+			statvfs("/mnt", &counts) == 0 && counts.f_bfree > 0,
+		    "Linux releases filler after verifying preallocated write");
+	}
 	if (full_blocks) {
 		namespace_full_blocks(block_size);
 	}
@@ -478,7 +505,7 @@ check_namespace(uint32_t block_size)
 		puts("LINUX_EXT4_SPECIAL_FILES_PASS");
 	}
 	if (ranges != 0) {
-		check_file_ranges(block_size, ranges == 2);
+		check_file_ranges(block_size, ranges >= 2);
 	}
 	directory = open(directory_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	root = open(parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);

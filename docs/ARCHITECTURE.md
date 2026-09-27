@@ -176,8 +176,19 @@ runs already satisfying the request. Cancelled steps can reduce their work budge
 on allocation or credit exhaustion. Attributes accompany each checkpoint, while
 the xattr batch applies only to the first successful prefix. Uncertain commits
 poison the owner. The exclusive owner and orphan holds remain in force throughout.
-Unwritten conversion under allocator exhaustion remains part of capacity acceptance;
-the API does not yet establish the full future-write space guarantee of fallocate.
+If conversion of an existing unwritten extent cannot allocate a mapping node,
+`ext4_write_partial` first requires that the extent contain no whole blocks beyond
+the current EOF, then validates its complete ownership map and admitted attributes,
+then zeros the entire backing extent in bounded transactions. Only the final
+zeroing transaction initializes the existing record; it needs no new mapping
+space. The following data transaction publishes the requested bytes and attributes.
+Interrupted preparation preserves visible zeros, EOF, attributes and allocation
+counts. Recovery may retain an initialized zero extent even with no reported data
+prefix. The atomic write API retains its unchanged-media rejection on exhaustion.
+KEEP_SIZE reservations extending beyond EOF still require mapping space when a
+partial write splits the extent. The fallback rejects that boundary before writes;
+publishing initialized blocks wholly beyond EOF would produce an invalid inode.
+Reserving sufficient metadata for this future-growth contract remains open.
 
 `ext4_truncate_atomic` performs the size, tail-zeroing, data/mapping removal, bitmap,
 group/superblock accounting and admitted attribute transition in one journal

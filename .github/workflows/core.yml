@@ -509,6 +509,35 @@ jobs:
             2>&1 | tee artifacts/checks/space-independent.log
           find artifacts/space-exports artifacts/space-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Independently verify preallocated writes on full filesystems
+        if: matrix.suite == 'namespace'
+        run: |
+          for mode in full large tree; do
+            exports="artifacts/preallocation-capacity-$mode-exports"
+            checked="artifacts/preallocation-capacity-$mode-independent"
+            mkdir "$exports"
+            options=()
+            if [[ "$mode" == full ]]; then
+              for profile in 1k 4k no-checksum no-filetype inode128 checksum-seed orphan-file; do
+                .build/ext4-file-range-test --capacity-full --export "$exports" \
+                  "artifacts/space-fixtures/space-$profile.img"
+              done 2>&1 | tee "artifacts/checks/preallocation-capacity-$mode-exports.log"
+              options=(--full)
+            else
+              flag=--capacity
+              if [[ "$mode" == tree ]]; then
+                flag=--capacity-tree
+                options=(--full --external)
+              fi
+              .build/ext4-file-range-test "$flag" --export "$exports" \
+                artifacts/space-fixtures/space-1k.img \
+                2>&1 | tee "artifacts/checks/preallocation-capacity-$mode-exports.log"
+            fi
+            python3 tests/check_range_capacity.py "${options[@]}" \
+              --fixtures artifacts/space-fixtures --exports "$exports" --output "$checked" \
+              2>&1 | tee "artifacts/checks/preallocation-capacity-$mode-independent.log"
+            find "$exports" "$checked" -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          done
       - name: Independently verify unlink and rmdir transactions
         if: matrix.suite == 'removal'
         run: |

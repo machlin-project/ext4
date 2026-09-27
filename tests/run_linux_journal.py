@@ -313,6 +313,11 @@ def main():
             print(f"PASS {source.name}: Linux attributes/ACLs, core/oracle replay, core mutation and Linux return", flush=True)
             continue
         if args.namespace:
+            if case.get("capacity_state") and any(message in console for message in (
+                    "Delayed block allocation failed", "Data will be lost", "EXT4-fs error")):
+                raise RuntimeError("Linux reported a full-disk allocation or write failure")
+            if case.get("capacity_state") and "LINUX_EXT4_PREALLOCATED_FULL_WRITE_PASS" not in console:
+                raise RuntimeError("Missing Linux preallocated write at zero free blocks")
             if case.get("verified_range") and "LINUX_EXT4_FILE_RANGES_PASS" not in console:
                 raise RuntimeError("Missing Linux preallocation and hole-punch evidence")
             if linux_namespace.special_case(case) and "LINUX_EXT4_SPECIAL_FILES_PASS" not in console:

@@ -104,8 +104,12 @@ def prepare(case, tree, tools):
         paths = list(renamed)
         data_paths = [path for path, value in renamed.items() if value["inode"]["type"] == "regular"]
     elif case.get("verified_range"):
-        paths += ["/empty"]
-        data_paths += ["/empty"]
+        if case.get("capacity_state"):
+            paths = ["/", "/target", "/empty"]
+            data_paths = ["/target", "/empty"]
+        else:
+            paths += ["/empty"]
+            data_paths += ["/empty"]
     elif basic:
         paths += ["/created", "/created-dir", "/created-dir/child", "/created-dir/alias",
                   "/hello-link", "/symlink-alias"]
@@ -125,6 +129,8 @@ def prepare(case, tree, tools):
     ranges = 0
     if case.get("verified_range"):
         ranges = 2 if case["verified_range"]["inode"]["flags"] & INODE_EXTENTS else 1
+        if case.get("capacity_state"):
+            ranges = 3
     (tree / "namespace-options").write_text(
         f"{int(exhaust)} {int(basic)} {int(indexed)} {int(full_blocks)} {int(special_case(case))} {ranges}\n")
     inode_lines = []
@@ -345,10 +351,22 @@ def verify(case, image, output, tools, recover, run):
         if case.get("verified_range"):
             original_inode = inode_fields(run([tools / "debugfs/debugfs", "-R", "stat /empty", original]))
             retained_inode = inode_fields(run([tools / "debugfs/debugfs", "-R", "stat /empty", candidate]))
+            expected_hash = case["verified_range"]["data_sha256"]
+            if case.get("capacity_state"):
+                # Linux changes one byte while the disk is full. Require that exact
+                # change after replay so a silently lost write cannot pass.
+                original_dump = output / f"{prefix}-{image.stem}.range-original"
+                run([tools / "debugfs/debugfs", "-R", f"dump /empty {original_dump}", original])
+                capacity_data = bytearray(original_dump.read_bytes())
+                if hashlib.sha256(capacity_data).hexdigest() != expected_hash:
+                    raise RuntimeError("Capacity source no longer matches its accepted contents")
+                capacity_data[block_size + 7] ^= 0x5a
+                expected_hash = hashlib.sha256(capacity_data).hexdigest()
+                original_inode.update(mtime=retained_inode["mtime"], ctime=retained_inode["ctime"])
             source_dump = output / f"{prefix}-{image.stem}.range-source"
             run([tools / "debugfs/debugfs", "-R", f"dump /empty {source_dump}", candidate])
             if (retained_inode != original_inode or hashlib.sha256(source_dump.read_bytes()).hexdigest() !=
-                    case["verified_range"]["data_sha256"]):
+                    expected_hash):
                 raise RuntimeError("Linux changed the core-created file range")
             if case["verified_range"]["attributes"]:
                 attribute_dump = output / f"{prefix}-{image.stem}.range-attribute"
@@ -374,6 +392,12 @@ def verify(case, image, output, tools, recover, run):
                         raise RuntimeError("Linux preallocation lost an unwritten block")
             retained_range = {"source": retained_inode, "linux": inode,
                               "data_sha256": hashlib.sha256(range_data).hexdigest()}
+            if case.get("capacity_state"):
+                filler = inode_fields(run([tools / "debugfs/debugfs", "-R", "stat /filler", candidate]))
+                old_filler = inode_fields(run([tools / "debugfs/debugfs", "-R", "stat /filler", original]))
+                if filler != dict(old_filler, size=0, blocks=0, mtime=filler["mtime"], ctime=filler["ctime"]):
+                    raise RuntimeError("Linux released an incorrect full-space filler")
+                retained_range["released_filler"] = filler
         if original.name.startswith(("removed-", "remove-atomic-")):
             expected_names = entries(run([tools / "debugfs/debugfs", "-R", "ls -p /", original]))
             if "victim" in expected_names:

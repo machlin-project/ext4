@@ -268,8 +268,10 @@ struct ext4_write_target {
  * No position or validation result survives the public call. */
 struct ext4_growth {
 	uint64_t zeroed;
+	uint32_t allocation_logical;
 	bool capacity_failed;
 	bool zeroing;
+	bool mapping_no_space;
 };
 
 static enum ext4_result
@@ -605,6 +607,135 @@ ext4_write_validate(struct ext4_fs *fs, uint64_t offset, const void *buffer, siz
 }
 
 static enum ext4_result
+ext4_unwritten_zero(struct ext4_fs *fs, uint32_t number, uint32_t generation,
+    const struct ext4_unwritten_extent *range, uint32_t position, uint32_t budget, uint32_t *next,
+    bool *capacity_failed)
+{
+	struct ext4_transaction *transaction;
+	struct ext4_inode_disk *disk;
+	struct ext4_inode inode;
+	struct ext4_allocation allocation;
+	struct ext4_unwritten_extent observed;
+	void *buffer;
+	uint32_t end = range->length - position < budget ? range->length : position + budget;
+	uint32_t index;
+	bool allocation_ready = false;
+	enum ext4_result error;
+
+	*capacity_failed = false;
+	error =
+	    ext4_transaction_begin(fs->journal, ext4_journal_credits(fs->journal), &transaction);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	error = ext4_edit_inode_record(fs, transaction, number, generation, &disk, &inode);
+	if (error == EXT4_OK) {
+		error = ext4_allocation_init(&allocation, fs, transaction, &inode);
+		allocation_ready = error == EXT4_OK;
+	}
+	if (error == EXT4_OK) {
+		error =
+		    ext4_write_map_unwritten(&allocation, &inode, disk, range->logical, &observed);
+	}
+	if (error == EXT4_OK &&
+	    (observed.logical != range->logical || observed.physical != range->physical ||
+		observed.length != range->length)) {
+		error = EXT4_CORRUPT;
+	}
+	for (index = position; error == EXT4_OK && index < end; index++) {
+		error = ext4_transaction_buffer(transaction, range->physical + index, &buffer);
+		if (error == EXT4_OK) {
+			ext4_zero(buffer, fs->info.block_size);
+		}
+	}
+	if (error == EXT4_OK && end == range->length) {
+		error = ext4_write_map_initialize(&allocation, &inode, disk, range);
+		if (error == EXT4_OK) {
+			ext4_inode_checksum_set(fs, number, disk);
+		}
+	}
+	*capacity_failed = ext4_transaction_capacity_failed(transaction);
+	if (allocation_ready) {
+		ext4_allocation_destroy(&allocation);
+	}
+	if (error != EXT4_OK) {
+		ext4_transaction_cancel(transaction);
+		return error;
+	}
+	/* No mapping, allocation, size or attribute changes precede the last zeroed
+	 * block. Publishing a fully zeroed extent needs no additional disk space. */
+	error = ext4_edit_commit(fs, transaction);
+	if (error == EXT4_OK) {
+		*next = end;
+	}
+	return error;
+}
+
+static enum ext4_result
+ext4_unwritten_prepare(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint32_t logical,
+    uint64_t end, const struct ext4_inode_update *update, bool *prepared)
+{
+	struct ext4_transaction *transaction;
+	struct ext4_inode_disk *disk;
+	struct ext4_inode inode;
+	struct ext4_allocation allocation;
+	struct ext4_unwritten_extent range;
+	uint32_t position = 0;
+	uint32_t budget = EXT4_ORPHAN_BATCH_BLOCKS;
+	bool allocation_ready = false;
+	bool capacity_failed;
+	enum ext4_result error;
+
+	*prepared = false;
+	error =
+	    ext4_transaction_begin(fs->journal, ext4_journal_credits(fs->journal), &transaction);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	error = ext4_edit_inode_record(fs, transaction, number, generation, &disk, &inode);
+	if (error == EXT4_OK) {
+		error = ext4_allocation_init(&allocation, fs, transaction, &inode);
+		allocation_ready = error == EXT4_OK;
+	}
+	if (error == EXT4_OK) {
+		error = ext4_write_map_unwritten(&allocation, &inode, disk, logical, &range);
+	}
+	if (allocation_ready) {
+		ext4_allocation_destroy(&allocation);
+	}
+	ext4_transaction_cancel(transaction);
+	if (error != EXT4_OK || range.length == 0) {
+		return error;
+	}
+	/* Initialized blocks wholly beyond EOF are not a valid ext4 representation.
+	 * KEEP_SIZE reservations crossing that boundary still require mapping space;
+	 * do not publish an invalid intermediate inode while preparing a write. */
+	if (((uint64_t)range.logical + range.length - 1U) * fs->info.block_size >= inode.size) {
+		return EXT4_OK;
+	}
+	/* Validate all physical ownership and the admitted attribute transition
+	 * before writing even inaccessible backing bytes. No other owner can change
+	 * the extent while bounded zeroing checkpoints retain this local range. */
+	error = ext4_growth_check(fs, number, generation, end, update, &inode);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	while (position < range.length) {
+		error = ext4_unwritten_zero(
+		    fs, number, generation, &range, position, budget, &position, &capacity_failed);
+		if (error == EXT4_RANGE && capacity_failed && !fs->aborted && budget > 1) {
+			budget /= 2;
+			continue;
+		}
+		if (error != EXT4_OK) {
+			return error;
+		}
+	}
+	*prepared = true;
+	return EXT4_OK;
+}
+
+static enum ext4_result
 ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t offset,
     const void *buffer, size_t length, const struct ext4_inode_update *update, size_t *completed,
     struct ext4_growth *growth)
@@ -638,6 +769,7 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 	if (growth != NULL) {
 		growth->capacity_failed = false;
 		growth->zeroing = false;
+		growth->mapping_no_space = false;
 	}
 	error = ext4_write_validate(fs, offset, buffer, length, update);
 	if (error != EXT4_OK) {
@@ -719,6 +851,10 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 		error = ext4_write_map_allocate(
 		    &allocation, &inode, disk, (uint32_t)(logical + index), &physical, &zero);
 		if (error != EXT4_OK) {
+			if (growth != NULL && error == EXT4_NO_SPACE) {
+				growth->mapping_no_space = true;
+				growth->allocation_logical = (uint32_t)(logical + index);
+			}
 			goto cancel;
 		}
 		error = ext4_write_snapshot(&allocation, targets, &target_count, credits,
@@ -800,6 +936,7 @@ ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation, uin
 	size_t within;
 	size_t chunk;
 	size_t written;
+	bool prepared;
 	enum ext4_result error;
 
 	if (completed == NULL) {
@@ -850,6 +987,17 @@ ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation, uin
 			}
 			growth.zeroed = offset;
 			continue;
+		}
+		if (error == EXT4_NO_SPACE && growth.mapping_no_space) {
+			error = ext4_unwritten_prepare(fs, number, generation,
+			    growth.allocation_logical, offset + length, &remaining, &prepared);
+			if (error != EXT4_OK) {
+				return error;
+			}
+			if (prepared) {
+				continue;
+			}
+			error = EXT4_NO_SPACE;
 		}
 		blocks =
 		    (uint32_t)((within + chunk + fs->info.block_size - 1U) / fs->info.block_size);

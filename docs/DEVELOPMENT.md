@@ -382,6 +382,20 @@ hole, then commits a journal for core/oracle replay. Run
 bytes through the portable reader. Use the same isolated VM handoff as other
 Linux checks. The indirect profile supports punching and rejects reservation.
 
+With the existing full-space fixtures, `ext4-file-range-test --capacity-full`
+checks allocation-free writes into a full inode root, `--capacity` spans zeroing
+transactions, and `--capacity-tree` fills an external extent leaf. Each accepts
+`--export DIRECTORY`. `tests/check_range_capacity.py --fixtures DIRECTORY
+--exports DIRECTORY --output NEW_DIRECTORY` checks the large case; add `--full`
+for small roots, or `--full --external` for external leaves. `--tools-root` selects
+e2fsprogs as above. `ext4-file-range-test --capacity-faults` injects resource and
+storage failures across preparation and the final data commit, including deliberately
+nonzero inaccessible backing. `--capacity-keep` verifies unchanged-media rejection
+of KEEP_SIZE growth when a split needs unavailable metadata space. No new capacity
+fixtures need to be generated. Linux capacity checks change a byte while free blocks
+remain zero and require that exact change after independent and core journal replay;
+a same-byte write cannot establish that the write survived.
+
 Generate deliberately nonzero unwritten backing data with
 `tests/generate_allocation_fixtures.py --fixtures EXTENDED_FIXTURE_DIRECTORY
 --tools-root E2FSPROGS_BUILD --output NEW_DIRECTORY`. Enable its Meson suite with

@@ -57,6 +57,22 @@ struct ext4_map_run {
 	bool unwritten;
 };
 
+struct ext4_unwritten_extent {
+	uint64_t physical;
+	uint32_t logical;
+	uint32_t length;
+};
+
+/* A missing unwritten extent returns length zero. Initialization requires that
+ * every backing byte has been durably zeroed under the same exclusive owner;
+ * it changes one existing record without allocating or splitting the tree. */
+enum ext4_result ext4_write_map_unwritten(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t logical,
+    struct ext4_unwritten_extent *range);
+enum ext4_result ext4_write_map_initialize(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, struct ext4_inode_disk *disk,
+    const struct ext4_unwritten_extent *range);
+
 /* These mapping operations read the private transaction view. Lookup returns
  * runs so sparse gaps can be skipped without visiting each logical block. */
 enum ext4_result ext4_write_map_lookup(struct ext4_allocation *allocation,

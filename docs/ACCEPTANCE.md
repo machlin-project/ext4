@@ -40,7 +40,7 @@ counted as portable-core implementation.
 
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
-| Ordinary filesystem operations | Admitted persistent inode flags; future writes into preallocation under allocator exhaustion | Open; bounded preallocation/hole punching, special files, atomic whiteout, automatic index creation and DIR_NLINK pass focused, independent and Linux acceptance |
+| Ordinary filesystem operations | Admitted persistent inode flags; metadata-space guarantee for future KEEP_SIZE growth under allocator exhaustion | Open; bounded preallocation/hole punching, special files, atomic whiteout, automatic index creation and DIR_NLINK pass focused, independent and Linux acceptance; full-disk writes within existing EOF pass targeted faults and independent inspection |
 | Format compatibility | META_BG and SPARSE_SUPER2 geometry; EA_INODE and INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open |
 | Journal compatibility | Checksum v1, asynchronous commit, fast commit and external journals, including interrupted replay and cross-implementation recovery | Open |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
@@ -93,6 +93,44 @@ Reports are in `artifacts/checks/file-range-linux-summary.json` and the lab's
 `artifacts/ext4-journal/linux-reference/file-range-{pending,functional}-linux/`.
 The expanded full CI regression is pending. This accepts bounded range behavior;
 the future-write space guarantee under exhaustion remains open above.
+
+## Preallocated writes without free mapping space
+
+When splitting an unwritten extent cannot allocate a mapping node,
+`ext4_write_partial` can zero and initialize the existing extent in bounded
+transactions before committing the requested bytes. No block allocation or
+relocation is needed. Preparatory commits preserve visible bytes, EOF, attributes
+and allocation counts; uncertain commits poison the owner. The atomic API still
+rejects the same exhausted split without changing the medium.
+
+Seven small-root profiles, a multi-transaction extent and a full external leaf
+pass. Four existing allocation/growth/write controls also pass. The fault matrix
+covers 126 allocation failures, 115 read failures and 1,116 write/flush cuts;
+1,114 cuts recover an allowed state and two torn primary superblocks reject
+explicitly. Inaccessible backing is deliberately nonzero. All eighteen exported
+states pass exact byte, physical-map, inode and allocation comparison plus
+nonrepairing e2fsck. Evidence is in `artifacts/checks/preallocation-capacity-*-summary.json`
+and `artifacts/preallocation-capacity-{full,large,tree}-independent*/report.json`.
+
+Initialization refuses extents containing whole blocks beyond current EOF.
+A dedicated KEEP_SIZE exhaustion test proves rejection before device writes,
+with no reported data prefix or aborted owner; its exported image also passes
+nonrepairing e2fsck. The future-growth metadata reservation contract remains open.
+The combined 361-test CI regression is pending.
+
+Three Linux roundtrips of core-converted full-disk images pass: full inode root,
+multi-transaction extent and full external leaf. Linux changes a byte before any
+space is released, then authors new range operations and a pending journal. Both
+replays retain the exact changed byte and all surrounding data; all six
+nonrepairing checks, three journal-only replays and three portable reads pass.
+Evidence is in `artifacts/checks/preallocation-capacity-written-linux-summary.json`.
+
+An initial Linux check of a large still-unwritten reservation reported a delayed
+allocation error and possible data loss despite successful syscalls. Its same-byte
+write could not detect a lost write, so that report is not accepted. The harness
+now changes the byte, compares exact post-replay contents and rejects those kernel
+diagnostics. The initial evidence remains in
+`artifacts/checks/preallocation-capacity-linux-summary.json`.
 
 ## Legacy group checksum evidence
 

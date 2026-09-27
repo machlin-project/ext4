@@ -286,7 +286,11 @@ enum ext4_result ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t genera
  * replay that already applied xattr batch. Whole-request overflow rejects before
  * writes. Zero length follows ext4_write. Written preallocation in an EOF gap
  * can be zeroed in preparatory transactions without changing size or attributes.
- * An error may retain those invisible zeros even when completed is zero. */
+ * If unwritten conversion needs unavailable mapping space, the complete existing
+ * extent, without whole blocks beyond EOF, can first be zeroed and initialized
+ * without allocation. Visible bytes, size and attributes remain unchanged until
+ * the data transaction commits.
+ * An error may retain either preparation even when completed is zero. */
 enum ext4_result ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint64_t offset, const void *buffer, size_t length, const struct ext4_inode_update *update,
     size_t *completed);
