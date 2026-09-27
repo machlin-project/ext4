@@ -34,12 +34,14 @@ def main():
                         help="verify truncate exports and replay Linux shrink/grow/reallocation")
     parser.add_argument("--orphans", action="store_true",
                         help="generate pending Linux orphan fixtures from checked clean exports")
+    parser.add_argument("--live-truncate", action="store_true",
+                        help="verify completed or interrupted live truncates and Linux regrowth")
     parser.add_argument("--case", action="append", default=[],
                         help="select an exact exported image filename (repeatable)")
     args = parser.parse_args()
-    if sum((args.file_writes, args.allocation, args.truncate, args.orphans)) > 1:
-        parser.error("select one of file-write, allocation, truncate or orphan modes")
-    clean_exports = args.file_writes or args.allocation or args.truncate or args.orphans
+    if sum((args.file_writes, args.allocation, args.truncate, args.orphans, args.live_truncate)) > 1:
+        parser.error("select one mutation verification mode")
+    clean_exports = args.file_writes or args.allocation or args.truncate or args.orphans or args.live_truncate
     lab = args.lab.resolve()
     root = Path(__file__).resolve().parent.parent
     output = args.output.resolve()
@@ -86,6 +88,8 @@ def main():
         command.insert(1, "-DEXT4_TEST_TRUNCATE=1")
     if args.orphans:
         command.insert(1, "-DEXT4_TEST_ORPHANS=1")
+    if args.live_truncate:
+        command.insert(1, "-DEXT4_TEST_LIVE_TRUNCATE=1")
     with (output / "build.log").open("wb") as log:
         subprocess.run([str(x) for x in command], stdout=log, stderr=subprocess.STDOUT, check=True)
     archives = {}
@@ -105,25 +109,30 @@ def main():
         raise RuntimeError("no exported writer cases")
     for case in exports:
         block_size = case["block_size"]
-        if block_size in archives:
+        key = (block_size, case["target"], case["inode"]["blocks"]) if args.live_truncate else block_size
+        if key in archives:
             continue
-        tree = output / f"root-{block_size}"
+        tree = output / (f"root-{block_size}-{case['target']}-{case['inode']['blocks']}"
+                         if args.live_truncate else f"root-{block_size}")
         for directory in ("dev", "mnt", "modules"):
             (tree / directory).mkdir(parents=True)
         shutil.copyfile(probe, tree / "init")
         (tree / "init").chmod(0o755)
         (tree / "block-size").write_text(f"{block_size}\n")
+        if args.live_truncate:
+            empty = int(case["target"] == "empty")
+            (tree / "live-truncate").write_text(f"{empty} {empty} {case['inode']['blocks']}\n")
         for name, record in module_report["modules"].items():
             source = lab / record["path"]
             if digest(source) != record["sha256"]:
                 raise RuntimeError(f"module changed: {source}")
             shutil.copyfile(source, tree / "modules" / f"{name}.ko")
         listing = "\n".join(str(path.relative_to(tree)) for path in sorted(tree.rglob("*"))) + "\n"
-        archive = output / f"initramfs-{block_size}.cpio"
+        archive = output / f"initramfs-{tree.name.removeprefix('root-')}.cpio"
         with archive.open("wb") as stream:
             subprocess.run(["/usr/bin/cpio", "-o", "-H", "newc"], cwd=tree,
                            input=listing.encode(), stdout=stream, check=True)
-        archives[block_size] = archive
+        archives[key] = archive
     if args.prepare_only:
         print(f"Prepared Linux probe and {len(archives)} initramfs archives in {output}")
         return
@@ -148,7 +157,8 @@ def main():
             done.check_returncode()
             return done.stdout
 
-        console = run([runner, kernel, archives[case["block_size"]], "2", "512",
+        key = (case["block_size"], case["target"], case["inode"]["blocks"]) if args.live_truncate else case["block_size"]
+        console = run([runner, kernel, archives[key], "2", "512",
                        "console=hvc0 rdinit=/init panic=-1 loglevel=4", scratch])
         (output / f"{source.stem}.console.log").write_text(console)
         if args.orphans:
@@ -166,7 +176,8 @@ def main():
             (output / "report.json").write_text(json.dumps(results, indent=2) + "\n")
             print(f"GENERATED {source.name}: six Linux open-unlinked inode types; recovery not yet checked", flush=True)
             continue
-        verification_marker = ("LINUX_EXT4_TRUNCATE_PASS" if args.truncate else
+        verification_marker = ("LINUX_EXT4_LIVE_TRUNCATE_PASS" if args.live_truncate else
+                               "LINUX_EXT4_TRUNCATE_PASS" if args.truncate else
                                "LINUX_EXT4_ALLOCATION_PASS" if args.allocation else
                                "LINUX_EXT4_FILE_WRITE_PASS" if args.file_writes else "LINUX_EXT4_REPLAY_PASS")
         for marker in (verification_marker,
@@ -181,13 +192,18 @@ def main():
         transactions = re.search(r"transactions=(\d+)", recovery)
         if not transactions or int(transactions[1]) == 0:
             raise RuntimeError("reverse roundtrip did not replay a Linux-authored transaction")
-        name = "empty" if args.allocation or args.truncate else "payload.bin"
+        name = case["target"] if args.live_truncate else ("empty" if args.allocation or args.truncate else "payload.bin")
         contents = output / f"{source.stem}.contents"
         run([tools / "debugfs/debugfs", "-R", f"dump /{name} {contents}", scratch])
         data = contents.read_bytes()
         expected = bytearray((index * 17 + 23) & 255 for index in range(200000))
         block_size = case["block_size"]
-        if args.truncate:
+        if args.live_truncate:
+            expected = bytearray(block_size * 6 + 13)
+            if name == "payload.bin":
+                expected[:block_size + 7] = bytes((index * 17 + 23) & 255 for index in range(block_size + 7))
+            expected[block_size * 4 + 7] = 0x6c
+        elif args.truncate:
             expected = bytearray(block_size * 12 + 17)
             expected[block_size * 10 + 7] = 0x6c
         elif args.allocation:
@@ -200,7 +216,7 @@ def main():
             expected[:block_size] = b"\x53" * block_size
             expected[block_size:block_size * 2] = b"\xa7" * block_size
             expected[:4] = bytes.fromhex("c03b3998")
-        if not args.allocation and not args.truncate:
+        if not args.allocation and not args.truncate and not args.live_truncate:
             expected[0] = 0x6c
         if data != expected:
             raise RuntimeError("incorrect contents after Linux/native recovery roundtrip")

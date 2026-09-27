@@ -107,9 +107,22 @@ target_link_libraries(ext4-orphan-test PRIVATE ext4_posix)
 target_compile_options(ext4-orphan-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
 add_test(NAME orphan-truncate-recovery COMMAND ext4-orphan-test ${EXT4_WRITE_IMAGES})
 set_tests_properties(orphan-truncate-recovery PROPERTIES TIMEOUT 600)
+add_test(NAME live-truncate COMMAND ext4-orphan-test --live ${EXT4_WRITE_IMAGES})
+set_tests_properties(live-truncate PROPERTIES TIMEOUT 900)
+if(EXT4_EXTENDED_TESTS)
+    add_test(NAME live-truncate-large COMMAND ext4-orphan-test --live --large
+        "${EXT4_FIXTURES}/ext4-indirect-1k.img")
+    set_tests_properties(live-truncate-large PROPERTIES TIMEOUT 900)
+endif()
 set(EXT4_ALLOCATION_FIXTURES "${CMAKE_SOURCE_DIR}/artifacts/allocation-fixtures" CACHE PATH
     "Independent unwritten-allocation images")
 if(EXT4_UNWRITTEN_TESTS)
+    add_test(NAME live-truncate-unwritten COMMAND ext4-orphan-test --live
+        "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-1k.img"
+        "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-4k.img"
+        "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-no-checksum.img"
+        "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-checksum-seed.img")
+    set_tests_properties(live-truncate-unwritten PROPERTIES TIMEOUT 600)
     add_test(NAME unwritten-allocation COMMAND ext4-write-test --allocation
         "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-1k.img"
         "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-4k.img"

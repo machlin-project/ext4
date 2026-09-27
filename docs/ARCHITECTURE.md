@@ -103,7 +103,7 @@ after commit succeeds. The primary-superblock snapshot always retains RECOVER an
 a fresh checksum through checkpoint; only clean finish clears that marker.
 Large-volume performance and a concurrent allocator remain unaccepted.
 
-Bounded truncate performs the size, tail-zeroing, data/mapping removal, bitmap,
+`ext4_truncate_atomic` performs the size, tail-zeroing, data/mapping removal, bitmap,
 group/superblock accounting and admitted attribute transition in one journal
 transaction. It validates the entire inode map first: all physical ranges must
 be allocated, disjoint from each other and protected metadata, and agree with
@@ -119,10 +119,27 @@ does not allocate sparse holes. Unwritten backing bytes remain inaccessible.
 Every successful transaction completes home writes and resets the log before
 another transaction can reuse freed blocks. There are no deferred home writes
 from a previous owner. Relaxing this ordering would require revoke and reuse
-ownership rules. Truncate currently cancels before resource writes when its
-whole mapping/metadata set exceeds the transaction bound. Arbitrarily large
-multi-transaction truncation initiated by a live API remains required work;
-this bounded API does not claim that contract or support open-unlinked files.
+ownership rules. The atomic API cancels before resource writes when its whole
+changed mapping/metadata set exceeds the transaction bound.
+
+`ext4_truncate` uses bounded batches to shrink a live regular file. Its first
+transaction validates the complete map, captures the admitted attributes and
+target size, zeroes the retained tail, removes a first batch and records a legacy
+orphan intent if more work remains. Further cleanup uses the same restartable
+owner as offline recovery; the final batch removes the intent. The filesystem
+owner excludes all other reads and mutations throughout the call. A successful
+call returns the final inode snapshot only after all batches have checkpointed.
+After the intent commits, any subsequent error, including a private allocation
+or read failure, poisons the instance until explicit recovery finishes that intent.
+Errors before the first commit leave the caller's result and resource unchanged;
+an uncertain commit still requires recovery. A crash may therefore leave the
+original file or finish the captured size and attributes during recovery.
+
+Journals too small to reserve the minimum cleanup paths retain the atomic
+contract, preventing an intent that a later cleanup batch cannot fit. Live growth
+still uses a single transaction: sparse and unwritten runs need no data snapshots,
+but zeroing many written allocations beyond the previous EOF remains credit-bound.
+These APIs do not yet own open-unlinked files or native page-cache concurrency.
 
 Offline recovery completes legacy orphan-list operations after journal replay.
 It validates the entire inode-number chain, allocation, checksums, types and cycles

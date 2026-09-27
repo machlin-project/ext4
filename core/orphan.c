@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "allocate.h"
 
-#define EXT4_ORPHAN_BATCH_BLOCKS 32U
-
 static enum ext4_result
 ext4_orphan_record(struct ext4_fs *fs, uint32_t number, struct ext4_inode_disk *disk,
     struct ext4_inode *inode, bool *mapped)

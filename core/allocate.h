@@ -4,6 +4,8 @@
 
 #include "journal.h"
 
+#define EXT4_ORPHAN_BATCH_BLOCKS 32U
+
 /* Private transaction state. Counters become visible in fs->info only after a
  * successful commit. The caller owns all snapshots through that commit. */
 struct ext4_allocation {

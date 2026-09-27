@@ -197,6 +197,17 @@ enum ext4_result ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t genera
  * allocating holes. Size, block accounting and attributes commit atomically.
  * Changed mapping nodes and other metadata must fit the transaction bound;
  * credit exhaustion rejects without device writes. result changes on success. */
+enum ext4_result ext4_truncate_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation,
+    uint64_t size, const struct ext4_inode_update *update, struct ext4_inode *result);
+/* Resize under the same exclusive owner and admitted attribute contract.
+ * Shrink uses bounded transactions; the first atomically records the target
+ * size, attributes and legacy orphan intent. Recovery completes a committed
+ * intent, so an interrupted request may finish after an error. Any error after
+ * that commit poisons the instance, including reads. Successful completion has
+ * released all suffix blocks and removed the intent. Before the first commit,
+ * private failures leave the resource unchanged. Journals too small to reserve
+ * cleanup paths retain the atomic limit, as does growth. result changes only
+ * on complete success. */
 enum ext4_result ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint64_t size, const struct ext4_inode_update *update, struct ext4_inode *result);
 /* Offline recovery replays the journal, reconstructs allocation summaries and

@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
-#include "journal.h"
+#include "allocate.h"
 #include "image.h"
 
 #include <stdio.h>
@@ -51,6 +51,8 @@ struct device {
 	bool partial;
 	bool off;
 	bool metadata_checksum;
+	bool commit_written;
+	bool intent_durable;
 };
 
 static void *
@@ -105,6 +107,9 @@ device_persist(struct device *device, unsigned int survival)
 		}
 		device->dirty[index] = 0;
 	}
+	if (survival == 1 && device->commit_written) {
+		device->intent_durable = true;
+	}
 }
 
 static enum ext4_result
@@ -132,6 +137,11 @@ device_write(void *context, uint64_t offset, const void *buffer, size_t length)
 	}
 	memcpy(device->cache + offset, buffer, length);
 	device->dirty[offset / device->block_size] = 1;
+	if (device->journal_blocks[offset / device->block_size] &&
+	    ext4_be32(&((const struct ext4_jbd_header *)buffer)->magic) == EXT4_JBD_MAGIC &&
+	    ext4_be32(&((const struct ext4_jbd_header *)buffer)->type) == EXT4_JBD_COMMIT) {
+		device->commit_written = true;
+	}
 	return EXT4_OK;
 }
 
@@ -164,6 +174,8 @@ device_reset(struct device *device, const uint8_t *source)
 	device->allocations = device->fail_read = device->fail_allocation = 0;
 	device->off = false;
 	device->partial = false;
+	device->commit_written = false;
+	device->intent_durable = false;
 }
 
 static void
@@ -609,7 +621,8 @@ large_mapping(struct device *device, const uint8_t *clean, const char *exports, 
 	EXPECT(ext4_get_inode(fs, inode.number, &inode), EXT4_OK);
 	CHECK(inode.blocks_512 / (device->block_size / EXT4_SECTOR_SIZE) > count * 2U);
 	writes = device->writes;
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &result), EXT4_RANGE);
+	EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &result),
+	    EXT4_RANGE);
 	CHECK(device->writes == writes);
 	EXPECT(ext4_sync(fs), EXT4_OK);
 	EXPECT(ext4_inode_location(fs, inode.number, &offset), EXT4_OK);
@@ -639,7 +652,289 @@ large_mapping(struct device *device, const uint8_t *clean, const char *exports, 
 }
 
 static void
-test_image(const char *path, bool pending, bool smoke, const char *exports)
+live_prepare_large(struct device *device)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode inode;
+	struct ext4_inode_update update;
+	uint64_t logical;
+	uint32_t per_block = device->block_size / sizeof(struct ext4_le32);
+	uint32_t index;
+	size_t completed;
+	uint8_t marker;
+
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	inode = lookup(fs, "empty");
+	CHECK(!(inode.flags & EXT4_INODE_EXTENTS) && inode.size == 0);
+	memset(&update, 0, sizeof(update));
+	update.fields = EXT4_ATTR_PERMISSIONS | EXT4_ATTR_MODIFY_TIME | EXT4_ATTR_CHANGE_TIME;
+	update.permissions = 06750;
+	update.modify_time.seconds = 1700000001;
+	update.change_time.seconds = 1700000002;
+	for (index = 0; index <= EXT4_TRANSACTION_MAX_BLOCKS; index++) {
+		logical = EXT4_DIRECT_BLOCKS + (uint64_t)per_block + (uint64_t)index * per_block;
+		marker = (uint8_t)(index + 1);
+		EXPECT(ext4_write(fs, inode.number, inode.generation,
+			   logical * device->block_size + 3, &marker, 1, &update, &completed),
+		    EXT4_OK);
+		CHECK(completed == 1);
+	}
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	memcpy(device->base, device->stable, device->size);
+	device_reset(device, device->base);
+}
+
+struct live_trace {
+	uint32_t allocations;
+	uint32_t reads;
+	uint32_t events;
+	uint32_t transactions;
+	bool intent_durable;
+};
+
+static enum ext4_result
+live_attempt(struct device *device, const char *name, unsigned int fault, uint32_t position,
+    unsigned int survival, bool partial, struct live_trace *trace)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode inode;
+	struct ext4_inode result;
+	struct ext4_inode sentinel;
+	struct ext4_inode_update update;
+	uint32_t sequence;
+	enum ext4_result error;
+
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	inode = lookup(fs, name);
+	memset(&update, 0, sizeof(update));
+	update.fields = EXT4_ATTR_PERMISSIONS | EXT4_ATTR_MODIFY_TIME | EXT4_ATTR_CHANGE_TIME;
+	update.permissions = 0640;
+	update.modify_time.seconds = 1700000301;
+	update.change_time.seconds = 1700000302;
+	memset(&result, 0xa5, sizeof(result));
+	sentinel = result;
+	device->allocations = device->reads = device->events = device->writes = 0;
+	device->fail_allocation = fault == 1 ? position : 0;
+	device->fail_read = fault == 2 ? position : 0;
+	device->stop_at = fault == 3 ? position : 0;
+	device->survival = survival;
+	device->partial = partial;
+	sequence = fs->journal->sequence;
+	error = ext4_truncate(
+	    fs, inode.number, inode.generation, device->block_size + 7, &update, &result);
+	trace->allocations = device->allocations;
+	trace->reads = device->reads;
+	trace->events = device->events;
+	trace->transactions = fs->journal->sequence - sequence;
+	trace->intent_durable = device->intent_durable;
+	device->fail_allocation = device->fail_read = device->stop_at = 0;
+	if (error == EXT4_OK) {
+		CHECK(result.number == inode.number && result.generation == inode.generation &&
+		    result.size == device->block_size + 7 && result.links == inode.links &&
+		    result.mode == (EXT4_MODE_REGULAR | update.permissions) &&
+		    result.modify_time.seconds == update.modify_time.seconds &&
+		    result.change_time.seconds == update.change_time.seconds && !fs->aborted &&
+		    fs->last_orphan == 0);
+		EXPECT(ext4_get_inode(fs, inode.number, &inode), EXT4_OK);
+		CHECK(memcmp(&inode, &result, sizeof(inode)) == 0);
+		EXPECT(ext4_sync(fs), EXT4_OK);
+	} else {
+		CHECK(memcmp(&result, &sentinel, sizeof(result)) == 0);
+		if (fs->aborted) {
+			EXPECT(ext4_get_inode(fs, inode.number, &result), EXT4_RECOVERY_REQUIRED);
+			EXPECT(ext4_sync(fs), EXT4_RECOVERY_REQUIRED);
+			EXPECT(
+			    ext4_truncate(fs, inode.number, inode.generation, 0, &update, &result),
+			    EXT4_RECOVERY_REQUIRED);
+		} else {
+			CHECK(device->writes == 0 &&
+			    memcmp(device->cache, device->base, device->size) == 0);
+			EXPECT(ext4_get_inode(fs, inode.number, &result), EXT4_OK);
+		}
+	}
+	ext4_unmount(fs);
+	CHECK(device->live == 0);
+	return error;
+}
+
+static bool
+live_equal(struct device *device, const uint8_t *expected)
+{
+	uint32_t index;
+
+	for (index = 0; index < device->blocks; index++) {
+		if (!device->journal_blocks[index] &&
+		    memcmp(device->cache + (size_t)index * device->block_size,
+			expected + (size_t)index * device->block_size, device->block_size) != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
+live_recover(struct device *device, const uint8_t *expected, bool intent_durable)
+{
+	struct ext4_recovery_report report;
+	struct ext4_super_disk *super;
+	enum ext4_result error;
+
+	device_reset(device, device->stable);
+	error = ext4_recover(&device->environment, &device->writer, &report);
+	if (error == EXT4_CORRUPT) {
+		super = (struct ext4_super_disk *)(device->cache + EXT4_SUPER_OFFSET);
+		CHECK(device->metadata_checksum && device->writes == 0 &&
+		    ext4_le32(&super->checksum) !=
+			ext4_crc32c(UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum)));
+		return false;
+	}
+	EXPECT(error, EXT4_OK);
+	CHECK(device->live == 0 && memcmp(device->cache, device->stable, device->size) == 0);
+	CHECK(
+	    live_equal(device, expected) || (!intent_durable && live_equal(device, device->base)));
+	return true;
+}
+
+static void
+live_contents(struct device *device, const char *name, bool zero)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode inode;
+	uint8_t *bytes = malloc(device->block_size + 7);
+	size_t index;
+	size_t completed;
+
+	CHECK(bytes != NULL);
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	inode = lookup(fs, name);
+	EXPECT(ext4_read(fs, &inode, 0, bytes, device->block_size + 7, &completed), EXT4_OK);
+	CHECK(completed == device->block_size + 7);
+	for (index = 0; index < completed; index++) {
+		CHECK(bytes[index] == (zero ? 0 : (uint8_t)(index * 17 + 23)));
+	}
+	ext4_unmount(fs);
+	free(bytes);
+}
+
+static void
+live_guards(struct device *device, const char *name)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode inode;
+	struct ext4_inode result;
+	struct ext4_inode_update update;
+	uint32_t blocks;
+
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	inode = lookup(fs, name);
+	memset(&update, 0, sizeof(update));
+	update.fields = EXT4_ATTR_PERMISSIONS | EXT4_ATTR_MODIFY_TIME | EXT4_ATTR_CHANGE_TIME;
+	update.permissions = 0640;
+	EXPECT(ext4_truncate(NULL, inode.number, inode.generation, 0, &update, &result),
+	    EXT4_INVALID_ARGUMENT);
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, NULL, &result),
+	    EXT4_INVALID_ARGUMENT);
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, NULL),
+	    EXT4_INVALID_ARGUMENT);
+	EXPECT(
+	    ext4_truncate(fs, inode.number, inode.generation + 1, 0, &update, &result), EXT4_STALE);
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, UINT64_MAX, &update, &result),
+	    EXT4_RANGE);
+	blocks = fs->journal->blocks;
+	fs->journal->blocks = fs->journal->first + 6;
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &result), EXT4_RANGE);
+	fs->journal->blocks = blocks;
+	CHECK(device->writes == 0 && memcmp(device->cache, device->base, device->size) == 0);
+	ext4_unmount(fs);
+}
+
+static void
+live_cases(struct device *device, const char *path, bool smoke, const char *exports, bool large)
+{
+	const char *base_name = strrchr(path, '/');
+	const char *name;
+	struct live_trace baseline;
+	struct live_trace trace;
+	uint8_t *expected = malloc(device->size);
+	uint32_t index;
+	uint32_t limit;
+	uint32_t fault;
+	uint32_t survival;
+	uint32_t partial;
+	uint32_t recovered = 0;
+	uint32_t torn = 0;
+	bool unwritten;
+
+	base_name = base_name == NULL ? path : base_name + 1;
+	unwritten = strncmp(base_name, "unwritten-", strlen("unwritten-")) == 0;
+	name = large || unwritten ? "empty" : "payload.bin";
+	CHECK(expected != NULL);
+	if (large) {
+		live_prepare_large(device);
+	}
+	export_image(device, exports, path, "before-");
+	live_guards(device, name);
+	device_reset(device, device->base);
+	EXPECT(live_attempt(device, name, 0, 0, 0, false, &baseline), EXT4_OK);
+	CHECK(baseline.transactions >= 1);
+	if (large || unwritten ||
+	    TEST_PAYLOAD_SIZE > (EXT4_ORPHAN_BATCH_BLOCKS + 2) * device->block_size) {
+		CHECK(baseline.transactions > 1);
+	}
+	memcpy(expected, device->stable, device->size);
+	live_contents(device, name, large || unwritten);
+	export_image(device, exports, path, "after-");
+	if (!smoke) {
+		for (fault = 1; fault <= 2; fault++) {
+			limit = fault == 1 ? baseline.allocations : baseline.reads;
+			for (index = 1; index <= limit; index++) {
+				device_reset(device, device->base);
+				EXPECT(live_attempt(device, name, fault, index, 0, false, &trace),
+				    fault == 1 ? EXT4_NO_MEMORY : EXT4_IO);
+				CHECK(live_recover(device, expected, trace.intent_durable));
+			}
+		}
+		for (index = 1; index <= baseline.events; index++) {
+			for (survival = 0; survival < 3; survival++) {
+				for (partial = 0; partial < 2; partial++) {
+					device_reset(device, device->base);
+					EXPECT(live_attempt(device, name, 3, index, survival,
+						   partial != 0, &trace),
+					    EXT4_IO);
+					CHECK(device->off);
+					if (live_recover(device, expected, trace.intent_durable)) {
+						recovered++;
+					} else {
+						torn++;
+					}
+				}
+			}
+			/* A representative durable intent is also checked by independent
+			 * tools. This is a stopped live call, not a synthesized list. */
+			if (index == baseline.events / 2 && exports != NULL) {
+				device_reset(device, device->base);
+				EXPECT(live_attempt(device, name, 3, index, 0, false, &trace),
+				    EXT4_IO);
+				export_image(device, exports, path, "pending-");
+			}
+		}
+		printf("PASS live truncate faults: allocations=%u reads=%u cuts=%u recovered=%u "
+		       "torn_super_fail_closed=%u\n",
+		    baseline.allocations, baseline.reads, baseline.events * 6, recovered, torn);
+	} else if (exports != NULL) {
+		device_reset(device, device->base);
+		EXPECT(
+		    live_attempt(device, name, 3, baseline.events / 2, 0, false, &trace), EXT4_IO);
+		export_image(device, exports, path, "pending-");
+		CHECK(live_recover(device, expected, trace.intent_durable));
+	}
+	free(expected);
+	printf("PASS live truncate: %u transactions, %s\n", baseline.transactions, path);
+}
+
+static void
+test_image(const char *path, bool pending, bool smoke, const char *exports, bool live, bool large)
 {
 	struct ext4_posix_image source;
 	struct ext4_fs *fs;
@@ -690,6 +985,10 @@ test_image(const char *path, bool pending, bool smoke, const char *exports)
 	ext4_journal_close(journal);
 	ext4_unmount(fs);
 	device_reset(&device, device.base);
+	if (live) {
+		live_cases(&device, path, smoke, exports, large);
+		goto finish;
+	}
 	if (!pending) {
 		linked_fixture(&device);
 	}
@@ -724,6 +1023,7 @@ test_image(const char *path, bool pending, bool smoke, const char *exports)
 	if (!pending) {
 		large_mapping(&device, expected, exports, path);
 	}
+finish:
 	CHECK(device.live == 0);
 	free(expected);
 	free(device.base);
@@ -731,8 +1031,10 @@ test_image(const char *path, bool pending, bool smoke, const char *exports)
 	free(device.stable);
 	free(device.dirty);
 	free(device.journal_blocks);
-	printf(
-	    "PASS %s orphan recovery: %s\n", pending ? "Linux unlinked" : "linked truncate", path);
+	if (!live) {
+		printf("PASS %s orphan recovery: %s\n",
+		    pending ? "Linux unlinked" : "linked truncate", path);
+	}
 }
 
 int
@@ -741,6 +1043,8 @@ main(int argc, char **argv)
 	const char *exports = NULL;
 	bool pending = false;
 	bool smoke = false;
+	bool live = false;
+	bool large = false;
 	int index = 1;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
@@ -751,6 +1055,12 @@ main(int argc, char **argv)
 		} else if (strcmp(argv[index], "--smoke") == 0) {
 			smoke = true;
 			index++;
+		} else if (strcmp(argv[index], "--live") == 0) {
+			live = true;
+			index++;
+		} else if (strcmp(argv[index], "--large") == 0) {
+			large = true;
+			index++;
 		} else if (strcmp(argv[index], "--export") == 0) {
 			CHECK(index + 1 < argc);
 			exports = argv[index + 1];
@@ -760,8 +1070,9 @@ main(int argc, char **argv)
 		}
 	}
 	CHECK(index < argc);
+	CHECK((!live || !pending) && (!large || live));
 	for (; index < argc; index++) {
-		test_image(argv[index], pending, smoke, exports);
+		test_image(argv[index], pending, smoke, exports, live, large);
 	}
 	return 0;
 }

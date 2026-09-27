@@ -128,6 +128,25 @@ copies and retains every source image. `ext4-orphan-test --pending IMAGE...`
 also runs the modeled fault matrix against those untouched Linux images.
 Only one prepared Linux runner may be operated at a time.
 
+`ext4-orphan-test --live IMAGE...` exercises live multi-transaction shrink and
+all operation faults; add `--large` for a sparse indirect tree exceeding atomic
+capacity. For independent evidence use `--smoke --export NEW_EMPTY_DIRECTORY`,
+then run:
+
+```sh
+python3 tests/check_resize.py --exports artifacts/live-exports \
+  --recover .build/ext4-recover --tools-root /path/to/e2fsprogs/build \
+  --output artifacts/live-independent
+```
+
+Keep large-profile exports separate and pass `--large` to the checker. Its
+successful report can be selected for `run_linux_journal.py --live-truncate`
+from the lab directory. That mode verifies the completed file or recovers a
+selected pending live intent, checks size/blocks/permissions/timestamps and all
+retained bytes, then grows and writes the file in Linux for reverse replay.
+Pending inputs require a generated selection report pinning their actual hashes
+and the independently verified new outcome. Use the same Sol/Luna handoff.
+
 ## Inode and file-write tests
 
 `ext4-write-test` opens source fixtures read-only and mutates separate modeled
@@ -177,6 +196,9 @@ The `Portable filesystem` GitHub Actions workflow runs on development/main pushe
 and pull requests. Its isolated Ubuntu job generates fresh fixtures, builds with
 Clang and ASan/UBSan, runs CTest, checks clean mutation exports independently, and
 recovers debugfs-authored journals. It retains reports and logs, not disk images.
+CI uses `RelWithDebInfo` with both sanitizers enabled and two concurrent CTest
+workers; fixture and fault coverage is identical to Debug. Use the same build
+type locally when reproducing CI timing.
 This portable CI does not replace selected-Xcode formatting, unsigned platform
 builds, actual macOS mounts, or the separately identified kernel/LXNU VM tests.
 

@@ -16,7 +16,7 @@ concurrency:
 jobs:
   linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       CC: clang
     defaults:
@@ -38,11 +38,11 @@ jobs:
             --output artifacts/allocation-fixtures 2>&1 | tee artifacts/checks/allocation-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
-          cmake -S . -B .build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+          cmake -S . -B .build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DEXT4_EXTENDED_TESTS=ON -DEXT4_INODE128_TEST=ON -DEXT4_UNWRITTEN_TESTS=ON
           cmake --build .build --parallel 2 2>&1 | tee artifacts/checks/build.log
       - name: Run conformance and fault tests
-        run: ctest --test-dir .build --output-on-failure --output-junit "$PWD/artifacts/core-tests.xml"
+        run: ctest --test-dir .build --parallel 2 --output-on-failure --output-junit "$PWD/artifacts/core-tests.xml"
       - name: Export and independently verify file writes
         run: |
           mkdir artifacts/write-exports
@@ -101,6 +101,23 @@ jobs:
             2>&1 | tee artifacts/checks/orphan-linked-independent.log
           e2fsck -fn artifacts/orphan-linked-exports/large-clean-ext4-indirect-1k.img \
             2>&1 | tee artifacts/checks/orphan-large-independent.log
+      - name: Independently verify live truncate and recovery
+        run: |
+          mkdir artifacts/live-exports artifacts/live-large-exports
+          .build/ext4-orphan-test --live --smoke --export artifacts/live-exports \
+            artifacts/fixtures/ext4-1k.img artifacts/fixtures/ext4-2k.img \
+            artifacts/fixtures/ext4-4k.img artifacts/fixtures/ext4-8k.img \
+            artifacts/fixtures/ext4-16k.img artifacts/fixtures/ext4-32k.img \
+            artifacts/fixtures/ext4-indirect-1k.img artifacts/fixtures/ext4-no-checksum.img \
+            artifacts/fixtures/ext4-checksum-seed.img artifacts/fixtures/ext4-inode128.img \
+            artifacts/allocation-fixtures/*.img 2>&1 | tee artifacts/checks/live-exports.log
+          .build/ext4-orphan-test --live --large --smoke --export artifacts/live-large-exports \
+            artifacts/fixtures/ext4-indirect-1k.img 2>&1 | tee artifacts/checks/live-large-exports.log
+          python3 tests/check_resize.py --exports artifacts/live-exports --recover .build/ext4-recover \
+            --output artifacts/live-independent 2>&1 | tee artifacts/checks/live-independent.log
+          python3 tests/check_resize.py --large --exports artifacts/live-large-exports \
+            --recover .build/ext4-recover --output artifacts/live-large-independent \
+            2>&1 | tee artifacts/checks/live-large-independent.log
       - name: Preserve test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

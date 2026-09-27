@@ -455,9 +455,15 @@ cancel:
 	return error;
 }
 
-enum ext4_result
-ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t size,
-    const struct ext4_inode_update *update, struct ext4_inode *result)
+/* One data block can release two extent paths, with a bitmap and descriptor
+ * per released block, plus the inode, superblock and retained data tail. Small
+ * journals keep the atomic contract rather than admitting an intent whose
+ * later path might not fit even the minimum cleanup batch. */
+#define EXT4_TRUNCATE_RECOVERY_CREDITS (3U * (2U * EXT4_EXTENT_MAX_DEPTH + 1U) + 3U)
+
+static enum ext4_result
+ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t size,
+    const struct ext4_inode_update *update, struct ext4_inode *result, uint32_t batch, bool *retry)
 {
 	struct ext4_transaction *transaction;
 	struct ext4_inode_disk *disk;
@@ -473,8 +479,10 @@ ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t
 	uint32_t target_count = 0;
 	uint32_t credits;
 	bool allocation_ready = false;
+	bool done = true;
 	enum ext4_result error;
 
+	*retry = false;
 	if (result == NULL) {
 		return EXT4_INVALID_ARGUMENT;
 	}
@@ -489,6 +497,9 @@ ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t
 		return EXT4_RANGE;
 	}
 	credits = ext4_journal_credits(fs->journal);
+	if (credits < EXT4_TRUNCATE_RECOVERY_CREDITS) {
+		batch = 0;
+	}
 	error = ext4_transaction_begin(fs->journal, credits, &transaction);
 	if (error != EXT4_OK) {
 		return error;
@@ -522,7 +533,31 @@ ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t
 	allocation_ready = true;
 	first = (uint32_t)((size + fs->info.block_size - 1) / fs->info.block_size);
 	if (size <= inode.size) {
-		error = ext4_write_map_truncate(&allocation, &inode, disk, first);
+		if (batch == 0) {
+			error = ext4_write_map_truncate(&allocation, &inode, disk, first);
+		} else {
+			error = ext4_allocation_super(&allocation);
+			if (error == EXT4_OK &&
+			    (fs->last_orphan != 0 ||
+				ext4_le32(&allocation.super->last_orphan) != 0)) {
+				error = EXT4_RECOVERY_REQUIRED;
+			}
+			if (error == EXT4_OK) {
+				error = ext4_write_map_validate(&allocation, &inode, disk);
+			}
+			if (error == EXT4_OK) {
+				*retry = batch > 1;
+				error = ext4_write_map_trim(
+				    &allocation, &inode, disk, first, batch, &done);
+			}
+			if (error == EXT4_OK && !done) {
+				if (allocation.freed == 0) {
+					error = EXT4_CORRUPT;
+				} else {
+					ext4_encode32(&allocation.super->last_orphan, number);
+				}
+			}
+		}
 		if (error != EXT4_OK) {
 			goto cancel;
 		}
@@ -558,6 +593,9 @@ ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t
 	error = ext4_edit_commit(fs, transaction);
 	if (error == EXT4_OK) {
 		fs->info.free_blocks = free_blocks;
+		if (!done) {
+			fs->last_orphan = number;
+		}
 		*result = inode;
 	}
 	return error;
@@ -571,4 +609,54 @@ cancel:
 	}
 	ext4_transaction_cancel(transaction);
 	return error;
+}
+
+enum ext4_result
+ext4_truncate_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t size,
+    const struct ext4_inode_update *update, struct ext4_inode *result)
+{
+	bool retry;
+
+	return ext4_truncate_start(fs, number, generation, size, update, result, 0, &retry);
+}
+
+enum ext4_result
+ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t size,
+    const struct ext4_inode_update *update, struct ext4_inode *result)
+{
+	struct ext4_inode inode;
+	struct ext4_recovery_report report;
+	uint32_t batch = EXT4_ORPHAN_BATCH_BLOCKS;
+	bool retry;
+	enum ext4_result error;
+
+	if (result == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	for (;;) {
+		error = ext4_truncate_start(
+		    fs, number, generation, size, update, &inode, batch, &retry);
+		if (error != EXT4_RANGE || !retry || fs->aborted) {
+			break;
+		}
+		batch /= 2;
+	}
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (fs->last_orphan != 0) {
+		ext4_zero(&report, sizeof(report));
+		error = ext4_orphan_cleanup(fs, &report);
+		if (error == EXT4_OK) {
+			error = ext4_get_inode(fs, number, &inode);
+		}
+		if (error != EXT4_OK) {
+			/* Even a private allocation/read failure now follows a committed
+			 * intent. Prevent every further access until offline recovery. */
+			fs->aborted = true;
+			return error;
+		}
+	}
+	*result = inode;
+	return EXT4_OK;
 }

@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
+#include <time.h>
 #include <unistd.h>
 
 #define TEST_UID 12345U
@@ -176,6 +177,65 @@ check_truncated_file(uint32_t block_size)
 }
 #endif
 
+#ifdef EXT4_TEST_LIVE_TRUNCATE
+static int
+check_live_truncated_file(uint32_t block_size, bool recovering,
+    const struct timespec *recovery_start, const struct timespec *recovery_end)
+{
+	struct stat status;
+	FILE *configuration;
+	uint8_t *bytes;
+	uint8_t expected;
+	unsigned int empty;
+	unsigned int zero;
+	unsigned int blocks;
+	size_t size = (size_t)block_size + 7;
+	size_t index;
+	int fd;
+	bool captured;
+	bool refreshed;
+
+	configuration = fopen("/live-truncate", "r");
+	require(configuration != NULL, "open live truncate configuration");
+	require(fscanf(configuration, "%u %u %u", &empty, &zero, &blocks) == 3,
+	    "read live truncate configuration");
+	require(fclose(configuration) == 0, "close live truncate configuration");
+	fd = open(empty ? "/mnt/empty" : "/mnt/payload.bin", O_RDWR | O_CLOEXEC);
+	require(fd >= 0 && fstat(fd, &status) == 0, "open/stat live truncated file");
+	printf("LINUX_EXT4_LIVE_STATE size=%lld blocks=%lld mode=%o mtime=%lld.%09ld "
+	       "ctime=%lld.%09ld recovering=%u\n",
+	    (long long)status.st_size, (long long)status.st_blocks,
+	    (unsigned int)(status.st_mode & 07777), (long long)status.st_mtim.tv_sec,
+	    status.st_mtim.tv_nsec, (long long)status.st_ctim.tv_sec, status.st_ctim.tv_nsec,
+	    recovering ? 1U : 0U);
+	printf("LINUX_EXT4_RECOVERY_WINDOW start=%lld end=%lld\n",
+	    (long long)recovery_start->tv_sec, (long long)recovery_end->tv_sec);
+	require(status.st_size == (off_t)size && status.st_blocks == blocks &&
+		(status.st_mode & 07777) == 0640,
+	    "verify live truncate allocation and permissions");
+	captured = status.st_mtim.tv_sec == 1700000301 && status.st_mtim.tv_nsec == 0 &&
+	    status.st_ctim.tv_sec == 1700000302 && status.st_ctim.tv_nsec == 0;
+	/* Linux orphan cleanup refreshes both timestamps. Bound that transition
+	 * to the actual mount interval, including legacy inode second precision. */
+	refreshed = recovering && status.st_mtim.tv_sec == status.st_ctim.tv_sec &&
+	    status.st_mtim.tv_nsec == status.st_ctim.tv_nsec &&
+	    status.st_mtim.tv_sec >= recovery_start->tv_sec &&
+	    status.st_mtim.tv_sec <= recovery_end->tv_sec && status.st_mtim.tv_nsec >= 0 &&
+	    status.st_mtim.tv_nsec < EXT4_NANOSECONDS_PER_SECOND;
+	require(captured || refreshed, "verify captured or Linux recovery timestamps");
+	bytes = malloc(size);
+	require(bytes != NULL, "allocate live truncate comparison");
+	require(pread(fd, bytes, size, 0) == (ssize_t)size, "read live truncated file");
+	for (index = 0; index < size; index++) {
+		expected = zero ? 0 : (uint8_t)(index * 17 + 23);
+		require(bytes[index] == expected, "verify live truncate retained bytes");
+	}
+	free(bytes);
+	puts("LINUX_EXT4_LIVE_TRUNCATE_PASS");
+	return fd;
+}
+#endif
+
 #ifdef EXT4_TEST_ORPHANS
 static void
 create_orphans(uint32_t block_size, bool extents)
@@ -259,8 +319,12 @@ main(void)
 	struct utsname identity;
 	char module[128];
 	FILE *configuration;
+#ifdef EXT4_TEST_LIVE_TRUNCATE
+	struct timespec recovery_start;
+	struct timespec recovery_end;
+#endif
 #if !defined(EXT4_TEST_FILE_WRITES) && !defined(EXT4_TEST_ALLOCATION) &&                           \
-    !defined(EXT4_TEST_TRUNCATE)
+    !defined(EXT4_TEST_TRUNCATE) && !defined(EXT4_TEST_LIVE_TRUNCATE)
 	uint8_t *buffer;
 	uint32_t position;
 	uint8_t expected;
@@ -302,13 +366,20 @@ main(void)
     defined(EXT4_TEST_TRUNCATE) || defined(EXT4_TEST_ORPHANS)
 	require((decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_RECOVER) == 0,
 	    "verify cleanly finished writable filesystem");
-#else
+#elif !defined(EXT4_TEST_LIVE_TRUNCATE)
 	require((decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_RECOVER) != 0,
 	    "verify journal requires recovery");
+#endif
+#ifdef EXT4_TEST_LIVE_TRUNCATE
+	require(
+	    clock_gettime(CLOCK_REALTIME_COARSE, &recovery_start) == 0, "read recovery start time");
 #endif
 	require(mount("/dev/vda", "/mnt", "ext4", MS_NOATIME | MS_NOSUID | MS_NODEV,
 		    "data=ordered") == 0,
 	    "Linux ext4 mount and recovery");
+#ifdef EXT4_TEST_LIVE_TRUNCATE
+	require(clock_gettime(CLOCK_REALTIME, &recovery_end) == 0, "read recovery end time");
+#endif
 #ifdef EXT4_TEST_ORPHANS
 	create_orphans(block_size,
 	    (decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_EXTENTS) != 0);
@@ -319,7 +390,13 @@ main(void)
 	    (uint16_t)super.inode_size.bytes[0] | ((uint16_t)super.inode_size.bytes[1] << 8));
 #endif
 
-#ifdef EXT4_TEST_ALLOCATION
+#ifdef EXT4_TEST_LIVE_TRUNCATE
+	fd = check_live_truncated_file(block_size,
+	    (decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_RECOVER) != 0 ||
+		decode_le32(&super.last_orphan) != 0,
+	    &recovery_start, &recovery_end);
+	write_offset = (off_t)block_size * 4 + 7;
+#elif defined(EXT4_TEST_ALLOCATION)
 	write_offset = (off_t)(check_allocated_file(block_size) + block_size + 7);
 	fd = open("/mnt/empty", O_RDWR | O_CLOEXEC);
 #elif defined(EXT4_TEST_TRUNCATE)
@@ -331,7 +408,7 @@ main(void)
 #endif
 	require(fd >= 0, "open recovered payload");
 #if !defined(EXT4_TEST_FILE_WRITES) && !defined(EXT4_TEST_ALLOCATION) &&                           \
-    !defined(EXT4_TEST_TRUNCATE)
+    !defined(EXT4_TEST_TRUNCATE) && !defined(EXT4_TEST_LIVE_TRUNCATE)
 	buffer = malloc((size_t)block_size * 2);
 	require(buffer != NULL, "allocate comparison buffer");
 	require(pread(fd, buffer, (size_t)block_size * 2, 0) == (ssize_t)block_size * 2,
@@ -356,6 +433,9 @@ main(void)
 #ifdef EXT4_TEST_TRUNCATE
 	require(ftruncate(fd, (off_t)block_size * 3 + 9) == 0, "Linux shrink and release");
 	require(ftruncate(fd, (off_t)block_size * 12 + 17) == 0, "Linux sparse growth");
+#endif
+#ifdef EXT4_TEST_LIVE_TRUNCATE
+	require(ftruncate(fd, (off_t)block_size * 6 + 13) == 0, "Linux grow truncated file");
 #endif
 	require(pwrite(fd, &linux_byte, sizeof(linux_byte), write_offset) == sizeof(linux_byte),
 	    "Linux write");

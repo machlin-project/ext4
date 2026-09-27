@@ -22,9 +22,10 @@ mmap, concurrent reads, repeated mounts and open-file/mapping lifetime.
 Portable journal transactions and offline recovery pass interrupted-I/O tests,
 independent debugfs journals and roundtrips through a real Linux kernel. General
 writable operations remain incomplete: selective inode updates, bounded writes,
-block allocation, sparse growth, unwritten conversion and bounded truncate/freeing
-pass portable faults, independent e2fsck and Linux roundtrips. Offline recovery also
-cleans legacy orphan lists through bounded transactions. Directory mutation, ACLs/xattrs
+block allocation, sparse growth, unwritten conversion and truncate/freeing pass
+portable faults, independent e2fsck and Linux roundtrips. Live shrink can span
+bounded journal transactions, with legacy orphan recovery completing interrupted operations.
+Directory mutation, ACLs/xattrs
 and Linux capability policy remain unimplemented. Both platform adapters remain
 read-only; FSKit has not been mounted. Read
 [the acceptance matrix](docs/ACCEPTANCE.md) before using an image with this code.

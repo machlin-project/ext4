@@ -11,7 +11,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Eleven read profiles pass; broader format and size coverage pending |
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
-| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, sparse growth, unwritten conversion and bounded truncate/freeing pass portable and Linux checks; multi-transaction truncation, directory mutation and platform writes pending |
+| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, sparse growth, unwritten conversion and truncate/freeing pass independent and Linux checks; live shrink spans transactions; directory mutation and platform writes pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine and legacy orphan cleanup pass portable faults and independent recovery; advanced journal/orphan-file formats and platform write integration remain pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; ACLs/xattrs and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
@@ -161,7 +161,7 @@ checks in `artifacts/checks/inode-write-final-*` pass all five sanitized CTest
 suites, the freestanding stack budget, formatter, both unsigned kext builds
 without core warnings, and the unsigned universal FSKit build. These adapters
 still expose read-only operations and were not runtime-tested in this change.
-Live multi-transaction truncate, directory mutation, security xattrs,
+Directory mutation, security xattrs,
 concurrent native page-cache ownership and LXNU policy remain unaccepted.
 
 ## Allocation and growth evidence
@@ -210,7 +210,7 @@ kext architectures and universal FSKit build successfully; these new binaries
 have compilation evidence only and still expose read-only operations.
 
 Writes remain bounded atomic operations. Large requests, concurrent mapping
-ownership, live multi-transaction truncate, inode/directory allocation, modern orphan files, policy
+ownership, inode/directory allocation, modern orphan files, policy
 for reserved space, platform durability and writable cache integration remain
 required work. The allocation tests do not complete the filesystem acceptance matrix.
 
@@ -251,9 +251,10 @@ The nine configured sanitized CTest suites pass, including the optimized freesta
 2 KiB frame check. Logs and JUnit output are under `artifacts/checks/truncate-*`.
 The shared core also compiles in both unsigned kext architectures and universal FSKit.
 Those new adapter binaries remain read-only and have compilation evidence only.
-Truncate is currently atomic only when changed mapping nodes and other metadata fit
-one bounded transaction. Larger operations initiated by a live API, modern orphan files,
-open-unlinked lifetime and native UBC/FSKit resize concurrency remain unaccepted.
+These tests exercise `ext4_truncate_atomic`, where changed mapping nodes and other
+metadata must fit one transaction. The separate live shrink contract is described
+below. Modern orphan files, open-unlinked lifetime and native UBC/FSKit resize
+concurrency remain unaccepted.
 
 ## Legacy orphan recovery evidence
 
@@ -308,9 +309,68 @@ logs and the JUnit report are under `artifacts/checks/orphan-final-*` and
 
 This accepts offline legacy-list cleanup for the tested inode profiles. It does
 not establish modern orphan-file support, orphaned ACL/xattr inodes, online
-open-unlinked lifetime, arbitrary live multi-transaction truncation, or writable
+open-unlinked lifetime or writable
 platform cache/concurrency behavior. Both adapters continue to expose read-only
 operations.
+
+## Live truncate evidence
+
+`ext4-orphan-test --live` checks the public `ext4_truncate` operation against ten
+ordinary profiles and four independently allocated unwritten profiles. The target
+size is a block plus seven bytes, preserving a written prefix or inaccessible
+nonzero unwritten backing data. A separate `--large` case builds 257 sparse indirect
+leaves, reaches triple-indirect mapping and completes shrink in 17 transactions.
+The atomic API and its no-write credit-exhaustion contract remain separately tested.
+
+The live suites inject every allocation and read after writable mount/lookup,
+including intent cleanup and final inode refresh. Every write/flush cut runs with
+three volatile-write survival patterns and partial writes. Once the first commit
+is known durable, recovery must produce the complete new resource outside the
+journal; earlier cuts may also retain the original resource. Errors leave the
+caller's output unchanged. Any post-intent error must poison all further access.
+Torn checksummed primary superblocks remain explicit no-write rejection cases.
+Across fifteen profiles, 975 allocation faults and 1,445 read faults pass. Of
+10,692 write/flush cuts, 10,572 recover successfully and 120 deliberately torn
+primary-superblock cases fail closed. The large-map case alone checks 425
+allocation faults, 928 read faults and 5,238 crash cuts. All thirteen Debug
+ASan/UBSan CTest suites pass; logs are under `artifacts/checks/live-final-*`, with
+`artifacts/live-tests.xml` and the full `live-final-ctest-full.log` retaining output.
+The same large matrix also passes in sanitized `RelWithDebInfo`: about 166 seconds
+versus 455 seconds in Debug on this host, with identical fault counts. CI selects
+that configuration and two CTest workers; this is a test-execution measurement,
+not a filesystem throughput benchmark.
+The other twelve suites pass in the optimized sanitized configuration as well,
+with the same fifteen live fault-count profiles as Debug. Logs and JUnit output
+are under `artifacts/checks/live-optimized-*` and `artifacts/live-optimized-tests.xml`.
+Both unsigned kext architectures and universal FSKit compile with this core;
+these builds remain read-only and have no new installed-runtime acceptance.
+
+All fourteen completed/interrupted export pairs and the large-map pair pass
+`check_resize.py`: nonrepairing e2fsck, exact file contents and selected attributes,
+preserved inode identity/owners/links, retained physical mappings, released block
+counts, separate e2fsck recovery and unchanged repeat recovery. The final build's
+45 before/pending/after images match the earlier independently checked exports.
+Reports are in `artifacts/live-final-independent/`,
+`artifacts/live-final-large-independent/` and `artifacts/checks/live-export-comparison.json`.
+
+Twenty-four Linux cases pass: completed and interrupted images for seven ordinary,
+four unwritten and one large indirect profile with 1/2/4 KiB blocks. Linux verifies
+size, allocation, mode and all retained bytes, grows/writes each file, commits and
+stops without unmounting. Portable replay then passes full contents, owners/mode
+and e2fsck. Clean inputs retain their exact captured timestamps. The identified
+Linux kernel refreshes mtime/ctime while completing linked orphan truncation;
+pending-input checks require equal refreshed times within the measured mount
+interval, allowing legacy inode second precision. Core and e2fsck recovery retain
+the captured timestamps. This difference is checked rather than silently ignored.
+Linux reports and console evidence are in the lab's
+`artifacts/ext4-journal/linux-reference/live-final-roundtrip/` and
+`logs/ext4-live-final-roundtrip.log`.
+
+Live growth retains the atomic credit limit when many written allocations beyond
+the previous EOF need zeroing. Very small journals retain the atomic shrink limit
+rather than admitting an intent they cannot complete. Mapping validation and all
+other documented format/resource bounds still apply. Native cache ownership,
+open-unlinked lifetime, modern orphan files and platform writes remain unaccepted.
 
 ## FSKit build evidence
 

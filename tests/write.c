@@ -570,7 +570,7 @@ run_write(struct device *device, struct ext4_fs *fs, const struct ext4_inode *in
 
 	if (device->truncate) {
 		memset(&after, 0xa5, sizeof(after));
-		error = ext4_truncate(fs, inode->number, inode->generation,
+		error = ext4_truncate_atomic(fs, inode->number, inode->generation,
 		    device->operation_offset, &update, &after);
 		if (error == EXT4_OK) {
 			CHECK(after.size == device->operation_offset &&
@@ -1060,7 +1060,8 @@ full_disk(struct device *device)
 	fs = mount_writer(device);
 	CHECK(fs->info.free_blocks == 0);
 	free_blocks = after.blocks_512 / (device->block_size / TEST_SECTOR_SIZE);
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
+	EXPECT(
+	    ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
 	CHECK(after.blocks_512 == 0 && fs->info.free_blocks == free_blocks);
 	EXPECT(ext4_write(fs, inode.number, inode.generation, 7, "R", 1, &update, &completed),
 	    EXT4_OK);
@@ -1132,7 +1133,7 @@ indirect_boundaries(struct device *device)
 	/* Remove the last direct/single/double/triple mappings independently,
 	 * then release the surviving path. Every lower boundary remains readable. */
 	for (index = 7; index > 0; index--) {
-		EXPECT(ext4_truncate(fs, inode.number, inode.generation,
+		EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation,
 			   logical[index - 1] * device->block_size, &update, &inode),
 		    EXT4_OK);
 		for (verify = 0; verify < sizeof(logical) / sizeof(logical[0]); verify++) {
@@ -1145,7 +1146,8 @@ indirect_boundaries(struct device *device)
 			}
 		}
 	}
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &inode), EXT4_OK);
+	EXPECT(
+	    ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &inode), EXT4_OK);
 	CHECK(inode.blocks_512 == 0 && fs->info.free_blocks == initial_free);
 	EXPECT(ext4_sync(fs), EXT4_OK);
 	ext4_unmount(fs);
@@ -1345,7 +1347,8 @@ truncate_operations(struct device *device)
 	targets[3] = 0;
 	for (test = 0; test < 4; test++) {
 		size = targets[test];
-		EXPECT(ext4_truncate(fs, inode.number, inode.generation, size, &update, &after),
+		EXPECT(
+		    ext4_truncate_atomic(fs, inode.number, inode.generation, size, &update, &after),
 		    EXT4_OK);
 		CHECK(after.size == size &&
 		    after.mode == (EXT4_MODE_REGULAR | update.permissions) &&
@@ -1382,14 +1385,15 @@ truncate_operations(struct device *device)
 		/* Growth after each shrink must not reveal the old tail or reallocate
 		 * holes, including after removal of a multi-level mapping tree. */
 		inode = after;
-		EXPECT(ext4_truncate(
+		EXPECT(ext4_truncate_atomic(
 			   fs, inode.number, inode.generation, original_size, &update, &after),
 		    EXT4_OK);
 		CHECK(after.blocks_512 == inode.blocks_512);
 		check_contents(fs, "empty", expected, original_size);
 		inode = after;
 	}
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
+	EXPECT(
+	    ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
 	CHECK(after.blocks_512 == 0 && fs->info.free_blocks == total_free);
 	EXPECT(ext4_write(fs, inode.number, inode.generation, (uint64_t)4 * device->block_size + 7,
 		   "T", 1, &update, &completed),
@@ -1397,7 +1401,8 @@ truncate_operations(struct device *device)
 	CHECK(completed == 1);
 	size = (size_t)9 * device->block_size + 13;
 	expected[4 * device->block_size + 7] = 'T';
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, size, &update, &after), EXT4_OK);
+	EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation, size, &update, &after),
+	    EXT4_OK);
 	CHECK(after.blocks_512 == device->block_size / TEST_SECTOR_SIZE &&
 	    fs->info.free_blocks == total_free - 1);
 	check_contents(fs, "empty", expected, size);
@@ -1429,14 +1434,16 @@ truncate_preallocation(struct device *device)
 	}
 	expected = calloc(1, size);
 	CHECK(expected != NULL);
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation,
+	EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation,
 		   (uint64_t)17 * device->block_size + 13, &update, &after),
 	    EXT4_OK);
 	CHECK(after.blocks_512 == 18 * (device->block_size / TEST_SECTOR_SIZE));
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, size, &update, &after), EXT4_OK);
+	EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation, size, &update, &after),
+	    EXT4_OK);
 	CHECK(after.blocks_512 == 18 * (device->block_size / TEST_SECTOR_SIZE));
 	check_contents(fs, "empty", expected, size);
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
+	EXPECT(
+	    ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
 	CHECK(after.blocks_512 == 0 && fs->info.free_blocks == total_free);
 	EXPECT(ext4_sync(fs), EXT4_OK);
 	ext4_unmount(fs);
@@ -1460,23 +1467,25 @@ truncate_guards(struct device *device)
 	uint32_t sector_units = device->block_size / TEST_SECTOR_SIZE;
 
 	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation + 1, 0, &update, &after),
+	    EXT4_STALE);
+	EXPECT(ext4_truncate_atomic(fs, root.number, root.generation, 0, &update, &after),
+	    EXT4_IS_DIRECTORY);
+	EXPECT(ext4_truncate_atomic(fs, link.number, link.generation, 0, &update, &after),
+	    EXT4_UNSUPPORTED);
 	EXPECT(
-	    ext4_truncate(fs, inode.number, inode.generation + 1, 0, &update, &after), EXT4_STALE);
-	EXPECT(
-	    ext4_truncate(fs, root.number, root.generation, 0, &update, &after), EXT4_IS_DIRECTORY);
-	EXPECT(
-	    ext4_truncate(fs, link.number, link.generation, 0, &update, &after), EXT4_UNSUPPORTED);
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, UINT64_MAX, &update, &after),
+	    ext4_truncate_atomic(fs, inode.number, inode.generation, UINT64_MAX, &update, &after),
 	    EXT4_RANGE);
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, NULL),
+	EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, NULL),
 	    EXT4_INVALID_ARGUMENT);
 	update.fields |= EXT4_ATTR_ACCESS_TIME;
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after),
+	EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &after),
 	    EXT4_INVALID_ARGUMENT);
 	update = write_update(fs);
 	journal_blocks = fs->journal->blocks;
 	fs->journal->blocks = fs->journal->first + 6;
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 1, &update, &after), EXT4_RANGE);
+	EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation, 1, &update, &after),
+	    EXT4_RANGE);
 	fs->journal->blocks = journal_blocks;
 	CHECK(device->writes == 0 && memcmp(device->cache, device->base, device->size) == 0);
 	EXPECT(ext4_inode_location(fs, inode.number, &inode_offset), EXT4_OK);
@@ -1484,15 +1493,16 @@ truncate_guards(struct device *device)
 	saved_blocks = ext4_le32(&disk->blocks_lo);
 	ext4_encode32(&disk->blocks_lo, saved_blocks + sector_units);
 	ext4_inode_checksum_set(fs, inode.number, disk);
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_CORRUPT);
+	EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &after),
+	    EXT4_CORRUPT);
 	CHECK(device->writes == 0);
 	ext4_encode32(&disk->blocks_lo, saved_blocks);
 	ext4_inode_checksum_set(fs, inode.number, disk);
 	CHECK(memcmp(device->cache, device->base, device->size) == 0);
 	ext4_unmount(fs);
 	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
-	EXPECT(
-	    ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_READ_ONLY);
+	EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &after),
+	    EXT4_READ_ONLY);
 	ext4_unmount(fs);
 }
 
@@ -1516,9 +1526,10 @@ truncate_sparse_limits(struct device *device)
 	if (blocks > UINT32_MAX) {
 		blocks = UINT32_MAX;
 	}
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
+	EXPECT(
+	    ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
 	free_blocks = fs->info.free_blocks;
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, blocks * device->block_size,
+	EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation, blocks * device->block_size,
 		   &update, &after),
 	    EXT4_OK);
 	CHECK(after.size == blocks * device->block_size && after.blocks_512 == 0 &&
@@ -1526,13 +1537,16 @@ truncate_sparse_limits(struct device *device)
 	EXPECT(ext4_read(fs, &after, after.size - 1, &byte, 1, &completed), EXT4_OK);
 	CHECK(completed == 1 && byte == 0);
 	writes = device->writes;
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, after.size + 1, &update, &after),
+	EXPECT(ext4_truncate_atomic(
+		   fs, inode.number, inode.generation, after.size + 1, &update, &after),
 	    EXT4_RANGE);
 	CHECK(device->writes == writes);
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
+	EXPECT(
+	    ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
 	CHECK(after.blocks_512 == 0 && fs->info.free_blocks == free_blocks);
 	inode = lookup(fs, "hello.txt");
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 3, &update, &after), EXT4_OK);
+	EXPECT(
+	    ext4_truncate_atomic(fs, inode.number, inode.generation, 3, &update, &after), EXT4_OK);
 	alias = lookup(fs, "hello-hardlink");
 	CHECK(alias.number == inode.number && alias.links == 2 && alias.size == 3);
 	check_contents(fs, "hello-hardlink", (const uint8_t *)"Mac", 3);
@@ -1565,7 +1579,8 @@ truncate_mapping_corruption(struct device *device)
 	uint32_t test;
 
 	CHECK(prepared != NULL && before != NULL);
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
+	EXPECT(
+	    ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
 	for (index = 0; index < 6; index++) {
 		EXPECT(ext4_write(fs, inode.number, inode.generation,
 			   (uint64_t)index * 2 * device->block_size, "C", 1, &update, &completed),
@@ -1617,7 +1632,7 @@ truncate_mapping_corruption(struct device *device)
 			ext4_inode_checksum_set(fs, inode.number, disk);
 		}
 		memcpy(before, device->cache, device->size);
-		EXPECT(ext4_truncate(fs, inode.number, inode.generation,
+		EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation,
 			   (uint64_t)2 * device->block_size + 7, &update, &after),
 		    EXT4_CORRUPT);
 		CHECK(device->writes == 0 && memcmp(before, device->cache, device->size) == 0);
@@ -1647,7 +1662,8 @@ truncate_faults(struct device *device)
 	uint32_t test;
 
 	CHECK(prepared != NULL && bytes != NULL);
-	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
+	EXPECT(
+	    ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
 	for (index = 0; index < 6; index++) {
 		memset(bytes, (int)(index + 31), device->block_size);
 		EXPECT(ext4_write(fs, inode.number, inode.generation,

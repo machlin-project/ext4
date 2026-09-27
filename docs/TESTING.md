@@ -31,6 +31,8 @@ contract, not physical power-loss protection on a particular disk.
 | Truncate | Partial/aligned/zero sizes, fragmented trees with surviving branches, repeated shrink/grow, root collapse, unwritten preallocation, direct/single/double/triple path release, maximum sparse size, hardlink identity and zeroed reuse after disk exhaustion |
 | Truncate validation | Duplicated data blocks, data/mapping aliases and protected metadata with repaired checksums, wrong inode block counts, stale generation, invalid admission, read-only/type/range errors and late credit exhaustion without writes |
 | Truncate failures | Every allocation/read and every write/flush cut in tail shrink, complete removal and exposure of allocated bytes past EOF; recovered inode, mapping, bitmaps, counters and data agree on one commit |
+| Live truncate | Multiple committed batches, persistent target size/permissions/timestamps, post-intent error poisoning, unchanged output on error, 257 indirect leaves beyond atomic capacity, retained nonzero unwritten backing bytes |
+| Live truncate failures | Every operation allocation/read and write/flush cut, including the large indirect map; a known durable first commit must recover the new outcome, never roll back to the original inode |
 | File mutation failures | Every allocation/read in the small overwrite, every write/flush cut through clean finish, torn writes and three survival patterns; consistent inode and data together after recovery, poisoned-instance read/write rejection |
 | Transaction ownership | One active writer/transaction, duplicate buffer identity, credit exhaustion, cancellation, empty commit, protected journal/control ranges |
 | Journal layouts | Legacy without checksums, checksum v2/v3, 32/64-bit tags, escape records, multiple descriptor blocks, ring wrap and sequence wrap |
@@ -54,6 +56,9 @@ The orphan suite samples the first and last 32 callbacks of the repeated journal
 mapping phase, then injects every callback through replay, summary reconstruction
 and cleanup. Its large indirect-map case checks successful reclamation beyond the
 atomic credit limit; exhaustive fault cuts use smaller multi-transaction maps.
+The separate live API suites enumerate every callback after writable mount and
+target lookup, including all subsequent intent cleanup and final inode refresh.
+Their large-map suite also runs the full fault matrix, with its own time limit.
 
 `ext4-write-test --truncate` runs resize and freeing cases across the selected
 profiles. Truncate exports include the final reused block and three intermediate
@@ -70,6 +75,16 @@ replayer, checks inode allocation and live contents, and requires a nonrepairing
 e2fsck pass on the core result before any oracle comparison. It measures unrelated
 directory indexing performed by e2fsck separately; unlinked cases must also return
 exactly to the pre-Linux baseline's free-block/inode totals.
+
+`ext4-orphan-test --live` invokes the public live truncate API on ordinary and
+independently allocated unwritten fixtures. `--large` builds a sparse indirect
+map beyond atomic capacity. `--smoke --export DIR` writes before/after images and
+a representative interrupted live call. `check_resize.py` requires nonrepairing
+e2fsck on the initial and completed states, verifies exact bytes, captured inode
+fields, retained physical mappings and released space, then compares portable
+and e2fsck recovery of the interrupted call. Written tails must be zero; unwritten
+retained backing data must remain unchanged and inaccessible. Original exports
+are hash-protected and repeated recovery must make no changes.
 
 Each unsupported format, fail-closed corruption case and unavailable runtime is
 reported separately from successfully recovered transactions. In particular,
