@@ -207,6 +207,23 @@ jobs:
           find artifacts/write-exports artifacts/write-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
+      - name: Independently verify large partial writes
+        if: matrix.suite == 'core'
+        run: |
+          mkdir artifacts/partial-write-exports
+          .build/ext4-write-partial-test --export artifacts/partial-write-exports \
+            artifacts/fixtures/ext4-1k.img artifacts/fixtures/ext4-2k.img \
+            artifacts/fixtures/ext4-4k.img artifacts/fixtures/ext4-8k.img \
+            artifacts/fixtures/ext4-16k.img artifacts/fixtures/ext4-32k.img \
+            artifacts/fixtures/ext4-indirect-1k.img artifacts/fixtures/ext4-no-checksum.img \
+            artifacts/fixtures/ext4-checksum-seed.img artifacts/fixtures/ext4-inode128.img \
+            2>&1 | tee artifacts/checks/partial-write-exports.log
+          python3 tests/check_partial_writes.py --fixtures artifacts/fixtures \
+            --exports artifacts/partial-write-exports --output artifacts/partial-write-independent \
+            2>&1 | tee artifacts/checks/partial-write-independent.log
+          find artifacts/partial-write-exports artifacts/partial-write-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          df -h .
       - name: Recover independently authored journals
         if: matrix.suite == 'core'
         run: |

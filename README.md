@@ -25,6 +25,9 @@ writable operations remain incomplete: selective inode updates, bounded writes,
 block allocation, sparse growth, unwritten conversion and truncate/freeing pass
 portable faults, independent e2fsck and Linux roundtrips. Live shrink can span
 bounded journal transactions, with orphan recovery completing interrupted operations.
+Large writes now have a separate API that spans transactions and reports a durable
+prefix on failure. Its focused fault and independent image checks pass; full
+regression and native write integration remain pending.
 Offline recovery handles legacy lists and bounded modern orphan files, including
 Linux-authored open-unlinked objects and mixed representations.
 Atomic creation, mkdir, symlinks, hard links, removal and rename now have portable

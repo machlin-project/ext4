@@ -51,7 +51,7 @@ foreach name, source : {
   'xattr': 'xattr', 'xattr-write': 'xattr_write', 'xattr-lifetime': 'xattr_lifetime', 'space': 'space',
   'directory-index': 'directory_index', 'directory-lookup': 'directory_lookup', 'index-write': 'index_write',
   'reader': 'reader', 'read-ranges': 'read_ranges', 'corruption': 'corruption', 'journal': 'journal',
-  'write': 'write', 'namespace': 'namespace', 'removal': 'removal',
+  'write': 'write', 'write-partial': 'write_partial', 'namespace': 'namespace', 'removal': 'removal',
   'rename': 'rename', 'orphan': 'orphan',
 }
   programs += {name: executable('ext4-' + name + '-test', 'tests/' + source + '.c',

@@ -263,6 +263,21 @@ enum ext4_result ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32
 enum ext4_result ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint64_t offset, const void *buffer, size_t length, const struct ext4_inode_update *update,
     size_t *completed);
+/* Write a large request in bounded transactions under one exclusive owner.
+ * The buffer and admitted update stay immutable for the complete call. OK means
+ * all bytes were written; an error retains the number of bytes from successfully
+ * checkpointed transactions. No partially prepared transaction contributes to
+ * completed. An uncertain commit poisons the instance and may add another whole
+ * transaction during recovery; it never removes the reported durable prefix.
+ * Permissions and captured times accompany each data transaction. The xattr
+ * batch commits only with the first successful prefix, then is preserved.
+ * A caller retrying after partial progress must refresh policy and must not
+ * replay that already applied xattr batch. Whole-request overflow rejects before
+ * writes. Zero length follows ext4_write. Zeroing an allocated gap before the
+ * first byte still has to fit one transaction; that bound can return RANGE. */
+enum ext4_result ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation,
+    uint64_t offset, const void *buffer, size_t length, const struct ext4_inode_update *update,
+    size_t *completed);
 /* Resize a regular file with the same admitted attribute fields as write.
  * Shrink releases data and unused mapping nodes, including allocations beyond
  * EOF, and zeroes the retained partial block. Growth exposes zero bytes without

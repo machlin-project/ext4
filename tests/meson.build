@@ -106,6 +106,11 @@ foreach profile : ['4k', '1k']
     args: paths['fixtures'] / ('ext4-' + profile + '.img'), timeout: 300, suite: 'core')
 endforeach
 test('inode-and-file-write', programs['write'], args: write_images, timeout: 300, suite: 'core')
+test('file-write-partial', programs['write-partial'], args: write_images, timeout: 300, suite: 'core')
+foreach profile : ['4k', '1k']
+  test('file-write-partial-faults-' + profile, programs['write-partial'],
+    args: ['--faults', paths['fixtures'] / ('ext4-' + profile + '.img')], timeout: 600, suite: 'core')
+endforeach
 test('allocation-and-growth', programs['write'], args: ['--allocation'] + write_images,
   timeout: 600, suite: 'core')
 test('truncate-and-free', programs['write'], args: ['--truncate'] + write_images,

@@ -91,8 +91,26 @@ They allocate holes, convert unwritten extents and extend EOF. The entire reques
 must fit the actual journal's credit bound; inode, bitmap, group, superblock and
 mapping-node snapshots consume credits alongside data. Credit exhaustion and
 allocation failure cancel the private transaction before any resource writes.
-The public API reports the full length on success and zero on error. Platform
-adapters will need a separate partial-progress/chunking contract for large I/O.
+`ext4_write` reports the full length on success and zero on error.
+
+`ext4_write_partial` accepts larger requests under one exclusive owner. It validates
+the complete byte range, then resolves the inode again for each bounded transaction.
+It reduces a cancelled private batch only after a proven snapshot-credit shortage
+or allocation shortage. Other range errors, I/O errors and poisoned instances never
+trigger an automatic retry. A successful batch checkpoints all of its data and
+metadata before the next starts; the journal's ordering and reuse rules are unchanged.
+On error, `completed` retains the durable prefix from those successful batches.
+Recovery can add the failed transaction when its commit reached stable storage.
+Even a read error while preparing commit conservatively poisons the current owner.
+
+Permissions and the operation's captured times accompany every data batch. The
+admitted xattr changes apply only with the first successful prefix; later batches
+preserve that state instead of repeating CREATE/REMOVE or security transitions.
+A caller retrying a suffix must refresh policy and preserve already applied changes.
+The input buffer and update remain immutable while the owner serializes the entire
+call. Zeroing written preallocation between the old EOF and the first requested byte
+still has to fit one transaction; that case retains an explicit range limit. Native
+adapters must translate the progress/error result into their cache and I/O contracts.
 
 The allocator validates group descriptors, bitmap checksums and free counts before
 selecting blocks. It initializes lazy block bitmaps from protected system ranges

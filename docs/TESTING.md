@@ -36,6 +36,7 @@ contract, not physical power-loss protection on a particular disk.
 | Inode updates | Full-width UID/GID, permission bits, generation identity, selective updates, hardlink visibility, preserved mappings/counts and neighboring inode records |
 | Writable timestamps | Signed and extended epoch boundaries, nanosecond bounds, birth time, 128-byte inode limits and each extra_isize field boundary; rejected updates perform no writes |
 | File overwrite | Complete-file comparison after an unaligned three-block overwrite, preserved EOF and untouched bytes, hardlinks, zero-length operation and read-only rejection |
+| Large writes | Requests larger than a transaction, exact durable prefixes on error, one-time xattr CREATE/REMOVE, held-unlinked writes, reserved-space exhaustion and retry after explicit recovery |
 | Write admission | Stale generation, invalid fields/types/ranges, unsupported xattrs/flags, metadata-target exclusion; no writes before successful validation |
 | Namespace creation | Regular files, mkdir dot/dotdot and parent link counts, full-width owners and precise captured times, nested hard links and hard links to symlinks, sparse writes through new aliases |
 | Symlink creation | Lengths 1/59/60/61 and block-size-minus-one, opaque non-UTF-8 bytes, zeroed terminator/tail, inline versus mapped accounting, hardlink identity, precise metadata and readonly remount |
@@ -272,6 +273,23 @@ Each unsupported format, fail-closed corruption case and unavailable runtime is
 reported separately from successfully recovered transactions. In particular,
 damaging a primary superblock across sectors can make its checksum unverifiable;
 the core rejects that medium instead of guessing geometry or declaring it clean.
+
+`file-write-partial` exercises ten write profiles. The two
+`file-write-partial-faults-*` cases use small journals to cross three transactions
+while injecting every observed allocation/read failure and every write/flush cut.
+They compare recovered state against independently observed checkpoint boundaries;
+failed commit-preparation reads require recovery even when no new data was committed.
+The normal storage model's torn-superblock rejection remains explicit.
+
+To generate the three completed states for independent checking, run
+`ext4-write-partial-test --export DIRECTORY IMAGES...`; export mode omits the
+already separate guards and fault matrices. Then use
+`tests/check_partial_writes.py --fixtures FIXTURE_DIRECTORY --exports DIRECTORY
+--output REPORT_DIRECTORY` with the selected e2fsprogs tools. The checker verifies
+complete bytes, single-application attribute changes, unchanged neighbors, namespace
+identity, free counts and clean nonrepairing e2fsck. The core CI suite includes both
+the focused cases and this independent check. Changing only a fixture workload or
+export path does not require repeating unchanged fault matrices during development.
 
 ## Attribute lifetime and feature transitions
 

@@ -390,9 +390,33 @@ ext4_inode_account(struct ext4_allocation *allocation, const struct ext4_inode *
 	return EXT4_OK;
 }
 
-enum ext4_result
-ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t offset,
-    const void *buffer, size_t length, const struct ext4_inode_update *update, size_t *completed)
+static enum ext4_result
+ext4_write_validate(struct ext4_fs *fs, uint64_t offset, const void *buffer, size_t length,
+    const struct ext4_inode_update *update)
+{
+	enum ext4_result error;
+
+	if (length != 0 && buffer == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	error = ext4_update_validate(fs, update);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if ((update->fields & ~(uint32_t)EXT4_ATTR_XATTRS) != EXT4_WRITE_FIELDS) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if (offset > UINT64_MAX - length ||
+	    (length != 0 && offset + length > (uint64_t)UINT32_MAX * fs->info.block_size)) {
+		return EXT4_RANGE;
+	}
+	return EXT4_OK;
+}
+
+static enum ext4_result
+ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t offset,
+    const void *buffer, size_t length, const struct ext4_inode_update *update, size_t *completed,
+    bool *capacity_failed)
 {
 	struct ext4_transaction *transaction;
 	struct ext4_inode_disk *disk;
@@ -419,19 +443,12 @@ ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t of
 		return EXT4_INVALID_ARGUMENT;
 	}
 	*completed = 0;
-	if (length != 0 && buffer == NULL) {
-		return EXT4_INVALID_ARGUMENT;
+	if (capacity_failed != NULL) {
+		*capacity_failed = false;
 	}
-	error = ext4_update_validate(fs, update);
+	error = ext4_write_validate(fs, offset, buffer, length, update);
 	if (error != EXT4_OK) {
 		return error;
-	}
-	if ((update->fields & ~(uint32_t)EXT4_ATTR_XATTRS) != EXT4_WRITE_FIELDS) {
-		return EXT4_INVALID_ARGUMENT;
-	}
-	if (offset > UINT64_MAX - length ||
-	    (length != 0 && offset + length > (uint64_t)UINT32_MAX * fs->info.block_size)) {
-		return EXT4_RANGE;
 	}
 	within = (size_t)(offset % fs->info.block_size);
 	block_count = length == 0 ? 0
@@ -546,6 +563,9 @@ ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t of
 	}
 	return error;
 cancel:
+	if (capacity_failed != NULL) {
+		*capacity_failed = ext4_transaction_capacity_failed(transaction);
+	}
 	if (allocation_ready) {
 		ext4_allocation_destroy(&allocation);
 	}
@@ -555,6 +575,83 @@ cancel:
 	}
 	ext4_transaction_cancel(transaction);
 	return error;
+}
+
+enum ext4_result
+ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t offset,
+    const void *buffer, size_t length, const struct ext4_inode_update *update, size_t *completed)
+{
+	return ext4_write_atomic(
+	    fs, number, generation, offset, buffer, length, update, completed, NULL);
+}
+
+enum ext4_result
+ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t offset,
+    const void *buffer, size_t length, const struct ext4_inode_update *update, size_t *completed)
+{
+	struct ext4_inode_update remaining;
+	uint32_t credits;
+	uint32_t blocks;
+	size_t limit;
+	size_t within;
+	size_t chunk;
+	size_t written;
+	bool capacity_failed;
+	enum ext4_result error;
+
+	if (completed == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	*completed = 0;
+	/* Validate the whole request before committing any prefix. Each transaction
+	 * subsequently resolves and validates the live inode under the same owner. */
+	error = ext4_write_validate(fs, offset, buffer, length, update);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (length == 0) {
+		return ext4_write(
+		    fs, number, generation, offset, buffer, length, update, completed);
+	}
+	credits = ext4_journal_credits(fs->journal);
+	if (credits < 2) {
+		return EXT4_RANGE;
+	}
+	remaining = *update;
+	limit = (size_t)(credits - 1U) * fs->info.block_size;
+	while (*completed < length) {
+		within = (size_t)((offset + *completed) % fs->info.block_size);
+		chunk = limit - within;
+		if (chunk > length - *completed) {
+			chunk = length - *completed;
+		}
+		error = ext4_write_atomic(fs, number, generation, offset + *completed,
+		    (const uint8_t *)buffer + *completed, chunk, &remaining, &written,
+		    &capacity_failed);
+		if (error == EXT4_OK) {
+			*completed += written;
+			/* The first durable data prefix owns the admitted attribute change.
+			 * Later transactions preserve that result, including non-idempotent
+			 * CREATE/REMOVE operations and security attribute removal. */
+			remaining.xattrs = NULL;
+			remaining.xattr_count = 0;
+			continue;
+		}
+		if (fs->aborted ||
+		    !((error == EXT4_RANGE && capacity_failed) || error == EXT4_NO_SPACE)) {
+			return error;
+		}
+		blocks =
+		    (uint32_t)((within + chunk + fs->info.block_size - 1U) / fs->info.block_size);
+		if (blocks <= 1) {
+			return error;
+		}
+		/* Cancelled private snapshots wrote nothing. Reduce only a proven
+		 * credit shortage or allocation shortage, never an I/O/format error.
+		 * Keep the smaller bound for subsequent batches of this request. */
+		limit = (size_t)(blocks / 2U) * fs->info.block_size;
+	}
+	return EXT4_OK;
 }
 
 /* One data block can release two extent paths, with a bitmap and descriptor

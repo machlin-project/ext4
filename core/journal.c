@@ -10,6 +10,7 @@ struct ext4_transaction {
 	struct ext4_journal *journal;
 	uint32_t credits;
 	uint32_t count;
+	bool capacity_failed;
 	struct ext4_transaction_entry entries[];
 };
 
@@ -674,6 +675,7 @@ ext4_transaction_snapshot(
 		}
 	}
 	if (transaction->count == transaction->credits) {
+		transaction->capacity_failed = true;
 		return EXT4_RANGE;
 	}
 	buffer = fs->environment.allocate(fs->environment.context, fs->info.block_size);
@@ -695,6 +697,12 @@ enum ext4_result
 ext4_transaction_buffer(struct ext4_transaction *transaction, uint64_t block, void **result)
 {
 	return ext4_transaction_snapshot(transaction, block, false, result);
+}
+
+bool
+ext4_transaction_capacity_failed(const struct ext4_transaction *transaction)
+{
+	return transaction->capacity_failed;
 }
 
 enum ext4_result

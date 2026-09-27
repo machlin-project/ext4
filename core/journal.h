@@ -142,6 +142,9 @@ enum ext4_result ext4_transaction_begin(
     struct ext4_journal *journal, uint32_t credits, struct ext4_transaction **result);
 enum ext4_result ext4_transaction_buffer(
     struct ext4_transaction *transaction, uint64_t block, void **result);
+/* A snapshot request exhausted this transaction's credits. Inspect before cancel;
+ * other RANGE failures do not authorize retrying a smaller operation. */
+bool ext4_transaction_capacity_failed(const struct ext4_transaction *transaction);
 /* Allocation accounting owns this special snapshot. Commit always retains the
  * recovery bit and recalculates its checksum before logging/checkpointing it. */
 enum ext4_result ext4_transaction_super(

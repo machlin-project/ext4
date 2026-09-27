@@ -373,6 +373,38 @@ still expose read-only operations and were not runtime-tested in this change.
 Security xattrs, concurrent native page-cache ownership and LXNU policy remain
 unaccepted; namespace operations have separate evidence below.
 
+## Portable large-write development evidence
+
+`ext4_write_partial` spans bounded transactions while preserving the atomic
+`ext4_write` contract. Successful batches contribute to a durable completed prefix;
+an uncertain transaction requires recovery and may add one more complete batch.
+The admitted xattr change accompanies the first successful batch only. Later
+batches retain its result and the same captured permissions and times.
+
+Ten existing format profiles pass large unaligned growth, overwrite, one-time
+xattr CREATE/REMOVE, held-unlinked writes, invalid inputs, reserved-space exhaustion
+and the explicit limit on zeroing written preallocation before the first byte.
+The workload exceeds the maximum transaction capacity while fitting the ordinary
+free pool of each fixture. The previous atomic-write suite also passes unchanged.
+
+Two small-journal profiles pass 370 allocation/read failures with retry of the
+remaining suffix. Six of those reads fail during commit preparation and require
+recovery of the exact earlier prefix. Their 972 write/flush interruption cases
+include 960 recoverable outcomes and 12 torn primary-superblock cases that explicitly
+reject with a checksum error before writing. Recoverable outcomes match either the
+reported prefix or that prefix plus the next complete transaction, including data,
+size, permissions, timestamps and attribute state. These are storage-model results.
+
+All 30 completed growth, overwrite and final-release exports pass independent
+debugfs byte/metadata/attribute comparisons, exact free-block/inode accounting and
+nonrepairing e2fsck. Original inputs remain unchanged. Evidence is under
+`artifacts/checks/partial-write-development-*`,
+`artifacts/checks/partial-write-independent-summary.json` and
+`artifacts/partial-write-independent/`. This batch's full regression is pending;
+the concurrent read-path CI run uses an earlier immutable source snapshot. Platform
+adapters still expose read-only operations, and concurrent writable owners remain
+outside this evidence.
+
 ## Portable namespace evidence
 
 `ext4-namespace-test` covers creation, mkdir and hard links across ten ordinary
