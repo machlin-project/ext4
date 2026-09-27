@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include <dirent.h>
 #include <sys/statvfs.h>
+#include <sys/sysmacros.h>
 
 #define TEST_SYMLINK_INLINE_CAPACITY 60U
 #define TEST_DIRECTORY_ENTRIES_MAX (1U << 20)
@@ -53,6 +54,8 @@ namespace_inode_checks(void)
 	unsigned int mode;
 	unsigned int uid;
 	unsigned int gid;
+	unsigned int device_major;
+	unsigned int device_minor;
 	long long atime;
 	long long mtime;
 	long long ctime;
@@ -64,14 +67,14 @@ namespace_inode_checks(void)
 	input = fopen("/namespace-inodes", "r");
 	require(input != NULL, "open independent namespace inode expectations");
 	for (;;) {
-		fields =
-		    fscanf(input, "%511s %llu %o %u %u %llu %llu %llu %lld %ld %lld %ld %lld %ld",
-			path, &inode, &mode, &uid, &gid, &links, &size, &blocks, &atime,
-			&access_nsec, &mtime, &modify_nsec, &ctime, &change_nsec);
+		fields = fscanf(input,
+		    "%511s %llu %o %u %u %llu %llu %llu %lld %ld %lld %ld %lld %ld %u %u", path,
+		    &inode, &mode, &uid, &gid, &links, &size, &blocks, &atime, &access_nsec, &mtime,
+		    &modify_nsec, &ctime, &change_nsec, &device_major, &device_minor);
 		if (fields == EOF) {
 			break;
 		}
-		require(fields == 14, "parse namespace inode expectation");
+		require(fields == 16, "parse namespace inode expectation");
 		snprintf(mounted, sizeof(mounted), "/mnt%s", path);
 		require(lstat(mounted, &actual) == 0, mounted);
 		if (actual.st_ino != inode || actual.st_mode != mode || actual.st_uid != uid ||
@@ -79,7 +82,9 @@ namespace_inode_checks(void)
 		    actual.st_size != (off_t)size || actual.st_blocks != (blkcnt_t)blocks ||
 		    actual.st_atim.tv_sec != atime || actual.st_atim.tv_nsec != access_nsec ||
 		    actual.st_mtim.tv_sec != mtime || actual.st_mtim.tv_nsec != modify_nsec ||
-		    actual.st_ctim.tv_sec != ctime || actual.st_ctim.tv_nsec != change_nsec) {
+		    actual.st_ctim.tv_sec != ctime || actual.st_ctim.tv_nsec != change_nsec ||
+		    major(actual.st_rdev) != device_major ||
+		    minor(actual.st_rdev) != device_minor) {
 			fprintf(stderr,
 			    "Namespace metadata mismatch: %s inode=%llu mode=%o "
 			    "uid=%u gid=%u links=%llu size=%lld blocks=%lld "
@@ -346,6 +351,7 @@ check_namespace(uint32_t block_size)
 	unsigned int basic;
 	unsigned int indexed;
 	unsigned int full_blocks;
+	unsigned int special;
 	unsigned int index;
 	int fd;
 	int directory;
@@ -353,7 +359,8 @@ check_namespace(uint32_t block_size)
 
 	input = fopen("/namespace-options", "r");
 	require(input != NULL, "open namespace options");
-	require(fscanf(input, "%u %u %u %u", &exhaust, &basic, &indexed, &full_blocks) == 4,
+	require(fscanf(input, "%u %u %u %u %u", &exhaust, &basic, &indexed, &full_blocks,
+		    &special) == 5,
 	    "read namespace options");
 	require(fclose(input) == 0, "close namespace options");
 	require(!indexed || (!exhaust && !basic), "validate indexed namespace options");
@@ -419,6 +426,18 @@ check_namespace(uint32_t block_size)
 	require(pwrite(fd, payload, sizeof(payload), (off_t)block_size + 3) == sizeof(payload),
 	    "Linux sparse write to created file");
 	require(fsync(fd) == 0, "Linux fsync namespace data and metadata");
+	if (special) {
+		require(mknod("/mnt/linux-device", S_IFCHR | TEST_MODE,
+			    makedev(EXT4_DEVICE_MAJOR_MAX, EXT4_DEVICE_MINOR_MAX)) == 0,
+		    "Linux create extended device identity");
+		require(mknod("/mnt/linux-fifo", S_IFIFO | TEST_MODE, 0) == 0 &&
+			mknod("/mnt/linux-socket", S_IFSOCK | TEST_MODE, 0) == 0,
+		    "Linux create FIFO and socket inodes");
+		require(renameat2(AT_FDCWD, "/mnt/linux-device", AT_FDCWD,
+			    "/mnt/linux-device-renamed", RENAME_WHITEOUT) == 0,
+		    "Linux atomically rename device and create whiteout");
+		puts("LINUX_EXT4_SPECIAL_FILES_PASS");
+	}
 	directory = open(directory_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	root = open(parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	require(directory >= 0 && root >= 0 && fsync(directory) == 0 && fsync(root) == 0,

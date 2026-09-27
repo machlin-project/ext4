@@ -136,6 +136,34 @@ write_images = []
 foreach name : write_names
   write_images += paths['fixtures'] / name
 endforeach
+foreach name : write_names
+  special_smoke = name in ['ext4-1k.img', 'ext4-4k.img'] ? [] : ['--smoke']
+  test('special-files-' + name, programs['namespace'],
+    args: ['--special'] + special_smoke + [paths['fixtures'] / name],
+    timeout: 900, suite: 'namespace')
+  test('whiteout-rename-' + name, programs['rename'],
+    args: ['--whiteout'] + special_smoke + [paths['fixtures'] / name],
+    timeout: 900, suite: 'rename')
+endforeach
+test('special-files-indexed', programs['namespace'],
+  args: ['--special', '--indexed', '--smoke', paths['fixtures'] / 'ext4-indexed.img'],
+  timeout: 300, suite: 'namespace')
+if get_option('namespace_tests')
+  test('special-files-no-filetype', programs['namespace'],
+    args: ['--special', '--smoke', paths['namespace_fixtures'] / 'namespace-no-filetype.img'],
+    timeout: 300, suite: 'namespace')
+  test('whiteout-rename-no-filetype', programs['rename'],
+    args: ['--whiteout', '--smoke', paths['namespace_fixtures'] / 'namespace-no-filetype.img'],
+    timeout: 300, suite: 'rename')
+endif
+if paths['group_checksum_fixtures'] != ''
+  test('special-files-group-checksum', programs['namespace'],
+    args: ['--special', '--smoke', paths['group_checksum_fixtures'] / 'gdt-1k32.img'],
+    timeout: 300, suite: 'core')
+  test('whiteout-rename-group-checksum', programs['rename'],
+    args: ['--whiteout', '--smoke', paths['group_checksum_fixtures'] / 'gdt-1k32.img'],
+    timeout: 300, suite: 'core')
+endif
 if paths['directory_index_64k_fixture'] != ''
   test('directory-create-index-64k', programs['index-write'],
     args: ['--create-index', '--fault-smoke', paths['directory_index_64k_fixture']],

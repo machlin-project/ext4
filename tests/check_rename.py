@@ -39,6 +39,12 @@ def scenario(operation):
         dict(source="regular", target="regular", large=True, held=True),
         dict(source="regular", grow=True),
         dict(source="directory", target="directory", exchange=True),
+        dict(source="regular", same=True, whiteout=True),
+        dict(source="directory", whiteout=True),
+        dict(source="regular", target="regular", large=True, whiteout=True),
+        dict(source="regular", grow=True, whiteout=True),
+        dict(source="regular", whiteout=True, attributes=True),
+        dict(source="regular", target="regular", large=True, held=True, whiteout=True),
     ]
     if operation not in range(len(cases)):
         raise RuntimeError(f"Unknown rename operation {operation}")
@@ -123,6 +129,12 @@ def main():
             if inode is None:
                 return None
             result = dict(inode=inode)
+            if inode["type"] == "character":
+                if test.get("attributes"):
+                    dump = output / f"{candidate.stem}.whiteout-attribute"
+                    run([tools["debugfs"], "-R", f"ea_get -f {dump} {path} user.whiteout", candidate])
+                    result["attribute"] = dump.read_bytes().hex()
+                return result
             if inode["type"] == "symlink":
                 data = symlink_bytes(candidate, path, inode, block_size, tools["debugfs"], run)
             else:
@@ -227,7 +239,28 @@ def main():
         destination_key = "left" if same else "right"
         expected["destination"] = moved(old["source"], old[destination_key]["inode"]["inode"])
         expected["source"] = moved(target, old["left"]["inode"]["inode"]) if exchange else None
-        if exchange:
+        whiteout_blocks = 0
+        if test.get("whiteout"):
+            whiteout = new["source"]
+            if whiteout is None:
+                raise RuntimeError("Missing whiteout at the old source name")
+            inode = whiteout["inode"]
+            if (inode["type"], inode["mode"], inode["device_major"], inode["device_minor"],
+                    inode["links"], inode["size"], inode["flags"], inode["uid"], inode["gid"]) != (
+                    "character", 0, 0, 0, 1, 0, 0, (1 << 32) - 3, 0x81234567):
+                raise RuntimeError("Whiteout has incorrect device identity or creation attributes")
+            if (inode["inode"] in (source_number, target_number) or inode["generation"] == 0 or
+                    any(inode[field] != NAMESPACE_TIME for field in ("atime", "mtime", "ctime"))):
+                raise RuntimeError("Whiteout reused a live inode or lost captured times")
+            whiteout_blocks = sectors if test.get("attributes") else 0
+            if inode["blocks"] != whiteout_blocks:
+                raise RuntimeError("Whiteout block accounting disagrees with its attribute storage")
+            if test.get("attributes") and whiteout.get("attribute") != bytes(
+                    (index * 31 + 7) & 255 for index in range(500)).hex():
+                raise RuntimeError("Whiteout lost admitted attribute bytes")
+            expected["source"] = whiteout
+            expected["left"]["names"]["source"] = inode["inode"]
+        elif exchange:
             expected["left"]["names"]["source"] = target_number
         else:
             del expected["left"]["names"]["source"]
@@ -264,8 +297,8 @@ def main():
         released = target["inode"]["blocks"] if last else 0
         if released % sectors:
             raise RuntimeError("Victim allocation is not a whole filesystem block")
-        expected["accounting"]["Free inodes"] += int(last)
-        expected["accounting"]["Free blocks"] += released // sectors - growth
+        expected["accounting"]["Free inodes"] += int(last) - int(test.get("whiteout", False))
+        expected["accounting"]["Free blocks"] += (released - whiteout_blocks) // sectors - growth
         if new != expected:
             record.update(expected=expected, observed=new)
             save()

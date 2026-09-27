@@ -60,10 +60,12 @@ ext4_inode_decode_record(
     struct ext4_fs *fs, uint32_t number, void *buffer, bool orphan, struct ext4_inode *inode)
 {
 	struct ext4_inode_disk *disk;
+	const struct ext4_device_disk *device;
 	struct ext4_inode decoded;
 	uint64_t xattr_block;
 	uint32_t checksum;
 	uint32_t expected;
+	uint32_t encoded_device;
 	uint16_t extra_size = 0;
 	bool checksum_hi;
 	enum ext4_result error;
@@ -118,6 +120,23 @@ ext4_inode_decode_record(
 		goto out;
 	}
 	ext4_copy(decoded.block_data, disk->block_data, sizeof(decoded.block_data));
+	if ((decoded.mode & EXT4_MODE_TYPE) == EXT4_MODE_CHARACTER ||
+	    (decoded.mode & EXT4_MODE_TYPE) == EXT4_MODE_BLOCK) {
+		device = (const struct ext4_device_disk *)disk->block_data;
+		encoded_device = ext4_le32(&device->legacy);
+		if (encoded_device != 0) {
+			decoded.device_major =
+			    (encoded_device >> EXT4_DEVICE_MAJOR_SHIFT) & EXT4_DEVICE_LEGACY_MASK;
+			decoded.device_minor = encoded_device & EXT4_DEVICE_LEGACY_MASK;
+		} else {
+			encoded_device = ext4_le32(&device->extended);
+			decoded.device_major =
+			    (encoded_device >> EXT4_DEVICE_MAJOR_SHIFT) & EXT4_DEVICE_MAJOR_MAX;
+			decoded.device_minor = (encoded_device & EXT4_DEVICE_LEGACY_MASK) |
+			    ((encoded_device >> EXT4_DEVICE_MINOR_HIGH_SHIFT) &
+				(EXT4_DEVICE_MINOR_MAX & ~EXT4_DEVICE_LEGACY_MASK));
+		}
+	}
 	xattr_block =
 	    ext4_le32(&disk->xattr_block_lo) | ((uint64_t)ext4_le16(&disk->xattr_block_hi) << 32);
 	decoded.fast_symlink = (decoded.mode & EXT4_MODE_TYPE) == EXT4_MODE_SYMLINK &&

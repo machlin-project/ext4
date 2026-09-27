@@ -12,6 +12,8 @@
 #define EXT4_UUID_SIZE 16U
 #define EXT4_VOLUME_NAME_SIZE 16U
 #define EXT4_INODE_BLOCK_BYTES 60U
+#define EXT4_DEVICE_MAJOR_MAX 0xfffU
+#define EXT4_DEVICE_MINOR_MAX 0xfffffU
 
 enum ext4_result {
 	EXT4_OK = 0,
@@ -151,6 +153,9 @@ struct ext4_inode {
 	uint32_t uid;
 	uint32_t gid;
 	uint32_t flags;
+	/* Device identity is meaningful only for character/block special files. */
+	uint32_t device_major;
+	uint32_t device_minor;
 	struct ext4_timestamp access_time;
 	struct ext4_timestamp change_time;
 	struct ext4_timestamp modify_time;
@@ -160,6 +165,12 @@ struct ext4_inode {
 	uint8_t block_data[EXT4_INODE_BLOCK_BYTES];
 	bool fast_symlink;
 	bool birth_time_valid;
+};
+
+struct ext4_special_file {
+	enum ext4_file_type type;
+	uint32_t device_major;
+	uint32_t device_minor;
 };
 
 struct ext4_dir_entry {
@@ -319,6 +330,14 @@ enum ext4_result ext4_create(struct ext4_fs *fs, uint32_t directory, uint32_t ge
 enum ext4_result ext4_mkdir(struct ext4_fs *fs, uint32_t directory, uint32_t generation,
     const uint8_t *name, size_t name_length, const struct ext4_inode_update *attributes,
     const struct ext4_timestamp *directory_time, struct ext4_inode *result);
+/* Create a character/block device, FIFO or socket inode with the same admitted
+ * attributes and atomic namespace contract. Device numbers use ext4's 12/20-bit
+ * major/minor format and must be zero for FIFO/socket. This stores metadata only;
+ * opening a device, pipe or socket is an adapter-owned operation. */
+enum ext4_result ext4_mknod(struct ext4_fs *fs, uint32_t directory, uint32_t generation,
+    const uint8_t *name, size_t name_length, const struct ext4_special_file *special,
+    const struct ext4_inode_update *attributes, const struct ext4_timestamp *directory_time,
+    struct ext4_inode *result);
 /* Create a symbolic link in the same atomic namespace transaction. Target bytes
  * are opaque except that NUL and empty targets are rejected. The target and its
  * terminating NUL must fit one filesystem block. The terminator is not in size.
@@ -358,6 +377,16 @@ enum ext4_result ext4_rmdir(struct ext4_fs *fs, uint32_t directory, uint32_t dir
  * Renaming two names for the same inode is a no-op except with NOREPLACE. */
 enum ext4_result ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
     const struct ext4_rename_entry *destination, uint32_t flags, const struct ext4_timestamp *time,
+    struct ext4_inode *result);
+/* Atomically rename and replace the old name with a new character device 0:0.
+ * whiteout_attributes supplies admitted creation attributes, including explicit
+ * ownership, zero permission bits and any parent ACL/security inheritance.
+ * Flags may be zero or NOREPLACE; EXCHANGE is invalid. Existing aliases of one
+ * inode remain a no-op as with rename. The caller authorizes device creation;
+ * no credentials or overlay policy are inferred inside the filesystem. */
+enum ext4_result ext4_rename_whiteout(struct ext4_fs *fs, const struct ext4_rename_entry *source,
+    const struct ext4_rename_entry *destination, uint32_t flags,
+    const struct ext4_inode_update *whiteout_attributes, const struct ext4_timestamp *time,
     struct ext4_inode *result);
 
 /* Offline recovery replays the journal, reconstructs allocation summaries and

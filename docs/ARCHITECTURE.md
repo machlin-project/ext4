@@ -330,7 +330,7 @@ the explicit admitted attribute transition when their permissions or owners chan
 Native UBC/FSKit
 integration and LXNU policy acceptance remain separate from this portable API.
 
-`ext4_create`, `ext4_mkdir`, `ext4_symlink` and `ext4_link` share the exclusive writable owner and
+`ext4_create`, `ext4_mkdir`, `ext4_mknod`, `ext4_symlink` and `ext4_link` share the exclusive writable owner and
 generation-checked inode resolution. Creation receives admitted permissions,
 full-width owners and captured atime/mtime/ctime, with optional representable birth
 time. The caller supplies one parent mutation time. The core does not derive
@@ -344,6 +344,15 @@ other fields. Allocation reads the released record's generation, advances it
 without producing zero, and clears all remaining old bytes. Lazy inode bitmaps
 are initialized from the group's actual inode bounds; allocation advances the
 initialized-table high-water mark while preserving the table-zeroed flag.
+
+`ext4_mknod` creates character/block devices, FIFOs and sockets with the same
+admitted attributes and transactional allocation. Character/block records expose
+12-bit major and 20-bit minor numbers; the decoder accepts legacy 8/8-bit and
+extended encodings. FIFO/socket requests require zero device numbers. Special
+inodes have no data map: only external attributes contribute to their block count,
+and file data APIs reject them. Device access, pipe/socket behavior and permission
+to create these objects belong to the platform owner. Hardlinks, replacement and
+open-unlinked retention use the existing inode lifetime contract.
 
 Symlink creation includes its target in that same transaction. Targets shorter
 than the 60-byte inode mapping area use inline storage with no extent flag or
@@ -458,10 +467,16 @@ cancels the entire private change before any device write.
 A replaced last-link inode enters the same orphan/lifetime path as unlink. A held
 victim remains accessible after its old name resolves to the replacement; otherwise
 bounded cleanup finishes before returning. Replacing one of several hardlinks
-preserves the other names and allocation. Whiteout creation is not implemented
-by this API. Authorization,
-sticky-directory rules and native rename locking remain responsibilities of the
+preserves the other names and allocation. Authorization, sticky-directory rules
+and native rename locking remain responsibilities of the
 platform owner; the portable operation cannot authorize itself.
+
+`ext4_rename_whiteout` adds a character device 0:0 at the old source name in the
+same transaction as the move, destination growth, replacement and any dotdot
+change. Its separate creation attributes supply explicit owners, zero permissions,
+captured times and admitted ACL/security inheritance. It supports NOREPLACE,
+rejects EXCHANGE and preserves the ordinary same-inode no-op. Allocation failure
+cancels the private transaction; no intermediate whiteout reaches storage.
 
 Directory link counts preserve the DIR_NLINK sentinel of one through mkdir,
 rmdir, moves, exchange and replacement. An indexed directory crossing the normal

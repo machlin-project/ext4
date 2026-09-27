@@ -62,7 +62,11 @@ LARGEDIR lookup and mutation with two internal index levels pass targeted portab
 faults, independent image checks, ten Linux recovery roundtrips and the complete
 295-test regression. Automatic creation of directory indexes and DIR_NLINK
 overflow also pass focused faults, independent image checks and Linux recovery;
-their complete 313-test regression remains pending.
+their 313-test CI run found an independent checker's stale index-flag expectation.
+That checker now admits verified automatic index creation. Special-file creation,
+legacy/extended device identities and atomic rename whiteouts pass focused faults,
+independent image checks and nine Linux recovery roundtrips. The expanded 338-test
+CI regression remains pending.
 Generated disk images and reports are not source artifacts.
 
 ## Layout

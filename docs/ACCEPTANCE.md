@@ -40,7 +40,7 @@ counted as portable-core implementation.
 
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
-| Ordinary filesystem operations | Special-file creation/device identity and whiteout; preallocation and hole punching; admitted persistent inode flags | Open; automatic index creation and DIR_NLINK now pass focused, independent and Linux acceptance |
+| Ordinary filesystem operations | Preallocation and hole punching; admitted persistent inode flags | Open; special files, atomic whiteout, automatic index creation and DIR_NLINK pass focused, independent and Linux acceptance |
 | Format compatibility | META_BG and SPARSE_SUPER2 geometry; EA_INODE and INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open |
 | Journal compatibility | Checksum v1, asynchronous commit, fast commit and external journals, including interrupted replay and cross-implementation recovery | Open |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
@@ -55,7 +55,7 @@ to the later adapters, with the core's metadata-transition contracts retained.
 
 Already implemented, with evidence below: ordinary reads and sparse mapping;
 transactional writes and allocation; restartable truncate and final deletion;
-create/link/symlink/mkdir/unlink/rmdir/rename; raw xattr storage and lifetime;
+create/link/symlink/mkdir/mknod/unlink/rmdir/rename and atomic whiteout; raw xattr storage and lifetime;
 internal-journal recovery and both orphan representations; HTree creation, lookup
 and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
 the remaining blocks have equal size or that the full core is accepted.
@@ -216,8 +216,44 @@ with six nonrepairing checks, three journal-only replays and idempotent repeated
 recovery. Inputs and binaries remain unchanged. Evidence is in
 `artifacts/checks/directory-growth-linux-summary.json` and the lab's
 `artifacts/ext4-journal/linux-reference/directory-growth-pending-linux/`.
-The complete 313-test CI regression remains pending. The reference Linux kernel
-has 4 KiB pages; 64 KiB format acceptance here is portable and independent only.
+The 313-test CI run found a checker defect in both namespace and legacy-group
+inspection: it expected the old parent flags after legitimate automatic index
+creation. The checker now admits that transition with bounded growth, exact names,
+unchanged unrelated attributes and clean e2fsck. Its 16 KiB regression control
+passes independently with the special-file package below. The complete regression
+has not yet been accepted. The reference Linux kernel has 4 KiB pages; 64 KiB
+format acceptance here is portable and independent only.
+
+## Special files and atomic whiteout
+
+Character/block devices, FIFOs and sockets now share creation attributes, xattrs,
+hardlinks and held-inode lifetime with existing namespace operations. Both device
+encodings preserve 12/20-bit identifiers. Atomic whiteout retains a character
+device 0:0 at the old source name while moving the source, including populated
+directories, replacement, destination growth and admitted whiteout attributes.
+Platform device access and authorization remain adapter responsibilities.
+
+All 29 selected sanitized tests pass, including 25 new cases across the writable
+format profiles, indexed/no-filetype parents and CRC16 groups. The freestanding
+2 KiB frame check passes. The fault matrix covers 1,274 resource failures and
+4,644 write/flush cuts: 4,524 recover a complete old/new state, while 120 torn
+checksummed primary superblocks explicitly fail closed. Three checksum cases are
+inapplicable; no Meson test skips. Evidence is in
+`artifacts/checks/special-files-development-*`.
+
+Independent checks pass 43 records: 18 special-file creations, 18 whiteout scenarios
+and seven 16 KiB namespace controls. All 254 nonrepairing checks, 84 journal-only
+oracle replays and 168 core recovery/idempotence commands return zero. Reports are
+under `artifacts/special-files-independent/` and `artifacts/whiteout-independent/`.
+
+Nine pending-journal roundtrips through Linux pass. Linux checks the core-created
+objects, creates its own devices/FIFOs/sockets and performs RENAME_WHITEOUT. Core
+and oracle replay agree, including the whiteout's external attribute; eighteen
+nonrepairing checks and nine journal-only replays return zero. The portable reader
+then verifies all nine returned images without writes. Source images and prepared
+binaries remain unchanged. Evidence is in `artifacts/checks/special-files-linux-summary.json`
+and the lab's `artifacts/ext4-journal/linux-reference/special-files-pending-linux/`
+and `whiteout-pending-linux/`. The expanded 338-test full CI regression is pending.
 
 ## Meson build acceptance
 

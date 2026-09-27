@@ -313,6 +313,8 @@ def main():
             print(f"PASS {source.name}: Linux attributes/ACLs, core/oracle replay, core mutation and Linux return", flush=True)
             continue
         if args.namespace:
+            if linux_namespace.special_case(case) and "LINUX_EXT4_SPECIAL_FILES_PASS" not in console:
+                raise RuntimeError("Missing Linux special-file creation and atomic whiteout evidence")
             if Path(case["image"]).name.startswith("exhaust-") and "LINUX_EXT4_NAMESPACE_REUSE_PASS" not in console:
                 raise RuntimeError("Missing Linux reuse evidence after inode exhaustion")
             if case.get("verified_space") is not None and "LINUX_EXT4_FULL_BLOCKS_PASS" not in console:

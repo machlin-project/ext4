@@ -14,7 +14,13 @@ enum operation {
 	CREATE_LINK,
 	CREATE_SYMLINK_SHORT,
 	CREATE_SYMLINK_LONG,
-	CREATE_SYMLINK_MAXIMUM
+	CREATE_SYMLINK_MAXIMUM,
+	CREATE_CHARACTER,
+	CREATE_BLOCK,
+	CREATE_FIFO,
+	CREATE_SOCKET,
+	CREATE_WHITEOUT_NODE,
+	CREATE_EXTENDED_CHARACTER
 };
 
 struct trace {
@@ -101,6 +107,8 @@ check_created(struct ext4_fs *fs, const struct ext4_inode *inode, uint16_t mode)
 	}
 }
 
+#include "special.h"
+
 static void
 symlink_contents(uint8_t *target, size_t length, bool binary)
 {
@@ -135,6 +143,15 @@ operate(struct ext4_fs *fs, const struct ext4_inode *parent, const struct ext4_i
 	case CREATE_LINK:
 		return ext4_link(fs, parent->number, parent->generation, name, length,
 		    target->number, target->generation, &update.change_time, result);
+	case CREATE_CHARACTER:
+	case CREATE_BLOCK:
+	case CREATE_FIFO:
+	case CREATE_SOCKET:
+	case CREATE_WHITEOUT_NODE:
+	case CREATE_EXTENDED_CHARACTER:
+		return ext4_mknod(fs, parent->number, parent->generation, name, length,
+		    &special_files[operation - CREATE_CHARACTER], &update, &update.change_time,
+		    result);
 	case CREATE_SYMLINK_SHORT:
 	case CREATE_SYMLINK_LONG:
 	case CREATE_SYMLINK_MAXIMUM:
@@ -1251,6 +1268,8 @@ main(int argc, char **argv)
 	bool groups = false;
 	bool indexed = false;
 	bool symlinks = false;
+	bool special = false;
+	bool special_read = false;
 	int argument = 1;
 	unsigned int operation;
 
@@ -1265,6 +1284,10 @@ main(int argc, char **argv)
 			indexed = true;
 		} else if (strcmp(argv[argument], "--symlinks") == 0) {
 			symlinks = true;
+		} else if (strcmp(argv[argument], "--special") == 0) {
+			special = true;
+		} else if (strcmp(argv[argument], "--special-read") == 0) {
+			special_read = true;
 		} else if (strcmp(argv[argument], "--export") == 0 && argument + 1 < argc) {
 			exports = argv[++argument];
 		} else {
@@ -1276,6 +1299,23 @@ main(int argc, char **argv)
 	CHECK(argument < argc);
 	for (; argument < argc; argument++) {
 		storage_open(&device, argv[argument]);
+		if (special_read) {
+			special_read_returned(&device);
+			storage_close(&device);
+			continue;
+		}
+		if (special) {
+			special_cases(&device, indexed);
+			special_guards(&device);
+			for (operation = CREATE_CHARACTER; operation <= CREATE_EXTENDED_CHARACTER;
+			    operation++) {
+				fault_cases(&device, (enum operation)operation, smoke, exports,
+				    argv[argument], "");
+			}
+			storage_close(&device);
+			printf("PASS special files: %s\n", argv[argument]);
+			continue;
+		}
 		if (indexed) {
 			indexed_operations(&device);
 			storage_close(&device);

@@ -441,6 +441,15 @@ independent checker and Linux `--namespace` runner consume these outputs;
 `symlinks-` images are clean multi-target cases, while atomic entries have the
 usual committed and uncommitted exports.
 
+Use `ext4-namespace-test --special` for device, FIFO and socket creation, and
+`ext4-rename-test --whiteout` for atomic move/whiteout cases. Both accept the
+existing `--smoke --export DIR` options; their numbered exports can share a
+directory with the respective ordinary suite. Check them with
+`check_namespace.py` or `check_rename.py` and use the resulting report with the
+Linux `--namespace --pending` runner. After reverse replay,
+`ext4-namespace-test --special-read RETURNED_IMAGE` verifies Linux-created device
+identities, FIFOs, sockets and whiteouts through the portable reader.
+
 `ext4-removal-test IMAGE...` runs unlink/rmdir, held-inode lifetime, malformed
 inputs and fault recovery. Its ordinary and indexed-validation suites are always
 configured; small and orphan-file suites follow the corresponding fixture options.

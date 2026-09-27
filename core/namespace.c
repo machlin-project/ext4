@@ -130,11 +130,76 @@ ext4_symlink_initialize(struct ext4_allocation *allocation, struct ext4_inode *i
 }
 
 static enum ext4_result
+ext4_creation_attributes(const struct ext4_inode_update *attributes)
+{
+	if (attributes == NULL || (attributes->fields & EXT4_CREATE_FIELDS) != EXT4_CREATE_FIELDS ||
+	    (attributes->fields &
+		~(uint32_t)(EXT4_CREATE_FIELDS | EXT4_ATTR_BIRTH_TIME | EXT4_ATTR_XATTRS)) ||
+	    (attributes->permissions & ~EXT4_MODE_PERMISSIONS)) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	return EXT4_OK;
+}
+
+static enum ext4_result
+ext4_namespace_new(struct ext4_allocation *allocation, const struct ext4_inode *parent,
+    const struct ext4_inode_disk *parent_disk, uint16_t mode,
+    const struct ext4_inode_update *attributes, struct ext4_inode_disk **disk,
+    struct ext4_inode *child)
+{
+	struct ext4_fs *fs = allocation->fs;
+	uint32_t flags;
+	enum ext4_result error;
+
+	/* The owner admits ACL/security inheritance, including explicitly none. */
+	if (ext4_inode_has_xattrs(fs, parent_disk) && !(attributes->fields & EXT4_ATTR_XATTRS)) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	error = ext4_allocate_inode(allocation, mode, disk, child);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	flags = parent->flags & EXT4_INHERITED_FILE_FLAGS;
+	if (mode == EXT4_MODE_DIRECTORY) {
+		flags |= parent->flags & EXT4_INODE_DIRSYNC;
+	} else if (mode != EXT4_MODE_REGULAR) {
+		flags &= EXT4_INODE_NODUMP | EXT4_INODE_NOATIME;
+	}
+	ext4_encode32(&(*disk)->flags, flags | child->flags);
+	error = ext4_inode_apply(fs, *disk, attributes);
+	if (error == EXT4_OK) {
+		ext4_inode_checksum_set(fs, child->number, *disk);
+		error = ext4_inode_decode(fs, child->number, *disk, child);
+	}
+	if (error == EXT4_OK && (attributes->fields & EXT4_ATTR_XATTRS)) {
+		error = ext4_xattr_apply(
+		    allocation, child, *disk, attributes->xattrs, attributes->xattr_count);
+	}
+	return error;
+}
+
+static void
+ext4_namespace_device(struct ext4_inode_disk *disk, const struct ext4_special_file *special)
+{
+	struct ext4_device_disk *device = (struct ext4_device_disk *)disk->block_data;
+	uint32_t major = special->device_major;
+	uint32_t minor = special->device_minor;
+
+	if (major <= EXT4_DEVICE_LEGACY_MASK && minor <= EXT4_DEVICE_LEGACY_MASK) {
+		ext4_encode32(&device->legacy, (major << EXT4_DEVICE_MAJOR_SHIFT) | minor);
+	} else {
+		ext4_encode32(&device->extended,
+		    (major << EXT4_DEVICE_MAJOR_SHIFT) | (minor & EXT4_DEVICE_LEGACY_MASK) |
+			((minor & ~EXT4_DEVICE_LEGACY_MASK) << EXT4_DEVICE_MINOR_HIGH_SHIFT));
+	}
+}
+
+static enum ext4_result
 ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation,
     const uint8_t *name, size_t name_length, uint16_t create_mode, uint32_t target,
     uint32_t target_generation, const struct ext4_inode_update *attributes,
-    const uint8_t *link_target, size_t link_length, const struct ext4_timestamp *time,
-    struct ext4_inode *result)
+    const uint8_t *link_target, size_t link_length, const struct ext4_special_file *special,
+    const struct ext4_timestamp *time, struct ext4_inode *result)
 {
 	struct ext4_transaction *transaction = NULL;
 	struct ext4_inode_disk *parent_disk;
@@ -147,7 +212,6 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	uint64_t free_blocks;
 	uint32_t feature_compat;
 	uint32_t feature_ro_compat;
-	uint32_t flags;
 	size_t index;
 	bool ready = false;
 	enum ext4_file_type type;
@@ -156,12 +220,7 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	if (fs == NULL || time == NULL || result == NULL) {
 		return EXT4_INVALID_ARGUMENT;
 	}
-	if (create_mode != 0 &&
-	    (attributes == NULL ||
-		(attributes->fields & EXT4_CREATE_FIELDS) != EXT4_CREATE_FIELDS ||
-		(attributes->fields &
-		    ~(uint32_t)(EXT4_CREATE_FIELDS | EXT4_ATTR_BIRTH_TIME | EXT4_ATTR_XATTRS)) ||
-		(attributes->permissions & ~EXT4_MODE_PERMISSIONS))) {
+	if (create_mode != 0 && ext4_creation_attributes(attributes) != EXT4_OK) {
 		return EXT4_INVALID_ARGUMENT;
 	}
 	if (fs->aborted) {
@@ -216,13 +275,6 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		error = EXT4_CORRUPT;
 		goto cancel;
 	}
-	/* The owner supplies the admitted inheritance decision, including an
-	 * explicit empty batch when no parent ACL/security value should pass on. */
-	if (create_mode != 0 && ext4_inode_has_xattrs(fs, parent_disk) &&
-	    !(attributes->fields & EXT4_ATTR_XATTRS)) {
-		error = EXT4_INVALID_ARGUMENT;
-		goto cancel;
-	}
 	ext4_zero(&times, sizeof(times));
 	times.fields = EXT4_ATTR_MODIFY_TIME | EXT4_ATTR_CHANGE_TIME;
 	times.modify_time = *time;
@@ -268,27 +320,8 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		goto cancel;
 	}
 	if (create_mode != 0) {
-		error = ext4_allocate_inode(&allocation, create_mode, &child_disk, &child);
-		if (error != EXT4_OK) {
-			goto cancel;
-		}
-		flags = parent.flags & EXT4_INHERITED_FILE_FLAGS;
-		if (create_mode == EXT4_MODE_DIRECTORY) {
-			flags |= parent.flags & EXT4_INODE_DIRSYNC;
-		} else if (create_mode == EXT4_MODE_SYMLINK) {
-			flags &= EXT4_INODE_NODUMP | EXT4_INODE_NOATIME;
-		}
-		flags |= child.flags;
-		ext4_encode32(&child_disk->flags, flags);
-		error = ext4_inode_apply(fs, child_disk, attributes);
-		if (error == EXT4_OK) {
-			ext4_inode_checksum_set(fs, child.number, child_disk);
-			error = ext4_inode_decode(fs, child.number, child_disk, &child);
-		}
-		if (error == EXT4_OK && (attributes->fields & EXT4_ATTR_XATTRS)) {
-			error = ext4_xattr_apply(&allocation, &child, child_disk,
-			    attributes->xattrs, attributes->xattr_count);
-		}
+		error = ext4_namespace_new(&allocation, &parent, parent_disk, create_mode,
+		    attributes, &child_disk, &child);
 		if (error == EXT4_OK && create_mode == EXT4_MODE_DIRECTORY) {
 			error = ext4_directory_initialize(
 			    &allocation, &child, child_disk, parent.number);
@@ -297,6 +330,9 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 			    &allocation, &child, child_disk, link_target, link_length);
 		} else if (error == EXT4_OK) {
 			error = ext4_inode_account(&allocation, &child, child_disk, 0);
+			if (error == EXT4_OK && special != NULL) {
+				ext4_namespace_device(child_disk, special);
+			}
 		}
 		if (error != EXT4_OK) {
 			goto cancel;
@@ -359,7 +395,7 @@ ext4_create(struct ext4_fs *fs, uint32_t directory, uint32_t generation, const u
     const struct ext4_timestamp *directory_time, struct ext4_inode *result)
 {
 	return ext4_namespace_add(fs, directory, generation, name, name_length, EXT4_MODE_REGULAR,
-	    0, 0, attributes, NULL, 0, directory_time, result);
+	    0, 0, attributes, NULL, 0, NULL, directory_time, result);
 }
 
 enum ext4_result
@@ -368,7 +404,46 @@ ext4_mkdir(struct ext4_fs *fs, uint32_t directory, uint32_t generation, const ui
     const struct ext4_timestamp *directory_time, struct ext4_inode *result)
 {
 	return ext4_namespace_add(fs, directory, generation, name, name_length, EXT4_MODE_DIRECTORY,
-	    0, 0, attributes, NULL, 0, directory_time, result);
+	    0, 0, attributes, NULL, 0, NULL, directory_time, result);
+}
+
+enum ext4_result
+ext4_mknod(struct ext4_fs *fs, uint32_t directory, uint32_t generation, const uint8_t *name,
+    size_t name_length, const struct ext4_special_file *special,
+    const struct ext4_inode_update *attributes, const struct ext4_timestamp *directory_time,
+    struct ext4_inode *result)
+{
+	uint16_t mode;
+
+	if (special == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	switch (special->type) {
+	case EXT4_FT_CHARACTER:
+		mode = EXT4_MODE_CHARACTER;
+		break;
+	case EXT4_FT_BLOCK:
+		mode = EXT4_MODE_BLOCK;
+		break;
+	case EXT4_FT_FIFO:
+		mode = EXT4_MODE_FIFO;
+		break;
+	case EXT4_FT_SOCKET:
+		mode = EXT4_MODE_SOCKET;
+		break;
+	default:
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if (mode == EXT4_MODE_FIFO || mode == EXT4_MODE_SOCKET) {
+		if (special->device_major != 0 || special->device_minor != 0) {
+			return EXT4_INVALID_ARGUMENT;
+		}
+	} else if (special->device_major > EXT4_DEVICE_MAJOR_MAX ||
+	    special->device_minor > EXT4_DEVICE_MINOR_MAX) {
+		return EXT4_RANGE;
+	}
+	return ext4_namespace_add(fs, directory, generation, name, name_length, mode, 0, 0,
+	    attributes, NULL, 0, special, directory_time, result);
 }
 
 enum ext4_result
@@ -377,7 +452,7 @@ ext4_link(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation,
     const struct ext4_timestamp *time, struct ext4_inode *result)
 {
 	return ext4_namespace_add(fs, directory, directory_generation, name, name_length, 0, target,
-	    target_generation, NULL, NULL, 0, time, result);
+	    target_generation, NULL, NULL, 0, NULL, time, result);
 }
 
 enum ext4_result
@@ -387,7 +462,7 @@ ext4_symlink(struct ext4_fs *fs, uint32_t directory, uint32_t generation, const 
     struct ext4_inode *result)
 {
 	return ext4_namespace_add(fs, directory, generation, name, name_length, EXT4_MODE_SYMLINK,
-	    0, 0, attributes, target, target_length, directory_time, result);
+	    0, 0, attributes, target, target_length, NULL, directory_time, result);
 }
 
 static enum ext4_result
@@ -618,8 +693,10 @@ ext4_rmdir(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation
 struct ext4_rename_state {
 	struct ext4_inode parents[2];
 	struct ext4_inode objects[2];
+	struct ext4_inode whiteout;
 	struct ext4_inode_disk *parent_disks[2];
 	struct ext4_inode_disk *object_disks[2];
+	struct ext4_inode_disk *whiteout_disk;
 	struct ext4_directory_slot entries[2];
 	struct ext4_directory_slot dotdot[2];
 	struct ext4_allocation allocation;
@@ -711,9 +788,10 @@ ext4_rename_ancestry(struct ext4_fs *fs, uint32_t moved, uint32_t parent)
 	}
 }
 
-enum ext4_result
-ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
-    const struct ext4_rename_entry *destination, uint32_t flags, const struct ext4_timestamp *time,
+static enum ext4_result
+ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
+    const struct ext4_rename_entry *destination, uint32_t flags,
+    const struct ext4_inode_update *whiteout_attributes, const struct ext4_timestamp *time,
     struct ext4_inode *result)
 {
 	const struct ext4_rename_entry *names[2];
@@ -722,6 +800,7 @@ ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
 	struct ext4_inode_update times;
 	struct ext4_directory_slot space;
 	uint64_t free_blocks;
+	uint32_t feature_compat;
 	uint32_t feature_ro_compat;
 	unsigned int index;
 	int delta[2] = { 0, 0 };
@@ -739,11 +818,23 @@ ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
 	    flags == (EXT4_RENAME_NOREPLACE | EXT4_RENAME_EXCHANGE)) {
 		return EXT4_INVALID_ARGUMENT;
 	}
+	if (whiteout_attributes != NULL &&
+	    (exchange || ext4_creation_attributes(whiteout_attributes) != EXT4_OK ||
+		whiteout_attributes->permissions != 0)) {
+		return EXT4_INVALID_ARGUMENT;
+	}
 	if (fs->aborted) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
 	if (fs->journal == NULL) {
 		return EXT4_READ_ONLY;
+	}
+	if (whiteout_attributes != NULL && (whiteout_attributes->fields & EXT4_ATTR_XATTRS)) {
+		error = ext4_xattr_changes_validate(
+		    fs, whiteout_attributes->xattrs, whiteout_attributes->xattr_count);
+		if (error != EXT4_OK) {
+			return error;
+		}
 	}
 	names[0] = source;
 	names[1] = destination;
@@ -838,6 +929,24 @@ ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
 			delta[1U - index]++;
 		}
 	}
+	if (whiteout_attributes != NULL) {
+		error = ext4_namespace_new(&state->allocation, &state->parents[0],
+		    state->parent_disks[0], EXT4_MODE_CHARACTER, whiteout_attributes,
+		    &state->whiteout_disk, &state->whiteout);
+		if (error == EXT4_OK) {
+			error = ext4_inode_account(
+			    &state->allocation, &state->whiteout, state->whiteout_disk, 0);
+		}
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
+		ext4_inode_checksum_set(fs, state->whiteout.number, state->whiteout_disk);
+		/* The zeroed device identity represents the whiteout. Subsequent
+		 * allocations belong to the destination directory, not this inode. */
+		state->allocation.allocated = 0;
+		state->allocation.freed = 0;
+		state->allocation.detached_shared_blocks = 0;
+	}
 	if (exists && !exchange) {
 		if (directory[1]) {
 			error = ext4_directory_scan(&state->allocation, &state->objects[1],
@@ -879,6 +988,9 @@ ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
 		error = ext4_directory_replace(&state->allocation, &state->parents[0],
 		    &state->entries[0], state->objects[1].number,
 		    ext4_namespace_type(state->objects[1].mode));
+	} else if (whiteout_attributes != NULL) {
+		error = ext4_directory_replace(&state->allocation, &state->parents[0],
+		    &state->entries[0], state->whiteout.number, EXT4_FT_CHARACTER);
 	} else {
 		error = ext4_directory_remove(
 		    &state->allocation, &state->parents[0], &state->entries[0]);
@@ -946,6 +1058,9 @@ ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
 		goto cancel;
 	}
 	free_blocks = state->allocation.free_blocks;
+	feature_compat = state->allocation.super == NULL
+	    ? fs->info.feature_compat
+	    : ext4_le32(&state->allocation.super->feature_compat);
 	feature_ro_compat = state->allocation.super == NULL
 	    ? fs->info.feature_ro_compat
 	    : ext4_le32(&state->allocation.super->feature_ro_compat);
@@ -957,7 +1072,11 @@ ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
 		goto out;
 	}
 	fs->info.free_blocks = free_blocks;
+	fs->info.feature_compat = feature_compat;
 	fs->info.feature_ro_compat |= feature_ro_compat & EXT4_FEATURE_RO_DIR_NLINK;
+	if (whiteout_attributes != NULL) {
+		fs->info.free_inodes--;
+	}
 	if (last) {
 		error = ext4_namespace_orphan_complete(
 		    fs, state->objects[1].number, state->objects[1].generation);
@@ -974,4 +1093,25 @@ cancel:
 out:
 	fs->environment.release(fs->environment.context, state, sizeof(*state));
 	return error;
+}
+
+enum ext4_result
+ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
+    const struct ext4_rename_entry *destination, uint32_t flags, const struct ext4_timestamp *time,
+    struct ext4_inode *result)
+{
+	return ext4_namespace_rename(fs, source, destination, flags, NULL, time, result);
+}
+
+enum ext4_result
+ext4_rename_whiteout(struct ext4_fs *fs, const struct ext4_rename_entry *source,
+    const struct ext4_rename_entry *destination, uint32_t flags,
+    const struct ext4_inode_update *whiteout_attributes, const struct ext4_timestamp *time,
+    struct ext4_inode *result)
+{
+	if (whiteout_attributes == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	return ext4_namespace_rename(
+	    fs, source, destination, flags, whiteout_attributes, time, result);
 }

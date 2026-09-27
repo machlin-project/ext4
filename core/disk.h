@@ -41,6 +41,9 @@
 #define EXT4_CRC32C_POLYNOMIAL 0x82f63b78U
 #define EXT4_CRC16_POLYNOMIAL 0xa001U
 #define EXT4_ORPHAN_MAGIC 0x0b10ca04U
+#define EXT4_DEVICE_LEGACY_MASK 0xffU
+#define EXT4_DEVICE_MAJOR_SHIFT 8U
+#define EXT4_DEVICE_MINOR_HIGH_SHIFT 12U
 
 #define EXT4_FEATURE_COMPAT_HAS_JOURNAL 0x0004U
 #define EXT4_FEATURE_COMPAT_EXT_ATTR 0x0008U
@@ -319,6 +322,12 @@ struct ext4_inode_disk {
 	struct ext4_le32 birth_time_extra;
 	struct ext4_le32 version_hi;
 	struct ext4_le32 project_id;
+};
+
+/* Character/block devices use this prefix of i_block instead of a block map. */
+struct ext4_device_disk {
+	struct ext4_le32 legacy;
+	struct ext4_le32 extended;
 };
 
 struct ext4_extent_header_disk {

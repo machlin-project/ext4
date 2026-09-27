@@ -20,6 +20,13 @@ def node_name(index):
     return f"node-{index:08d}".ljust(255, "n")
 
 
+def special_case(case):
+    name = Path(case["image"]).name
+    creation = re.fullmatch(r"atomic-(\d+)-.+\.img", name)
+    return (creation is not None and 6 <= int(creation[1]) <= 11 or
+            case.get("operation", -1) in range(11, 17) and bool(case.get("verified_rename")))
+
+
 def rename_objects(case):
     state = case.get("verified_rename")
     if state is None:
@@ -112,10 +119,12 @@ def prepare(case, tree, tools):
             data_paths += ["/kept-name"]
     else:
         paths += ["/atomic-entry"]
-    (tree / "namespace-options").write_text(f"{int(exhaust)} {int(basic)} {int(indexed)} {int(full_blocks)}\n")
+    (tree / "namespace-options").write_text(
+        f"{int(exhaust)} {int(basic)} {int(indexed)} {int(full_blocks)} {int(special_case(case))}\n")
     inode_lines = []
     directories = []
-    kinds = {"regular": stat.S_IFREG, "directory": stat.S_IFDIR, "symlink": stat.S_IFLNK}
+    kinds = {"regular": stat.S_IFREG, "directory": stat.S_IFDIR, "symlink": stat.S_IFLNK,
+             "character": stat.S_IFCHR, "block": stat.S_IFBLK, "FIFO": stat.S_IFIFO, "socket": stat.S_IFSOCK}
     for path in paths:
         text = run([tools / "debugfs/debugfs", "-R", f"stat {path}", image])
         inode = inode_fields(text)
@@ -128,6 +137,7 @@ def prepare(case, tree, tools):
             seconds, extra = inode[field]
             seconds = seconds - (1 << 32) if seconds & (1 << 31) else seconds
             values += [seconds + ((extra & 3) << 32), extra >> 2]
+        values += [inode.get("device_major", 0), inode.get("device_minor", 0)]
         inode_lines.append(" ".join(str(value) for value in values))
         if kind[1] == "directory":
             listing = byte_entries(run([tools / "debugfs/debugfs", "-R", f"ls -p {path}", image], raw=True))
@@ -141,7 +151,7 @@ def prepare(case, tree, tools):
             name = f"link-{len(link_lines)}"
             (expected / name).write_bytes(target)
             link_lines.append(f"{path} /expected/{name}")
-        elif path == "/atomic-entry":
+        elif path == "/atomic-entry" and kind[1] == "regular":
             data_paths += [path]
     (tree / "namespace-inodes").write_text("\n".join(inode_lines) + "\n")
     (tree / "namespace-directories").write_text("\n".join(directories) + "\n")
@@ -223,7 +233,12 @@ def verify(case, image, output, tools, recover, run):
         if observed_diagnostics != diagnostics or fix_pending:
             raise RuntimeError("Journal-only oracle accounting diagnostics disagree with group totals")
         inodes = {}
-        for path in (base + "/", base + "/linux-dir", base + "/linux-dir/renamed", base + "/linux-link", base + "/linux-symlink"):
+        created_paths = [base + "/", base + "/linux-dir", base + "/linux-dir/renamed", base + "/linux-link", base + "/linux-symlink"]
+        created_names = ["linux-dir", "linux-link", "linux-symlink"]
+        if special_case(case):
+            created_names += ["linux-device", "linux-device-renamed", "linux-fifo", "linux-socket"]
+            created_paths += ["/" + name for name in created_names[3:]]
+        for path in created_paths:
             inodes[path] = inode_fields(run([tools / "debugfs/debugfs", "-R", f"stat {path}", candidate]))
         retained_links = {}
         for path in symlink_paths(case):
@@ -251,6 +266,8 @@ def verify(case, image, output, tools, recover, run):
         expected_free = case["accounting"]["Free inodes"]
         if not Path(case["image"]).name.startswith("exhaust-"):
             expected_free -= 3
+        if special_case(case):
+            expected_free -= 4
         if counts["Free inodes"] != expected_free:
             raise RuntimeError("Linux inode reuse or primary free-inode reconstruction disagrees")
         names = {}
@@ -268,13 +285,13 @@ def verify(case, image, output, tools, recover, run):
             if value["inode"]["type"] == "directory":
                 expected_names = dict(value["names"])
                 if path == "/":
-                    for name in ("linux-dir", "linux-link", "linux-symlink"):
+                    for name in created_names:
                         expected_names[name] = inodes[f"/{name}"]["inode"]
                 listing = entries(run([tools / "debugfs/debugfs", "-R", f"ls -p {path}", candidate]))
                 if listing != expected_names:
                     raise RuntimeError(f"Linux changed rename topology or restored an old name: {path}")
                 retained["names"] = listing
-            else:
+            elif value["inode"]["type"] in ("regular", "symlink"):
                 if value["inode"]["type"] == "symlink":
                     contents = bytes.fromhex(retained_links[path])
                 else:
@@ -286,7 +303,33 @@ def verify(case, image, output, tools, recover, run):
                 if len(contents) != value["data_size"] or actual_hash != value["data_sha256"]:
                     raise RuntimeError(f"Linux changed the contents of a renamed object: {path}")
                 retained["data_sha256"] = actual_hash
+            elif "attribute" in value:
+                dump = output / f"{prefix}-{image.stem}.whiteout-attribute"
+                run([tools / "debugfs/debugfs", "-R", f"ea_get -f {dump} {path} user.whiteout", candidate])
+                if dump.read_bytes().hex() != value["attribute"]:
+                    raise RuntimeError("Linux changed the whiteout's admitted attribute")
+                retained["attribute"] = value["attribute"]
             retained_rename[path] = retained
+        retained_special = {}
+        if special_case(case):
+            if not case.get("verified_rename"):
+                for source in (original, candidate):
+                    retained_special[str(source)] = inode_fields(run(
+                        [tools / "debugfs/debugfs", "-R", "stat /atomic-entry", source]))
+                if retained_special[str(original)] != retained_special[str(candidate)]:
+                    raise RuntimeError("Linux changed the core-created special inode")
+                retained_special = {"/atomic-entry": retained_special[str(candidate)]}
+            for path, kind, mode, major, minor in (
+                    ("/linux-device", "character", 0, 0, 0),
+                    ("/linux-device-renamed", "character", 0o600, 4095, 1048575),
+                    ("/linux-fifo", "FIFO", 0o600, 0, 0),
+                    ("/linux-socket", "socket", 0o600, 0, 0)):
+                inode = inode_fields(run([tools / "debugfs/debugfs", "-R", f"stat {path}", candidate]))
+                if inode is None or (inode["type"], inode["mode"], inode.get("device_major", 0),
+                        inode.get("device_minor", 0), inode["uid"], inode["gid"], inode["links"],
+                        inode["size"], inode["blocks"]) != (kind, mode, major, minor, 0, 0, 1, 0, 0):
+                    raise RuntimeError("Core replay lost a Linux special inode or whiteout")
+                retained_special[path] = inode
         if original.name.startswith(("removed-", "remove-atomic-")):
             expected_names = entries(run([tools / "debugfs/debugfs", "-R", "ls -p /", original]))
             if "victim" in expected_names:
@@ -313,7 +356,7 @@ def verify(case, image, output, tools, recover, run):
         return {"inodes": inodes, "directories": names, "accounting": counts,
                 "retained_symlinks": retained_links, "retained_alias": retained_alias,
                 "retained_rename": retained_rename, "retained_index": retained_index,
-                "retained_space": retained_space}, lag
+                "retained_space": retained_space, "retained_special": retained_special}, lag
 
     observed, _ = snapshot(image, "core")
     independent, lag = snapshot(oracle, "oracle", allow_summary_lag=True)

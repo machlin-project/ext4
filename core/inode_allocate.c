@@ -91,7 +91,9 @@ ext4_allocate_inode(struct ext4_allocation *allocation, uint16_t mode,
 	uint16_t desired;
 	enum ext4_result error;
 
-	if (mode != EXT4_MODE_REGULAR && mode != EXT4_MODE_DIRECTORY && mode != EXT4_MODE_SYMLINK) {
+	if (mode != EXT4_MODE_REGULAR && mode != EXT4_MODE_DIRECTORY && mode != EXT4_MODE_SYMLINK &&
+	    mode != EXT4_MODE_CHARACTER && mode != EXT4_MODE_BLOCK && mode != EXT4_MODE_FIFO &&
+	    mode != EXT4_MODE_SOCKET) {
 		return EXT4_INVALID_ARGUMENT;
 	}
 	error = ext4_allocation_super(allocation);
@@ -192,7 +194,9 @@ ext4_allocate_inode(struct ext4_allocation *allocation, uint16_t mode,
 	if (extra != 0) {
 		ext4_encode16(&disk->extra_size, extra);
 	}
-	if (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) {
+	if ((fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) &&
+	    (mode == EXT4_MODE_REGULAR || mode == EXT4_MODE_DIRECTORY ||
+		mode == EXT4_MODE_SYMLINK)) {
 		ext4_encode32(&disk->flags, EXT4_INODE_EXTENTS);
 		extent = (struct ext4_extent_header_disk *)disk->block_data;
 		ext4_encode16(&extent->magic, EXT4_EXTENT_MAGIC);

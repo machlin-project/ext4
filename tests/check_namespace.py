@@ -20,7 +20,16 @@ SECTOR_SIZE = 512
 INODE_BLOCK_DATA_OFFSET = 0x28
 INODE_BLOCK_DATA_SIZE = 60
 INODE_EXTENTS = 0x80000
+INODE_INDEX = 0x1000
 REMOVAL_DATA_BLOCKS = 35
+SPECIAL_FILES = {
+    6: ("character", 255, 255),
+    7: ("block", 4095, 1048575),
+    8: ("FIFO", 0, 0),
+    9: ("socket", 0, 0),
+    10: ("character", 0, 0),
+    11: ("character", 256, 256),
+}
 
 
 def symlink_target(length, binary=False):
@@ -82,6 +91,11 @@ def inode_fields(text):
     if kind is None:
         raise RuntimeError("Missing independently decoded inode type")
     result["type"] = kind[1]
+    if result["type"] in ("character", "block"):
+        device = re.search(r"Device major/minor number:\s+(\d+):(\d+)", text)
+        if device is None:
+            raise RuntimeError("Missing independently decoded device identity")
+        result.update(device_major=int(device[1]), device_minor=int(device[2]))
     for key in ("atime", "mtime", "ctime", "crtime"):
         match = re.search(rf"\b{key}:\s+0x([0-9a-f]+)(?::([0-9a-f]+))?", text)
         result[key] = (int(match[1], 16), int(match[2] or "0", 16)) if match else None
@@ -115,16 +129,18 @@ def main():
     exports = args.exports.resolve()
     tools = resolve_tools(args.tools_root)
     images = sorted(p for p in exports.glob("*.img") if re.match(
-        r"^(basic-|exhaust-|symlinks-|removed-|(?:append-|group-|remove-)?atomic-[0-5]-)", p.name))
+        r"^(basic-|exhaust-|symlinks-|removed-|(?:append-|group-|remove-)?atomic-\d+-)", p.name))
     if not images:
         raise RuntimeError("No namespace exports")
     records = []
     for image in images:
-        match = re.fullmatch(r"(append-|group-|remove-)?atomic-([0-5])-(.+\.img)", image.name)
+        match = re.fullmatch(r"(append-|group-|remove-)?atomic-(\d+)-(.+\.img)", image.name)
         atomic = match is not None
         scenario = (match[1] or "") if atomic else ""
         removal = scenario == "remove-"
         operation = int(match[2]) if atomic else None
+        if atomic and operation not in (range(5) if removal else range(12)):
+            raise RuntimeError(f"Unknown namespace operation {operation}")
         name = match[3] if atomic else image.name.split("-", 1)[1]
         before = (exports / f"remove-before-{operation}-{name}" if removal else
                   exports / f"{scenario}before-{name}" if scenario else args.fixtures.resolve() / name)
@@ -183,7 +199,7 @@ def main():
                     contents = names(candidate, entry_path)
                 elif entry["type"] == "symlink":
                     contents = target(candidate, entry_path, entry, accounting(header)["Block size"]).hex()
-                else:
+                elif entry["type"] == "regular":
                     contents = data(candidate, entry_path, f"{candidate.stem}.entry").hex()
             result = {"accounting": accounting(header), "inode_size": inode_size,
                       "root": stat(candidate, "/"), "hello": stat(candidate, "/hello.txt"),
@@ -204,6 +220,12 @@ def main():
         expected_root = dict(old["root"])
         expected_root.update(ctime=namespace_time, mtime=namespace_time,
                              blocks=new["root"]["blocks"], size=new["root"]["size"])
+        if (old["root"]["size"] == block_size and not old["root"]["flags"] & INODE_INDEX and
+                new["root"]["flags"] == old["root"]["flags"] | INODE_INDEX):
+            if (new["root"]["size"] < 2 * block_size or
+                    atomic and new["root"]["size"] not in (2 * block_size, 3 * block_size)):
+                raise RuntimeError("Automatic root index creation has an invalid size")
+            expected_root["flags"] |= INODE_INDEX
         child_blocks = 0
         inode_delta = 0
         expected_names = dict(old["names"])
@@ -263,12 +285,20 @@ def main():
                     expected_root["links"] += 1
                     if names(image, "/atomic-entry") != {".": entry["inode"], "..": new["root"]["inode"]}:
                         raise RuntimeError("New directory has incorrect dot/dotdot ownership")
-            elif operation >= 3:
+            elif operation in (3, 4, 5):
                 creation_attributes(entry, inode_size, symlink=True)
                 length = {3: INODE_BLOCK_DATA_SIZE - 1, 4: INODE_BLOCK_DATA_SIZE, 5: block_size - 1}[operation]
                 if entry["links"] != 1 or new["entry_contents"] != symlink_target(length).hex():
                     raise RuntimeError("Atomic symlink lost its exact target or link count")
                 child_blocks = entry["blocks"]
+                inode_delta = 1
+            elif operation in SPECIAL_FILES:
+                creation_attributes(entry, inode_size)
+                kind, major, minor = SPECIAL_FILES[operation]
+                if (entry["type"], entry.get("device_major", 0), entry.get("device_minor", 0),
+                        entry["size"], entry["blocks"], entry["links"], entry["flags"]) != (
+                        kind, major, minor, 0, 0, 1, 0):
+                    raise RuntimeError("Special file lost device identity or acquired data blocks")
                 inode_delta = 1
             else:
                 expected_target = dict(old["hello"])

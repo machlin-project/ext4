@@ -722,6 +722,12 @@ enum rename_operation {
 	RENAME_REPLACE_HELD,
 	RENAME_GROW_PARENT,
 	RENAME_EXCHANGE_DIRECTORIES,
+	RENAME_WHITEOUT_FILE,
+	RENAME_WHITEOUT_DIRECTORY,
+	RENAME_WHITEOUT_REPLACE,
+	RENAME_WHITEOUT_GROW,
+	RENAME_WHITEOUT_ATTRIBUTES,
+	RENAME_WHITEOUT_HELD,
 	RENAME_OPERATION_COUNT
 };
 
@@ -735,6 +741,8 @@ struct rename_case {
 	bool large;
 	bool alias;
 	bool grow;
+	bool whiteout;
+	bool attributes;
 };
 
 static const struct rename_case cases[RENAME_OPERATION_COUNT] = {
@@ -772,7 +780,24 @@ static const struct rename_case cases[RENAME_OPERATION_COUNT] = {
 	[RENAME_EXCHANGE_DIRECTORIES] = { .source = TEST_DIRECTORY,
 	    .target = TEST_DIRECTORY,
 	    .replace = true,
-	    .exchange = true }
+	    .exchange = true },
+	[RENAME_WHITEOUT_FILE] = { .source = TEST_REGULAR, .same_parent = true, .whiteout = true },
+	[RENAME_WHITEOUT_DIRECTORY] = { .source = TEST_DIRECTORY, .whiteout = true },
+	[RENAME_WHITEOUT_REPLACE] = { .source = TEST_REGULAR,
+	    .target = TEST_REGULAR,
+	    .replace = true,
+	    .large = true,
+	    .whiteout = true },
+	[RENAME_WHITEOUT_GROW] = { .source = TEST_REGULAR, .grow = true, .whiteout = true },
+	[RENAME_WHITEOUT_ATTRIBUTES] = { .source = TEST_REGULAR,
+	    .whiteout = true,
+	    .attributes = true },
+	[RENAME_WHITEOUT_HELD] = { .source = TEST_REGULAR,
+	    .target = TEST_REGULAR,
+	    .replace = true,
+	    .held = true,
+	    .large = true,
+	    .whiteout = true }
 };
 
 struct trace {
@@ -963,9 +988,13 @@ attempt(struct device *device, enum rename_operation operation, unsigned int fau
 	struct ext4_inode_hold *hold = NULL;
 	struct ext4_rename_entry names[2];
 	struct ext4_timestamp time = { .seconds = 1700000050 };
+	struct ext4_inode_update whiteout_update = attributes(TEST_REGULAR);
+	struct ext4_xattr_change attribute;
+	uint8_t value[500];
 	uint32_t allocations;
 	uint32_t reads;
 	uint32_t events;
+	size_t byte;
 	char name[EXT4_NAME_MAX + 1];
 	enum ext4_result error;
 
@@ -992,6 +1021,25 @@ attempt(struct device *device, enum rename_operation operation, unsigned int fau
 	allocations = device->allocations;
 	reads = device->reads;
 	events = device->events;
+	whiteout_update.permissions = 0;
+	whiteout_update.access_time = time;
+	whiteout_update.modify_time = time;
+	whiteout_update.change_time = time;
+	memset(&attribute, 0, sizeof(attribute));
+	if (test->attributes) {
+		for (byte = 0; byte < sizeof(value); byte++) {
+			value[byte] = (uint8_t)(byte * 31U + 7U);
+		}
+		attribute.policy = EXT4_XATTR_CREATE;
+		attribute.name_index = EXT4_XATTR_USER;
+		attribute.name = (const uint8_t *)"whiteout";
+		attribute.name_length = 8;
+		attribute.value = value;
+		attribute.value_size = sizeof(value);
+		whiteout_update.fields |= EXT4_ATTR_XATTRS;
+		whiteout_update.xattrs = &attribute;
+		whiteout_update.xattr_count = 1;
+	}
 	memset(&result, 0xa5, sizeof(result));
 	untouched = result;
 	device->survival = survival;
@@ -1003,8 +1051,10 @@ attempt(struct device *device, enum rename_operation operation, unsigned int fau
 	} else if (fault == 3) {
 		device->stop_at = events + point;
 	}
-	error = ext4_rename(
-	    fs, &names[0], &names[1], test->exchange ? EXT4_RENAME_EXCHANGE : 0, &time, &result);
+	error = test->whiteout
+	    ? ext4_rename_whiteout(fs, &names[0], &names[1], 0, &whiteout_update, &time, &result)
+	    : ext4_rename(fs, &names[0], &names[1], test->exchange ? EXT4_RENAME_EXCHANGE : 0,
+		  &time, &result);
 	if (error == EXT4_OK) {
 		CHECK(result.number == objects[0].number &&
 		    result.generation == objects[0].generation &&
@@ -1119,6 +1169,8 @@ fault_cases(struct device *device, enum rename_operation operation, bool smoke, 
 	free(original);
 }
 
+#include "whiteout.h"
+
 int
 main(int argc, char **argv)
 {
@@ -1132,6 +1184,7 @@ main(int argc, char **argv)
 	bool smoke = false;
 	bool functional_only = false;
 	bool indexed = false;
+	bool whiteout = false;
 	int argument = 1;
 
 	while (argument < argc && argv[argument][0] == '-') {
@@ -1141,6 +1194,8 @@ main(int argc, char **argv)
 			functional_only = true;
 		} else if (strcmp(argv[argument], "--indexed") == 0) {
 			indexed = true;
+		} else if (strcmp(argv[argument], "--whiteout") == 0) {
+			whiteout = true;
 		} else if (strcmp(argv[argument], "--export") == 0 && argument + 1 < argc) {
 			exports = argv[++argument];
 		} else {
@@ -1151,6 +1206,17 @@ main(int argc, char **argv)
 	CHECK(argument < argc);
 	for (; argument < argc; argument++) {
 		storage_open(&device, argv[argument]);
+		if (whiteout) {
+			whiteout_guards(&device);
+			for (operation = RENAME_WHITEOUT_FILE; operation < RENAME_OPERATION_COUNT;
+			    operation++) {
+				fault_cases(&device, (enum rename_operation)operation, smoke,
+				    exports, argv[argument]);
+			}
+			storage_close(&device);
+			printf("PASS whiteout rename: %s\n", argv[argument]);
+			continue;
+		}
 		if (indexed) {
 			indexed_operations(&device);
 			storage_close(&device);
@@ -1198,7 +1264,7 @@ main(int argc, char **argv)
 		}
 		storage_export(&device, exports, argv[argument], "rename-exchanged-");
 		if (!functional_only) {
-			for (operation = 0; operation < RENAME_OPERATION_COUNT; operation++) {
+			for (operation = 0; operation < RENAME_WHITEOUT_FILE; operation++) {
 				fault_cases(&device, (enum rename_operation)operation, smoke,
 				    exports, argv[argument]);
 			}

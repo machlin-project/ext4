@@ -177,6 +177,18 @@ idempotence and unchanged protected input hashes. Linux roundtrips consume those
 checked expectations and require the complete renamed tree to remain unchanged
 after Linux creates additional objects and commits its own journal transaction.
 
+`ext4-namespace-test --special` checks character/block device encodings, FIFO and
+socket creation, invalid device numbers, inherited attributes, hardlinks, held
+unlink, replacement and inode reuse. Six creation operations reuse the ordinary
+allocation/read and interrupted-I/O fault engine. `ext4-rename-test --whiteout`
+adds six atomic scenarios: file move, populated cross-parent directory move,
+replacement, destination index growth, whiteout attributes and held replacement.
+The independently checked exports preserve committed and uncommitted journals.
+The Linux namespace probe verifies these objects with `lstat`, then creates its
+own device/FIFO/socket and performs `RENAME_WHITEOUT`. Portable and e2fsprogs replay
+must agree on returned metadata; `ext4-namespace-test --special-read` checks the
+portable decoder against those Linux-created special inodes without writes.
+
 `generate_index_fixtures.py` builds twenty independently checked indexed profiles.
 `directory-index-*` validates complete graphs and malformed structures;
 `indexed-write-*` exercises namespace operations and tree growth;

@@ -442,6 +442,8 @@ jobs:
               mkdir -p "$exports"
               .build/ext4-namespace-test --smoke --export "$exports" "$image" \
                 2>&1 | tee "artifacts/checks/namespace-$profile-exports.log"
+              .build/ext4-namespace-test --special --smoke --export "$exports" "$image" \
+                2>&1 | tee "artifacts/checks/special-files-$profile-exports.log"
               if [[ "$fixtures" == artifacts/namespace-fixtures ]]; then
                 .build/ext4-namespace-test --smoke --groups --export "$exports" "$image" \
                   2>&1 | tee "artifacts/checks/namespace-$profile-groups.log"
@@ -526,6 +528,8 @@ jobs:
               mkdir -p "$exports"
               .build/ext4-rename-test --smoke --export "$exports" "$image" \
                 2>&1 | tee "artifacts/checks/rename-$profile-exports.log"
+              .build/ext4-rename-test --whiteout --smoke --export "$exports" "$image" \
+                2>&1 | tee "artifacts/checks/whiteout-$profile-exports.log"
               python3 tests/check_rename.py --exports "$exports" \
                 --recover .build/ext4-recover --output "$checked" \
                 2>&1 | tee "artifacts/checks/rename-$profile-independent.log"

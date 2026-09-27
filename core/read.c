@@ -325,6 +325,11 @@ ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, v
 	if (fs->aborted) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
+	if ((inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR &&
+	    (inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY &&
+	    (inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_SYMLINK) {
+		return EXT4_UNSUPPORTED;
+	}
 	if (offset >= inode->size) {
 		return EXT4_OK;
 	}
