@@ -30,6 +30,27 @@ in Git. Generated images never enter source history. Unsupported advanced ext4
 features remain visible requirements or explicit scope decisions; they may not be
 silently reclassified to declare the project complete.
 
+## Meson build acceptance
+
+Meson replaces CMake for the portable library, utilities, tests and CI. The complete
+207-test registration retains the executable arguments and existing explicit
+deadlines, with six disjoint CI suites. All 207 tests pass under ASan/UBSan across
+the initial run and a six-test follow-up: the first invocation passed 201 before
+an incorrect local unwritten-fixture path caused a failure and stopped remaining
+work. The follow-up uses the existing images and runs only the six unfinished
+cases. The original failed attempt remains in the generated evidence; it is not
+reported as one uninterrupted successful run.
+
+Fresh and repeated Make builds, selected tests and clean pass with the Xcode
+compiler selected through `xcrun`; clean retains reports and fixture images.
+Meson 1.3 also configures all 207 cases, passes three uninstrumented attribute
+tests and builds the bounded fuzzer, which completes 100 smoke executions with
+ASan/UBSan. All 21 core translation units pass the separate optimized freestanding
+compilation and 2 KiB frame budget. Evidence is in
+`artifacts/checks/meson-migration-acceptance.json` and
+`artifacts/checks/meson-toolchains-summary.txt`. This validates the build migration;
+it adds no filesystem-format or platform-runtime acceptance.
+
 ## Portable reader evidence
 
 `tests/generate_fixtures.py` creates three 64 MiB images: 4 KiB blocks, 1 KiB
@@ -66,7 +87,7 @@ Libkern. The sanitizer build has a different frame layout and is tested separate
 The metadata fixture also covers 32-bit UID/GID, signed pre-epoch time, dates
 beyond 2038 and 2106, birth time and nanosecond precision. A malformed timestamp
 with a valid inode checksum is rejected. Current regenerated images are in
-`artifacts/fixtures-metadata/`; the CMake `EXT4_FIXTURES` setting selects them.
+`artifacts/fixtures-metadata/`; the Meson `fixtures` option selects them.
 
 The bounded metadata fuzzer completed 106,119 executions in 61 seconds with
 Clang 22.1.5, ASan and UBSan, without a crash or sanitizer diagnostic. It mutates
@@ -150,7 +171,11 @@ The combined selected regression passes 53 suites under sanitizers, and the
 freestanding stack-budget build passes. Evidence is in
 `artifacts/checks/xattr-write-edges-summary.json`, `artifacts/xattr-write-edges.xml`,
 `artifacts/xattr-write-independent-edges/` and `artifacts/xattr-write-independent-full/`.
-Linux runtime roundtrips and published CI for this writer are still pending.
+Published writer CI passes all six jobs and 207 tests, including independent
+verification of all 369 writer, packing and full-space states. Complete logs retain
+the fault counts and explicit applicability skips. The downloaded evidence and
+reviewed hashes are in `artifacts/checks/xattr-write-ci-manifest.json`.
+Linux runtime roundtrips for these attribute mutations remain pending.
 
 ## Journal evidence
 
@@ -756,7 +781,7 @@ ACL/xattr policy remain unaccepted. Later indexed mutation has separate evidence
 
 The initial rename CI run timed out the two aggregated ten-image suites at 900
 seconds; the small-format and indexed-rejection suites passed. That run is not
-accepted as full CI validation. CTest now schedules each image separately with
+accepted as full CI validation. The test runner schedules each image separately with
 the same complete functional/fault workload, so enabling more profiles does not
 consume one shared per-test deadline. The failed run's output remains under
 `artifacts/checks/rename-ci-artifacts/` and the job log in `artifacts/checks/`.

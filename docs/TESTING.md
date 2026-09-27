@@ -138,8 +138,8 @@ pair. Separate guards verify unchanged media/output on rejection and retained
 identity for hardlink aliases and held sources. The actual indexed fixture separately
 checks missing sources, indexed destinations, mixed exchange and child rename.
 `--functional-only` omits the fault/export scenarios;
-it does not stand in for the complete CTest matrix.
-CTest registers each writable image as its own rename test, retaining all 160
+it does not stand in for the complete Meson matrix.
+Meson registers each writable image as its own rename test, retaining all 160
 functional sequences and eleven fault operations for that image. This keeps
 per-test timeouts independent of the number of enabled image profiles; CI still
 limits execution to two concurrent tests. Removal also schedules each image
@@ -200,7 +200,7 @@ profiles. Truncate exports include the final reused block and three intermediate
 sizes retaining different portions of the fragmented mapping tree; independent
 byte oracles and e2fsck inspect those states as well. `--export-only --export DIR`
 runs the successful export scenarios without repeating the fault loops already
-run by CTest. It is an artifact-generation mode, not the complete test suite.
+run by Meson. It is an artifact-generation mode, not the complete test suite.
 
 `ext4-orphan-test` constructs linked-truncate intents in copies of the ordinary
 fixtures. `--pending` instead consumes untouched Linux orphan images. All mutations

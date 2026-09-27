@@ -1,0 +1,181 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Every test belongs to exactly one CI suite. Selecting a fixture profile adds
+# required cases; missing images fail tests instead of silently removing them.
+paths = {}
+foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
+  'namespace_fixtures', 'xattr_fixtures', 'xattr_space_fixtures', 'space_fixtures',
+  'index_fixtures', 'index_collisions', 'index_capacity']
+  value = get_option(option)
+  paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
+endforeach
+
+xattr_profiles = ['1k', '4k', '16k', '64k', 'indirect', 'no-checksum',
+  'checksum-seed', 'inode128', 'inode512', 'orphan-file']
+if paths['xattr_fixtures'] != ''
+  foreach profile : xattr_profiles
+    stem = paths['xattr_fixtures'] / ('xattr-' + profile)
+    test('xattr-reader-' + profile, programs['xattr'],
+      args: [stem + '.img', stem + '.expected'], timeout: 300, suite: 'core')
+    test('xattr-mutation-' + profile, programs['xattr-write'],
+      args: stem + '.img', timeout: 600, suite: 'core')
+    test('xattr-packing-' + profile, programs['xattr-write'],
+      args: ['--edges', stem + '.img'], timeout: 300, suite: 'core')
+  endforeach
+endif
+if paths['xattr_space_fixtures'] != ''
+  foreach profile : xattr_profiles
+    test('xattr-full-space-' + profile, programs['xattr-write'],
+      args: ['--full', paths['xattr_space_fixtures'] / ('xattr-space-' + profile + '.img')],
+      timeout: 300, suite: 'core')
+  endforeach
+endif
+if paths['space_fixtures'] != ''
+  foreach profile : ['1k', '4k', 'indirect', 'no-checksum', 'no-filetype',
+    'inode128', 'checksum-seed', 'orphan-file']
+    test('namespace-space-' + profile, programs['space'],
+      args: paths['space_fixtures'] / ('space-' + profile + '.img'),
+      timeout: 300, suite: 'namespace')
+  endforeach
+endif
+
+test('directory-hash', programs['directory-hash'], suite: 'indexed')
+if paths['index_capacity'] != ''
+  test('indexed-capacity', programs['index-write'], args: ['--capacity', paths['index_capacity']],
+    timeout: 300, suite: 'indexed')
+endif
+if paths['index_fixtures'] != ''
+  foreach profile : ['legacy-signed', 'legacy-unsigned', 'half_md4-signed', 'half_md4-unsigned',
+    'tea-signed', 'tea-unsigned', '2k', '4k', '8k', '16k', '32k', 'deep', 'deep-unsigned',
+    'indirect', 'no-checksum', 'no-filetype', 'inode128', 'checksum-seed',
+    'orphan-file', 'orphan-file-deep']
+    image = paths['index_fixtures'] / ('index-' + profile + '.img')
+    test('directory-index-' + profile, programs['directory-index'], args: image,
+      timeout: 300, suite: 'indexed')
+    test('indexed-write-' + profile, programs['index-write'], args: image,
+      timeout: 300, suite: 'indexed')
+    test('indexed-faults-' + profile, programs['index-write'], args: ['--faults', image],
+      timeout: 900, suite: 'indexed')
+    if paths['index_collisions'] != '' and profile not in ['2k', '4k', '8k', '16k', '32k']
+      test('indexed-edges-' + profile, programs['index-write'],
+        args: ['--edges', paths['index_collisions'], image], timeout: 300, suite: 'indexed')
+    endif
+  endforeach
+endif
+
+reader_names = ['ext4-4k.img', 'ext4-1k.img', 'ext4-indexed.img']
+write_names = ['ext4-4k.img', 'ext4-1k.img']
+if get_option('extended_tests')
+  extended = ['ext4-2k.img', 'ext4-8k.img', 'ext4-16k.img', 'ext4-32k.img',
+    'ext4-indirect-1k.img', 'ext4-no-checksum.img', 'ext4-checksum-seed.img']
+  reader_names += ['ext4-2k.img', 'ext4-8k.img', 'ext4-16k.img', 'ext4-32k.img',
+    'ext4-64k.img', 'ext4-indirect-1k.img', 'ext4-no-checksum.img', 'ext4-checksum-seed.img']
+  write_names += extended
+endif
+if get_option('inode128_test')
+  write_names += 'ext4-inode128.img'
+endif
+reader_images = []
+foreach name : reader_names
+  reader_images += paths['fixtures'] / name
+endforeach
+write_images = []
+foreach name : write_names
+  write_images += paths['fixtures'] / name
+endforeach
+test('image-reader', programs['reader'], args: reader_images, timeout: 300, suite: 'core')
+test('malformed-images', programs['corruption'], args: paths['fixtures'] / 'ext4-4k.img',
+  timeout: 300, suite: 'core')
+foreach profile : ['4k', '1k']
+  test('journal-durability-' + profile, programs['journal'],
+    args: paths['fixtures'] / ('ext4-' + profile + '.img'), timeout: 300, suite: 'core')
+endforeach
+test('inode-and-file-write', programs['write'], args: write_images, timeout: 300, suite: 'core')
+test('allocation-and-growth', programs['write'], args: ['--allocation'] + write_images,
+  timeout: 600, suite: 'core')
+test('truncate-and-free', programs['write'], args: ['--truncate'] + write_images,
+  timeout: 600, suite: 'core')
+test('namespace-create-and-link', programs['namespace'], args: write_images,
+  timeout: 900, suite: 'namespace')
+test('namespace-symlinks', programs['namespace'], args: ['--symlinks'] + write_images,
+  timeout: 900, suite: 'namespace')
+foreach item : [
+  ['namespace-removal-indexed-validation', 'removal', 'removal'],
+  ['namespace-rename-indexed', 'rename', 'rename'],
+  ['namespace-indexed', 'namespace', 'namespace'],
+]
+  test(item[0], programs[item[1]], args: ['--indexed', paths['fixtures'] / 'ext4-indexed.img'],
+    timeout: 300, suite: item[2])
+endforeach
+
+removal_images = write_images
+if get_option('namespace_tests')
+  namespace_images = []
+  foreach profile : ['small', 'lazy', 'indirect', 'no-checksum', 'no-filetype', 'inode128']
+    namespace_images += paths['namespace_fixtures'] / ('namespace-' + profile + '.img')
+  endforeach
+  foreach name, arguments : {
+    'namespace-small-formats': [],
+    'namespace-inode-exhaustion': ['--exhaust'],
+    'namespace-inode-group-transition': ['--groups'],
+    'namespace-symlink-small-formats': ['--symlinks'],
+    'namespace-symlink-inode-groups': ['--symlinks', '--groups'],
+  }
+    test(name, programs['namespace'], args: arguments + namespace_images,
+      timeout: 600, suite: 'namespace')
+  endforeach
+  removal_images += namespace_images
+endif
+test('orphan-truncate-recovery', programs['orphan'], args: write_images,
+  timeout: 600, suite: 'core')
+test('live-truncate', programs['orphan'], args: ['--live'] + write_images,
+  timeout: 900, suite: 'core')
+if get_option('orphan_file_tests')
+  orphan_images = []
+  foreach name : write_names
+    orphan_images += paths['orphan_file_fixtures'] / ('orphan-file-' + name)
+  endforeach
+  test('orphan-file-recovery', programs['orphan'], args: ['--orphan-file'] + orphan_images,
+    timeout: 900, suite: 'orphan-file')
+  test('orphan-file-mixed-recovery', programs['orphan'], args: ['--mixed',
+    paths['orphan_file_fixtures'] / 'orphan-file-ext4-1k.img',
+    paths['orphan_file_fixtures'] / 'orphan-file-ext4-4k.img'], timeout: 900, suite: 'orphan-file')
+  test('orphan-file-live-truncate', programs['orphan'], args: ['--live'] + orphan_images,
+    timeout: 900, suite: 'orphan-file')
+  test('namespace-orphan-file', programs['namespace'], args: orphan_images,
+    timeout: 900, suite: 'namespace')
+  test('namespace-symlink-orphan-file', programs['namespace'], args: ['--symlinks'] + orphan_images,
+    timeout: 900, suite: 'namespace')
+  removal_images += orphan_images
+  if get_option('extended_tests')
+    test('orphan-file-indirect-recovery', programs['orphan'], args: ['--orphan-file',
+      paths['orphan_file_fixtures'] / 'mapped/orphan-file-ext4-indirect-1k.img'],
+      timeout: 900, suite: 'orphan-file')
+    test('orphan-file-size-bound', programs['orphan'], args: ['--orphan-file', '--smoke',
+      paths['orphan_file_fixtures'] / 'maximum/orphan-file-ext4-indirect-1k.img'],
+      timeout: 900, suite: 'orphan-file')
+  endif
+endif
+# Each image retains its full functional/fault matrix and its own deadline.
+foreach image : removal_images
+  profile = image.split('/')[-1].replace('.img', '')
+  test('namespace-removal-' + profile, programs['removal'], args: image,
+    timeout: 900, suite: 'removal')
+  test('namespace-rename-' + profile, programs['rename'], args: image,
+    timeout: 900, suite: 'rename')
+endforeach
+if get_option('extended_tests')
+  test('live-truncate-large', programs['orphan'], args: ['--live', '--large',
+    paths['fixtures'] / 'ext4-indirect-1k.img'], timeout: 900, suite: 'core')
+endif
+if get_option('unwritten_tests')
+  unwritten_images = []
+  foreach profile : ['1k', '4k', 'no-checksum', 'checksum-seed']
+    unwritten_images += paths['allocation_fixtures'] / ('unwritten-ext4-' + profile + '.img')
+  endforeach
+  test('live-truncate-unwritten', programs['orphan'], args: ['--live'] + unwritten_images,
+    timeout: 600, suite: 'core')
+  test('unwritten-allocation', programs['write'], args: ['--allocation'] + unwritten_images,
+    timeout: 300, suite: 'core')
+  test('unwritten-truncate', programs['write'], args: ['--truncate'] + unwritten_images,
+    timeout: 300, suite: 'core')
+endif

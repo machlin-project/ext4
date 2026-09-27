@@ -21,19 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - suite: core
-            test-filter: -E '^(orphan-file|namespace|directory-|indexed-)'
-          - suite: orphan-file
-            test-filter: -R '^orphan-file'
-          - suite: namespace
-            test-filter: -R '^namespace' -E '^namespace-(rename|removal)'
-          - suite: removal
-            test-filter: -R '^namespace-removal'
-          - suite: rename
-            test-filter: -R '^namespace-rename'
-          - suite: indexed
-            test-filter: -R '^(directory-|indexed-)'
+        suite: [core, orphan-file, namespace, removal, rename, indexed]
     env:
       CC: clang
     defaults:
@@ -46,7 +34,9 @@ jobs:
       - name: Install test tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y clang cmake ninja-build build-essential pkg-config
+          sudo apt-get install --no-install-recommends -y clang meson ninja-build build-essential pkg-config
+          meson --version
+          ninja --version
       # Older journal-only recovery leaves orphan_present set after cleanup.
       # Keep the independent oracle on the same fixed upstream release as the lab.
       - name: Check out e2fsprogs
@@ -108,21 +98,23 @@ jobs:
           space_options=()
           xattr_options=()
           if [[ '${{ matrix.suite }}' == indexed ]]; then
-            index_options=(-DEXT4_INDEX_FIXTURES="$PWD/artifacts/index-fixtures" \
-              -DEXT4_INDEX_COLLISIONS="$PWD/artifacts/index-collisions/vectors.txt" \
-              -DEXT4_INDEX_CAPACITY="$PWD/artifacts/index-capacity-fixture/index-capacity.img")
+            index_options=(-Dindex_fixtures="$PWD/artifacts/index-fixtures" \
+              -Dindex_collisions="$PWD/artifacts/index-collisions/vectors.txt" \
+              -Dindex_capacity="$PWD/artifacts/index-capacity-fixture/index-capacity.img")
           fi
           if [[ '${{ matrix.suite }}' == namespace ]]; then
-            space_options=(-DEXT4_SPACE_FIXTURES="$PWD/artifacts/space-fixtures")
+            space_options=(-Dspace_fixtures="$PWD/artifacts/space-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == core ]]; then
-            xattr_options=(-DEXT4_XATTR_FIXTURES="$PWD/artifacts/xattr-fixtures" \
-              -DEXT4_XATTR_SPACE_FIXTURES="$PWD/artifacts/xattr-space-fixtures")
+            xattr_options=(-Dxattr_fixtures="$PWD/artifacts/xattr-fixtures" \
+              -Dxattr_space_fixtures="$PWD/artifacts/xattr-space-fixtures")
           fi
-          cmake -S . -B .build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DEXT4_EXTENDED_TESTS=ON -DEXT4_INODE128_TEST=ON -DEXT4_UNWRITTEN_TESTS=ON \
-            -DEXT4_ORPHAN_FILE_TESTS=ON -DEXT4_NAMESPACE_TESTS=ON "${index_options[@]}" "${space_options[@]}" "${xattr_options[@]}"
-          cmake --build .build --parallel 2 2>&1 | tee artifacts/checks/build.log
+          meson setup .build --buildtype=debugoptimized -Db_sanitize=address,undefined \
+            -Dextended_tests=true -Dinode128_test=true -Dunwritten_tests=true \
+            -Dorphan_file_tests=true -Dnamespace_tests=true \
+            "${index_options[@]}" "${space_options[@]}" "${xattr_options[@]}" \
+            2>&1 | tee artifacts/checks/configure.log
+          meson compile -C .build -j 2 2>&1 | tee artifacts/checks/build.log
       - name: Independently verify directory hashes and collision vectors
         if: matrix.suite == 'indexed'
         run: |
@@ -131,7 +123,7 @@ jobs:
           python3 tests/generate_index_collisions.py --probe .build/ext4-directory-hash-test \
             --output artifacts/index-collisions 2>&1 | tee artifacts/checks/index-collisions.log
       - name: Run conformance and fault tests
-        run: ctest --test-dir .build --parallel 2 ${{ matrix.test-filter }} --output-on-failure --output-junit "$PWD/artifacts/core-tests.xml"
+        run: env -i PATH="$PATH" meson test -C .build --no-rebuild -j 2 --suite '${{ matrix.suite }}' --print-errorlogs
       - name: Independently inspect extended attribute representations
         if: matrix.suite == 'core'
         run: |
@@ -460,4 +452,8 @@ jobs:
             artifacts/**/*.xml
             artifacts/fixtures/features.txt
             artifacts/fixtures/tool-versions.txt
-            .build/Testing/Temporary/*.log
+            .build/meson-logs/meson-log.txt
+            .build/meson-logs/testlog.txt
+            .build/meson-logs/testlog.json
+            .build/meson-logs/testlog.junit.xml
+            .build/meson-info/intro-tests.json

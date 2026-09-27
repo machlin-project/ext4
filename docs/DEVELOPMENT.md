@@ -1,5 +1,49 @@
 # Development
 
+## Portable build
+
+The project uses Meson 1.3 or newer and Ninja. A C11 compiler and Python 3 are
+required; macOS development uses the selected Xcode Clang. `make build` selects
+that compiler, configures `.build`, and compiles the core, image utilities and
+test programs. Use a new build directory when changing build systems or compilers;
+existing generated test evidence can remain in its original directory.
+
+```sh
+CC='xcrun --sdk macosx clang' meson setup .build --buildtype=debugoptimized
+meson compile -C .build -j 4
+env -i PATH="$PATH" meson test -C .build --no-rebuild -j 2 --print-errorlogs
+```
+
+The `xcrun` compiler command selects the active Xcode and macOS SDK on each compile
+and link, including later incremental builds. On Linux, use `CC=clang` for setup.
+ASan and UBSan are enabled by default through
+Meson's `b_sanitize=address,undefined`; `-Db_sanitize=none` selects an uninstrumented
+build. Every build also compiles the complete freestanding core at O2 without
+instrumentation, enforcing its 2 KiB stack-frame budget. Native mounted-test
+executables keep their separate uninstrumented build.
+
+Generate the required images as described below before running image tests.
+`meson configure .build` lists options; `meson setup --reconfigure .build -Dname=value`
+sets them while retaining other choices. Fixture paths can be absolute or relative
+to the source directory. Enabling a profile requires all its images; none are
+silently skipped. Test executables and `ext4-recover` remain directly in the build
+directory for the independent checkers and VM harnesses.
+
+`meson test -C .build --list` lists the configured cases. The six disjoint suites
+are `core`, `orphan-file`, `namespace`, `removal`, `rename` and `indexed`; select one
+with `--suite NAME`, or use quoted test-name patterns. Complete output, per-test
+JSON records and JUnit results are in `.build/meson-logs/testlog.txt`,
+`testlog.json` and `testlog.junit.xml`. CI retains all three, including successful
+fault-test output and explicit applicability skips.
+Make and CI invoke the tests with a minimal environment because Meson records
+the inherited environment in its test logs. The direct command above does the same.
+
+The Makefile is a convenience entry point for the same Meson commands.
+`BUILD_DIR`, `MESON_OPTIONS`, `BUILD_JOBS` and `TEST_JOBS` customize its build and
+test invocation. `make clean` removes compiled outputs through Meson without
+removing fixtures or reports. `make format` and `make check-style` work without
+configuration; Meson exposes the same formatting targets after setup.
+
 ## FSKit app
 
 `make fskit` uses XcodeGen and the selected Xcode toolchain to build an unsigned
@@ -47,7 +91,7 @@ can change on every guest boot and must not be inferred from an earlier report.
 
 ## Metadata fuzzing
 
-`EXT4_BUILD_FUZZER=ON` builds `ext4-image-fuzzer` using Clang's libFuzzer runtime,
+`-Dfuzzer=true` builds `ext4-image-fuzzer` using Clang's libFuzzer runtime,
 ASan and UBSan. Use an LLVM installation that includes libFuzzer; the selected
 Xcode installation currently lacks `libclang_rt.fuzzer_osx.a`. A separate build
 directory under `artifacts/` keeps this compiler isolated from the driver builds.
@@ -118,7 +162,7 @@ durable device-cache barrier; it cannot satisfy the write capability by assumpti
 
 `ext4-orphan-test IMAGE...` constructs linked-truncate intents in RAM copies and
 checks cleanup, malformed lists, stale summaries, interrupted recovery and retries.
-It is included in CTest for the ordinary writable profiles. Use `--smoke --export
+It is included in Meson for the ordinary writable profiles. Use `--smoke --export
 NEW_EMPTY_DIRECTORY` to export successful pending/clean states without the fault
 loops. The indirect profile additionally exports a 257-leaf map that cannot be
 removed by the bounded atomic truncate API. Check these exports with:
@@ -151,10 +195,10 @@ python3 tests/generate_orphan_file_fixtures.py --fixtures artifacts/fixtures \
 python3 tests/generate_orphan_file_fixtures.py --fixtures artifacts/fixtures \
   --tools-root /path/to/e2fsprogs/build --case ext4-indirect-1k.img --blocks 512 \
   --output artifacts/orphan-file-fixtures/maximum
-cmake -S . -B .build -DEXT4_ORPHAN_FILE_TESTS=ON
+meson setup --reconfigure .build -Dorphan_file_tests=true
 ```
 
-`EXT4_ORPHAN_FILE_FIXTURES` selects another fixture directory. The generator's
+`orphan_file_fixtures` selects another fixture directory. The generator's
 default ten profiles require the base fixture generator's `--extended --inode128`.
 Use `ext4-orphan-test --orphan-file` or `--mixed` on these images; `--pending`
 accepts Linux-authored modern or legacy recovery states. The same independent
@@ -187,9 +231,9 @@ Generate and inspect xattr reader fixtures with the same independent tools:
 ```sh
 python3 tests/generate_xattr_fixtures.py --tools-root /path/to/e2fsprogs/build \
   --output artifacts/xattr-fixtures
-cmake -S . -B .build -DEXT4_XATTR_FIXTURES="$PWD/artifacts/xattr-fixtures"
-cmake --build .build --target ext4-xattr-test
-ctest --test-dir .build -R '^xattr-reader-' --output-on-failure
+meson setup --reconfigure .build -Dxattr_fixtures="$PWD/artifacts/xattr-fixtures"
+meson compile -C .build ext4-xattr-test
+env -i PATH="$PATH" meson test -C .build 'xattr-reader-*' --no-rebuild --print-errorlogs
 mkdir artifacts/xattr-exports
 for image in artifacts/xattr-fixtures/*.img; do
   .build/ext4-xattr-test --export artifacts/xattr-exports "$image" "${image%.img}.expected"
@@ -208,11 +252,11 @@ reported as clean filesystem acceptance. No input image is repaired or modified.
 The same ten fixtures drive `xattr-mutation-*` and `xattr-packing-*`. The first
 enumerates every post-lookup allocation/read failure and write/flush interruption
 for six atomic operations. `--smoke` exports their successful and interrupted states
-without repeating fault sweeps; it does not replace the registered CTest suites.
+without repeating fault sweeps; it does not replace the registered Meson suites.
 
 ```sh
-cmake --build .build --target ext4-xattr-write-test ext4-recover
-ctest --test-dir .build -R '^xattr-(mutation|packing)-' --output-on-failure
+meson compile -C .build ext4-xattr-write-test ext4-recover
+env -i PATH="$PATH" meson test -C .build 'xattr-mutation-*' 'xattr-packing-*' -j 2 --no-rebuild --print-errorlogs
 mkdir artifacts/xattr-write-exports artifacts/xattr-edge-exports
 .build/ext4-xattr-write-test --smoke --export artifacts/xattr-write-exports artifacts/xattr-fixtures/*.img
 .build/ext4-xattr-write-test --edges --export artifacts/xattr-edge-exports artifacts/xattr-fixtures/*.img
@@ -224,8 +268,8 @@ python3 tests/check_xattr_writes.py --edges --fixtures artifacts/xattr-fixtures/
   --tools-root /path/to/e2fsprogs/build --output artifacts/xattr-edge-independent
 python3 tests/generate_xattr_space.py --fixtures artifacts/xattr-fixtures/report.json \
   --tools-root /path/to/e2fsprogs/build --output artifacts/xattr-space-fixtures
-cmake -S . -B .build -DEXT4_XATTR_SPACE_FIXTURES="$PWD/artifacts/xattr-space-fixtures"
-ctest --test-dir .build -R '^xattr-full-space-' --output-on-failure
+meson setup --reconfigure .build -Dxattr_space_fixtures="$PWD/artifacts/xattr-space-fixtures"
+env -i PATH="$PATH" meson test -C .build 'xattr-full-space-*' --no-rebuild --print-errorlogs
 mkdir artifacts/xattr-full-exports
 .build/ext4-xattr-write-test --full --export artifacts/xattr-full-exports artifacts/xattr-space-fixtures/*.img
 python3 tests/check_xattr_writes.py --full --fixtures artifacts/xattr-space-fixtures/report.json \
@@ -250,7 +294,7 @@ the tool refuses to overwrite export files. It also accepts 128-byte inode
 fixtures, where extended timestamp fields are absent. The 64 KiB reader fixture
 has no journal and is not a writable test image.
 Use `tests/generate_fixtures.py --extended --inode128` to reproduce the complete
-reader/write profile, and configure `-DEXT4_EXTENDED_TESTS=ON -DEXT4_INODE128_TEST=ON`.
+reader/write profile, and configure `-Dextended_tests=true -Dinode128_test=true`.
 The generator verifies the legacy inode size and omits unrepresentable timestamp
 fixture fields; tests verify that such updates reject instead of truncating.
 
@@ -272,8 +316,8 @@ is `tests/check_allocation.py --exports DIRECTORY --tools-root E2FSPROGS_BUILD
 
 Generate deliberately nonzero unwritten backing data with
 `tests/generate_allocation_fixtures.py --fixtures EXTENDED_FIXTURE_DIRECTORY
---tools-root E2FSPROGS_BUILD --output NEW_DIRECTORY`. Enable its CTest suite with
-`-DEXT4_UNWRITTEN_TESTS=ON -DEXT4_ALLOCATION_FIXTURES=ABSOLUTE_NEW_DIRECTORY`.
+--tools-root E2FSPROGS_BUILD --output NEW_DIRECTORY`. Enable its Meson suite with
+`-Dunwritten_tests=true -Dallocation_fixtures=ABSOLUTE_NEW_DIRECTORY`.
 The generator preserves its source images and records each independent mapping,
 the exact modified data blocks, tool output and nonrepairing e2fsck result.
 
@@ -287,12 +331,12 @@ working directory, explicit profile selection and Sol/Luna VM handoff apply.
 The `Portable filesystem` GitHub Actions workflow runs on development/main pushes
 and pull requests. Separate Ubuntu jobs cover the base core, orphan files and
 namespace mutations, each generating fresh fixtures and building with Clang and
-ASan/UBSan. They run disjoint CTest suites, inspect mutation exports independently
+ASan/UBSan. They run disjoint Meson suites, inspect mutation exports independently
 and recover debugfs-authored journals. Reports and logs are retained; successfully
 verified image exports are released between stages, and namespace exports are
 checked one source profile at a time to bound disk use.
-CI uses `RelWithDebInfo` with both sanitizers enabled and two concurrent CTest
-workers; fixture and fault coverage is identical to Debug. Use the same build
+CI uses `debugoptimized` with both sanitizers enabled and two concurrent Meson
+workers; fixture and fault coverage is identical to `debug`. Use the same build
 type locally when reproducing CI timing.
 This portable CI does not replace selected-Xcode formatting, unsigned platform
 builds, actual macOS mounts, or the separately identified kernel/LXNU VM tests.
@@ -303,14 +347,14 @@ multi-group fixtures and their exhaustion/group-transition suites with:
 ```sh
 python3 tests/generate_namespace_fixtures.py --tools-root /path/to/e2fsprogs/build \
   --output artifacts/namespace-fixtures
-cmake -S . -B .build -DEXT4_NAMESPACE_TESTS=ON
-cmake --build .build --parallel 4
-ctest --test-dir .build -R '^namespace' --output-on-failure
+meson setup --reconfigure .build -Dnamespace_tests=true
+meson compile -C .build -j 4
+env -i PATH="$PATH" meson test -C .build 'namespace-*' -j 2 --no-rebuild --print-errorlogs
 ```
 
-`EXT4_NAMESPACE_FIXTURES` selects another fixture directory. The ordinary namespace
+`namespace_fixtures` selects another fixture directory. The ordinary namespace
 and basic indexed-directory tests are always enabled; the modern suite follows
-`EXT4_ORPHAN_FILE_TESTS`. To independently inspect one profile after its fault suite:
+`orphan_file_tests`. To independently inspect one profile after its fault suite:
 
 ```sh
 mkdir artifacts/namespace-exports
@@ -365,7 +409,7 @@ detaches and verifies unchanged device/source bytes. It does not load a module,
 replace a kernel or change boot state; those remain the separate VM preparation.
 
 `ext4-write-test --truncate IMAGE...` checks bounded resize, freeing, corruption
-and recovery. Add `--export-only --export NEW_DIRECTORY` after a successful CTest
+and recovery. Add `--export-only --export NEW_DIRECTORY` after a successful Meson
 run to create independent inspection images without duplicating its fault loops.
 For truncate this emits three `cut400-`, `cut40-`, `cut4-` intermediate images and
 the final reused-block image for each source. Verify them with:
@@ -411,18 +455,18 @@ make check-style
 For an out-of-tree e2fsprogs build, use
 `--tools-root /absolute/path/to/e2fsprogs/build`. To retain previous evidence,
 choose a new `--output` directory; the generator refuses to overwrite images.
-`cmake -S . -B .build -DEXT4_FIXTURES=/absolute/path/to/fixtures` selects that
+`meson setup --reconfigure .build -Dfixtures=/absolute/path/to/fixtures` selects that
 directory for tests. ASan/UBSan are enabled by default and can be disabled for
-an adapter build with `-DEXT4_SANITIZERS=OFF`.
+an adapter build with `-Db_sanitize=none`.
 
 For the extended read profile, add `--extended` to the fixture generator and
-configure `-DEXT4_EXTENDED_TESTS=ON` along with the generated directory in
-`EXT4_FIXTURES`. This requires all eleven images rather than skipping absent
+configure `-Dextended_tests=true` along with the generated directory in
+`fixtures`. This requires all eleven images rather than skipping absent
 variations. It covers block sizes from 1 through 64 KiB, 32-bit group descriptors
 with indirect mapping, metadata without checksums and an explicit checksum seed.
 The 64 KiB image omits the journal to keep its total size at 64 MiB.
 
-The selected Xcode clang compiles a second, optimized freestanding object target
+The selected Xcode clang compiles a second, optimized freestanding archive
 with the same source and a 2048-byte frame-size check. This is a portability
 check, not a linked or boot-tested kernel artifact. Kernel stack-protector symbols
 remain enabled; XNU supplies them. Core code has no libc I/O or allocation imports.
@@ -444,10 +488,10 @@ namespace failure rollback and reuse of existing space:
 ```sh
 python3 tests/generate_space_fixtures.py --tools-root ../lab/vendor/e2fsprogs-ext4/build \
   --output artifacts/space-fixtures
-cmake -S . -B .build-space -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DEXT4_SPACE_FIXTURES="$PWD/artifacts/space-fixtures"
-cmake --build .build-space --parallel 2
-ctest --test-dir .build-space -R '^namespace-space-' --output-on-failure
+meson setup .build-space --buildtype=debugoptimized \
+  -Dspace_fixtures="$PWD/artifacts/space-fixtures"
+meson compile -C .build-space -j 2
+env -i PATH="$PATH" meson test -C .build-space 'namespace-space-*' -j 2 --no-rebuild --print-errorlogs
 mkdir artifacts/space-exports
 .build-space/ext4-space-test --export artifacts/space-exports artifacts/space-fixtures/*.img
 python3 tests/check_space.py --fixtures artifacts/space-fixtures/report.json \
@@ -472,16 +516,16 @@ build the probes before generating independently verified collision pairs:
 ```sh
 python3 tests/generate_index_fixtures.py --output artifacts/index-fixtures
 python3 tests/generate_index_fixtures.py --capacity --output artifacts/index-capacity-fixture
-cmake -S . -B .build-indexed -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DEXT4_INDEX_FIXTURES="$PWD/artifacts/index-fixtures" \
-  -DEXT4_INDEX_COLLISIONS="$PWD/artifacts/index-collisions/vectors.txt" \
-  -DEXT4_INDEX_CAPACITY="$PWD/artifacts/index-capacity-fixture/index-capacity.img"
-cmake --build .build-indexed --parallel 4
+meson setup .build-indexed --buildtype=debugoptimized \
+  -Dindex_fixtures="$PWD/artifacts/index-fixtures" \
+  -Dindex_collisions="$PWD/artifacts/index-collisions/vectors.txt" \
+  -Dindex_capacity="$PWD/artifacts/index-capacity-fixture/index-capacity.img"
+meson compile -C .build-indexed -j 4
 python3 tests/check_directory_hash.py --probe .build-indexed/ext4-directory-hash-test \
   --output artifacts/index-hash-independent
 python3 tests/generate_index_collisions.py --probe .build-indexed/ext4-directory-hash-test \
   --output artifacts/index-collisions
-ctest --test-dir .build-indexed -R '^(directory-|indexed-)' --parallel 2 --output-on-failure
+env -i PATH="$PATH" meson test -C .build-indexed --suite indexed -j 2 --no-rebuild --print-errorlogs
 ```
 
 Generators and independent checkers accept `--tools-root` for a prepared e2fsprogs

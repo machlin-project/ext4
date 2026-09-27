@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: BSD-3-Clause
+option('fuzzer', type: 'boolean', value: false,
+  description: 'Build the bounded image fuzzer with Clang and libFuzzer')
+option('extended_tests', type: 'boolean', value: false,
+  description: 'Require all extended reader and writer image profiles')
+option('inode128_test', type: 'boolean', value: false,
+  description: 'Require the 128-byte-inode writer fixture')
+option('unwritten_tests', type: 'boolean', value: false,
+  description: 'Require the independent unwritten-allocation fixtures')
+option('orphan_file_tests', type: 'boolean', value: false,
+  description: 'Require the independent orphan-file fixtures')
+option('namespace_tests', type: 'boolean', value: false,
+  description: 'Require small multi-group namespace fixtures')
+option('fixtures', type: 'string', value: 'artifacts/fixtures',
+  description: 'Base images; relative paths resolve against the source directory')
+option('allocation_fixtures', type: 'string', value: 'artifacts/allocation-fixtures',
+  description: 'Independent unwritten-allocation images')
+option('orphan_file_fixtures', type: 'string', value: 'artifacts/orphan-file-fixtures',
+  description: 'Independent orphan-file images')
+option('namespace_fixtures', type: 'string', value: 'artifacts/namespace-fixtures',
+  description: 'Independent namespace allocation images')
+option('xattr_fixtures', type: 'string', value: '',
+  description: 'Enable inode-body, external and shared xattr image tests')
+option('xattr_space_fixtures', type: 'string', value: '',
+  description: 'Enable full-space images with shared xattr blocks')
+option('space_fixtures', type: 'string', value: '',
+  description: 'Enable fully allocated namespace image tests')
+option('index_fixtures', type: 'string', value: '',
+  description: 'Enable independently generated indexed-directory image tests')
+option('index_collisions', type: 'string', value: '',
+  description: 'Enable independently verified directory hash collision vectors')
+option('index_capacity', type: 'string', value: '',
+  description: 'Enable the full-root indexed-directory image test')
