@@ -30,7 +30,7 @@ ext4_dependency = declare_dependency(link_with: ext4_core,
 
 # Instrumentation changes frame layout. Compile the same sources separately at
 # O2 without sanitizers, coverage or LTO so every build checks the kernel budget.
-static_library('ext4_freestanding_check', core_sources,
+freestanding_core = static_library('ext4_freestanding_check', core_sources,
   include_directories: public_headers,
   c_args: core_arguments + ['-Wframe-larger-than=2048'], pic: false,
   override_options: ['optimization=2', 'b_sanitize=none', 'b_coverage=false', 'b_lto=false'])
@@ -50,7 +50,7 @@ programs = {}
 foreach name, source : {
   'xattr': 'xattr', 'xattr-write': 'xattr_write', 'xattr-lifetime': 'xattr_lifetime', 'space': 'space',
   'directory-index': 'directory_index', 'directory-lookup': 'directory_lookup', 'index-write': 'index_write',
-  'reader': 'reader', 'corruption': 'corruption', 'journal': 'journal',
+  'reader': 'reader', 'read-ranges': 'read_ranges', 'corruption': 'corruption', 'journal': 'journal',
   'write': 'write', 'namespace': 'namespace', 'removal': 'removal',
   'rename': 'rename', 'orphan': 'orphan',
 }
@@ -60,6 +60,10 @@ endforeach
 programs += {'directory-hash': executable('ext4-directory-hash-test', 'tests/directory_hash.c',
   include_directories: internal_headers, dependencies: ext4_dependency)}
 executable('ext4-recover', 'tools/recover.c', dependencies: posix_dependency)
+executable('ext4-read-benchmark', ['tools/benchmark_read.c', 'adapters/posix/image.c'],
+  include_directories: [public_headers, posix_headers], c_args: posix_arguments,
+  link_with: freestanding_core,
+  override_options: ['optimization=2', 'b_sanitize=none', 'b_coverage=false', 'b_lto=false'])
 
 threads = dependency('threads')
 foreach name : ['mounted', 'mounted-symlink']

@@ -35,19 +35,22 @@ Indexed-directory mutation now passes portable functional/fault tests, independe
 e2fsprogs checks and Linux roundtrips, including collisions and bounded tree growth.
 Name lookup follows the directory hash index, including collision continuations
 across internal nodes. Independent name comparisons and targeted fault tests pass;
-directory enumeration and broader read-path performance still need work.
+streamed enumeration, contiguous read ranges and per-read scratch reuse also pass
+focused tests and warm-cache benchmarks. Broader performance acceptance remains open.
 The portable core reads, lists and transactionally changes inode-body and external
 xattrs, including copying shared blocks before modification. Attribute batches can
 commit together with inode permissions, ownership and times. Attribute lifetime now
 extends through creation, file writes, truncate, namespace changes and final orphan
-release. The combined 227-test regression passes alongside targeted fault and
-independent checks. Bidirectional Linux attribute/ACL/security roundtrips and direct
+release. The combined 248-test regression passes for the indexed-lookup checkpoint,
+alongside targeted fault and independent checks. Bidirectional Linux
+attribute/ACL/security roundtrips and direct
 Linux replay of core attribute transactions pass on eight format profiles. ACL
 enforcement and Linux capability policy are not implemented. Work proceeds through
 portable-core acceptance, then FSKit integration on stock macOS, then LXNU policy.
-Both platform adapters remain
-read-only; FSKit has not been mounted. Read
+Both platform adapters remain read-only; FSKit has not been mounted. Read
 [the acceptance matrix](docs/ACCEPTANCE.md) before using an image with this code.
+The completed read-path batch passes 24 focused tests; its full CI regression is
+pending. Native adapters have not yet adopted the streamed enumeration API.
 Generated disk images and reports are not source artifacts.
 
 ## Layout

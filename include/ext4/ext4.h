@@ -364,8 +364,31 @@ enum ext4_result ext4_refresh_inode(struct ext4_inode_hold *hold, struct ext4_in
 enum ext4_result ext4_release_inode(struct ext4_inode_hold *hold);
 enum ext4_result ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset,
     void *buffer, size_t length, size_t *completed);
+/* Return a contiguous physical or zero-filled range from a fresh regular-file
+ * snapshot. The range can include padding in the block containing EOF, but no
+ * later blocks. The owner zeroes EOF padding before exposing it through a native
+ * page cache. Failure leaves mapping unchanged. */
 enum ext4_result ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset,
     size_t length, struct ext4_mapping *mapping);
+
+enum ext4_dir_action { EXT4_DIR_ACCEPT, EXT4_DIR_ACCEPT_STOP, EXT4_DIR_STOP };
+
+/* Stream entries using one temporary directory block. Every block's checksum,
+ * records and resume boundary are validated before any of its entries are
+ * delivered. The visitor receives the cookie following the entry: ACCEPT
+ * consumes it and continues, ACCEPT_STOP consumes it and returns, and STOP
+ * returns without consuming it. A stopped visit returns OK; NOT_FOUND means
+ * the directory ended, including when entries were delivered in this call.
+ * Errors retain progress through earlier accepted entries/validated blocks.
+ * Entry storage expires when the visitor returns. Read-only core queries are
+ * allowed in the visitor; mutation, unmount or changes to directory/cookie are
+ * not. The writable owner's serialization covers the complete call and visitor.
+ * No directory data is retained between calls or across a mutation. */
+enum ext4_result ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory,
+    uint64_t *cookie,
+    enum ext4_dir_action (*visit)(
+	void *context, const struct ext4_dir_entry *entry, uint64_t next_cookie),
+    void *context);
 /* EXT4_NOT_FOUND means end-of-directory; cookie is an opaque resumable offset. */
 enum ext4_result ext4_next_dir(struct ext4_fs *fs, const struct ext4_inode *directory,
     uint64_t *cookie, struct ext4_dir_entry *entry);

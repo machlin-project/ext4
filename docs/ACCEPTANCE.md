@@ -969,7 +969,8 @@ writable adapters, native concurrency and policy remain separate requirements.
 The public lookup path follows checked HTree ranges and collision continuations
 instead of enumerating the entire indexed directory. Its directory buffers are
 bounded independently of the number of entries. Ordinary linear lookup reads
-each directory block once; enumeration still has its earlier per-entry cost.
+each directory block once. At this checkpoint enumeration retained its earlier
+per-entry cost; the subsequent read-path batch is recorded below.
 
 Twenty format profiles and the full-root capacity image pass 21 targeted sanitized
 suites. They perform 107,840 successful name-to-inode comparisons against independent
@@ -1006,8 +1007,47 @@ Evidence is in `artifacts/checks/indexed-lookup-targeted-review.json`,
 `artifacts/checks/indexed-lookup-edges-summary.json`,
 `artifacts/indexed-lookup-linux/report.json`, and the compiler, source and input
 reports under `artifacts/checks/indexed-lookup-*`. The complete regression for this
-implementation is still running; the earlier 227-test acceptance is not substituted
-for that result.
+implementation passes all 248 registered tests under ASan/UBSan, including the
+20 indexed fault suites. Meson reports zero failures or skipped tests; embedded
+format-applicability notices remain separately recorded. The compiled sources
+match the Git snapshot identified in `artifacts/checks/indexed-lookup-acceptance.json`.
+Later read-path development is not covered by that completed run.
+
+## Portable read-range and streamed-enumeration evidence
+
+Reads combine consecutive physical blocks and sparse ranges, reusing one mapping
+buffer through each call. The new directory visitor validates each complete block
+before publishing entries and supports accept, stop and resume without persistent
+directory state. The single-entry compatibility API retains its external contract.
+Native adapters have not yet adopted the visitor API.
+
+The batch passes 24 focused tests under ASan/UBSan. Real-image reads compare full
+and unaligned contents and inject every observed read/allocation failure. Eight
+modeled configurations cover 1, 4, 16 and 64 KiB blocks, with and without metadata
+checksums: initialized/unwritten extents, ancestor boundaries, sparse subtrees,
+direct through triple-indirect mapping, EOF preallocation and the 32-bit logical
+block limit. Returned mappings are compared with explicit physical-block vectors.
+
+Twenty-one directory profiles stream 107,840 independently expected names across
+read-only and exclusive writable owners. They pass 2,132 iteration fault cases,
+42 argument/late-record-corruption/read-only-reentry suites and 21 create/unlink
+refresh suites. Small directories sweep every failure position; large directories
+sample first, middle and last positions. Stop/resume preserves accepted cookies,
+and an invalid later record prevents every entry in its block from being delivered.
+
+Fourteen warm-cache benchmark pairs compare identical work against the previous
+implementation, using optimized unsanitized core/POSIX builds, one warmup and 31
+measured repeats. All pairs preserve the same data/entry digests, write no device
+bytes and balance allocations. On the 46,122-entry directory, the median changes
+from 251.692 to 75.986 ms, callbacks from 61,618 to 15,497 and allocations from
+107,741 to one. The 4 KiB sparse-file workload changes from 7.216 to 0.368 ms and
+524 to 37 read callbacks. These measurements cover warm image reads only; cold
+device I/O, writes, concurrency and mounted-filesystem performance remain pending.
+
+Evidence is in `artifacts/checks/read-path-batch-targeted-retry1-summary.json` and
+`artifacts/checks/read-path-benchmark-results/`. The full 249-test regression is
+delegated to the batch's CI run; it has not yet been accepted. The earlier local
+248-test run is not counted as acceptance of these changes.
 
 ## Namespace on completely allocated block bitmaps
 

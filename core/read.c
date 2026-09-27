@@ -1,12 +1,32 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
 
+static enum ext4_result ext4_map_blocks(struct ext4_fs *fs, const struct ext4_inode *inode,
+    uint32_t logical, uint8_t **scratch, uint64_t *physical, uint64_t *blocks,
+    struct ext4_block_path *path);
+
+static enum ext4_result
+ext4_mapping_node(struct ext4_fs *fs, uint64_t block, uint8_t **scratch)
+{
+	if (*scratch == NULL) {
+		*scratch = fs->environment.allocate(fs->environment.context, fs->info.block_size);
+		if (*scratch == NULL) {
+			return EXT4_NO_MEMORY;
+		}
+	}
+	return ext4_block_read(fs, block, *scratch);
+}
+
 enum ext4_result
 ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, size_t length,
     struct ext4_mapping *mapping)
 {
+	uint8_t *scratch = NULL;
 	uint64_t block;
 	uint64_t logical;
+	uint64_t blocks;
+	uint64_t file_blocks;
+	uint64_t bytes;
 	size_t within;
 	enum ext4_result error;
 
@@ -24,24 +44,32 @@ ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offse
 	if (logical > UINT32_MAX) {
 		return EXT4_RANGE;
 	}
-	error = ext4_map_block(fs, inode, (uint32_t)logical, &block);
+	error = ext4_map_blocks(fs, inode, (uint32_t)logical, &scratch, &block, &blocks, NULL);
+	if (scratch != NULL) {
+		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
+	}
 	if (error != EXT4_OK) {
 		return error;
 	}
+	file_blocks = inode->size / fs->info.block_size;
+	if (inode->size % fs->info.block_size != 0) {
+		file_blocks++;
+	}
+	if (blocks > file_blocks - logical) {
+		blocks = file_blocks - logical;
+	}
 	within = (size_t)(offset % fs->info.block_size);
+	bytes = blocks * fs->info.block_size - within;
 	mapping->hole = block == 0;
 	mapping->device_offset = block == 0 ? 0 : block * fs->info.block_size + within;
-	mapping->length = fs->info.block_size - within;
-	if (mapping->length > length) {
-		mapping->length = length;
-	}
-	/* The mapped block includes EOF padding for native page-cache I/O. */
+	mapping->length = bytes < length ? (size_t)bytes : length;
+	/* Native I/O may include padding in the final filesystem block only. */
 	return EXT4_OK;
 }
 
 static enum ext4_result
 ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
-    uint8_t *scratch, uint64_t *physical, struct ext4_block_path *path)
+    uint8_t **scratch, uint64_t *physical, uint64_t *blocks, struct ext4_block_path *path)
 {
 	const uint8_t *node = inode->block_data;
 	const struct ext4_extent_header_disk *header;
@@ -55,6 +83,7 @@ ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t log
 	uint64_t end = 0;
 	uint64_t disk_block;
 	uint64_t child;
+	uint64_t boundary = (uint64_t)UINT32_MAX + 1U;
 	uint32_t length;
 	uint16_t entries;
 	uint16_t maximum;
@@ -110,8 +139,15 @@ ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t log
 					return EXT4_CORRUPT;
 				}
 				end = start + length;
-				if (logical >= start && logical < end && !unwritten) {
-					*physical = disk_block + (logical - start);
+				if (logical >= start && logical < end) {
+					if (!unwritten) {
+						*physical = disk_block + (logical - start);
+					}
+					if (end < boundary) {
+						boundary = end;
+					}
+				} else if (start > logical && start < boundary) {
+					boundary = start;
 				}
 			} else {
 				index = (const struct ext4_extent_index_disk *)(node +
@@ -126,21 +162,26 @@ ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t log
 				end = start;
 				if (logical >= start) {
 					child = disk_block;
+				} else if (start < boundary) {
+					boundary = start;
 				}
 			}
 		}
 		if (depth == 0 || child == 0) {
+			if (blocks != NULL) {
+				*blocks = boundary - logical;
+			}
 			return EXT4_OK;
 		}
 		if (path != NULL) {
 			path->blocks[path->count++] = child;
 		}
-		error = ext4_block_read(fs, child, scratch);
+		error = ext4_mapping_node(fs, child, scratch);
 		if (error != EXT4_OK) {
 			return error;
 		}
 		expected_depth = depth - 1;
-		node = scratch;
+		node = *scratch;
 		node_size = fs->info.block_size;
 		external = true;
 	}
@@ -148,19 +189,26 @@ ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t log
 
 static enum ext4_result
 ext4_indirect_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
-    uint8_t *scratch, uint64_t *physical, struct ext4_block_path *path)
+    uint8_t **scratch, uint64_t *physical, uint64_t *blocks, struct ext4_block_path *path)
 {
 	const struct ext4_le32 *pointers = (const struct ext4_le32 *)inode->block_data;
 	uint64_t remaining;
 	uint64_t span = 1;
 	uint64_t block;
+	uint64_t next;
+	uint64_t run;
+	uint64_t limit = (uint64_t)UINT32_MAX + 1U - logical;
 	uint32_t per_block = fs->info.block_size / sizeof(*pointers);
+	uint32_t position = 0;
+	uint32_t available;
 	unsigned int depth;
 	unsigned int level;
 	enum ext4_result error;
 
 	if (logical < EXT4_DIRECT_BLOCKS) {
-		block = ext4_le32(&pointers[logical]);
+		position = logical;
+		available = EXT4_DIRECT_BLOCKS - position;
+		block = ext4_le32(&pointers[position]);
 	} else {
 		remaining = logical - EXT4_DIRECT_BLOCKS;
 		for (depth = 1; depth <= EXT4_INDIRECT_LEVELS; depth++) {
@@ -178,21 +226,58 @@ ext4_indirect_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t l
 			if (path != NULL) {
 				path->blocks[path->count++] = block;
 			}
-			error = ext4_block_read(fs, block, scratch);
+			error = ext4_mapping_node(fs, block, scratch);
 			if (error != EXT4_OK) {
 				return error;
 			}
 			span /= per_block;
-			pointers = (const struct ext4_le32 *)scratch;
-			block = ext4_le32(&pointers[remaining / span]);
+			pointers = (const struct ext4_le32 *)*scratch;
+			position = (uint32_t)(remaining / span);
+			block = ext4_le32(&pointers[position]);
 			remaining %= span;
 		}
+		if (level != 0) {
+			/* An absent ancestor covers the rest of its logical subtree. */
+			*physical = 0;
+			if (blocks != NULL) {
+				run = span - remaining;
+				*blocks = run < limit ? run : limit;
+			}
+			return EXT4_OK;
+		}
+		available = per_block - position;
 	}
 	if (block >= fs->info.blocks) {
 		return EXT4_CORRUPT;
 	}
 	*physical = block;
+	if (blocks != NULL) {
+		for (run = 1; run < available && run < limit; run++) {
+			next = ext4_le32(&pointers[position + (uint32_t)run]);
+			if (next >= fs->info.blocks ||
+			    (block == 0 ? next != 0 : next != block + run)) {
+				break;
+			}
+		}
+		*blocks = run;
+	}
 	return EXT4_OK;
+}
+
+static enum ext4_result
+ext4_map_blocks(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
+    uint8_t **scratch, uint64_t *physical, uint64_t *blocks, struct ext4_block_path *path)
+{
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
+	if (path != NULL) {
+		path->count = 0;
+	}
+	if (inode->flags & EXT4_INODE_EXTENTS) {
+		return ext4_extent_map(fs, inode, logical, scratch, physical, blocks, path);
+	}
+	return ext4_indirect_map(fs, inode, logical, scratch, physical, blocks, path);
 }
 
 enum ext4_result
@@ -206,25 +291,13 @@ enum ext4_result
 ext4_map_block_path(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
     uint64_t *physical, struct ext4_block_path *path)
 {
-	uint8_t *scratch;
+	uint8_t *scratch = NULL;
 	enum ext4_result error;
 
-	if (fs->aborted) {
-		return EXT4_RECOVERY_REQUIRED;
+	error = ext4_map_blocks(fs, inode, logical, &scratch, physical, NULL, path);
+	if (scratch != NULL) {
+		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
 	}
-	if (path != NULL) {
-		path->count = 0;
-	}
-	scratch = fs->environment.allocate(fs->environment.context, fs->info.block_size);
-	if (scratch == NULL) {
-		return EXT4_NO_MEMORY;
-	}
-	if (inode->flags & EXT4_INODE_EXTENTS) {
-		error = ext4_extent_map(fs, inode, logical, scratch, physical, path);
-	} else {
-		error = ext4_indirect_map(fs, inode, logical, scratch, physical, path);
-	}
-	fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
 	return error;
 }
 
@@ -233,11 +306,14 @@ ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, v
     size_t length, size_t *completed)
 {
 	uint8_t *output = buffer;
+	uint8_t *scratch = NULL;
 	uint64_t physical;
 	uint64_t logical;
+	uint64_t blocks;
+	uint64_t bytes;
 	size_t chunk;
 	size_t in_block;
-	enum ext4_result error;
+	enum ext4_result error = EXT4_OK;
 
 	if (completed == NULL) {
 		return EXT4_INVALID_ARGUMENT;
@@ -266,16 +342,19 @@ ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, v
 	while (*completed < length) {
 		logical = offset / fs->info.block_size;
 		if (logical > UINT32_MAX) {
-			return EXT4_RANGE;
+			error = EXT4_RANGE;
+			goto out;
 		}
 		in_block = (size_t)(offset % fs->info.block_size);
-		chunk = fs->info.block_size - in_block;
-		if (chunk > length - *completed) {
-			chunk = length - *completed;
-		}
-		error = ext4_map_block(fs, inode, (uint32_t)logical, &physical);
+		error = ext4_map_blocks(
+		    fs, inode, (uint32_t)logical, &scratch, &physical, &blocks, NULL);
 		if (error != EXT4_OK) {
-			return error;
+			goto out;
+		}
+		bytes = blocks * fs->info.block_size - in_block;
+		chunk = length - *completed;
+		if (bytes < chunk) {
+			chunk = (size_t)bytes;
 		}
 		if (physical == 0) {
 			ext4_zero(output + *completed, chunk);
@@ -283,11 +362,15 @@ ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, v
 			error = ext4_device_read(fs, physical * fs->info.block_size + in_block,
 			    output + *completed, chunk);
 			if (error != EXT4_OK) {
-				return error;
+				goto out;
 			}
 		}
 		*completed += chunk;
 		offset += chunk;
 	}
-	return EXT4_OK;
+out:
+	if (scratch != NULL) {
+		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
+	}
+	return error;
 }

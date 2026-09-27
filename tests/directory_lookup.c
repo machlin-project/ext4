@@ -599,6 +599,8 @@ lookup_arguments(struct device *device, struct ext4_fs *fs)
 	puts("PASS lookup arguments preserve output without I/O");
 }
 
+#include "directory_iteration.h"
+
 static void
 lookup_image(const char *image, const char *expected)
 {
@@ -614,6 +616,7 @@ lookup_image(const char *image, const char *expected)
 				: ext4_mount(&device.environment, &fs),
 		    EXT4_OK);
 		names = independent_names(&device, fs, expected);
+		independent_iteration(&device, fs, expected);
 		lookup_arguments(&device, fs);
 		lookup_damage(&device, fs);
 		ext4_unmount(fs);
@@ -624,6 +627,7 @@ lookup_image(const char *image, const char *expected)
 		    writable, image);
 	}
 	hash_signedness(&device);
+	iteration_mutation(&device);
 	storage_close(&device);
 }
 

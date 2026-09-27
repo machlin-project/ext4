@@ -128,9 +128,32 @@ ext4_directory_entry_decode(struct ext4_fs *fs, const uint8_t *buffer, uint32_t 
 	return EXT4_OK;
 }
 
+static enum ext4_result
+ext4_directory_block_validate(struct ext4_fs *fs, const uint8_t *buffer, uint32_t wanted)
+{
+	struct ext4_dir_entry entry;
+	uint32_t offset = 0;
+	uint32_t length;
+	enum ext4_result error;
+
+	while (offset < fs->info.block_size) {
+		error = ext4_directory_entry_decode(fs, buffer, offset, &entry, &length);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		if (offset < wanted && offset + length > wanted) {
+			return EXT4_CORRUPT;
+		}
+		offset += length;
+	}
+	return EXT4_OK;
+}
+
 enum ext4_result
-ext4_next_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *cookie,
-    struct ext4_dir_entry *entry)
+ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *cookie,
+    enum ext4_dir_action (*visit)(
+	void *context, const struct ext4_dir_entry *entry, uint64_t next_cookie),
+    void *context)
 {
 	struct ext4_dir_entry decoded;
 	uint8_t *buffer;
@@ -140,8 +163,9 @@ ext4_next_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *
 	uint32_t wanted;
 	uint32_t record_length;
 	enum ext4_result error;
+	enum ext4_dir_action action;
 
-	if (fs == NULL || directory == NULL || cookie == NULL || entry == NULL) {
+	if (fs == NULL || directory == NULL || cookie == NULL || visit == NULL) {
 		return EXT4_INVALID_ARGUMENT;
 	}
 	if (fs->aborted) {
@@ -152,6 +176,12 @@ ext4_next_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *
 	}
 	if (directory->size % fs->info.block_size != 0 || *cookie > directory->size) {
 		return EXT4_CORRUPT;
+	}
+	if (directory->size / fs->info.block_size > (uint64_t)UINT32_MAX + 1U) {
+		return EXT4_RANGE;
+	}
+	if (*cookie == directory->size) {
+		return EXT4_NOT_FOUND;
 	}
 	buffer = fs->environment.allocate(fs->environment.context, fs->info.block_size);
 	if (buffer == NULL) {
@@ -172,37 +202,65 @@ ext4_next_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *
 		}
 		error = ext4_directory_checksum(
 		    fs, directory, (uint32_t)(block_offset / fs->info.block_size), buffer);
+		if (error == EXT4_OK) {
+			error = ext4_directory_block_validate(fs, buffer, wanted);
+		}
 		if (error != EXT4_OK) {
 			goto out;
 		}
-		offset = 0;
+		offset = wanted;
 		while (offset < fs->info.block_size) {
 			error = ext4_directory_entry_decode(
 			    fs, buffer, offset, &decoded, &record_length);
 			if (error != EXT4_OK) {
 				goto out;
 			}
-			if (offset < wanted && offset + record_length > wanted) {
-				error = EXT4_CORRUPT;
-				goto out;
-			}
-			if (offset >= wanted) {
-				*cookie = block_offset + offset + record_length;
-				if (decoded.inode != 0) {
-					entry->inode = decoded.inode;
-					entry->type = decoded.type;
-					entry->name_length = decoded.name_length;
-					ext4_copy(
-					    entry->name, decoded.name, decoded.name_length + 1U);
+			offset += record_length;
+			if (decoded.inode != 0) {
+				action = visit(context, &decoded, block_offset + offset);
+				if (action == EXT4_DIR_STOP) {
 					error = EXT4_OK;
 					goto out;
 				}
+				if (action != EXT4_DIR_ACCEPT && action != EXT4_DIR_ACCEPT_STOP) {
+					error = EXT4_INVALID_ARGUMENT;
+					goto out;
+				}
+				*cookie = block_offset + offset;
+				if (action == EXT4_DIR_ACCEPT_STOP) {
+					error = EXT4_OK;
+					goto out;
+				}
+			} else {
+				*cookie = block_offset + offset;
 			}
-			offset += record_length;
 		}
 		error = EXT4_NOT_FOUND;
 	}
 out:
 	fs->environment.release(fs->environment.context, buffer, fs->info.block_size);
 	return error;
+}
+
+static enum ext4_dir_action
+ext4_directory_one(void *context, const struct ext4_dir_entry *entry, uint64_t next_cookie)
+{
+	struct ext4_dir_entry *output = context;
+
+	(void)next_cookie;
+	output->inode = entry->inode;
+	output->type = entry->type;
+	output->name_length = entry->name_length;
+	ext4_copy(output->name, entry->name, entry->name_length + 1U);
+	return EXT4_DIR_ACCEPT_STOP;
+}
+
+enum ext4_result
+ext4_next_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *cookie,
+    struct ext4_dir_entry *entry)
+{
+	if (entry == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	return ext4_iterate_dir(fs, directory, cookie, ext4_directory_one, entry);
 }

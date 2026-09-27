@@ -329,6 +329,27 @@ not permit another agent to change them behind its back. Failed lookup leaves th
 caller's output unchanged. These read paths obey the same owner serialization as
 other core operations and perform no writes, including on a writable mount.
 
+`ext4_iterate_dir` streams a directory through one temporary block and a visitor.
+It verifies the checksum, all records and the requested resume boundary before
+delivering any entry from that block. The visitor can accept and continue, accept
+and stop, or stop before accepting an entry when its output buffer is full.
+Cookies retain accepted progress across a later error. The existing single-entry
+API uses the same parser. No directory buffers survive the call; writable owners
+hold serialization through the visitor and refresh snapshots after a mutation.
+Read-only inode queries inside the visitor are permitted.
+
+File reads and native mapping queries return contiguous physical ranges or hole
+ranges. Extent runs stop at extent and ancestor-index boundaries; legacy runs
+stop at their pointer-table boundary, while an absent ancestor represents its
+remaining sparse subtree. Unwritten extents return zeros. A read allocates mapping
+scratch only when it reaches an external node and reuses that one block for the
+rest of the call. Inline extent maps and direct pointers need no scratch buffer.
+Checksums and range validation precede each returned mapping; there is no mapping
+cache shared across operations or retained across mutations. Native mappings end
+at the block containing EOF even if later blocks are preallocated. The platform
+owner zeroes padding in that final block before exposing it through its page cache.
+Focused tests and warm-cache benchmarks pass; full regression remains pending.
+
 An indexed insertion reuses record slack, compacts a fragmented leaf, or splits
 the leaf at a balanced record boundary. Equal hashes retain the collision
 continuation bit. Separator insertion, internal-node splitting, root height growth,

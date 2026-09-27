@@ -335,17 +335,33 @@ checkpointed core operation is not comparable to a buffered write that has not
 reached stable storage. Linux comparisons must record journal mode and flush
 boundaries as well as caching and thread counts.
 
-The current implementation has concrete unaccepted performance constraints:
-block-at-a-time reads allocate mapping scratch buffers repeatedly; CRC32C uses a
-bitwise fallback; enumeration rereads and checksums a block for each returned entry;
-attributed writes can validate the complete inode map; each
-transaction journals data and checkpoints synchronously; writable access is
+The read-path batch adds contiguous read ranges, reusable mapping scratch within
+a read and a streamed directory API. Its focused tests and warm-cache benchmarks
+pass; complete CI acceptance is pending. The compatibility single-entry API still
+reads and validates a block per returned entry, so adapters need to adopt the visitor
+to obtain streamed enumeration's benefit.
+CRC32C still uses a bitwise fallback; attributed writes can validate the complete
+inode map; each transaction journals data and checkpoints synchronously; writable access is
 serialized by its owner. Measure these costs before choosing optimizations.
 Buffer reuse, range mapping and bounded metadata caching must preserve validation
 and mutation invalidation. Changes to transaction batching, checkpoint timing or
 concurrency require renewed crash, ordering and lifetime acceptance. Native page
 cache ownership stays in the adapters. These requirements remain pending until
 the generated measurements and representative application workloads are reviewed.
+
+Reader tests compare complete and unaligned ranges with the
+independent fixture bytes and inject failures at each observed read/allocation.
+Indexed-directory tests stream the independent name expectations, stop and resume
+visitors, seek saved cookies and retry after I/O or allocation errors. Small
+directories sweep every failure position; large directory runs explicitly sample
+the first, middle and last positions. These focused checks provide development
+feedback without repeating the entire write/recovery and Linux matrix after each
+edit. `file-read-ranges` additionally checks explicit physical-block vectors for
+extent/index boundaries, holes and unwritten data, direct through triple-indirect
+addressing, EOF preallocation and the logical-block limit. It uses four block sizes
+with checksums enabled and disabled. Directory tests reject late malformed records
+before any callback, allow read-only queries inside the visitor and refresh the
+directory snapshot after create/unlink. The lookup counts below predate this batch.
 
 The read-only probe compares public directory lookup cost on three
 independently generated indexed images. It links the optimized freestanding core
@@ -359,16 +375,37 @@ allocations for a lookup of an absent name after complete enumeration:
 | 46,122 | 15,497 | 61,618 / 3 | 107,741 / 4 |
 
 On those same images, looking up the final enumerated entry takes 4, 5 and 5 read
-callbacks, respectively, including inode loading. Enumeration itself retains its
-earlier counts. The input hashes, compiler options, exact work and allocation
+callbacks, respectively, including inode loading. Enumeration at that checkpoint
+retains its earlier counts. The input hashes, compiler options, exact work and allocation
 balance are recorded in `artifacts/checks/core-read-cost-report.json` and
 `artifacts/checks/indexed-lookup-cost-report.json`. This demonstrates the reduced
 search work for these inputs; it does not measure physical I/O or throughput.
 
 All three images remain unchanged, with zero writes and balanced allocations.
 The probe source is retained alongside the reports. These software operation
-counts are not a comparison with Linux; reusable directory-reading state and
-representative timing workloads remain separate work.
+counts are not a comparison with Linux.
+
+`ext4-read-benchmark` links the optimized freestanding core without sanitizers,
+coverage or LTO even in a sanitized test build. It accepts an image, a regular-file
+or directory path and a repeat count:
+
+```sh
+.build/ext4-read-benchmark artifacts/fixtures/ext4-4k.img /sparse.bin 31
+.build/ext4-read-benchmark artifacts/index-capacity-fixture/index-capacity.img /indexed 31
+```
+
+Each run opens the image read-only, warms the workload once, checks stable digests
+and balanced allocations, and reports minimum, median and p95 monotonic times,
+read callbacks and core allocations as JSON. File requests are at most 1 MiB;
+file digest computation is outside the timed read calls. Directory timing includes
+the visitor's digest. Building the same tool with `EXT4_BENCH_SINGLE_ENTRY` uses the
+compatibility API for comparison with an older core. Preserve the exact compiler,
+library, executable and image identities in the generated report.
+
+The 14-pair warm-cache comparison is recorded under
+`artifacts/checks/read-path-benchmark-results/`. It does not measure cold reads,
+CPU time, device-level operations, writable or concurrent workloads, or mounted
+platform behavior. Representative performance acceptance therefore remains open.
 
 ## Platform suites and remaining coverage
 

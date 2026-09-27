@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include <ext4/ext4.h>
 #include "image.h"
+#include "internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,10 +26,14 @@ lookup(
 }
 
 static void
-check_contents(
-    struct ext4_fs *fs, struct ext4_inode *inode, const uint8_t *expected, size_t expected_size)
+check_contents(struct ext4_fs *fs, struct ext4_posix_image *image, struct ext4_inode *inode,
+    const uint8_t *expected, size_t expected_size)
 {
 	uint8_t *buffer = NULL;
+	uint64_t allocations;
+	uint64_t reads;
+	uint64_t fault;
+	uint64_t live = image->live_allocations;
 	size_t completed;
 	size_t offset;
 	size_t chunk;
@@ -37,10 +42,36 @@ check_contents(
 	buffer = malloc(expected_size + 16);
 	CHECK(buffer != NULL);
 	memset(buffer, 0xa7, expected_size + 16);
+	image->allocation_calls = 0;
+	image->read_calls = 0;
 	CHECK(ext4_read(fs, inode, 0, buffer, expected_size + 16, &completed) == EXT4_OK);
+	allocations = image->allocation_calls;
+	reads = image->read_calls;
+	CHECK(allocations <= 1 && image->live_allocations == live);
 	CHECK(completed == expected_size);
 	CHECK(memcmp(buffer, expected, expected_size) == 0);
 	CHECK(buffer[expected_size] == 0xa7);
+	/* A failed range may follow an already returned prefix. Retry the full read
+	 * only after checking that prefix and the temporary mapping buffer's lifetime. */
+	for (fault = 1; fault <= allocations; fault++) {
+		image->allocation_calls = 0;
+		image->fail_allocation_at = fault;
+		memset(buffer, 0xa7, expected_size + 16);
+		CHECK(ext4_read(fs, inode, 0, buffer, expected_size + 16, &completed) ==
+		    EXT4_NO_MEMORY);
+		CHECK(completed <= expected_size && memcmp(buffer, expected, completed) == 0);
+		CHECK(buffer[expected_size] == 0xa7 && image->live_allocations == live);
+	}
+	image->fail_allocation_at = 0;
+	for (fault = 1; fault <= reads; fault++) {
+		image->read_calls = 0;
+		image->fail_read_at = fault;
+		memset(buffer, 0xa7, expected_size + 16);
+		CHECK(ext4_read(fs, inode, 0, buffer, expected_size + 16, &completed) == EXT4_IO);
+		CHECK(completed <= expected_size && memcmp(buffer, expected, completed) == 0);
+		CHECK(buffer[expected_size] == 0xa7 && image->live_allocations == live);
+	}
+	image->fail_read_at = 0;
 	CHECK(ext4_read(fs, inode, expected_size, buffer, 1, &completed) == EXT4_OK);
 	CHECK(completed == 0);
 	CHECK(ext4_read(fs, inode, UINT64_MAX, buffer, 1, &completed) == EXT4_OK);
@@ -57,6 +88,8 @@ check_contents(
 		CHECK(memcmp(buffer, expected + offset, chunk) == 0);
 	}
 out:
+	image->fail_allocation_at = 0;
+	image->fail_read_at = 0;
 	free(buffer);
 }
 
@@ -99,6 +132,80 @@ out:
 	return;
 }
 
+struct directory_stream {
+	bool seen[400];
+	unsigned int count;
+	size_t batch;
+	size_t limit;
+	uint64_t last_cookie;
+};
+
+static enum ext4_dir_action
+stream_entry(void *context, const struct ext4_dir_entry *entry, uint64_t next_cookie)
+{
+	struct directory_stream *stream = context;
+	unsigned int index;
+
+	CHECK(next_cookie > stream->last_cookie);
+	if (stream->limit == 0) {
+		return EXT4_DIR_STOP;
+	}
+	if (strcmp((const char *)entry->name, ".") != 0 &&
+	    strcmp((const char *)entry->name, "..") != 0) {
+		CHECK(sscanf((const char *)entry->name, "entry-%u", &index) == 1);
+		CHECK(index < 400 && !stream->seen[index]);
+		stream->seen[index] = true;
+		stream->count++;
+	}
+	stream->last_cookie = next_cookie;
+	return ++stream->batch == stream->limit ? EXT4_DIR_ACCEPT_STOP : EXT4_DIR_ACCEPT;
+out:
+	return (enum ext4_dir_action) - 1;
+}
+
+static void
+check_stream(struct ext4_fs *fs, struct ext4_posix_image *image, const struct ext4_inode *directory,
+    uint32_t block_size)
+{
+	struct directory_stream stream = { 0 };
+	uint64_t cookie = 0;
+	uint64_t live = image->live_allocations;
+	unsigned int batch;
+	enum ext4_result error;
+
+	/* Rejecting the first entry leaves it available, including cookie zero. */
+	CHECK(ext4_iterate_dir(fs, directory, &cookie, stream_entry, &stream) == EXT4_OK);
+	CHECK(cookie == 0 && stream.count == 0 && image->live_allocations == live);
+	for (batch = 0; batch < 2; batch++) {
+		memset(&stream, 0, sizeof(stream));
+		stream.limit = batch == 0 ? SIZE_MAX : 17;
+		cookie = 0;
+		image->read_calls = 0;
+		image->allocation_calls = 0;
+		do {
+			stream.batch = 0;
+			error = ext4_iterate_dir(fs, directory, &cookie, stream_entry, &stream);
+		} while (error == EXT4_OK);
+		CHECK(error == EXT4_NOT_FOUND && stream.count == 400 && cookie == directory->size);
+		CHECK(image->live_allocations == live);
+		if (batch == 0) {
+			CHECK(image->read_calls <=
+			    directory->size / block_size * (EXT4_EXTENT_MAX_DEPTH + 1U));
+			CHECK(image->allocation_calls <= directory->size / block_size + 1U);
+			printf("PASS streamed directory entries=%u reads=%llu allocations=%llu\n",
+			    stream.count, (unsigned long long)image->read_calls,
+			    (unsigned long long)image->allocation_calls);
+		}
+	}
+	/* End-of-directory must not allocate, read or call the visitor. */
+	image->read_calls = 0;
+	image->allocation_calls = 0;
+	CHECK(ext4_iterate_dir(fs, directory, &cookie, stream_entry, &stream) == EXT4_NOT_FOUND);
+	CHECK(image->read_calls == 0 && image->allocation_calls == 0);
+out:
+	return;
+}
+
 static void
 check_reader(const char *path)
 {
@@ -133,7 +240,7 @@ check_reader(const char *path)
 	    (info.block_size & (info.block_size - 1)) == 0);
 	CHECK(ext4_get_inode(fs, EXT4_ROOT_INODE, &root) == EXT4_OK);
 	CHECK(lookup(fs, &root, "hello.txt", &inode) == EXT4_OK);
-	check_contents(fs, &inode, (const uint8_t *)"Machlin ext4\n", 13);
+	check_contents(fs, &image, &inode, (const uint8_t *)"Machlin ext4\n", 13);
 	CHECK(lookup(fs, &root, "hello-hardlink", &other) == EXT4_OK);
 	CHECK(other.number == inode.number && inode.links == 2);
 	CHECK(lookup(fs, &root, "metadata.txt", &inode) == EXT4_OK);
@@ -146,31 +253,31 @@ check_reader(const char *path)
 	CHECK(inode.birth_time_valid && inode.birth_time.seconds == 1700000000 &&
 	    inode.birth_time.nanoseconds == 999999999);
 	CHECK(lookup(fs, &root, "empty", &inode) == EXT4_OK);
-	check_contents(fs, &inode, (const uint8_t *)"", 0);
+	check_contents(fs, &image, &inode, (const uint8_t *)"", 0);
 	CHECK(lookup(fs, &root, "hello-link", &inode) == EXT4_OK);
 	CHECK(inode.fast_symlink);
-	check_contents(fs, &inode, (const uint8_t *)"hello.txt", 9);
+	check_contents(fs, &image, &inode, (const uint8_t *)"hello.txt", 9);
 	CHECK(lookup(fs, &root, "long-link", &inode) == EXT4_OK);
 	CHECK(!inode.fast_symlink);
 	memset(long_link, 'L', sizeof(long_link));
-	check_contents(fs, &inode, long_link, sizeof(long_link));
+	check_contents(fs, &image, &inode, long_link, sizeof(long_link));
 	CHECK(lookup(fs, &root, "nested", &directory) == EXT4_OK);
 	CHECK(lookup(fs, &directory, "child.txt", &inode) == EXT4_OK);
-	check_contents(fs, &inode, (const uint8_t *)"nested data\n", 12);
+	check_contents(fs, &image, &inode, (const uint8_t *)"nested data\n", 12);
 	CHECK(lookup(fs, &root, "payload.bin", &inode) == EXT4_OK);
 	expected = malloc(2U * 1024U * 1024U);
 	CHECK(expected != NULL);
 	for (index = 0; index < 200000; index++) {
 		expected[index] = (uint8_t)((index * 17 + 23) & 255U);
 	}
-	check_contents(fs, &inode, expected, 200000);
+	check_contents(fs, &image, &inode, expected, 200000);
 	check_mappings(fs, &image, &inode, expected, 200000);
 	CHECK(lookup(fs, &root, "sparse.bin", &inode) == EXT4_OK);
 	memset(expected, 0, 2U * 1024U * 1024U);
 	for (extent_index = 0; extent_index < 12; extent_index++) {
 		memset(expected + extent_index * 65536, (int)extent_index + 1, 4096);
 	}
-	check_contents(fs, &inode, expected, 2U * 1024U * 1024U);
+	check_contents(fs, &image, &inode, expected, 2U * 1024U * 1024U);
 	check_mappings(fs, &image, &inode, expected, 2U * 1024U * 1024U);
 	CHECK(lookup(fs, &root, "many", &directory) == EXT4_OK);
 	cookie = 0;
@@ -185,11 +292,12 @@ check_reader(const char *path)
 		count++;
 	}
 	CHECK(error == EXT4_NOT_FOUND && count == 400);
+	check_stream(fs, &image, &directory, info.block_size);
 	for (entry_index = 0; entry_index < 400; entry_index += 37) {
 		snprintf(name, sizeof(name), "entry-%04u", entry_index);
 		CHECK(lookup(fs, &directory, name, &inode) == EXT4_OK);
 		snprintf(name, sizeof(name), "%u\n", entry_index);
-		check_contents(fs, &inode, (const uint8_t *)name, strlen(name));
+		check_contents(fs, &image, &inode, (const uint8_t *)name, strlen(name));
 	}
 	CHECK(lookup(fs, &root, "no-such-entry", &inode) == EXT4_NOT_FOUND);
 	cookie = 1;
