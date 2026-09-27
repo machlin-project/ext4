@@ -481,8 +481,13 @@ nonrepairing e2fsck. Inputs and exports remain unchanged. Reports are under
 `artifacts/checks/growth-independent-retry2-summary.json`. Earlier attempts stopped
 on a command input path and report-directory setup; no filesystem checks failed.
 The default Meson profile also configures correctly without the optional indirect
-fixture. Full regression is pending at this batch boundary. Writable platform and
-concurrent-cache acceptance remain separate.
+fixture. The full CI regression passes all six jobs and exactly 256 registered
+tests, with no missing, duplicate, skipped or failed Meson cases. Its independent
+checks again pass all 20 growth states and all 30 partial-write states with
+nonrepairing e2fsck. The ten known shared-value reader-only e2fsck exceptions are
+recorded separately. Evidence is retained under
+`artifacts/checks/growth-ci-36344007575/`. This checkpoint precedes the CRC16 format
+package. Writable platform and concurrent-cache acceptance remain separate.
 
 ## Portable namespace evidence
 
