@@ -55,8 +55,9 @@ Evidence is under `artifacts/group-checksum-fixtures/` and
 Independent mutation checks pass all 48 case records: four writes, four allocation
 states, sixteen truncate checkpoints, four growth cases with both write and
 truncate outcomes, and twenty namespace cases. Contents, attributes, mappings,
-group accounting and recovery comparisons pass; all 168 nonrepairing e2fsck
-commands return zero. Fixture and exported input bytes remain unchanged. Reports
+group accounting and recovery comparisons pass; all 168 e2fsck commands return
+zero: 136 nonrepairing checks and 32 journal-only oracle replays on copied images.
+Fixture and exported input bytes remain unchanged. Reports
 are under `artifacts/group-checksum-*-independent/`, with the combined review in
 `artifacts/checks/group-checksum-independent-retry1-summary.json`.
 
@@ -68,8 +69,15 @@ agree on the returned namespace/data and allocation accounting; all 22 recorded
 e2fsck commands return zero. Source images remain unchanged. Reports are in the
 lab under `artifacts/ext4-journal/linux-reference/group-checksum-*-linux/`, with
 review in `artifacts/checks/group-checksum-linux-summary.json` in this repository.
-Complete regression remains pending. Large-volume and native writable behavior
-are not established by these bounded profiles.
+The complete six-job CI regression passes all 270 registered tests exactly once,
+with no missing, duplicate, unexpected or skipped Meson tests. Its independent
+checks reproduce all 48 format cases, 88 exports and 168 successful e2fsck commands.
+The ten earlier shared-value reader-only exceptions remain separate from clean
+filesystem acceptance. Evidence is under
+`artifacts/checks/group-checksum-ci-36346361547/`; see the
+[accepted CI run](https://github.com/machlin-project/ext4/actions/runs/36346361547).
+Large-volume and native writable behavior are not established by these bounded
+profiles.
 
 ## Large-directory development evidence
 
