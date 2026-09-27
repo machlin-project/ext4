@@ -103,6 +103,26 @@ after commit succeeds. The primary-superblock snapshot always retains RECOVER an
 a fresh checksum through checkpoint; only clean finish clears that marker.
 Large-volume performance and a concurrent allocator remain unaccepted.
 
+Bounded truncate performs the size, tail-zeroing, data/mapping removal, bitmap,
+group/superblock accounting and admitted attribute transition in one journal
+transaction. It validates the entire inode map first: all physical ranges must
+be allocated, disjoint from each other and protected metadata, and agree with
+the inode's block count. Its temporary ownership index is capped at 1,048,576
+ranges (16 MiB), and all mapping-node snapshots must fit the journal credit
+bound. This checks ownership within that inode, not across every inode on disk.
+Extent suffix removal frees empty nodes and collapses a small sole child back
+into the inode. Indirect removal releases empty paths through all three levels.
+Shrink zeroes a retained written partial block; growth exposes zero bytes and
+does not allocate sparse holes. Unwritten backing bytes remain inaccessible.
+
+Every successful transaction completes home writes and resets the log before
+another transaction can reuse freed blocks. There are no deferred home writes
+from a previous owner. Relaxing this ordering would require revoke and reuse
+ownership rules. Truncate currently cancels before resource writes when its
+whole mapping/metadata set exceeds the transaction bound. Arbitrarily large
+multi-transaction truncation and persistent orphan cleanup remain required work;
+this bounded API does not claim that contract or support open-unlinked files.
+
 The admitted operation supplies final permission bits and captured timestamps
 under the same owner lock as authorization and mutation. Ownership changes must
 include the admitted permission transition; a write requires final permissions,

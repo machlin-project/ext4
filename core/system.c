@@ -48,12 +48,11 @@ ext4_range_sift(struct ext4_block_range *ranges, size_t root, size_t count)
 	ranges[root] = saved;
 }
 
-static enum ext4_result
-ext4_system_sort(struct ext4_fs *fs)
+enum ext4_result
+ext4_ranges_sort(struct ext4_block_range *ranges, size_t *range_count)
 {
-	struct ext4_block_range *ranges = fs->system_ranges;
 	struct ext4_block_range temporary;
-	size_t count = fs->system_range_count;
+	size_t count = *range_count;
 	size_t index;
 	size_t used = 0;
 
@@ -80,7 +79,7 @@ ext4_system_sort(struct ext4_fs *fs)
 		}
 		ranges[used++] = ranges[index];
 	}
-	fs->system_range_count = used;
+	*range_count = used;
 	return EXT4_OK;
 }
 
@@ -159,7 +158,7 @@ ext4_system_ranges_build(struct ext4_fs *fs)
 			return error;
 		}
 	}
-	return ext4_system_sort(fs);
+	return ext4_ranges_sort(fs->system_ranges, &fs->system_range_count);
 }
 
 bool

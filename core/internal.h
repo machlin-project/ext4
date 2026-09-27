@@ -50,6 +50,8 @@ struct ext4_group {
 	uint16_t flags;
 };
 
+/* Sort, reject overlaps and merge adjacent already-bounded physical ranges. */
+enum ext4_result ext4_ranges_sort(struct ext4_block_range *ranges, size_t *count);
 enum ext4_result ext4_group_get(struct ext4_fs *fs, uint32_t group, struct ext4_group *result);
 enum ext4_result ext4_group_decode(
     struct ext4_fs *fs, uint32_t group, struct ext4_group_disk *disk, struct ext4_group *result);

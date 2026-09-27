@@ -11,7 +11,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Eleven read profiles pass; broader format and size coverage pending |
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
-| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, sparse growth and unwritten conversion pass portable and Linux checks; truncate, directory mutation and platform writes pending |
+| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, sparse growth, unwritten conversion and bounded truncate/freeing pass portable and Linux checks; multi-transaction truncation, directory mutation and platform writes pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine passes the portable fault matrix, debugfs replay and Linux roundtrips; advanced journal formats, orphans and platform write integration remain pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; ACLs/xattrs and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
@@ -210,9 +210,50 @@ kext architectures and universal FSKit build successfully; these new binaries
 have compilation evidence only and still expose read-only operations.
 
 Writes remain bounded atomic operations. Large requests, concurrent mapping
-ownership, truncate/freeing, inode/directory allocation, orphan cleanup, policy
+ownership, multi-transaction truncate, inode/directory allocation, orphan cleanup, policy
 for reserved space, platform durability and writable cache integration remain
 required work. The allocation tests do not complete the filesystem acceptance matrix.
+
+## Truncate and freeing evidence
+
+`ext4-write-test --truncate` passes ten ordinary write profiles and four independently
+generated unwritten profiles. It shrinks a fragmented file at partial/aligned/zero
+boundaries, retains different branches, collapses extent roots, frees indirect paths,
+grows again without exposing removed bytes, and reuses released blocks. Separate cases
+cover unwritten preallocation, hardlink identity, maximum sparse size, invalid admission,
+stale generation and late credit exhaustion. Repaired-checksum corruption cases reject
+duplicated data blocks, data/mapping aliases and protected metadata. Inode block-count
+mismatches also reject before writes. The allocation suite additionally fills a whole
+multi-group image, truncates it and verifies zeroed reuse after ENOSPC; all direct through
+triple-indirect boundaries are checked again while their paths are removed.
+
+Three operations per profile (partial shrink/tree collapse, complete removal, and
+exposure of already allocated bytes past EOF) inject every allocation/read failure:
+708 allocation and 1,161 read failures. Across 6,396 write/flush cuts, 6,268 recover
+to the complete old or new resource outside the journal. The remaining 128 deliberately
+torn checksummed primary-superblock cases fail closed without recovery writes.
+These are modeled errors, not successful repairs or physical-device power-loss tests.
+
+All fourteen final exports and forty-two intermediate truncate states pass independent
+contents/mapping checks and e2fsck in `artifacts/truncate-final-independent/`. Final
+images also have exactly one data block and no leaked mapping nodes. The same fourteen
+final image hashes match the earlier `artifacts/truncate-independent/` report used
+for Linux verification. Eleven selected final exports also pass
+real Linux mounts and exact contents/allocated-block checks. Linux then shrinks, grows
+and reallocates the file, commits with fsync and powers off without unmounting. The core
+replays one Linux-authored transaction (four or five blocks), preserving exact bytes,
+owners and mode; e2fsck passes. Linux reports and console evidence are in the lab under
+`artifacts/ext4-journal/linux-reference/truncate-roundtrip/`, with
+`logs/ext4-truncate-roundtrip.log`. The reference kernel uses 4 KiB pages; 8/16/32 KiB
+filesystem profiles retain portable/e2fsprogs evidence only.
+
+The nine configured sanitized CTest suites pass, including the optimized freestanding
+2 KiB frame check. Logs and JUnit output are under `artifacts/checks/truncate-*`.
+The shared core also compiles in both unsigned kext architectures and universal FSKit.
+Those new adapter binaries remain read-only and have compilation evidence only.
+Truncate is currently atomic only when the full mapping tree and changed metadata fit
+one bounded transaction. Larger multi-transaction operations, persistent orphan cleanup,
+open-unlinked lifetime and native UBC/FSKit resize concurrency remain unaccepted.
 
 ## FSKit build evidence
 

@@ -20,6 +20,7 @@ struct ext4_allocation {
 	uint32_t group_index;
 	uint32_t next_bit;
 	uint32_t allocated;
+	uint64_t freed;
 };
 
 enum ext4_result ext4_allocation_init(struct ext4_allocation *allocation, struct ext4_fs *fs,
@@ -27,6 +28,10 @@ enum ext4_result ext4_allocation_init(struct ext4_allocation *allocation, struct
 void ext4_allocation_destroy(struct ext4_allocation *allocation);
 enum ext4_result ext4_allocate_block(struct ext4_allocation *allocation, uint64_t *block);
 enum ext4_result ext4_allocation_valid(struct ext4_allocation *allocation, uint64_t block);
+enum ext4_result ext4_allocation_valid_range(
+    struct ext4_allocation *allocation, uint64_t block, uint64_t length);
+enum ext4_result ext4_free_blocks(
+    struct ext4_allocation *allocation, uint64_t block, uint64_t length);
 
 struct ext4_map_run {
 	uint64_t physical;
@@ -42,5 +47,10 @@ enum ext4_result ext4_write_map_lookup(struct ext4_allocation *allocation,
 enum ext4_result ext4_write_map_allocate(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t logical,
     uint64_t *physical, bool *zero);
+/* Validate the entire inode's allocated map before releasing any part of it.
+ * Reject shared physical ranges, invalid bitmaps and inconsistent i_blocks.
+ * All mapping snapshots must fit the transaction's bounded credit capacity. */
+enum ext4_result ext4_write_map_truncate(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t first);
 
 #endif

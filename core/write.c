@@ -291,6 +291,7 @@ ext4_write_account(struct ext4_allocation *allocation, const struct ext4_inode *
 	struct ext4_fs *fs = allocation->fs;
 	uint64_t units = ext4_le32(&disk->blocks_lo);
 	uint64_t increment = allocation->allocated;
+	uint64_t decrement = allocation->freed;
 	uint64_t maximum = UINT32_MAX;
 	uint32_t flags = inode->flags;
 
@@ -300,7 +301,15 @@ ext4_write_account(struct ext4_allocation *allocation, const struct ext4_inode *
 	}
 	if (!(flags & EXT4_INODE_HUGE_FILE)) {
 		increment *= fs->info.block_size / EXT4_SECTOR_SIZE;
+		if (decrement > units / (fs->info.block_size / EXT4_SECTOR_SIZE)) {
+			return EXT4_CORRUPT;
+		}
+		decrement *= fs->info.block_size / EXT4_SECTOR_SIZE;
 	}
+	if (decrement > units) {
+		return EXT4_CORRUPT;
+	}
+	units -= decrement;
 	if (increment > maximum - units) {
 		if (!(fs->info.feature_ro_compat & EXT4_FEATURE_RO_HUGE_FILE) ||
 		    (flags & EXT4_INODE_HUGE_FILE) ||
@@ -317,13 +326,11 @@ ext4_write_account(struct ext4_allocation *allocation, const struct ext4_inode *
 		ext4_encode16(&disk->blocks_hi, (uint16_t)(units >> 32));
 	}
 	ext4_encode32(&disk->flags, flags);
-	if (end > inode->size) {
-		if (end > INT32_MAX && !(fs->info.feature_ro_compat & EXT4_FEATURE_RO_LARGE_FILE)) {
-			return EXT4_UNSUPPORTED;
-		}
-		ext4_encode32(&disk->size_lo, (uint32_t)end);
-		ext4_encode32(&disk->size_hi, (uint32_t)(end >> 32));
+	if (end > INT32_MAX && !(fs->info.feature_ro_compat & EXT4_FEATURE_RO_LARGE_FILE)) {
+		return EXT4_UNSUPPORTED;
 	}
+	ext4_encode32(&disk->size_lo, (uint32_t)end);
+	ext4_encode32(&disk->size_hi, (uint32_t)(end >> 32));
 	return EXT4_OK;
 }
 
@@ -442,7 +449,8 @@ ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t of
 		consumed += chunk;
 		within = 0;
 	}
-	error = ext4_write_account(&allocation, &inode, disk, offset + length);
+	error = ext4_write_account(
+	    &allocation, &inode, disk, offset + length > inode.size ? offset + length : inode.size);
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
@@ -455,6 +463,124 @@ ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t of
 	if (error == EXT4_OK) {
 		fs->info.free_blocks = free_blocks;
 		*completed = length;
+	}
+	return error;
+cancel:
+	if (allocation_ready) {
+		ext4_allocation_destroy(&allocation);
+	}
+	if (targets != NULL) {
+		fs->environment.release(
+		    fs->environment.context, targets, (size_t)credits * sizeof(*targets));
+	}
+	ext4_transaction_cancel(transaction);
+	return error;
+}
+
+enum ext4_result
+ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t size,
+    const struct ext4_inode_update *update, struct ext4_inode *result)
+{
+	struct ext4_transaction *transaction;
+	struct ext4_inode_disk *disk;
+	struct ext4_inode inode;
+	struct ext4_inode zero_from;
+	struct ext4_allocation allocation;
+	struct ext4_write_target *targets = NULL;
+	uint64_t end;
+	uint64_t free_blocks;
+	uint64_t per_block;
+	uint64_t limit;
+	uint32_t first;
+	uint32_t target_count = 0;
+	uint32_t credits;
+	bool allocation_ready = false;
+	enum ext4_result error;
+
+	if (result == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	error = ext4_update_validate(fs, update);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (update->fields != EXT4_WRITE_FIELDS) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if (size > (uint64_t)UINT32_MAX * fs->info.block_size) {
+		return EXT4_RANGE;
+	}
+	credits = ext4_journal_credits(fs->journal);
+	error = ext4_transaction_begin(fs->journal, credits, &transaction);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	error = ext4_edit_inode(fs, transaction, number, generation, &disk, &inode);
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	if ((inode.mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR) {
+		error = (inode.mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY ? EXT4_IS_DIRECTORY
+									     : EXT4_UNSUPPORTED;
+		goto cancel;
+	}
+	if (!(inode.flags & EXT4_INODE_EXTENTS)) {
+		per_block = fs->info.block_size / sizeof(struct ext4_le32);
+		limit = EXT4_DIRECT_BLOCKS + per_block + per_block * per_block +
+		    per_block * per_block * per_block;
+		if (size > limit * fs->info.block_size) {
+			error = EXT4_RANGE;
+			goto cancel;
+		}
+	}
+	error = ext4_inode_apply(fs, disk, update);
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	error = ext4_allocation_init(&allocation, fs, transaction, &inode);
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	allocation_ready = true;
+	first = (uint32_t)((size + fs->info.block_size - 1) / fs->info.block_size);
+	if (size <= inode.size) {
+		error = ext4_write_map_truncate(&allocation, &inode, disk, first);
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
+	}
+	targets =
+	    fs->environment.allocate(fs->environment.context, (size_t)credits * sizeof(*targets));
+	if (targets == NULL) {
+		error = EXT4_NO_MEMORY;
+		goto cancel;
+	}
+	zero_from = inode;
+	if (size <= inode.size) {
+		zero_from.size = size;
+		end = (uint64_t)first * fs->info.block_size;
+	} else {
+		end = size;
+	}
+	error = ext4_write_gap(&allocation, &zero_from, disk, end, targets, &target_count, credits);
+	if (error == EXT4_OK) {
+		error = ext4_write_account(&allocation, &inode, disk, size);
+	}
+	if (error == EXT4_OK) {
+		ext4_inode_checksum_set(fs, number, disk);
+		error = ext4_inode_decode(fs, number, disk, &inode);
+	}
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	free_blocks = allocation.free_blocks;
+	ext4_allocation_destroy(&allocation);
+	fs->environment.release(
+	    fs->environment.context, targets, (size_t)credits * sizeof(*targets));
+	error = ext4_edit_commit(fs, transaction);
+	if (error == EXT4_OK) {
+		fs->info.free_blocks = free_blocks;
+		*result = inode;
 	}
 	return error;
 cancel:

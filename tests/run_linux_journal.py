@@ -30,12 +30,14 @@ def main():
                         help="verify clean file-write exports listed by check_writes.py")
     parser.add_argument("--allocation", action="store_true",
                         help="verify allocation exports and replay a Linux-authored file extension")
+    parser.add_argument("--truncate", action="store_true",
+                        help="verify truncate exports and replay Linux shrink/grow/reallocation")
     parser.add_argument("--case", action="append", default=[],
                         help="select an exact exported image filename (repeatable)")
     args = parser.parse_args()
-    if args.file_writes and args.allocation:
-        parser.error("select either file-write or allocation exports")
-    clean_exports = args.file_writes or args.allocation
+    if sum((args.file_writes, args.allocation, args.truncate)) > 1:
+        parser.error("select one of file-write, allocation or truncate exports")
+    clean_exports = args.file_writes or args.allocation or args.truncate
     lab = args.lab.resolve()
     root = Path(__file__).resolve().parent.parent
     output = args.output.resolve()
@@ -78,6 +80,8 @@ def main():
         command.insert(1, "-DEXT4_TEST_FILE_WRITES=1")
     if args.allocation:
         command.insert(1, "-DEXT4_TEST_ALLOCATION=1")
+    if args.truncate:
+        command.insert(1, "-DEXT4_TEST_TRUNCATE=1")
     with (output / "build.log").open("wb") as log:
         subprocess.run([str(x) for x in command], stdout=log, stderr=subprocess.STDOUT, check=True)
     archives = {}
@@ -143,7 +147,8 @@ def main():
         console = run([runner, kernel, archives[case["block_size"]], "2", "512",
                        "console=hvc0 rdinit=/init panic=-1 loglevel=4", scratch])
         (output / f"{source.stem}.console.log").write_text(console)
-        verification_marker = ("LINUX_EXT4_ALLOCATION_PASS" if args.allocation else
+        verification_marker = ("LINUX_EXT4_TRUNCATE_PASS" if args.truncate else
+                               "LINUX_EXT4_ALLOCATION_PASS" if args.allocation else
                                "LINUX_EXT4_FILE_WRITE_PASS" if args.file_writes else "LINUX_EXT4_REPLAY_PASS")
         for marker in (verification_marker,
                        "LINUX_EXT4_COMMITTED_RECOVERY_PENDING",
@@ -157,13 +162,16 @@ def main():
         transactions = re.search(r"transactions=(\d+)", recovery)
         if not transactions or int(transactions[1]) == 0:
             raise RuntimeError("reverse roundtrip did not replay a Linux-authored transaction")
-        name = "empty" if args.allocation else "payload.bin"
+        name = "empty" if args.allocation or args.truncate else "payload.bin"
         contents = output / f"{source.stem}.contents"
         run([tools / "debugfs/debugfs", "-R", f"dump /{name} {contents}", scratch])
         data = contents.read_bytes()
         expected = bytearray((index * 17 + 23) & 255 for index in range(200000))
         block_size = case["block_size"]
-        if args.allocation:
+        if args.truncate:
+            expected = bytearray(block_size * 12 + 17)
+            expected[block_size * 10 + 7] = 0x6c
+        elif args.allocation:
             expected = expected_contents(block_size)
             expected += bytes(block_size + 7) + b"\x6c"
         elif args.file_writes:
@@ -173,7 +181,7 @@ def main():
             expected[:block_size] = b"\x53" * block_size
             expected[block_size:block_size * 2] = b"\xa7" * block_size
             expected[:4] = bytes.fromhex("c03b3998")
-        if not args.allocation:
+        if not args.allocation and not args.truncate:
             expected[0] = 0x6c
         if data != expected:
             raise RuntimeError("incorrect contents after Linux/native recovery roundtrip")

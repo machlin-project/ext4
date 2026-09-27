@@ -155,6 +155,24 @@ recovers debugfs-authored journals. It retains reports and logs, not disk images
 This portable CI does not replace selected-Xcode formatting, unsigned platform
 builds, actual macOS mounts, or the separately identified kernel/LXNU VM tests.
 
+`ext4-write-test --truncate IMAGE...` checks bounded resize, freeing, corruption
+and recovery. Add `--export-only --export NEW_DIRECTORY` after a successful CTest
+run to create independent inspection images without duplicating its fault loops.
+For truncate this emits three `cut400-`, `cut40-`, `cut4-` intermediate images and
+the final reused-block image for each source. Verify them with:
+
+```sh
+python3 tests/check_allocation.py --truncate --exports artifacts/truncate-exports \
+  --output artifacts/truncate-independent
+```
+
+Use `--tools-root` when e2fsprogs is outside PATH. The Linux roundtrip runner's
+`--truncate` mode takes this independent report, verifies a final export under
+Linux, and then truncates, grows and reallocates before leaving a committed journal
+for portable recovery. Select final image names explicitly with `--case`; the
+intermediate `cut*` exports use different byte oracles and are e2fsprogs checks.
+Run VM commands from the lab directory using its identified reference kernel.
+
 Use the selected Xcode C compiler and formatter on macOS. The portable core and
 image tests must also compile with Clang on Linux. FSKit builds target a declared
 macOS baseline; do not use newer SDK APIs without availability handling.

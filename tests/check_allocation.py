@@ -30,11 +30,19 @@ def expected_contents(block_size):
     return data[:size]
 
 
+def expected_truncate_contents(block_size):
+    data = bytearray(block_size * 9 + 13)
+    data[block_size * 4 + 7] = ord("T")
+    return data
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exports", type=Path, required=True)
     parser.add_argument("--tools-root", type=Path)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--truncate", action="store_true",
+                        help="verify truncate/free/reuse exports instead of allocation exports")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -66,7 +74,14 @@ def main():
             raise RuntimeError("export is not cleanly finished")
         contents = output / f"{image.stem}.empty"
         run([tools["debugfs"], "-R", f"dump /empty {contents}", image])
-        expected = expected_contents(block_size)
+        checkpoint = re.match(r"^cut(400|40|4)-", image.name) if args.truncate else None
+        if checkpoint:
+            blocks = int(checkpoint[1])
+            size = blocks * block_size + {400: 7, 40: 0, 4: 9}[blocks]
+            expected = expected_contents(block_size)[:size]
+        else:
+            expected = (expected_truncate_contents(block_size) if args.truncate
+                        else expected_contents(block_size))
         if contents.read_bytes() != expected:
             raise RuntimeError(f"incorrect allocation bytes or exposed unwritten contents: {image.name}")
         payload = output / f"{image.stem}.payload"
@@ -74,10 +89,15 @@ def main():
         if payload.read_bytes() != bytes((index * 17 + 23) & 255 for index in range(200000)):
             raise RuntimeError("allocation damaged another inode's data")
         record["stat"] = run([tools["debugfs"], "-R", "stat /empty", image])
+        if args.truncate and not checkpoint:
+            count = re.search(r"Blockcount:\s+(\d+)", record["stat"])
+            if not count or int(count[1]) != block_size // 512:
+                raise RuntimeError("truncate leaked allocation or mapping blocks")
         run([tools["e2fsck"], "-fn", image])
         if digest(image) != record["input_sha256"]:
             raise RuntimeError("independent inspection changed source")
-        record.update(size=len(expected), passed=True)
+        record.update(size=len(expected), operation="truncate" if args.truncate else "allocation",
+                      checkpoint=int(checkpoint[1]) if checkpoint else None, passed=True)
         save()
         print(f"PASS {image.name}: sparse contents, extent/indirect mapping, accounting, e2fsck", flush=True)
 

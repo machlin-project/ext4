@@ -8,7 +8,7 @@ fixture-generation command does not prove the corresponding runtime behavior.
 
 ## Portable suites
 
-`make test` runs the reader, malformed-image, file-write, allocation and journal tests
+`make test` runs the reader, malformed-image, file-write, allocation, truncate and journal tests
 with ASan/UBSan. The 1 KiB and 4 KiB journal suites use separate volatile and
 persistent device states. They interrupt each write and flush, then reopen the
 surviving medium. Cases retain none, all or alternating pending blocks; partial
@@ -28,6 +28,9 @@ contract, not physical power-loss protection on a particular disk.
 | Free-space ownership | Group and superblock counters, inode data/mapping block counts, lazy bitmaps, short final groups, exhaustion to zero free blocks, reserved-space rejection, late credit failure with no writes |
 | Allocator corruption | Damaged bitmap CRC, forged free system blocks with matching checksums/counters, and inconsistent bitmap/free-count pairs; journal data and mapping blocks stay protected |
 | Allocation failures | Every allocation/read in bounded growth and mapping promotion; every write/flush cut with three survival patterns and partial writes; all blocks outside the journal match the complete old or new image |
+| Truncate | Partial/aligned/zero sizes, fragmented trees with surviving branches, repeated shrink/grow, root collapse, unwritten preallocation, direct/single/double/triple path release, maximum sparse size, hardlink identity and zeroed reuse after disk exhaustion |
+| Truncate validation | Duplicated data blocks, data/mapping aliases and protected metadata with repaired checksums, wrong inode block counts, stale generation, invalid admission, read-only/type/range errors and late credit exhaustion without writes |
+| Truncate failures | Every allocation/read and every write/flush cut in tail shrink, complete removal and exposure of allocated bytes past EOF; recovered inode, mapping, bitmaps, counters and data agree on one commit |
 | File mutation failures | Every allocation/read in the small overwrite, every write/flush cut through clean finish, torn writes and three survival patterns; consistent inode and data together after recovery, poisoned-instance read/write rejection |
 | Transaction ownership | One active writer/transaction, duplicate buffer identity, credit exhaustion, cancellation, empty commit, protected journal/control ranges |
 | Journal layouts | Legacy without checksums, checksum v2/v3, 32/64-bit tags, escape records, multiple descriptor blocks, ring wrap and sequence wrap |
@@ -35,7 +38,7 @@ contract, not physical power-loss protection on a particular disk.
 | Recovery faults | Interrupted replay and retry, allocation/read failures in each distinct ownership phase, no leaks, no writes on already clean media |
 | Corruption | Corrupt committed payload/descriptor rejects replay, invalid commit discards the incomplete tail; a torn checksummed control block fails closed |
 | Independent replay | debugfs-authored commits, unfinished tail, revokes and later reuse; exact recovered blocks, repeated recovery and e2fsck |
-| Linux roundtrip | Linux mounts/replays our pending log or checks a clean allocation export, commits metadata/file growth, stops without unmount; our core replays the Linux-authored transaction, then contents, owners, mode and e2fsck are checked |
+| Linux roundtrip | Linux mounts/replays our pending log or checks a clean mutation export, commits metadata/growth/truncate, stops without unmount; our core replays the Linux-authored transaction, then contents, owners, mode and e2fsck are checked |
 
 Read/allocation failure loops select the beginnings and ends of repeated journal
 mapping operations and every distinct surrounding phase. They do not claim to
@@ -44,6 +47,13 @@ every operation in the small transaction and recovery sequence.
 The file-write suite additionally injects every allocation/read after its writable
 mount, including validation and snapshot preparation. It does not enumerate every
 identical call made while mapping the journal during mount.
+
+`ext4-write-test --truncate` runs resize and freeing cases across the selected
+profiles. Truncate exports include the final reused block and three intermediate
+sizes retaining different portions of the fragmented mapping tree; independent
+byte oracles and e2fsck inspect those states as well. `--export-only --export DIR`
+runs the successful export scenarios without repeating the fault loops already
+run by CTest. It is an artifact-generation mode, not the complete test suite.
 
 Each unsupported format, fail-closed corruption case and unavailable runtime is
 reported separately from successfully recovered transactions. In particular,

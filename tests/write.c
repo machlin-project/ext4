@@ -54,6 +54,9 @@ struct device {
 	unsigned int survival;
 	bool partial;
 	bool off;
+	bool truncate;
+	const char *source_path;
+	const char *export_directory;
 };
 
 static void *
@@ -561,9 +564,22 @@ run_write(struct device *device, struct ext4_fs *fs, const struct ext4_inode *in
     const uint8_t *patch, size_t length)
 {
 	struct ext4_inode_update update = write_update(fs);
+	struct ext4_inode after;
 	size_t completed;
 	enum ext4_result error;
 
+	if (device->truncate) {
+		memset(&after, 0xa5, sizeof(after));
+		error = ext4_truncate(fs, inode->number, inode->generation,
+		    device->operation_offset, &update, &after);
+		if (error == EXT4_OK) {
+			CHECK(after.size == device->operation_offset &&
+			    after.number == inode->number && after.generation == inode->generation);
+		} else {
+			CHECK(after.size == UINT64_C(0xa5a5a5a5a5a5a5a5));
+		}
+		return error;
+	}
 	error = ext4_write(fs, inode->number, inode->generation, device->operation_offset, patch,
 	    length, &update, &completed);
 	CHECK(completed == (error == EXT4_OK ? length : 0));
@@ -613,8 +629,8 @@ precommit_failures(struct device *device, bool growth)
 			CHECK(device->live == 0);
 		}
 	}
-	printf("%s resource faults: allocations=%u reads=%u\n", growth ? "allocation" : "write",
-	    allocations, reads);
+	printf("%s resource faults: allocations=%u reads=%u\n",
+	    device->truncate ? "truncate" : (growth ? "allocation" : "write"), allocations, reads);
 	free(patch);
 }
 
@@ -727,7 +743,8 @@ crash_cases(struct device *device, bool growth)
 		}
 	}
 	printf("%s crash cuts: cases=%u recovered=%u damaged-superblock=%u\n",
-	    growth ? "allocation" : "write", cases, repaired, rejected);
+	    device->truncate ? "truncate" : (growth ? "allocation" : "write"), cases, repaired,
+	    rejected);
 	free(expected_image);
 	free(expected_inode);
 	free(patch);
@@ -1042,10 +1059,24 @@ full_disk(struct device *device)
 	ext4_unmount(fs);
 	fs = mount_writer(device);
 	CHECK(fs->info.free_blocks == 0);
+	free_blocks = after.blocks_512 / (device->block_size / TEST_SECTOR_SIZE);
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
+	CHECK(after.blocks_512 == 0 && fs->info.free_blocks == free_blocks);
+	EXPECT(ext4_write(fs, inode.number, inode.generation, 7, "R", 1, &update, &completed),
+	    EXT4_OK);
+	CHECK(completed == 1 && fs->info.free_blocks == free_blocks - 1);
+	EXPECT(ext4_get_inode(fs, inode.number, &after), EXT4_OK);
+	EXPECT(ext4_map_block(fs, &after, 0, &offset), EXT4_OK);
+	CHECK(offset != 0);
+	for (index = 0; index < device->block_size; index++) {
+		CHECK(device->cache[offset * device->block_size + index] == (index == 7 ? 'R' : 0));
+	}
+	EXPECT(ext4_sync(fs), EXT4_OK);
 	ext4_unmount(fs);
 	free(bytes);
 	free(before);
-	printf("full disk: initialized-groups=%u final-free-blocks=0\n", uninitialized);
+	printf("full disk: initialized-groups=%u exhausted, released, reused with zeroed bytes\n",
+	    uninitialized);
 }
 
 static void
@@ -1058,10 +1089,12 @@ indirect_boundaries(struct device *device)
 	uint64_t logical[8];
 	uint64_t limit;
 	uint64_t offset;
+	uint64_t initial_free = fs->info.free_blocks;
 	uint8_t byte;
 	uint8_t observed;
 	size_t completed;
 	size_t index;
+	size_t verify;
 
 	if (inode.flags & EXT4_INODE_EXTENTS) {
 		ext4_unmount(fs);
@@ -1096,9 +1129,28 @@ indirect_boundaries(struct device *device)
 	EXPECT(ext4_write(fs, inode.number, inode.generation, limit * device->block_size, "a", 1,
 		   &update, &completed),
 	    EXT4_RANGE);
+	/* Remove the last direct/single/double/triple mappings independently,
+	 * then release the surviving path. Every lower boundary remains readable. */
+	for (index = 7; index > 0; index--) {
+		EXPECT(ext4_truncate(fs, inode.number, inode.generation,
+			   logical[index - 1] * device->block_size, &update, &inode),
+		    EXT4_OK);
+		for (verify = 0; verify < sizeof(logical) / sizeof(logical[0]); verify++) {
+			if (logical[verify] < logical[index - 1]) {
+				EXPECT(
+				    ext4_read(fs, &inode, logical[verify] * device->block_size + 17,
+					&observed, 1, &completed),
+				    EXT4_OK);
+				CHECK(completed == 1 && observed == verify + 1);
+			}
+		}
+	}
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &inode), EXT4_OK);
+	CHECK(inode.blocks_512 == 0 && fs->info.free_blocks == initial_free);
 	EXPECT(ext4_sync(fs), EXT4_OK);
 	ext4_unmount(fs);
-	printf("indirect boundaries: direct/single/double/triple and maximum logical block\n");
+	printf("indirect boundaries: direct/single/double/triple, maximum logical block, path "
+	       "release\n");
 }
 
 static void
@@ -1236,17 +1288,428 @@ mapping_faults(struct device *device)
 }
 
 static void
-test_image(const char *path, const char *export_directory, bool growth)
+export_state(struct device *device, const char *prefix)
 {
-	struct ext4_posix_image image;
-	struct ext4_fs *fs;
-	struct device device;
 	const char *name;
 	char *destination;
 	FILE *output;
 	size_t path_size;
 
+	if (device->export_directory == NULL) {
+		return;
+	}
+	name = strrchr(device->source_path, '/');
+	name = name == NULL ? device->source_path : name + 1;
+	path_size = strlen(device->export_directory) + strlen(name) + strlen(prefix) + 2;
+	destination = malloc(path_size);
+	CHECK(destination != NULL);
+	CHECK(snprintf(destination, path_size, "%s/%s%s", device->export_directory, prefix, name) >
+	    0);
+	output = fopen(destination, "wbx");
+	CHECK(output != NULL && fwrite(device->stable, 1, device->size, output) == device->size);
+	CHECK(fclose(output) == 0);
+	free(destination);
+}
+
+static void
+truncate_operations(struct device *device)
+{
+	static const char *checkpoints[] = { "cut400-", "cut40-", "cut4-" };
+	struct ext4_fs *fs = mount_writer(device);
+	struct ext4_inode inode = lookup(fs, "empty");
+	struct ext4_inode after;
+	struct ext4_inode_update update = write_update(fs);
+	uint64_t total_free =
+	    fs->info.free_blocks + inode.blocks_512 / (device->block_size / TEST_SECTOR_SIZE);
+	uint64_t physical;
+	uint8_t *expected;
+	size_t original_size;
+	size_t size;
+	size_t completed;
+	size_t index;
+	size_t targets[4];
+	uint32_t test;
+
+	ext4_unmount(fs);
+	allocation_operations(device);
+	fs = mount_writer(device);
+	inode = lookup(fs, "empty");
+	original_size = (size_t)inode.size;
+	expected = malloc(original_size);
+	CHECK(expected != NULL);
+	EXPECT(ext4_read(fs, &inode, 0, expected, original_size, &completed), EXT4_OK);
+	CHECK(completed == original_size);
+	targets[0] = (size_t)400 * device->block_size + 7;
+	targets[1] = (size_t)40 * device->block_size;
+	targets[2] = (size_t)4 * device->block_size + 9;
+	targets[3] = 0;
+	for (test = 0; test < 4; test++) {
+		size = targets[test];
+		EXPECT(ext4_truncate(fs, inode.number, inode.generation, size, &update, &after),
+		    EXT4_OK);
+		CHECK(after.size == size &&
+		    after.mode == (EXT4_MODE_REGULAR | update.permissions) &&
+		    after.links == inode.links &&
+		    after.modify_time.seconds == update.modify_time.seconds &&
+		    after.change_time.seconds == update.change_time.seconds);
+		CHECK(fs->info.free_blocks +
+			after.blocks_512 / (device->block_size / TEST_SECTOR_SIZE) ==
+		    total_free);
+		check_contents(fs, "empty", expected, size);
+		if (size % device->block_size != 0) {
+			EXPECT(ext4_map_block(
+				   fs, &after, (uint32_t)(size / device->block_size), &physical),
+			    EXT4_OK);
+			if (physical != 0) {
+				for (index = size % device->block_size; index < device->block_size;
+				    index++) {
+					CHECK(
+					    device->cache[physical * device->block_size + index] ==
+					    0);
+				}
+			}
+		}
+		if (test >= 2 && (inode.flags & EXT4_INODE_EXTENTS)) {
+			CHECK(
+			    ext4_le16(
+				&((struct ext4_extent_header_disk *)after.block_data)->depth) == 0);
+		}
+		if (test < 3 && device->export_directory != NULL) {
+			EXPECT(ext4_sync(fs), EXT4_OK);
+			export_state(device, checkpoints[test]);
+		}
+		memset(expected + size, 0, original_size - size);
+		/* Growth after each shrink must not reveal the old tail or reallocate
+		 * holes, including after removal of a multi-level mapping tree. */
+		inode = after;
+		EXPECT(ext4_truncate(
+			   fs, inode.number, inode.generation, original_size, &update, &after),
+		    EXT4_OK);
+		CHECK(after.blocks_512 == inode.blocks_512);
+		check_contents(fs, "empty", expected, original_size);
+		inode = after;
+	}
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
+	CHECK(after.blocks_512 == 0 && fs->info.free_blocks == total_free);
+	EXPECT(ext4_write(fs, inode.number, inode.generation, (uint64_t)4 * device->block_size + 7,
+		   "T", 1, &update, &completed),
+	    EXT4_OK);
+	CHECK(completed == 1);
+	size = (size_t)9 * device->block_size + 13;
+	expected[4 * device->block_size + 7] = 'T';
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, size, &update, &after), EXT4_OK);
+	CHECK(after.blocks_512 == device->block_size / TEST_SECTOR_SIZE &&
+	    fs->info.free_blocks == total_free - 1);
+	check_contents(fs, "empty", expected, size);
+	check_payload(fs, NULL, 0);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	fs = mount_writer(device);
+	check_contents(fs, "empty", expected, size);
+	ext4_unmount(fs);
+	free(expected);
+	printf("truncate operations: partial/aligned/empty, tree collapse, grow, block reuse\n");
+}
+
+static void
+truncate_preallocation(struct device *device)
+{
+	struct ext4_fs *fs = mount_writer(device);
+	struct ext4_inode inode = lookup(fs, "empty");
+	struct ext4_inode after;
+	struct ext4_inode_update update = write_update(fs);
+	uint64_t total_free =
+	    fs->info.free_blocks + inode.blocks_512 / (device->block_size / TEST_SECTOR_SIZE);
+	size_t size = (size_t)129 * device->block_size + 5;
+	uint8_t *expected;
+
+	if (inode.size == 0) {
+		ext4_unmount(fs);
+		return;
+	}
+	expected = calloc(1, size);
+	CHECK(expected != NULL);
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation,
+		   (uint64_t)17 * device->block_size + 13, &update, &after),
+	    EXT4_OK);
+	CHECK(after.blocks_512 == 18 * (device->block_size / TEST_SECTOR_SIZE));
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, size, &update, &after), EXT4_OK);
+	CHECK(after.blocks_512 == 18 * (device->block_size / TEST_SECTOR_SIZE));
+	check_contents(fs, "empty", expected, size);
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
+	CHECK(after.blocks_512 == 0 && fs->info.free_blocks == total_free);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	free(expected);
+	printf("truncate unwritten preallocation: released blocks and zero growth\n");
+}
+
+static void
+truncate_guards(struct device *device)
+{
+	struct ext4_fs *fs = mount_writer(device);
+	struct ext4_inode inode = lookup(fs, "payload.bin");
+	struct ext4_inode link = lookup(fs, "hello-link");
+	struct ext4_inode root;
+	struct ext4_inode after;
+	struct ext4_inode_update update = write_update(fs);
+	struct ext4_inode_disk *disk;
+	uint64_t inode_offset;
+	uint32_t journal_blocks;
+	uint32_t saved_blocks;
+	uint32_t sector_units = device->block_size / TEST_SECTOR_SIZE;
+
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(
+	    ext4_truncate(fs, inode.number, inode.generation + 1, 0, &update, &after), EXT4_STALE);
+	EXPECT(
+	    ext4_truncate(fs, root.number, root.generation, 0, &update, &after), EXT4_IS_DIRECTORY);
+	EXPECT(
+	    ext4_truncate(fs, link.number, link.generation, 0, &update, &after), EXT4_UNSUPPORTED);
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, UINT64_MAX, &update, &after),
+	    EXT4_RANGE);
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, NULL),
+	    EXT4_INVALID_ARGUMENT);
+	update.fields |= EXT4_ATTR_ACCESS_TIME;
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after),
+	    EXT4_INVALID_ARGUMENT);
+	update = write_update(fs);
+	journal_blocks = fs->journal->blocks;
+	fs->journal->blocks = fs->journal->first + 6;
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 1, &update, &after), EXT4_RANGE);
+	fs->journal->blocks = journal_blocks;
+	CHECK(device->writes == 0 && memcmp(device->cache, device->base, device->size) == 0);
+	EXPECT(ext4_inode_location(fs, inode.number, &inode_offset), EXT4_OK);
+	disk = (struct ext4_inode_disk *)(device->cache + inode_offset);
+	saved_blocks = ext4_le32(&disk->blocks_lo);
+	ext4_encode32(&disk->blocks_lo, saved_blocks + sector_units);
+	ext4_inode_checksum_set(fs, inode.number, disk);
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_CORRUPT);
+	CHECK(device->writes == 0);
+	ext4_encode32(&disk->blocks_lo, saved_blocks);
+	ext4_inode_checksum_set(fs, inode.number, disk);
+	CHECK(memcmp(device->cache, device->base, device->size) == 0);
+	ext4_unmount(fs);
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	EXPECT(
+	    ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_READ_ONLY);
+	ext4_unmount(fs);
+}
+
+static void
+truncate_sparse_limits(struct device *device)
+{
+	struct ext4_fs *fs = mount_writer(device);
+	struct ext4_inode inode = lookup(fs, "empty");
+	struct ext4_inode after;
+	struct ext4_inode alias;
+	struct ext4_inode_update update = write_update(fs);
+	uint64_t per_block = device->block_size / sizeof(struct ext4_le32);
+	uint64_t blocks = inode.flags & EXT4_INODE_EXTENTS ? UINT32_MAX
+							   : EXT4_DIRECT_BLOCKS + per_block +
+		per_block * per_block + per_block * per_block * per_block;
+	uint64_t free_blocks;
+	uint8_t byte = 0xa5;
+	size_t completed;
+	uint32_t writes;
+
+	if (blocks > UINT32_MAX) {
+		blocks = UINT32_MAX;
+	}
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
+	free_blocks = fs->info.free_blocks;
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, blocks * device->block_size,
+		   &update, &after),
+	    EXT4_OK);
+	CHECK(after.size == blocks * device->block_size && after.blocks_512 == 0 &&
+	    fs->info.free_blocks == free_blocks);
+	EXPECT(ext4_read(fs, &after, after.size - 1, &byte, 1, &completed), EXT4_OK);
+	CHECK(completed == 1 && byte == 0);
+	writes = device->writes;
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, after.size + 1, &update, &after),
+	    EXT4_RANGE);
+	CHECK(device->writes == writes);
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
+	CHECK(after.blocks_512 == 0 && fs->info.free_blocks == free_blocks);
+	inode = lookup(fs, "hello.txt");
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 3, &update, &after), EXT4_OK);
+	alias = lookup(fs, "hello-hardlink");
+	CHECK(alias.number == inode.number && alias.links == 2 && alias.size == 3);
+	check_contents(fs, "hello-hardlink", (const uint8_t *)"Mac", 3);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	printf("truncate sparse limits: maximum size, no allocation, hardlink identity\n");
+}
+
+static void
+truncate_mapping_corruption(struct device *device)
+{
+	struct ext4_fs *fs = mount_writer(device);
+	struct ext4_inode inode = lookup(fs, "empty");
+	struct ext4_inode after;
+	struct ext4_inode_update update = write_update(fs);
+	struct ext4_inode_disk *disk;
+	struct ext4_extent_header_disk *header;
+	struct ext4_extent_index_disk *indices;
+	struct ext4_extent_disk *entries;
+	struct ext4_le32 *pointers;
+	struct ext4_le32 *tail;
+	uint8_t *prepared = malloc(device->size);
+	uint8_t *before = malloc(device->size);
+	uint64_t inode_offset;
+	uint64_t node;
+	uint64_t replacement;
+	size_t tail_offset;
+	size_t completed;
+	uint32_t index;
+	uint32_t test;
+
+	CHECK(prepared != NULL && before != NULL);
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
+	for (index = 0; index < 6; index++) {
+		EXPECT(ext4_write(fs, inode.number, inode.generation,
+			   (uint64_t)index * 2 * device->block_size, "C", 1, &update, &completed),
+		    EXT4_OK);
+	}
+	if (!(inode.flags & EXT4_INODE_EXTENTS)) {
+		EXPECT(ext4_write(fs, inode.number, inode.generation,
+			   (uint64_t)EXT4_DIRECT_BLOCKS * device->block_size, "C", 1, &update,
+			   &completed),
+		    EXT4_OK);
+	}
+	EXPECT(ext4_inode_location(fs, inode.number, &inode_offset), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, inode.number, &inode), EXT4_OK);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	memcpy(prepared, device->stable, device->size);
+	for (test = 0; test < 3; test++) {
+		device_reset(device, prepared);
+		fs = mount_writer(device);
+		disk = (struct ext4_inode_disk *)(device->cache + inode_offset);
+		if (inode.flags & EXT4_INODE_EXTENTS) {
+			header = (struct ext4_extent_header_disk *)disk->block_data;
+			CHECK(ext4_le16(&header->depth) == 1 && ext4_le16(&header->entries) == 1);
+			indices = (struct ext4_extent_index_disk *)(header + 1);
+			node = ext4_le32(&indices[0].child_lo) |
+			    (uint64_t)ext4_le16(&indices[0].child_hi) << 32;
+			header = (struct ext4_extent_header_disk *)(device->cache +
+			    node * device->block_size);
+			entries = (struct ext4_extent_disk *)(header + 1);
+			CHECK(ext4_le16(&header->entries) == 6);
+			replacement = test == 0 ? ext4_le32(&entries[0].physical_lo)
+						: (test == 1 ? node : fs->first_data_block);
+			ext4_encode32(&entries[5].physical_lo, (uint32_t)replacement);
+			ext4_encode16(&entries[5].physical_hi, 0);
+			if (fs->metadata_checksum) {
+				tail_offset = sizeof(*header) +
+				    ext4_le16(&header->maximum) * sizeof(*entries);
+				tail = (struct ext4_le32 *)((uint8_t *)header + tail_offset);
+				ext4_encode32(tail,
+				    ext4_crc32c(ext4_inode_seed(fs, &inode), header, tail_offset));
+			}
+		} else {
+			pointers = (struct ext4_le32 *)disk->block_data;
+			replacement = test == 0
+			    ? ext4_le32(&pointers[0])
+			    : (test == 1 ? ext4_le32(&pointers[EXT4_DIRECT_BLOCKS])
+					 : fs->first_data_block);
+			ext4_encode32(&pointers[10], (uint32_t)replacement);
+			ext4_inode_checksum_set(fs, inode.number, disk);
+		}
+		memcpy(before, device->cache, device->size);
+		EXPECT(ext4_truncate(fs, inode.number, inode.generation,
+			   (uint64_t)2 * device->block_size + 7, &update, &after),
+		    EXT4_CORRUPT);
+		CHECK(device->writes == 0 && memcmp(before, device->cache, device->size) == 0);
+		ext4_unmount(fs);
+	}
+	free(prepared);
+	free(before);
+	printf(
+	    "truncate malformed mappings: duplicate data, data/node alias, protected metadata\n");
+}
+
+static void
+truncate_faults(struct device *device)
+{
+	struct ext4_fs *fs = mount_writer(device);
+	struct ext4_inode inode = lookup(fs, "empty");
+	struct ext4_inode_update update = write_update(fs);
+	struct ext4_inode_disk *disk;
+	struct ext4_inode after;
+	uint8_t *prepared = malloc(device->size);
+	uint8_t *saved = device->base;
+	uint8_t *bytes = malloc(device->block_size);
+	uint64_t offset;
+	uint64_t per_block = device->block_size / sizeof(struct ext4_le32);
+	size_t completed;
+	uint32_t index;
+	uint32_t test;
+
+	CHECK(prepared != NULL && bytes != NULL);
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
+	for (index = 0; index < 6; index++) {
+		memset(bytes, (int)(index + 31), device->block_size);
+		EXPECT(ext4_write(fs, inode.number, inode.generation,
+			   (uint64_t)index * 2 * device->block_size, bytes, device->block_size,
+			   &update, &completed),
+		    EXT4_OK);
+		CHECK(completed == device->block_size);
+	}
+	if (!(inode.flags & EXT4_INODE_EXTENTS)) {
+		offset =
+		    (EXT4_DIRECT_BLOCKS + per_block + per_block * per_block) * device->block_size;
+		EXPECT(ext4_write(fs, inode.number, inode.generation, offset, bytes,
+			   device->block_size, &update, &completed),
+		    EXT4_OK);
+		EXPECT(ext4_write(fs, inode.number, inode.generation,
+			   (EXT4_DIRECT_BLOCKS + per_block) * device->block_size, bytes,
+			   device->block_size, &update, &completed),
+		    EXT4_OK);
+	}
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	memcpy(prepared, device->stable, device->size);
+	device->base = prepared;
+	device->truncate = true;
+	for (test = 0; test < 3; test++) {
+		device_reset(device, prepared);
+		if (test == 2) {
+			/* A valid allocated range past EOF must be zeroed when resize
+			 * exposes it. Keep this state local to the storage model. */
+			fs = mount_writer(device);
+			EXPECT(ext4_inode_location(fs, inode.number, &offset), EXT4_OK);
+			disk = (struct ext4_inode_disk *)(prepared + offset);
+			ext4_encode32(&disk->size_lo, 1);
+			ext4_encode32(&disk->size_hi, 0);
+			ext4_inode_checksum_set(fs, inode.number, disk);
+			ext4_unmount(fs);
+			device_reset(device, prepared);
+		}
+		device->operation_offset = test == 0
+		    ? (uint64_t)2 * device->block_size + 7
+		    : (test == 1 ? 0 : (uint64_t)11 * device->block_size);
+		precommit_failures(device, true);
+		device_reset(device, prepared);
+		crash_cases(device, true);
+	}
+	device->base = saved;
+	device->truncate = false;
+	free(prepared);
+	free(bytes);
+}
+
+static void
+test_image(
+    const char *path, const char *export_directory, bool growth, bool truncate, bool export_only)
+{
+	struct ext4_posix_image image;
+	struct ext4_fs *fs;
+	struct device device;
+
 	memset(&device, 0, sizeof(device));
+	device.source_path = path;
+	device.export_directory = export_directory;
 	EXPECT(ext4_posix_open(&image, path), EXT4_OK);
 	EXPECT(ext4_mount(&image.environment, &fs), EXT4_OK);
 	device.size = (size_t)image.environment.size_bytes;
@@ -1272,25 +1735,29 @@ test_image(const char *path, const char *export_directory, bool growth)
 	device.writer.write = device_write;
 	device.writer.flush = device_flush;
 	device_reset(&device, device.base);
-	if (growth) {
+	if (truncate) {
+		truncate_operations(&device);
+	} else if (growth) {
 		allocation_operations(&device);
 	} else {
 		basic_operations(&device);
 	}
-	if (export_directory != NULL) {
-		name = strrchr(path, '/');
-		name = name == NULL ? path : name + 1;
-		path_size = strlen(export_directory) + strlen(name) + 2;
-		destination = malloc(path_size);
-		CHECK(destination != NULL);
-		CHECK(snprintf(destination, path_size, "%s/%s", export_directory, name) > 0);
-		output = fopen(destination, "wbx");
-		CHECK(
-		    output != NULL && fwrite(device.stable, 1, device.size, output) == device.size);
-		CHECK(fclose(output) == 0);
-		free(destination);
+	export_state(&device, "");
+	if (export_only) {
+		goto release;
 	}
-	if (growth) {
+	if (truncate) {
+		device_reset(&device, device.base);
+		truncate_preallocation(&device);
+		device_reset(&device, device.base);
+		truncate_guards(&device);
+		device_reset(&device, device.base);
+		truncate_sparse_limits(&device);
+		device_reset(&device, device.base);
+		truncate_mapping_corruption(&device);
+		device_reset(&device, device.base);
+		truncate_faults(&device);
+	} else if (growth) {
 		device_reset(&device, device.base);
 		allocated_eof_gap(&device);
 		device_reset(&device, device.base);
@@ -1310,20 +1777,26 @@ test_image(const char *path, const char *export_directory, bool growth)
 		device_reset(&device, device.base);
 		metadata_guards(&device);
 	}
-	device_reset(&device, device.base);
-	precommit_failures(&device, growth);
-	device_reset(&device, device.base);
-	crash_cases(&device, growth);
-	if (growth) {
+	if (!truncate) {
 		device_reset(&device, device.base);
-		mapping_faults(&device);
+		precommit_failures(&device, growth);
+		device_reset(&device, device.base);
+		crash_cases(&device, growth);
+		if (growth) {
+			device_reset(&device, device.base);
+			mapping_faults(&device);
+		}
 	}
+release:
 	CHECK(device.live == 0);
 	free(device.base);
 	free(device.cache);
 	free(device.stable);
 	free(device.dirty);
-	printf("PASS %s: %s\n", growth ? "allocation and growth" : "writable inode and file", path);
+	printf("PASS %s: %s\n",
+	    truncate ? "truncate and free"
+		     : (growth ? "allocation and growth" : "writable inode and file"),
+	    path);
 }
 
 int
@@ -1331,11 +1804,19 @@ main(int argc, char **argv)
 {
 	const char *export_directory = NULL;
 	bool growth = false;
+	bool truncate = false;
+	bool export_only = false;
 	int index = 1;
 
 	while (index < argc) {
 		if (strcmp(argv[index], "--allocation") == 0) {
 			growth = true;
+			index++;
+		} else if (strcmp(argv[index], "--truncate") == 0) {
+			truncate = true;
+			index++;
+		} else if (strcmp(argv[index], "--export-only") == 0) {
+			export_only = true;
 			index++;
 		} else if (strcmp(argv[index], "--export") == 0) {
 			CHECK(index + 1 < argc);
@@ -1346,8 +1827,10 @@ main(int argc, char **argv)
 		}
 	}
 	CHECK(index < argc);
+	CHECK(!growth || !truncate);
+	CHECK(!export_only || export_directory != NULL);
 	for (; index < argc; index++) {
-		test_image(argv[index], export_directory, growth);
+		test_image(argv[index], export_directory, growth, truncate, export_only);
 	}
 	return 0;
 }

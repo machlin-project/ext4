@@ -184,6 +184,14 @@ enum ext4_result ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32
 enum ext4_result ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint64_t offset, const void *buffer, size_t length, const struct ext4_inode_update *update,
     size_t *completed);
+/* Resize a regular file with the same admitted attribute fields as write.
+ * Shrink releases data and unused mapping nodes, including allocations beyond
+ * EOF, and zeroes the retained partial block. Growth exposes zero bytes without
+ * allocating holes. Size, block accounting and attributes commit atomically.
+ * The full mapping tree and changed metadata must fit the transaction bound;
+ * credit exhaustion rejects without device writes. result changes on success. */
+enum ext4_result ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation,
+    uint64_t size, const struct ext4_inode_update *update, struct ext4_inode *result);
 /* Offline recovery only. A read-only mount never invokes this operation.
  * On error the resource remains unmounted and must not be used for mutations. */
 enum ext4_result ext4_recover(const struct ext4_environment *environment,

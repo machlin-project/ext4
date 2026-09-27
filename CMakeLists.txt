@@ -99,6 +99,8 @@ add_test(NAME inode-and-file-write COMMAND ext4-write-test ${EXT4_WRITE_IMAGES})
 set_tests_properties(inode-and-file-write PROPERTIES TIMEOUT 300)
 add_test(NAME allocation-and-growth COMMAND ext4-write-test --allocation ${EXT4_WRITE_IMAGES})
 set_tests_properties(allocation-and-growth PROPERTIES TIMEOUT 600)
+add_test(NAME truncate-and-free COMMAND ext4-write-test --truncate ${EXT4_WRITE_IMAGES})
+set_tests_properties(truncate-and-free PROPERTIES TIMEOUT 600)
 set(EXT4_ALLOCATION_FIXTURES "${CMAKE_SOURCE_DIR}/artifacts/allocation-fixtures" CACHE PATH
     "Independent unwritten-allocation images")
 if(EXT4_UNWRITTEN_TESTS)
@@ -108,6 +110,12 @@ if(EXT4_UNWRITTEN_TESTS)
         "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-no-checksum.img"
         "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-checksum-seed.img")
     set_tests_properties(unwritten-allocation PROPERTIES TIMEOUT 300)
+    add_test(NAME unwritten-truncate COMMAND ext4-write-test --truncate
+        "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-1k.img"
+        "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-4k.img"
+        "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-no-checksum.img"
+        "${EXT4_ALLOCATION_FIXTURES}/unwritten-ext4-checksum-seed.img")
+    set_tests_properties(unwritten-truncate PROPERTIES TIMEOUT 300)
 endif()
 
 find_package(Threads REQUIRED)

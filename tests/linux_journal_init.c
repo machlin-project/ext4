@@ -149,6 +149,33 @@ check_allocated_file(uint32_t block_size)
 }
 #endif
 
+#ifdef EXT4_TEST_TRUNCATE
+static void
+check_truncated_file(uint32_t block_size)
+{
+	struct stat status;
+	uint8_t *observed;
+	size_t size = (size_t)block_size * 9 + 13;
+	size_t index;
+	int fd;
+
+	observed = malloc(size);
+	require(observed != NULL, "allocate truncated-file oracle");
+	fd = open("/mnt/empty", O_RDONLY | O_CLOEXEC);
+	require(fd >= 0 && fstat(fd, &status) == 0, "open/stat truncated file");
+	require(status.st_size == (off_t)size && status.st_blocks == block_size / EXT4_SECTOR_SIZE,
+	    "verify truncated size and released mapping blocks");
+	require(pread(fd, observed, size, 0) == (ssize_t)size, "read truncated file");
+	for (index = 0; index < size; index++) {
+		require(observed[index] == (index == (size_t)block_size * 4 + 7 ? 'T' : 0),
+		    "verify zero growth and reused allocation");
+	}
+	require(close(fd) == 0, "close truncated file");
+	free(observed);
+	puts("LINUX_EXT4_TRUNCATE_PASS");
+}
+#endif
+
 int
 main(void)
 {
@@ -158,7 +185,8 @@ main(void)
 	struct utsname identity;
 	char module[128];
 	FILE *configuration;
-#if !defined(EXT4_TEST_FILE_WRITES) && !defined(EXT4_TEST_ALLOCATION)
+#if !defined(EXT4_TEST_FILE_WRITES) && !defined(EXT4_TEST_ALLOCATION) &&                           \
+    !defined(EXT4_TEST_TRUNCATE)
 	uint8_t *buffer;
 	uint32_t position;
 	uint8_t expected;
@@ -196,7 +224,7 @@ main(void)
 	logarithm = decode_le32(&super.log_block_size);
 	require(logarithm <= 6 && (EXT4_MIN_BLOCK_SIZE << logarithm) == block_size,
 	    "verify filesystem block size");
-#if defined(EXT4_TEST_FILE_WRITES) || defined(EXT4_TEST_ALLOCATION)
+#if defined(EXT4_TEST_FILE_WRITES) || defined(EXT4_TEST_ALLOCATION) || defined(EXT4_TEST_TRUNCATE)
 	require((decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_RECOVER) == 0,
 	    "verify cleanly finished writable filesystem");
 #else
@@ -214,11 +242,16 @@ main(void)
 #ifdef EXT4_TEST_ALLOCATION
 	write_offset = (off_t)(check_allocated_file(block_size) + block_size + 7);
 	fd = open("/mnt/empty", O_RDWR | O_CLOEXEC);
+#elif defined(EXT4_TEST_TRUNCATE)
+	check_truncated_file(block_size);
+	write_offset = (off_t)block_size * 10 + 7;
+	fd = open("/mnt/empty", O_RDWR | O_CLOEXEC);
 #else
 	fd = open("/mnt/payload.bin", O_RDWR | O_CLOEXEC);
 #endif
 	require(fd >= 0, "open recovered payload");
-#if !defined(EXT4_TEST_FILE_WRITES) && !defined(EXT4_TEST_ALLOCATION)
+#if !defined(EXT4_TEST_FILE_WRITES) && !defined(EXT4_TEST_ALLOCATION) &&                           \
+    !defined(EXT4_TEST_TRUNCATE)
 	buffer = malloc((size_t)block_size * 2);
 	require(buffer != NULL, "allocate comparison buffer");
 	require(pread(fd, buffer, (size_t)block_size * 2, 0) == (ssize_t)block_size * 2,
@@ -240,6 +273,10 @@ main(void)
 	/* Linux now authors a real inode transaction for the reverse roundtrip. */
 	require(fchown(fd, TEST_UID, TEST_GID) == 0, "Linux chown");
 	require(fchmod(fd, TEST_MODE) == 0, "Linux chmod");
+#ifdef EXT4_TEST_TRUNCATE
+	require(ftruncate(fd, (off_t)block_size * 3 + 9) == 0, "Linux shrink and release");
+	require(ftruncate(fd, (off_t)block_size * 12 + 17) == 0, "Linux sparse growth");
+#endif
 	require(pwrite(fd, &linux_byte, sizeof(linux_byte), write_offset) == sizeof(linux_byte),
 	    "Linux write");
 	require(fsync(fd) == 0, "Linux fsync commit");
