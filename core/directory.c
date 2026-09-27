@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
 
-static uint32_t
+uint32_t
 ext4_directory_record_length(struct ext4_fs *fs, const struct ext4_dir_header_disk *header)
 {
 	uint32_t length = ext4_le16(&header->record_length);
@@ -12,7 +12,7 @@ ext4_directory_record_length(struct ext4_fs *fs, const struct ext4_dir_header_di
 	return length;
 }
 
-static enum ext4_result
+enum ext4_result
 ext4_directory_checksum(
     struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical, uint8_t *buffer)
 {
@@ -89,6 +89,7 @@ ext4_next_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *
 	uint32_t record_length;
 	uint32_t number;
 	uint16_t name_length;
+	bool checksum_tail;
 	enum ext4_result error;
 
 	if (fs == NULL || directory == NULL || cookie == NULL || entry == NULL) {
@@ -133,11 +134,19 @@ ext4_next_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *
 			}
 			header = (struct ext4_dir_header_disk *)(buffer + offset);
 			record_length = ext4_directory_record_length(fs, header);
+			number = ext4_le32(&header->inode);
 			name_length = header->name_length;
-			if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_FILETYPE)) {
+			checksum_tail = fs->metadata_checksum &&
+			    offset == fs->info.block_size - sizeof(struct ext4_dir_tail_disk) &&
+			    number == 0 && name_length == 0 &&
+			    header->type == EXT4_DIRECTORY_TAIL_TYPE &&
+			    record_length == sizeof(struct ext4_dir_tail_disk);
+			/* A checksum tail keeps its marker byte even with legacy 16-bit
+			 * directory name lengths and no FILETYPE feature. */
+			if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_FILETYPE) &&
+			    !checksum_tail) {
 				name_length |= (uint16_t)((uint16_t)header->type << 8);
 			}
-			number = ext4_le32(&header->inode);
 			if (record_length < sizeof(*header) || (record_length & 3U) ||
 			    record_length > fs->info.block_size - offset ||
 			    name_length > record_length - sizeof(*header) ||

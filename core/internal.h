@@ -87,6 +87,12 @@ void ext4_inode_checksum_set(struct ext4_fs *fs, uint32_t number, struct ext4_in
 enum ext4_result ext4_inode_apply(
     struct ext4_fs *fs, struct ext4_inode_disk *disk, const struct ext4_inode_update *update);
 enum ext4_result ext4_inode_allocated(struct ext4_fs *fs, uint32_t number);
+enum ext4_result ext4_edit_inode(struct ext4_fs *fs, struct ext4_transaction *transaction,
+    uint32_t number, uint32_t generation, struct ext4_inode_disk **disk, struct ext4_inode *inode);
+uint32_t ext4_directory_record_length(
+    struct ext4_fs *fs, const struct ext4_dir_header_disk *header);
+enum ext4_result ext4_directory_checksum(
+    struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical, uint8_t *buffer);
 enum ext4_result ext4_orphan_cleanup(struct ext4_fs *fs, struct ext4_recovery_report *report);
 enum ext4_result ext4_orphan_file_prepare(struct ext4_fs *fs);
 void ext4_orphan_file_close(struct ext4_fs *fs);

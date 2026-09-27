@@ -29,7 +29,9 @@ enum ext4_result {
 	EXT4_IS_DIRECTORY,
 	EXT4_RANGE,
 	EXT4_STALE,
-	EXT4_NO_SPACE
+	EXT4_NO_SPACE,
+	EXT4_EXISTS,
+	EXT4_TOO_MANY_LINKS
 };
 
 enum ext4_file_type {
@@ -211,8 +213,28 @@ enum ext4_result ext4_truncate_atomic(struct ext4_fs *fs, uint32_t number, uint3
  * on complete success. */
 enum ext4_result ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint64_t size, const struct ext4_inode_update *update, struct ext4_inode *result);
+/* Namespace mutations share the writable instance's exclusive owner. The caller
+ * authorizes against fresh objects and supplies admitted creation attributes and
+ * one captured namespace time; this interface does not confer policy authority.
+ * Create/mkdir require permissions, UID/GID and atime/mtime/ctime; birth time is
+ * optional and must be representable. They create an empty regular file or a
+ * directory containing dot/dotdot. Parent ctime/mtime change to directory_time.
+ * Existing names, dot/dotdot and indexed directories are rejected before writes.
+ * Allocation, directory records, link counts and timestamps commit atomically.
+ * Outputs change only on success; uncertain commits require explicit recovery. */
+enum ext4_result ext4_create(struct ext4_fs *fs, uint32_t directory, uint32_t generation,
+    const uint8_t *name, size_t name_length, const struct ext4_inode_update *attributes,
+    const struct ext4_timestamp *directory_time, struct ext4_inode *result);
+enum ext4_result ext4_mkdir(struct ext4_fs *fs, uint32_t directory, uint32_t generation,
+    const uint8_t *name, size_t name_length, const struct ext4_inode_update *attributes,
+    const struct ext4_timestamp *directory_time, struct ext4_inode *result);
+/* Add another name for an allocated non-directory inode. Update its ctime and
+ * the destination directory's ctime/mtime to time, preserving other attributes. */
+enum ext4_result ext4_link(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation,
+    const uint8_t *name, size_t name_length, uint32_t target, uint32_t target_generation,
+    const struct ext4_timestamp *time, struct ext4_inode *result);
 /* Offline recovery replays the journal, reconstructs allocation summaries and
- * completes legacy orphan-list cleanup in bounded durable transactions.
+ * completes legacy-list and modern orphan-file cleanup in bounded transactions.
  * A read-only mount never invokes this operation.
  * On error the resource remains unmounted and must not be used for mutations. */
 enum ext4_result ext4_recover(const struct ext4_environment *environment,

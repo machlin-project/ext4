@@ -89,7 +89,7 @@ ext4_update_validate(struct ext4_fs *fs, const struct ext4_inode_update *update)
 	return EXT4_OK;
 }
 
-static enum ext4_result
+enum ext4_result
 ext4_edit_inode(struct ext4_fs *fs, struct ext4_transaction *transaction, uint32_t number,
     uint32_t generation, struct ext4_inode_disk **disk, struct ext4_inode *inode)
 {

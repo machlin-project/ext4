@@ -13,11 +13,13 @@ option(EXT4_EXTENDED_TESTS "Require the extended generated image profile" OFF)
 option(EXT4_INODE128_TEST "Require the generated 128-byte-inode write fixture" OFF)
 option(EXT4_UNWRITTEN_TESTS "Require independent unwritten-allocation fixtures" OFF)
 option(EXT4_ORPHAN_FILE_TESTS "Require independently allocated orphan-file fixtures" OFF)
+option(EXT4_NAMESPACE_TESTS "Require small multi-group namespace fixtures" OFF)
 
 set(EXT4_CORE_SOURCES
     core/support.c core/mount.c core/inode.c core/read.c core/directory.c
     core/journal.c core/recovery.c core/group.c core/system.c
-    core/allocate.c core/map_write.c core/write.c core/orphan.c)
+    core/allocate.c core/map_write.c core/write.c core/orphan.c
+    core/inode_allocate.c core/namespace.c)
 add_library(ext4_core STATIC ${EXT4_CORE_SOURCES})
 target_include_directories(ext4_core PUBLIC include)
 target_compile_options(ext4_core PRIVATE
@@ -102,6 +104,27 @@ add_test(NAME allocation-and-growth COMMAND ext4-write-test --allocation ${EXT4_
 set_tests_properties(allocation-and-growth PROPERTIES TIMEOUT 600)
 add_test(NAME truncate-and-free COMMAND ext4-write-test --truncate ${EXT4_WRITE_IMAGES})
 set_tests_properties(truncate-and-free PROPERTIES TIMEOUT 600)
+add_executable(ext4-namespace-test tests/namespace.c)
+target_include_directories(ext4-namespace-test PRIVATE core)
+target_link_libraries(ext4-namespace-test PRIVATE ext4_posix)
+target_compile_options(ext4-namespace-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
+add_test(NAME namespace-create-and-link COMMAND ext4-namespace-test ${EXT4_WRITE_IMAGES})
+set_tests_properties(namespace-create-and-link PROPERTIES TIMEOUT 900)
+add_test(NAME namespace-indexed-rejection COMMAND ext4-namespace-test --indexed
+    "${EXT4_FIXTURES}/ext4-indexed.img")
+set(EXT4_NAMESPACE_FIXTURES "${CMAKE_SOURCE_DIR}/artifacts/namespace-fixtures" CACHE PATH
+    "Independent namespace allocation images")
+if(EXT4_NAMESPACE_TESTS)
+    set(EXT4_NAMESPACE_IMAGES)
+    foreach(profile small lazy indirect no-checksum no-filetype inode128)
+        list(APPEND EXT4_NAMESPACE_IMAGES "${EXT4_NAMESPACE_FIXTURES}/namespace-${profile}.img")
+    endforeach()
+    add_test(NAME namespace-small-formats COMMAND ext4-namespace-test ${EXT4_NAMESPACE_IMAGES})
+    add_test(NAME namespace-inode-exhaustion COMMAND ext4-namespace-test --exhaust ${EXT4_NAMESPACE_IMAGES})
+    add_test(NAME namespace-inode-group-transition COMMAND ext4-namespace-test --groups ${EXT4_NAMESPACE_IMAGES})
+    set_tests_properties(namespace-small-formats namespace-inode-exhaustion
+        namespace-inode-group-transition PROPERTIES TIMEOUT 600)
+endif()
 add_executable(ext4-orphan-test tests/orphan.c)
 target_include_directories(ext4-orphan-test PRIVATE core)
 target_link_libraries(ext4-orphan-test PRIVATE ext4_posix)
@@ -123,6 +146,8 @@ if(EXT4_ORPHAN_FILE_TESTS)
         "${EXT4_ORPHAN_FILE_FIXTURES}/orphan-file-ext4-1k.img"
         "${EXT4_ORPHAN_FILE_FIXTURES}/orphan-file-ext4-4k.img")
     add_test(NAME orphan-file-live-truncate COMMAND ext4-orphan-test --live ${EXT4_ORPHAN_FILE_IMAGES})
+    add_test(NAME namespace-orphan-file COMMAND ext4-namespace-test ${EXT4_ORPHAN_FILE_IMAGES})
+    set_tests_properties(namespace-orphan-file PROPERTIES TIMEOUT 900)
     set_tests_properties(orphan-file-recovery orphan-file-mixed-recovery orphan-file-live-truncate
         PROPERTIES TIMEOUT 900)
     if(EXT4_EXTENDED_TESTS)

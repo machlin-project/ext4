@@ -15,8 +15,19 @@ concurrency:
 
 jobs:
   linux:
+    name: Linux ${{ matrix.suite }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: core
+            test-filter: -E '^(orphan-file|namespace)'
+          - suite: orphan-file
+            test-filter: -R '^orphan-file'
+          - suite: namespace
+            test-filter: -R '^namespace'
     env:
       CC: clang
     defaults:
@@ -44,15 +55,18 @@ jobs:
           python3 tests/generate_orphan_file_fixtures.py --fixtures artifacts/fixtures \
             --case ext4-indirect-1k.img --blocks 512 --output artifacts/orphan-file-fixtures/maximum \
             2>&1 | tee artifacts/checks/orphan-file-maximum-fixtures.log
+          python3 tests/generate_namespace_fixtures.py --output artifacts/namespace-fixtures \
+            2>&1 | tee artifacts/checks/namespace-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           cmake -S . -B .build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DEXT4_EXTENDED_TESTS=ON -DEXT4_INODE128_TEST=ON -DEXT4_UNWRITTEN_TESTS=ON \
-            -DEXT4_ORPHAN_FILE_TESTS=ON
+            -DEXT4_ORPHAN_FILE_TESTS=ON -DEXT4_NAMESPACE_TESTS=ON
           cmake --build .build --parallel 2 2>&1 | tee artifacts/checks/build.log
       - name: Run conformance and fault tests
-        run: ctest --test-dir .build --parallel 2 --output-on-failure --output-junit "$PWD/artifacts/core-tests.xml"
+        run: ctest --test-dir .build --parallel 2 ${{ matrix.test-filter }} --output-on-failure --output-junit "$PWD/artifacts/core-tests.xml"
       - name: Export and independently verify file writes
+        if: matrix.suite == 'core'
         run: |
           mkdir artifacts/write-exports
           .build/ext4-write-test --export-only --export artifacts/write-exports \
@@ -68,6 +82,7 @@ jobs:
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
       - name: Recover independently authored journals
+        if: matrix.suite == 'core'
         run: |
           python3 tests/generate_journal_fixtures.py --source artifacts/fixtures/ext4-4k.img \
             --output artifacts/journal-fixtures
@@ -78,6 +93,7 @@ jobs:
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
       - name: Independently verify allocation and unwritten conversion
+        if: matrix.suite == 'core'
         run: |
           mkdir artifacts/allocation-exports
           .build/ext4-write-test --allocation --export-only --export artifacts/allocation-exports \
@@ -93,6 +109,7 @@ jobs:
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
       - name: Independently verify truncate and freed block reuse
+        if: matrix.suite == 'core'
         run: |
           mkdir artifacts/truncate-exports
           .build/ext4-write-test --truncate --export-only --export artifacts/truncate-exports \
@@ -108,6 +125,7 @@ jobs:
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
       - name: Independently verify orphan cleanup
+        if: matrix.suite == 'core'
         run: |
           mkdir artifacts/orphan-linked-exports
           .build/ext4-orphan-test --smoke --export artifacts/orphan-linked-exports \
@@ -126,6 +144,7 @@ jobs:
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
       - name: Independently verify live truncate and recovery
+        if: matrix.suite == 'core'
         run: |
           mkdir artifacts/live-exports artifacts/live-large-exports
           .build/ext4-orphan-test --live --smoke --export artifacts/live-exports \
@@ -146,6 +165,7 @@ jobs:
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
       - name: Independently verify orphan-file recovery
+        if: matrix.suite == 'orphan-file'
         run: |
           mkdir artifacts/orphan-file-exports artifacts/orphan-file-mixed-exports \
             artifacts/orphan-file-mapped-exports artifacts/orphan-file-maximum-exports \
@@ -180,11 +200,38 @@ jobs:
           find artifacts/orphan-file-live-exports artifacts/orphan-file-live-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
+      - name: Independently verify namespace transactions
+        if: matrix.suite == 'namespace'
+        run: |
+          for fixtures in artifacts/fixtures artifacts/orphan-file-fixtures artifacts/namespace-fixtures; do
+            for image in "$fixtures"/*.img; do
+              name="${image##*/}"
+              case "$name" in ext4-indexed.img|ext4-64k.img) continue ;; esac
+              profile="${name%.img}"
+              exports="artifacts/namespace-exports/$profile"
+              checked="artifacts/namespace-independent/$profile"
+              mkdir -p "$exports"
+              .build/ext4-namespace-test --smoke --export "$exports" "$image" \
+                2>&1 | tee "artifacts/checks/namespace-$profile-exports.log"
+              if [[ "$fixtures" == artifacts/namespace-fixtures ]]; then
+                .build/ext4-namespace-test --smoke --groups --export "$exports" "$image" \
+                  2>&1 | tee "artifacts/checks/namespace-$profile-groups.log"
+                .build/ext4-namespace-test --exhaust --export "$exports" "$image" \
+                  2>&1 | tee "artifacts/checks/namespace-$profile-exhaust.log"
+              fi
+              python3 tests/check_namespace.py --fixtures "$fixtures" --exports "$exports" \
+                --recover .build/ext4-recover --output "$checked" \
+                2>&1 | tee "artifacts/checks/namespace-$profile-independent.log"
+              find "$exports" "$checked" -type f \
+                ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+            done
+          done
+          df -h .
       - name: Preserve test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: portable-filesystem-reports
+          name: portable-filesystem-${{ matrix.suite }}-reports
           retention-days: 7
           include-hidden-files: true
           path: |

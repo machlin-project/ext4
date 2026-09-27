@@ -12,6 +12,7 @@ import struct
 import subprocess
 
 from check_allocation import expected_contents
+import linux_namespace
 
 
 def digest(path):
@@ -36,14 +37,28 @@ def main():
                         help="generate pending Linux orphan fixtures from checked clean exports")
     parser.add_argument("--live-truncate", action="store_true",
                         help="verify completed or interrupted live truncates and Linux regrowth")
+    parser.add_argument("--namespace", action="store_true",
+                        help="verify independently checked namespace exports and Linux inode reuse")
+    parser.add_argument("--pending", action="store_true",
+                        help="with --namespace, mount the exported pending journal instead of its clean result")
+    parser.add_argument("--recover", type=Path,
+                        help="portable recovery executable (required for --namespace)")
     parser.add_argument("--case", action="append", default=[],
                         help="select an exact exported image filename (repeatable)")
     args = parser.parse_args()
-    if sum((args.file_writes, args.allocation, args.truncate, args.orphans, args.live_truncate)) > 1:
+    if sum((args.file_writes, args.allocation, args.truncate, args.orphans,
+            args.live_truncate, args.namespace)) > 1:
         parser.error("select one mutation verification mode")
-    clean_exports = args.file_writes or args.allocation or args.truncate or args.orphans or args.live_truncate
+    if args.pending and not args.namespace:
+        parser.error("--pending requires --namespace")
+    if args.namespace and args.recover is None:
+        parser.error("--namespace requires the exact prepared --recover executable")
+    clean_exports = (args.file_writes or args.allocation or args.truncate or args.orphans or
+                     args.live_truncate or args.namespace)
     lab = args.lab.resolve()
     root = Path(__file__).resolve().parent.parent
+    recover = args.recover.resolve() if args.recover else root / ".build/ext4-recover"
+    recover_sha = digest(recover) if not args.orphans and (args.namespace or not args.prepare_only) else None
     output = args.output.resolve()
     if Path.cwd().resolve() != lab:
         parser.error("run from the explicit Machlin lab working directory")
@@ -90,6 +105,8 @@ def main():
         command.insert(1, "-DEXT4_TEST_ORPHANS=1")
     if args.live_truncate:
         command.insert(1, "-DEXT4_TEST_LIVE_TRUNCATE=1")
+    if args.namespace:
+        command.insert(1, "-DEXT4_TEST_NAMESPACE=1")
     with (output / "build.log").open("wb") as log:
         subprocess.run([str(x) for x in command], stdout=log, stderr=subprocess.STDOUT, check=True)
     archives = {}
@@ -107,13 +124,28 @@ def main():
         exports = [record for record in exports if Path(record["image"]).name in args.case]
     if not exports:
         raise RuntimeError("no exported writer cases")
+    tools = lab / "vendor/e2fsprogs-ext4/build"
+
+    def archive_key(case):
+        if args.namespace:
+            return Path(case["image"]).stem
+        if args.live_truncate:
+            return (case["block_size"], case["target"], case["inode"]["blocks"])
+        return case["block_size"]
+
     for case in exports:
+        if args.namespace:
+            case["block_size"] = case["accounting"]["Block size"]
+            if case["block_size"] > 4096:
+                raise RuntimeError("Select namespace cases supported by the 4 KiB-page reference kernel")
+            if args.pending and (not case.get("pending") or case.get("recovered_outcome") != "new"):
+                raise RuntimeError("Pending namespace mode requires a checked committed namespace export")
         block_size = case["block_size"]
-        key = (block_size, case["target"], case["inode"]["blocks"]) if args.live_truncate else block_size
+        key = archive_key(case)
         if key in archives:
             continue
-        tree = output / (f"root-{block_size}-{case['target']}-{case['inode']['blocks']}"
-                         if args.live_truncate else f"root-{block_size}")
+        suffix = "-".join(str(part) for part in key) if isinstance(key, tuple) else str(key)
+        tree = output / f"root-{suffix}"
         for directory in ("dev", "mnt", "modules"):
             (tree / directory).mkdir(parents=True)
         shutil.copyfile(probe, tree / "init")
@@ -122,6 +154,8 @@ def main():
         if args.live_truncate:
             empty = int(case["target"] == "empty")
             (tree / "live-truncate").write_text(f"{empty} {empty} {case['inode']['blocks']}\n")
+        if args.namespace:
+            linux_namespace.prepare(case, tree, tools)
         for name, record in module_report["modules"].items():
             source = lab / record["path"]
             if digest(source) != record["sha256"]:
@@ -136,28 +170,31 @@ def main():
     if args.prepare_only:
         print(f"Prepared Linux probe and {len(archives)} initramfs archives in {output}")
         return
-    tools = lab / "vendor/e2fsprogs-ext4/build"
     results = []
     for case in exports:
-        source = Path(case["image"])
-        if clean_exports and digest(source) != case["input_sha256"]:
+        source = Path(case["pending"] if args.pending else case["image"])
+        expected_sha = case["pending_sha256"] if args.pending else case.get("input_sha256")
+        if clean_exports and digest(source) != expected_sha:
             raise RuntimeError(f"file-write export changed: {source}")
         scratch = output / source.name
         shutil.copyfile(source, scratch)
         record = {"case": source.name, "input_sha256": digest(source), "commands": []}
+        if not args.orphans:
+            record.update(recover=str(recover), recover_sha256=recover_sha)
         results.append(record)
 
-        def run(command, timeout=90):
+        def run(command, timeout=90, allowed=(0,)):
             done = subprocess.run([str(x) for x in command], cwd=lab,
                                   capture_output=True, text=True, timeout=timeout)
             record["commands"].append({"command": [str(x) for x in command],
                                        "status": done.returncode, "stdout": done.stdout,
                                        "stderr": done.stderr})
             (output / "report.json").write_text(json.dumps(results, indent=2) + "\n")
-            done.check_returncode()
+            if done.returncode not in allowed:
+                raise subprocess.CalledProcessError(done.returncode, command, done.stdout, done.stderr)
             return done.stdout
 
-        key = (case["block_size"], case["target"], case["inode"]["blocks"]) if args.live_truncate else case["block_size"]
+        key = archive_key(case)
         console = run([runner, kernel, archives[key], "2", "512",
                        "console=hvc0 rdinit=/init panic=-1 loglevel=4", scratch])
         (output / f"{source.stem}.console.log").write_text(console)
@@ -176,7 +213,8 @@ def main():
             (output / "report.json").write_text(json.dumps(results, indent=2) + "\n")
             print(f"GENERATED {source.name}: six Linux open-unlinked inode types; recovery not yet checked", flush=True)
             continue
-        verification_marker = ("LINUX_EXT4_LIVE_TRUNCATE_PASS" if args.live_truncate else
+        verification_marker = ("LINUX_EXT4_NAMESPACE_PASS" if args.namespace else
+                               "LINUX_EXT4_LIVE_TRUNCATE_PASS" if args.live_truncate else
                                "LINUX_EXT4_TRUNCATE_PASS" if args.truncate else
                                "LINUX_EXT4_ALLOCATION_PASS" if args.allocation else
                                "LINUX_EXT4_FILE_WRITE_PASS" if args.file_writes else "LINUX_EXT4_REPLAY_PASS")
@@ -188,7 +226,19 @@ def main():
         header = run([tools / "misc/dumpe2fs", "-h", scratch])
         if "needs_recovery" not in header:
             raise RuntimeError("Linux did not leave a pending journal for the reverse roundtrip")
-        recovery = run([root / ".build/ext4-recover", "--write", scratch])
+        if digest(recover) != recover_sha:
+            raise RuntimeError("Recovery executable changed during the roundtrip")
+        if args.namespace:
+            if Path(case["image"]).name.startswith("exhaust-") and "LINUX_EXT4_NAMESPACE_REUSE_PASS" not in console:
+                raise RuntimeError("Missing Linux reuse evidence after inode exhaustion")
+            record.update(linux_namespace.verify(case, scratch, output, tools, recover, run))
+            if digest(source) != expected_sha:
+                raise RuntimeError("Namespace roundtrip changed its protected source image")
+            record.update(output_sha256=digest(scratch), passed=True)
+            (output / "report.json").write_text(json.dumps(results, indent=2) + "\n")
+            print(f"PASS {source.name}: Linux namespace, Linux commit, core/oracle replay, e2fsck", flush=True)
+            continue
+        recovery = run([recover, "--write", scratch])
         transactions = re.search(r"transactions=(\d+)", recovery)
         if not transactions or int(transactions[1]) == 0:
             raise RuntimeError("reverse roundtrip did not replay a Linux-authored transaction")

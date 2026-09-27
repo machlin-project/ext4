@@ -8,7 +8,7 @@ fixture-generation command does not prove the corresponding runtime behavior.
 
 ## Portable suites
 
-`make test` runs the reader, malformed-image, file-write, allocation, truncate, orphan and journal tests
+`make test` runs the reader, malformed-image, namespace, file-write, allocation, truncate, orphan and journal tests
 with ASan/UBSan. The 1 KiB and 4 KiB journal suites use separate volatile and
 persistent device states. They interrupt each write and flush, then reopen the
 surviving medium. Cases retain none, all or alternating pending blocks; partial
@@ -23,6 +23,10 @@ contract, not physical power-loss protection on a particular disk.
 | Writable timestamps | Signed and extended epoch boundaries, nanosecond bounds, birth time, 128-byte inode limits and each extra_isize field boundary; rejected updates perform no writes |
 | File overwrite | Complete-file comparison after an unaligned three-block overwrite, preserved EOF and untouched bytes, hardlinks, zero-length operation and read-only rejection |
 | Write admission | Stale generation, invalid fields/types/ranges, unsupported xattrs/flags, metadata-target exclusion; no writes before successful validation |
+| Namespace creation | Regular files, mkdir dot/dotdot and parent link counts, full-width owners and precise captured times, nested hard links and hard links to symlinks, sparse writes through new aliases |
+| Namespace allocation | Full-directory append, lazy inode bitmap/table ownership, group transitions, all inodes exhausted, hard links after exhaustion, cleared released records, generation increment/wrap and inherited inode flags |
+| Namespace validation | Invalid/duplicate names, stale parent/target, directory hard links, indexed/immutable parents, link limits, malformed records/dot entries, inode bitmap/count/high-water corruption and small-journal credit exhaustion |
+| Namespace failures | Every allocation/read after mount and every write/flush cut for create/mkdir/link in existing and appended blocks and at an inode-group transition; full-resource old/new comparison, with durable commits forced to the new state |
 | Allocation and growth | Unaligned initial writes, sparse gaps, written allocations beyond EOF, deterministic fragmented insertion, extent root/leaf/parent splits, and direct through triple-indirect boundaries |
 | Unwritten conversion | Independent debugfs allocation with deliberately nonzero backing bytes; partial writes preserve zero semantics and split/merge extent records |
 | Free-space ownership | Group and superblock counters, inode data/mapping block counts, lazy bitmaps, short final groups, exhaustion to zero free blocks, reserved-space rejection, late credit failure with no writes |
@@ -62,6 +66,32 @@ atomic credit limit; exhaustive fault cuts use smaller multi-transaction maps.
 The separate live API suites enumerate every callback after writable mount and
 target lookup, including all subsequent intent cleanup and final inode refresh.
 Their large-map suite also runs the full fault matrix, with its own time limit.
+
+`ext4-namespace-test` runs create/mkdir/link and directory-growth cases on every
+writable profile, including modern orphan files. Six small multi-group images
+add legacy indirect mapping, absent checksums, absent FILETYPE, 128-byte inodes
+and uninitialized inode tables. `--groups` fills the first inode group
+before faulting the next creation; `--exhaust` fills all eight groups with long
+names, growing the parent through legacy indirect blocks. An actual indexed
+directory is a separate unsupported-operation test, not an accepted write case.
+
+`--smoke --export DIR` preserves completed operations and two distinct interrupted
+states: before the commit write and immediately after its successful durability
+barrier. `check_namespace.py` requires old and new outcomes respectively, then
+compares each to independent journal-only replay. It checks exact directory names,
+inode identity, owners/times, link counts, sparse bytes, free-space accounting,
+nonrepairing e2fsck, unchanged sources and idempotent recovery. Malformed input,
+allocation failures and deliberately torn primary superblocks remain separate
+from successful journal recovery.
+
+The Linux namespace probe reads expectations independently decoded from the
+checked clean image. It checks stat, lookup, complete readdir and file bytes,
+then creates and links new objects and commits a cross-directory rename. On an
+inode-exhausted image it first requires ENOSPC and then reuses the only released
+inode. Returned pending Linux transactions are replayed by both the core and
+e2fsprogs. Linux can leave stale primary free-space summaries: the oracle admits
+only the exact summary diagnostics confirmed by independently summed groups;
+the core result must already have correct primary totals and no such diagnostics.
 
 `ext4-write-test --truncate` runs resize and freeing cases across the selected
 profiles. Truncate exports include the final reused block and three intermediate

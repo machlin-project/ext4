@@ -39,6 +39,10 @@ ext4_xnu_error(enum ext4_result result)
 		return ESTALE;
 	case EXT4_NO_SPACE:
 		return ENOSPC;
+	case EXT4_EXISTS:
+		return EEXIST;
+	case EXT4_TOO_MANY_LINKS:
+		return EMLINK;
 	default:
 		return EIO;
 	}

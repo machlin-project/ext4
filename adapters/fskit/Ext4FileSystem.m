@@ -50,6 +50,12 @@ ext4_error(enum ext4_result result)
 	case EXT4_NO_SPACE:
 		error = ENOSPC;
 		break;
+	case EXT4_EXISTS:
+		error = EEXIST;
+		break;
+	case EXT4_TOO_MANY_LINKS:
+		error = EMLINK;
+		break;
 	case EXT4_CORRUPT:
 	case EXT4_RECOVERY_REQUIRED:
 	case EXT4_IO:

@@ -51,6 +51,10 @@ decode_le32(const struct ext4_le32 *field)
 	    ((uint32_t)field->bytes[2] << 16) | ((uint32_t)field->bytes[3] << 24);
 }
 
+#ifdef EXT4_TEST_NAMESPACE
+#include "linux_namespace.h"
+#endif
+
 #ifdef EXT4_TEST_FILE_WRITES
 static void
 check_exported_files(uint32_t block_size, uint16_t inode_size)
@@ -366,7 +370,7 @@ main(void)
     defined(EXT4_TEST_TRUNCATE) || defined(EXT4_TEST_ORPHANS)
 	require((decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_RECOVER) == 0,
 	    "verify cleanly finished writable filesystem");
-#elif !defined(EXT4_TEST_LIVE_TRUNCATE)
+#elif !defined(EXT4_TEST_LIVE_TRUNCATE) && !defined(EXT4_TEST_NAMESPACE)
 	require((decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_RECOVER) != 0,
 	    "verify journal requires recovery");
 #endif
@@ -383,6 +387,10 @@ main(void)
 #ifdef EXT4_TEST_ORPHANS
 	create_orphans(block_size,
 	    (decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_EXTENTS) != 0);
+	return 1;
+#endif
+#ifdef EXT4_TEST_NAMESPACE
+	check_namespace(block_size);
 	return 1;
 #endif
 #ifdef EXT4_TEST_FILE_WRITES

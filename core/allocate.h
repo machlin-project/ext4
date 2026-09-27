@@ -35,6 +35,11 @@ enum ext4_result ext4_allocation_valid_range(
 enum ext4_result ext4_free_blocks(
     struct ext4_allocation *allocation, uint64_t block, uint64_t length);
 enum ext4_result ext4_allocation_super(struct ext4_allocation *allocation);
+/* Enroll one free inode and initialize its empty record in this transaction.
+ * The caller links it into a directory before committing, and publishes the
+ * primary free-inode count only after commit. */
+enum ext4_result ext4_allocate_inode(struct ext4_allocation *allocation, uint16_t mode,
+    struct ext4_inode_disk **disk, struct ext4_inode *inode);
 enum ext4_result ext4_inode_account(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint64_t size);
 

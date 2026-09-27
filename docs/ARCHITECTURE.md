@@ -197,6 +197,31 @@ xattrs or unsupported flags (including immutable and append-only) currently
 reject mutation pending their actual policy implementation. Native UBC/FSKit
 integration and LXNU policy acceptance remain separate from this portable API.
 
+`ext4_create`, `ext4_mkdir` and `ext4_link` share the exclusive writable owner and
+generation-checked inode resolution. Creation receives admitted permissions,
+full-width owners and captured atime/mtime/ctime, with optional representable birth
+time. The caller supplies one parent mutation time. The core does not derive
+credentials, umask, group inheritance or authorization from that request.
+
+One bounded transaction owns the directory entry, new inode record and bitmap,
+group/primary accounting, parent timestamps and link counts. Mkdir also initializes
+dot/dotdot and accounts its block separately from any parent growth. A hard link
+increments the existing non-directory inode's links and ctime, preserving its
+other fields. Allocation reads the released record's generation, advances it
+without producing zero, and clears all remaining old bytes. Lazy inode bitmaps
+are initialized from the group's actual inode bounds; allocation advances the
+initialized-table high-water mark while preserving the table-zeroed flag.
+
+The current namespace writer scans linear directories, validating their full maps
+and every record before insertion, even after finding a candidate slot. It reuses
+record slack or appends a zeroed block, preserving legacy name-length encoding and
+metadata checksum tails. Directory size is bounded to 1,048,576 blocks. Existing
+indexed parents explicitly reject mutation. Duplicate names, stale generations,
+invalid dot records, exhausted inodes, reserved-space exclusion and journal-credit
+exhaustion cancel before resource writes; uncertain commits poison the owner.
+These operations do not yet implement directory indexing, symlink creation,
+unlink/rmdir/rename or open-unlinked lifetime, and neither adapter exposes them.
+
 The initial kernel reader uses a fixed device-sector buffer-cache key for
 metadata. Regular file reads and page-in use `cluster_read`/`cluster_pagein`,
 with validated byte mappings from the C core and `buf_strategy` device dispatch.

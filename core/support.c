@@ -155,7 +155,11 @@ ext4_result_string(enum ext4_result result)
 	case EXT4_STALE:
 		return "inode generation changed";
 	case EXT4_NO_SPACE:
-		return "no free filesystem blocks";
+		return "no free filesystem space";
+	case EXT4_EXISTS:
+		return "entry already exists";
+	case EXT4_TOO_MANY_LINKS:
+		return "too many hard links";
 	}
 	return "unknown filesystem error";
 }

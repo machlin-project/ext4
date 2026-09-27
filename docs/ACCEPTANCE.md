@@ -11,7 +11,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Eleven read profiles pass; broader format and size coverage pending |
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
-| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, sparse growth, unwritten conversion and truncate/freeing pass independent and Linux checks; live shrink spans transactions; directory mutation and platform writes pending |
+| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/link have portable and independent evidence; indexed mutation, unlink/rename and platform writes pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine, legacy lists and modern orphan files pass portable faults, independent recovery and Linux reuse; advanced journal formats and platform write integration remain pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; ACLs/xattrs and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
@@ -163,6 +163,57 @@ without core warnings, and the unsigned universal FSKit build. These adapters
 still expose read-only operations and were not runtime-tested in this change.
 Directory mutation, security xattrs,
 concurrent native page-cache ownership and LXNU policy remain unaccepted.
+
+## Portable namespace evidence
+
+`ext4-namespace-test` covers creation, mkdir and hard links across ten ordinary
+writable profiles, ten modern orphan-file profiles and six small multi-group
+profiles. Cases include nested names and dot/dotdot, hard links to regular files
+and symlinks, wide owners, signed/extended timestamps, 255-byte names, directory
+growth, generation reuse/wrap and inherited flags. The small profile without
+FILETYPE retains metadata checksums and tests correct recognition of checksum
+tails in legacy directory records.
+
+The six small filesystems each exhaust 115 available inodes, including 23 new
+directories, across eight groups. Hard links remain possible with no free inodes;
+create/mkdir return an error without modifying media. Separate group-transition
+tests fault both regular-file and directory creation in the next lazy inode group.
+Malformed records, dot entries, bitmap checksums/counts/high-water marks, immutable
+or indexed parents, stale identities and link limits reject without writes. A
+small admitted journal verifies private cancellation on late credit exhaustion.
+
+Every allocation/read after writable mount and target lookup is faulted for the
+bounded operations: 2,804 allocation and 2,705 read points across 168 scenarios.
+The 25,680 write/flush cuts use three pending-write survival patterns and partial
+writes; 25,042 recover consistently and 638 torn-primary cases fail closed.
+Recovered resources outside the journal must match
+the complete old or new image; a durable commit requires the new image. Deliberate
+torn primary-superblock failures remain fail-closed cases, not successful repairs.
+The full optimized ASan/UBSan matrix passed 24 suites; all six namespace suites
+passed again after the generation/credit and dual-commit-boundary additions.
+There are 537 malformed-case passes and nine explicit checksum-absent skips.
+
+Independent namespace checks passed 200 records: 70 ordinary, 70 modern and
+60 small-filesystem results. Each of the 168 atomic
+records separately verifies uncommitted rollback and committed replay against
+e2fsprogs journal-only recovery, with exact names, metadata, link counts, bytes and
+accounting. Actual Linux checks passed 95 cases: 32 clean exports and 63 pending
+commits, including every operation, directory append, inode-group transitions,
+modern orphan files and all six inode-exhaustion formats. Linux required ENOSPC,
+reused the sole released inode, then authored new namespace commits. Reverse core
+replay, independent journal-only replay and unchanged repeated recovery passed.
+The reference Linux kernel has 4 KiB pages; larger blocks have portable and
+e2fsprogs evidence only. Generated evidence is under
+`artifacts/namespace-final-*/`, `artifacts/checks/namespace-*` and the lab's
+`artifacts/ext4-journal/linux-reference/namespace-*` directories.
+The selected-Xcode formatter, freestanding stack budget, unsigned arm64e/x86_64
+kext builds and unsigned universal FSKit app/extension build also pass. These new
+platform binaries have compilation evidence only.
+
+This accepts neither indexed-directory mutation, unlink/rmdir/rename, symlink
+creation nor open-unlinked ownership. Both platform adapters remain read-only.
+The namespace API takes caller-admitted attributes and does not implement native
+authorization, LXNU policy, writable page-cache ownership or concurrent mutation.
 
 ## Allocation and growth evidence
 

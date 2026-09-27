@@ -215,14 +215,54 @@ with exact file bytes/attributes and e2fsck verified afterward. The same lab
 working directory, explicit profile selection and Sol/Luna VM handoff apply.
 
 The `Portable filesystem` GitHub Actions workflow runs on development/main pushes
-and pull requests. Its isolated Ubuntu job generates fresh fixtures, builds with
-Clang and ASan/UBSan, runs CTest, checks clean mutation exports independently, and
-recovers debugfs-authored journals. It retains reports and logs, not disk images.
+and pull requests. Separate Ubuntu jobs cover the base core, orphan files and
+namespace mutations, each generating fresh fixtures and building with Clang and
+ASan/UBSan. They run disjoint CTest suites, inspect mutation exports independently
+and recover debugfs-authored journals. Reports and logs are retained; successfully
+verified image exports are released between stages, and namespace exports are
+checked one source profile at a time to bound disk use.
 CI uses `RelWithDebInfo` with both sanitizers enabled and two concurrent CTest
 workers; fixture and fault coverage is identical to Debug. Use the same build
 type locally when reproducing CI timing.
 This portable CI does not replace selected-Xcode formatting, unsigned platform
 builds, actual macOS mounts, or the separately identified kernel/LXNU VM tests.
+
+Namespace tests use the ordinary writable and orphan-file profiles. Add six small
+multi-group fixtures and their exhaustion/group-transition suites with:
+
+```sh
+python3 tests/generate_namespace_fixtures.py --tools-root /path/to/e2fsprogs/build \
+  --output artifacts/namespace-fixtures
+cmake -S . -B .build -DEXT4_NAMESPACE_TESTS=ON
+cmake --build .build --parallel 4
+ctest --test-dir .build -R '^namespace' --output-on-failure
+```
+
+`EXT4_NAMESPACE_FIXTURES` selects another fixture directory. The ordinary namespace
+and indexed-rejection tests are always enabled; the modern suite follows
+`EXT4_ORPHAN_FILE_TESTS`. To independently inspect one profile after its fault suite:
+
+```sh
+mkdir artifacts/namespace-exports
+.build/ext4-namespace-test --smoke --export artifacts/namespace-exports \
+  artifacts/fixtures/ext4-4k.img
+python3 tests/check_namespace.py --fixtures artifacts/fixtures \
+  --exports artifacts/namespace-exports --recover .build/ext4-recover \
+  --tools-root /path/to/e2fsprogs/build --output artifacts/namespace-independent
+```
+
+For the small images, also export `--smoke --groups` and `--exhaust` into that
+source profile's new export directory before checking it. Exports contain both
+uncommitted and durable-commit interruptions. The independent checker requires
+the old and new states respectively, not merely an arbitrary consistent outcome.
+
+From the lab directory, `run_linux_journal.py --namespace` takes that checker's
+`report.json`. Pass an explicit prepared `--recover` executable, `--case` names,
+the pinned `--module-report`, `--lab` and a new `--output`. Select 1/2/4 KiB images
+for the current reference kernel. Add `--pending` for atomic entries with a checked
+committed journal; basic/exhaustion exports are clean cases. Sol prepares the
+reference environment, then Luna runs the CLI batches. The guest verifies an
+independent namespace oracle and authors new committed changes for reverse replay.
 
 `ext4-write-test --truncate IMAGE...` checks bounded resize, freeing, corruption
 and recovery. Add `--export-only --export NEW_DIRECTORY` after a successful CTest
