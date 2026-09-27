@@ -55,6 +55,9 @@ Both platform adapters remain read-only; FSKit has not been mounted. Read
 Native adapters have not yet adopted the streamed enumeration API. Bounded zeroing of written
 preallocation now passes focused faults and independent image checks for both
 write and truncate growth; its full regression remains pending.
+Legacy CRC16 group descriptors also pass portable checks, independent image
+inspection and Linux mutation/recovery roundtrips, including lazy inode and block
+groups. Full regression of that format package remains pending.
 Generated disk images and reports are not source artifacts.
 
 ## Layout

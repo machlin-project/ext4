@@ -12,7 +12,7 @@ safe rejection of a feature is recorded separately from supporting it.
 
 | Contract | Required evidence | Current state |
 | --- | --- | --- |
-| Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Eleven read profiles pass; broader format and size coverage pending |
+| Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Eleven base read profiles pass; CRC16 group variants pass targeted portable, independent and Linux checks; broader format and size coverage pending |
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir/rename and bounded indexed mutation pass portable, independent and Linux checks; core holds retain open-unlinked or replaced objects; platform writes and broader capacity/concurrency acceptance pending |
@@ -50,11 +50,26 @@ mutations reject without publishing output. Bitmap/inode/directory checksum case
 remain explicitly inapplicable where that checksum format is absent.
 
 Evidence is under `artifacts/group-checksum-fixtures/` and
-`artifacts/checks/group-checksum-development-retry1-*`. The first configuration
-attempt stopped on the stale Meson option cache before compilation or tests;
-regenerating that cache admitted the new option. No failed filesystem test was
-rerun. Independent mutation checks, Linux roundtrips and complete regression
-remain pending; large-volume and native writable behavior are not established.
+`artifacts/checks/group-checksum-development-retry1-*`.
+
+Independent mutation checks pass all 48 case records: four writes, four allocation
+states, sixteen truncate checkpoints, four growth cases with both write and
+truncate outcomes, and twenty namespace cases. Contents, attributes, mappings,
+group accounting and recovery comparisons pass; all 168 nonrepairing e2fsck
+commands return zero. Fixture and exported input bytes remain unchanged. Reports
+are under `artifacts/group-checksum-*-independent/`, with the combined review in
+`artifacts/checks/group-checksum-independent-retry1-summary.json`.
+
+Ten roundtrips through the actual Linux reference kernel pass: four allocated
+files, two exhausted inode pools, two clean cross-group mkdir states and two
+pending mkdir journals. Linux verifies or replays the portable results, reuses
+inodes and authors new committed transactions. Portable and independent replay
+agree on the returned namespace/data and allocation accounting; all 22 recorded
+e2fsck commands return zero. Source images remain unchanged. Reports are in the
+lab under `artifacts/ext4-journal/linux-reference/group-checksum-*-linux/`, with
+review in `artifacts/checks/group-checksum-linux-summary.json` in this repository.
+Complete regression remains pending. Large-volume and native writable behavior
+are not established by these bounded profiles.
 
 ## Meson build acceptance
 
