@@ -60,7 +60,7 @@ revokes. It bounds the journal to 1,048,576 data blocks, 1,024 data runs and 8,1
 mapping blocks, a writing transaction to 256 snapshots, and recovery to 1,048,576
 records. Exceeding a bound
 is an explicit unsupported result. External journals, checksum v1, async/fast
-commit, the modern orphan-file feature and general filesystem mutation remain separate work.
+commit and general filesystem mutation remain separate work.
 The internal block transaction interface is not an application or driver ioctl.
 Platform adapters remain read-only until their metadata ownership, native cache
 integration and durable device-barrier paths are implemented and tested.
@@ -87,7 +87,7 @@ adapters will need a separate partial-progress/chunking contract for large I/O.
 The allocator validates group descriptors, bitmap checksums and free counts before
 selecting blocks. It initializes lazy block bitmaps from protected system ranges
 and marks the invalid tail of the final group. A sorted, merged range index covers
-superblocks, GDT/reserved GDT, bitmaps, inode tables and journal data/mapping nodes,
+superblocks, GDT/reserved GDT, bitmaps, inode tables, journal and orphan-file data/mapping nodes,
 including flex_bg placement. Writable mount bounds its input index to 1,048,576
 ranges. It is a metadata exclusion index, not a global filesystem consistency
 checker. Ordinary allocation preserves the reserved-block pool; admitted use of
@@ -141,7 +141,7 @@ still uses a single transaction: sparse and unwritten runs need no data snapshot
 but zeroing many written allocations beyond the previous EOF remains credit-bound.
 These APIs do not yet own open-unlinked files or native page-cache concurrency.
 
-Offline recovery completes legacy orphan-list operations after journal replay.
+Offline recovery completes legacy orphan-list and modern orphan-file operations after journal replay.
 It validates the entire inode-number chain, allocation, checksums, types and cycles
 before the first cleanup transaction. Each inode's complete block map is checked
 before releasing its first batch. Linked regular files retain their recorded size,
@@ -156,7 +156,32 @@ and list update commit together. Interrupted cleanup can restart from the remain
 map; it never reuses a block before the previous transaction's checkpoint completes.
 The recovery report separates replayed transactions, cleanup transactions and
 completed orphan entries. Unsupported inode attributes/flags leave cleanup pending.
-Modern orphan files and online open-unlinked lifetime are not yet implemented.
+Online open-unlinked lifetime is not yet implemented.
+
+The orphan file has a fixed, validated inode and mapping for the writable owner's
+lifetime. Preparation checks its allocation, complete map and block count, rejects
+holes/unwritten mappings, verifies each tail magic/checksum, and adds its data and
+mapping nodes to the protected system index. Ordinary inode mutation cannot target
+that private inode. The implementation supports up to 512 file blocks and 1,048,576
+active entries, with explicit rejection beyond either bound. A clean writable
+mount also rejects nonempty slots when ORPHAN_PRESENT is absent.
+
+Recovery validates every active entry's inode and checks duplicates within the file
+and against the entire legacy chain before starting cleanup. It first finishes the
+legacy chain, then atomically clears one modern slot and makes that inode the legacy
+head in the same journal transaction. The existing bounded cleaner completes it
+before the next transfer. An interruption therefore retains each pending inode in
+one of the two supported representations. Both may legitimately coexist on disk.
+The file checksum binds the inode seed and generation, physical block address and
+entry array; tail magic is checked separately. Recovery reports transfers separately
+from completed orphan entries and total cleanup transactions.
+
+Every writing transaction on this feature retains ORPHAN_PRESENT alongside RECOVER;
+clean finish clears both only after the validated file and legacy list are empty.
+Read-only mounts reject ORPHAN_PRESENT even if RECOVER is absent. Live truncation
+continues to use the legacy list on these volumes. Scalable concurrent insertion,
+orphan-file growth and the owning platform's open-unlinked lifetime remain separate
+work; this recovery owner does not provide those contracts.
 
 Linux's primary free-block/inode summaries may lag committed group-descriptor
 changes. Explicit recovery reconstructs those totals from the validated, replayed
@@ -206,6 +231,7 @@ through an untrusted user ioctl. Missing bridge support remains an explicit gap.
 
 - [ext4 format](https://docs.kernel.org/filesystems/ext4/index.html)
 - [JBD2 journal format](https://docs.kernel.org/filesystems/ext4/journal.html)
+- [Orphan-file format](https://docs.kernel.org/filesystems/ext4/orphan.html)
 - [FSKit](https://developer.apple.com/documentation/fskit)
 - [FSKit block resources](https://developer.apple.com/documentation/fskit/fsblockdeviceresource)
 

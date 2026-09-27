@@ -10,6 +10,8 @@
 #define TEST_LINKED_ORPHANS 2U
 #define TEST_PAYLOAD_SIZE 200000U
 
+enum orphan_format { ORPHAN_LEGACY, ORPHAN_FILE, ORPHAN_MIXED };
+
 #define CHECK(expression)                                                                          \
 	do {                                                                                       \
 		if (!(expression)) {                                                               \
@@ -202,15 +204,40 @@ lookup(struct ext4_fs *fs, const char *name)
 }
 
 static void
-linked_fixture(struct device *device)
+orphan_block_checksum(
+    struct device *device, struct ext4_fs *fs, const struct ext4_inode *file, uint64_t block)
+{
+	struct ext4_orphan_tail_disk *tail;
+	struct ext4_block_number_disk address;
+	uint8_t *buffer = device->cache + block * device->block_size;
+	uint32_t checksum;
+
+	if (!device->metadata_checksum) {
+		return;
+	}
+	tail = (struct ext4_orphan_tail_disk *)(buffer + device->block_size - sizeof(*tail));
+	ext4_encode32(&address.low, (uint32_t)block);
+	ext4_encode32(&address.high, (uint32_t)(block >> 32));
+	checksum = ext4_crc32c(ext4_inode_seed(fs, file), &address, sizeof(address));
+	ext4_encode32(
+	    &tail->checksum, ext4_crc32c(checksum, buffer, device->block_size - sizeof(*tail)));
+}
+
+static void
+linked_fixture(struct device *device, enum orphan_format format)
 {
 	struct ext4_fs *fs;
 	struct ext4_inode payload;
 	struct ext4_inode hello;
+	struct ext4_inode file;
 	struct ext4_inode_disk *disk;
 	struct ext4_super_disk *super =
 	    (struct ext4_super_disk *)(device->cache + EXT4_SUPER_OFFSET);
 	uint64_t offset;
+	uint64_t block;
+	uint32_t slots =
+	    (device->block_size - sizeof(struct ext4_orphan_tail_disk)) / sizeof(struct ext4_le32);
+	struct ext4_le32 *entries;
 
 	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
 	payload = lookup(fs, "payload.bin");
@@ -218,14 +245,35 @@ linked_fixture(struct device *device)
 	EXPECT(ext4_inode_location(fs, payload.number, &offset), EXT4_OK);
 	disk = (struct ext4_inode_disk *)(device->cache + offset);
 	ext4_encode32(&disk->size_lo, device->block_size + 7);
-	ext4_encode32(&disk->deletion_time, hello.number);
+	ext4_encode32(&disk->deletion_time, format == ORPHAN_LEGACY ? hello.number : 0);
 	ext4_inode_checksum_set(fs, payload.number, disk);
 	EXPECT(ext4_inode_location(fs, hello.number, &offset), EXT4_OK);
 	disk = (struct ext4_inode_disk *)(device->cache + offset);
 	ext4_encode32(&disk->size_lo, 7);
 	ext4_encode32(&disk->deletion_time, 0);
 	ext4_inode_checksum_set(fs, hello.number, disk);
-	ext4_encode32(&super->last_orphan, payload.number);
+	ext4_encode32(&super->last_orphan, format == ORPHAN_FILE ? 0 : payload.number);
+	if (format != ORPHAN_LEGACY) {
+		CHECK(fs->orphan_file_inode != 0);
+		EXPECT(ext4_get_inode(fs, fs->orphan_file_inode, &file), EXT4_OK);
+		CHECK(file.size / device->block_size >= 2);
+		if (format == ORPHAN_FILE) {
+			EXPECT(ext4_map_block(fs, &file, 0, &block), EXT4_OK);
+			entries = (struct ext4_le32 *)(device->cache + block * device->block_size);
+			ext4_encode32(&entries[0], payload.number);
+			orphan_block_checksum(device, fs, &file, block);
+		}
+		EXPECT(ext4_map_block(
+			   fs, &file, (uint32_t)(file.size / device->block_size - 1), &block),
+		    EXT4_OK);
+		entries = (struct ext4_le32 *)(device->cache + block * device->block_size);
+		ext4_encode32(&entries[slots - 1], hello.number);
+		orphan_block_checksum(device, fs, &file, block);
+	}
+	if (fs->orphan_file_inode != 0) {
+		ext4_encode32(&super->feature_ro_compat,
+		    ext4_le32(&super->feature_ro_compat) | EXT4_FEATURE_RO_ORPHAN_PRESENT);
+	}
 	ext4_encode32(&super->feature_incompat,
 	    ext4_le32(&super->feature_incompat) | EXT4_FEATURE_INCOMPAT_RECOVER);
 	super_checksum(device);
@@ -431,9 +479,267 @@ malformed_cases(struct device *device)
 	printf("PASS malformed orphan cases=%u; SKIP checksum-absent cases=%u\n", checked, skipped);
 }
 
+enum orphan_file_malformed {
+	FILE_PRESENT_WITHOUT_FEATURE,
+	FILE_ENTRIES_WITHOUT_PRESENT,
+	FILE_INODE_ZERO,
+	FILE_INODE_ZERO_RESERVED_BASE,
+	FILE_INODE_ROOT,
+	FILE_INODE_JOURNAL,
+	FILE_INODE_OUTSIDE,
+	FILE_INODE_FREE,
+	FILE_SIZE_ZERO,
+	FILE_SIZE_UNALIGNED,
+	FILE_SIZE_LIMIT,
+	FILE_LINK_COUNT,
+	FILE_DELETION_TIME,
+	FILE_WRONG_TYPE,
+	FILE_IMMUTABLE,
+	FILE_WRONG_BLOCK_COUNT,
+	FILE_MAP_HOLE,
+	FILE_MAP_ALIAS,
+	FILE_MAP_PROTECTED,
+	FILE_FIRST_MAGIC,
+	FILE_LAST_MAGIC,
+	FILE_FIRST_CHECKSUM,
+	FILE_LAST_CHECKSUM,
+	FILE_ADDRESS_CHECKSUM,
+	FILE_GENERATION_CHECKSUM,
+	FILE_ENTRY_OUTSIDE,
+	FILE_ENTRY_ROOT,
+	FILE_ENTRY_JOURNAL,
+	FILE_ENTRY_SELF,
+	FILE_ENTRY_FREE,
+	FILE_ENTRY_DUPLICATE,
+	FILE_ENTRY_CROSS_BLOCK_DUPLICATE,
+	FILE_ENTRY_LEGACY_DUPLICATE,
+	FILE_ENTRY_DELETION_TIME,
+	FILE_LAST_ENTRY_TYPE,
+	FILE_MALFORMED_COUNT
+};
+
+static void
+orphan_file_malformed_cases(struct device *device)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode file;
+	struct ext4_inode payload;
+	struct ext4_inode hello;
+	struct ext4_inode_disk *disk;
+	struct ext4_inode_disk *payload_disk;
+	struct ext4_inode_disk *hello_disk;
+	struct ext4_super_disk *super;
+	struct ext4_extent_header_disk *header;
+	struct ext4_extent_disk *extent;
+	struct ext4_le32 *first;
+	struct ext4_le32 *last;
+	struct ext4_orphan_tail_disk *first_tail;
+	struct ext4_orphan_tail_disk *last_tail;
+	struct ext4_recovery_report report;
+	uint8_t *malformed = malloc(device->size);
+	uint64_t offset;
+	uint64_t first_block;
+	uint64_t last_block;
+	uint32_t slots =
+	    (device->block_size - sizeof(struct ext4_orphan_tail_disk)) / sizeof(struct ext4_le32);
+	unsigned int kind;
+	unsigned int checked = 0;
+	unsigned int skipped = 0;
+	enum ext4_result expected;
+
+	CHECK(malformed != NULL);
+	for (kind = 0; kind < FILE_MALFORMED_COUNT; kind++) {
+		if (kind >= FILE_FIRST_CHECKSUM && kind <= FILE_GENERATION_CHECKSUM &&
+		    !device->metadata_checksum) {
+			skipped++;
+			continue;
+		}
+		device_reset(device, device->base);
+		EXPECT(ext4_load(&device->environment, true, &fs), EXT4_OK);
+		EXPECT(ext4_get_inode(fs, fs->orphan_file_inode, &file), EXT4_OK);
+		payload = lookup(fs, "payload.bin");
+		hello = lookup(fs, "hello.txt");
+		EXPECT(ext4_inode_location(fs, file.number, &offset), EXT4_OK);
+		disk = (struct ext4_inode_disk *)(device->cache + offset);
+		EXPECT(ext4_inode_location(fs, payload.number, &offset), EXT4_OK);
+		payload_disk = (struct ext4_inode_disk *)(device->cache + offset);
+		EXPECT(ext4_inode_location(fs, hello.number, &offset), EXT4_OK);
+		hello_disk = (struct ext4_inode_disk *)(device->cache + offset);
+		EXPECT(ext4_map_block(fs, &file, 0, &first_block), EXT4_OK);
+		EXPECT(ext4_map_block(
+			   fs, &file, (uint32_t)(file.size / device->block_size - 1), &last_block),
+		    EXT4_OK);
+		first = (struct ext4_le32 *)(device->cache + first_block * device->block_size);
+		last = (struct ext4_le32 *)(device->cache + last_block * device->block_size);
+		first_tail = (struct ext4_orphan_tail_disk *)(first + slots);
+		last_tail = (struct ext4_orphan_tail_disk *)(last + slots);
+		super = (struct ext4_super_disk *)(device->cache + EXT4_SUPER_OFFSET);
+		expected = EXT4_CORRUPT;
+		switch (kind) {
+		case FILE_PRESENT_WITHOUT_FEATURE:
+			ext4_encode32(&super->feature_compat,
+			    ext4_le32(&super->feature_compat) & ~EXT4_FEATURE_COMPAT_ORPHAN_FILE);
+			break;
+		case FILE_ENTRIES_WITHOUT_PRESENT:
+			ext4_encode32(&super->feature_ro_compat,
+			    ext4_le32(&super->feature_ro_compat) & ~EXT4_FEATURE_RO_ORPHAN_PRESENT);
+			break;
+		case FILE_INODE_ZERO:
+			ext4_encode32(&super->orphan_file_inode, 0);
+			break;
+		case FILE_INODE_ZERO_RESERVED_BASE:
+			ext4_encode32(&super->orphan_file_inode, 0);
+			ext4_encode32(&super->first_inode, 0);
+			break;
+		case FILE_INODE_ROOT:
+			ext4_encode32(&super->orphan_file_inode, EXT4_ROOT_INODE);
+			break;
+		case FILE_INODE_JOURNAL:
+			ext4_encode32(&super->orphan_file_inode, fs->journal_inode);
+			break;
+		case FILE_INODE_OUTSIDE:
+			ext4_encode32(&super->orphan_file_inode, fs->info.inodes + 1);
+			break;
+		case FILE_INODE_FREE:
+			ext4_encode32(&super->orphan_file_inode, fs->info.inodes);
+			break;
+		case FILE_SIZE_ZERO:
+			ext4_encode32(&disk->size_lo, 0);
+			break;
+		case FILE_SIZE_UNALIGNED:
+			ext4_encode32(&disk->size_lo, (uint32_t)file.size - 1);
+			break;
+		case FILE_SIZE_LIMIT:
+			ext4_encode32(&disk->size_lo,
+			    (EXT4_ORPHAN_FILE_MAX_BLOCKS + 1U) * device->block_size);
+			expected = EXT4_UNSUPPORTED;
+			break;
+		case FILE_LINK_COUNT:
+			ext4_encode16(&disk->links, 2);
+			break;
+		case FILE_DELETION_TIME:
+			ext4_encode32(&disk->deletion_time, payload.number);
+			break;
+		case FILE_WRONG_TYPE:
+			ext4_encode16(&disk->mode, EXT4_MODE_DIRECTORY | 0700);
+			break;
+		case FILE_IMMUTABLE:
+			ext4_encode32(&disk->flags, file.flags | EXT4_INODE_IMMUTABLE);
+			expected = EXT4_UNSUPPORTED;
+			break;
+		case FILE_WRONG_BLOCK_COUNT:
+			ext4_encode32(&disk->blocks_lo, ext4_le32(&disk->blocks_lo) + 1);
+			break;
+		case FILE_MAP_HOLE:
+		case FILE_MAP_ALIAS:
+		case FILE_MAP_PROTECTED:
+			if (file.flags & EXT4_INODE_EXTENTS) {
+				header = (struct ext4_extent_header_disk *)disk->block_data;
+				CHECK(ext4_le16(&header->depth) == 0 &&
+				    file.size == 4U * device->block_size);
+				extent = (struct ext4_extent_disk *)(header + 1);
+				if (kind == FILE_MAP_HOLE) {
+					ext4_encode16(&header->entries, 0);
+				} else if (kind == FILE_MAP_ALIAS) {
+					ext4_encode16(&header->entries, 2);
+					ext4_encode32(&extent[0].logical, 0);
+					ext4_encode16(&extent[0].length, 2);
+					ext4_encode16(&extent[0].physical_hi, 0);
+					ext4_encode32(
+					    &extent[0].physical_lo, (uint32_t)first_block);
+					extent[1] = extent[0];
+					ext4_encode32(&extent[1].logical, 2);
+				} else {
+					ext4_encode32(
+					    &extent->physical_lo, fs->first_data_block + 1);
+					ext4_encode16(&extent->physical_hi, 0);
+				}
+			} else {
+				ext4_encode32((struct ext4_le32 *)disk->block_data,
+				    kind == FILE_MAP_HOLE ? 0
+					: kind == FILE_MAP_ALIAS
+					? ext4_le32((struct ext4_le32 *)disk->block_data + 1)
+					: fs->first_data_block + 1);
+			}
+			break;
+		case FILE_FIRST_MAGIC:
+			ext4_encode32(&first_tail->magic, 0);
+			break;
+		case FILE_LAST_MAGIC:
+			ext4_encode32(&last_tail->magic, 0);
+			break;
+		case FILE_FIRST_CHECKSUM:
+			first_tail->checksum.bytes[0] ^= 1;
+			break;
+		case FILE_LAST_CHECKSUM:
+			last_tail->checksum.bytes[0] ^= 1;
+			break;
+		case FILE_ADDRESS_CHECKSUM:
+			memcpy(last, first, device->block_size);
+			break;
+		case FILE_GENERATION_CHECKSUM:
+			ext4_encode32(&disk->generation, file.generation + 1);
+			break;
+		case FILE_ENTRY_OUTSIDE:
+			ext4_encode32(&first[0], fs->info.inodes + 1);
+			break;
+		case FILE_ENTRY_ROOT:
+			ext4_encode32(&first[0], EXT4_ROOT_INODE);
+			break;
+		case FILE_ENTRY_JOURNAL:
+			ext4_encode32(&first[0], fs->journal_inode);
+			break;
+		case FILE_ENTRY_SELF:
+			ext4_encode32(&first[0], file.number);
+			break;
+		case FILE_ENTRY_FREE:
+			ext4_encode32(&first[0], fs->info.inodes);
+			break;
+		case FILE_ENTRY_DUPLICATE:
+			ext4_encode32(&first[1], payload.number);
+			break;
+		case FILE_ENTRY_CROSS_BLOCK_DUPLICATE:
+			ext4_encode32(&last[0], payload.number);
+			break;
+		case FILE_ENTRY_LEGACY_DUPLICATE:
+			ext4_encode32(&super->last_orphan, payload.number);
+			break;
+		case FILE_ENTRY_DELETION_TIME:
+			ext4_encode32(&payload_disk->deletion_time, hello.number);
+			break;
+		case FILE_LAST_ENTRY_TYPE:
+			ext4_encode16(&hello_disk->mode, EXT4_MODE_DIRECTORY | 0700);
+			expected = EXT4_UNSUPPORTED;
+			break;
+		default:
+			CHECK(false);
+		}
+		if (kind < FILE_FIRST_CHECKSUM || kind > FILE_GENERATION_CHECKSUM) {
+			orphan_block_checksum(device, fs, &file, first_block);
+			orphan_block_checksum(device, fs, &file, last_block);
+		}
+		ext4_inode_checksum_set(fs, file.number, disk);
+		ext4_inode_checksum_set(fs, payload.number, payload_disk);
+		ext4_inode_checksum_set(fs, hello.number, hello_disk);
+		super_checksum(device);
+		ext4_unmount(fs);
+		memcpy(malformed, device->cache, device->size);
+		device_reset(device, malformed);
+		printf("CHECK orphan file malformed case=%u\n", kind);
+		EXPECT(ext4_recover(&device->environment, &device->writer, &report), expected);
+		CHECK(report.cleaned_orphans == 0 && report.orphan_transactions == 0);
+		check_equal(device, malformed);
+		checked++;
+	}
+	free(malformed);
+	printf("PASS malformed orphan file cases=%u; SKIP checksum-absent cases=%u\n", checked,
+	    skipped);
+}
+
 static void
 recount_cases(struct device *device, const uint8_t *expected)
 {
+	struct ext4_fs *fs;
 	struct ext4_super_disk *super;
 	struct ext4_recovery_report report;
 	uint32_t blocks;
@@ -458,6 +764,10 @@ recount_cases(struct device *device, const uint8_t *expected)
 		super_checksum(device);
 		memcpy(pending, device->cache, device->size);
 		device_reset(device, pending);
+		if (kind == 2) {
+			EXPECT(ext4_mount(&device->environment, &fs), EXT4_RECOVERY_REQUIRED);
+			CHECK(fs == NULL && device->writes == 0);
+		}
 		EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_OK);
 		CHECK(report.cleaned_orphans == TEST_LINKED_ORPHANS &&
 		    report.accounting_updated == (kind < 2));
@@ -934,7 +1244,96 @@ live_cases(struct device *device, const char *path, bool smoke, const char *expo
 }
 
 static void
-test_image(const char *path, bool pending, bool smoke, const char *exports, bool live, bool large)
+orphan_file_write_guards(struct device *device)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode file;
+	struct ext4_inode payload;
+	struct ext4_inode result;
+	struct ext4_inode_disk *disk;
+	struct ext4_inode_update update;
+	struct ext4_recovery_report report;
+	struct ext4_super_disk *super;
+	struct ext4_le32 *entries;
+	struct ext4_extent_header_disk *header;
+	struct ext4_extent_disk *extent;
+	uint64_t offset;
+	uint64_t file_block;
+	uint32_t index;
+	size_t completed;
+	uint8_t marker = 0xa5;
+
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	CHECK(fs->orphan_file != NULL && fs->orphan_file->pending == 0);
+	file = fs->orphan_file->inode;
+	file_block = fs->orphan_file->blocks[0];
+	memset(&update, 0, sizeof(update));
+	update.fields = EXT4_ATTR_PERMISSIONS | EXT4_ATTR_MODIFY_TIME | EXT4_ATTR_CHANGE_TIME;
+	update.permissions = 0600;
+	update.modify_time.seconds = 1700000201;
+	update.change_time.seconds = 1700000202;
+	EXPECT(ext4_set_attributes(fs, file.number, file.generation, &update, &result),
+	    EXT4_UNSUPPORTED);
+	EXPECT(
+	    ext4_truncate(fs, file.number, file.generation, 0, &update, &result), EXT4_UNSUPPORTED);
+	EXPECT(ext4_write(fs, file.number, file.generation, 0, &marker, 1, &update, &completed),
+	    EXT4_UNSUPPORTED);
+	CHECK(completed == 0);
+	for (index = 0; index < fs->orphan_file->block_count + fs->orphan_file->mapping_count;
+	    index++) {
+		CHECK(ext4_system_block(fs, fs->orphan_file->blocks[index]));
+		EXPECT(ext4_data_block_valid(fs, fs->orphan_file->blocks[index]), EXT4_CORRUPT);
+	}
+	payload = lookup(fs, "payload.bin");
+	EXPECT(ext4_inode_location(fs, payload.number, &offset), EXT4_OK);
+	disk = (struct ext4_inode_disk *)(device->cache + offset);
+	if (payload.flags & EXT4_INODE_EXTENTS) {
+		header = (struct ext4_extent_header_disk *)disk->block_data;
+		CHECK(ext4_le16(&header->depth) == 0 && ext4_le16(&header->entries) != 0);
+		extent = (struct ext4_extent_disk *)(header + 1);
+		ext4_encode32(&extent->physical_lo, (uint32_t)fs->orphan_file->blocks[0]);
+		ext4_encode16(&extent->physical_hi, 0);
+	} else {
+		ext4_encode32(
+		    (struct ext4_le32 *)disk->block_data, (uint32_t)fs->orphan_file->blocks[0]);
+	}
+	ext4_inode_checksum_set(fs, payload.number, disk);
+	EXPECT(
+	    ext4_write(fs, payload.number, payload.generation, 0, &marker, 1, &update, &completed),
+	    EXT4_CORRUPT);
+	CHECK(completed == 0);
+	EXPECT(ext4_truncate_atomic(fs, payload.number, payload.generation, 0, &update, &result),
+	    EXT4_CORRUPT);
+	CHECK(device->writes == 0);
+	ext4_unmount(fs);
+	device_reset(device, device->base);
+	/* A hidden pending slot is invalid even when the mount marker is clean. */
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	entries = (struct ext4_le32 *)(device->cache + file_block * device->block_size);
+	ext4_encode32(entries, payload.number);
+	orphan_block_checksum(device, fs, &file, file_block);
+	ext4_unmount(fs);
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_CORRUPT);
+	CHECK(fs == NULL && device->writes == 0 && device->live == 0);
+	device_reset(device, device->base);
+	/* Conversely, an empty file may carry only ORPHAN_PRESENT after a crash. */
+	super = (struct ext4_super_disk *)(device->cache + EXT4_SUPER_OFFSET);
+	ext4_encode32(&super->feature_ro_compat,
+	    ext4_le32(&super->feature_ro_compat) | EXT4_FEATURE_RO_ORPHAN_PRESENT);
+	super_checksum(device);
+	memcpy(device->stable, device->cache, device->size);
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_RECOVERY_REQUIRED);
+	CHECK(fs == NULL && device->writes == 0);
+	EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_OK);
+	CHECK(report.cleaned_orphans == 0 && report.orphan_file_transfers == 0);
+	check_equal(device, device->base);
+	device_reset(device, device->base);
+	puts("PASS orphan file inode and backing blocks excluded from ordinary mutations");
+}
+
+static void
+test_image(const char *path, bool pending, bool smoke, const char *exports, bool live, bool large,
+    enum orphan_format format)
 {
 	struct ext4_posix_image source;
 	struct ext4_fs *fs;
@@ -949,6 +1348,7 @@ test_image(const char *path, bool pending, bool smoke, const char *exports, bool
 	uint32_t events;
 	uint32_t mount_allocations;
 	uint32_t mount_reads;
+	bool orphan_file;
 
 	memset(&device, 0, sizeof(device));
 	EXPECT(ext4_posix_open(&source, path), EXT4_OK);
@@ -971,6 +1371,7 @@ test_image(const char *path, bool pending, bool smoke, const char *exports, bool
 	device.block_size = fs->info.block_size;
 	device.blocks = (uint32_t)(device.size / device.block_size);
 	device.metadata_checksum = fs->metadata_checksum;
+	orphan_file = fs->orphan_file_inode != 0;
 	device.dirty = calloc(device.blocks, 1);
 	device.journal_blocks = calloc(device.blocks, 1);
 	CHECK(device.dirty != NULL && device.journal_blocks != NULL);
@@ -985,12 +1386,15 @@ test_image(const char *path, bool pending, bool smoke, const char *exports, bool
 	ext4_journal_close(journal);
 	ext4_unmount(fs);
 	device_reset(&device, device.base);
+	if (orphan_file && !pending) {
+		orphan_file_write_guards(&device);
+	}
 	if (live) {
 		live_cases(&device, path, smoke, exports, large);
 		goto finish;
 	}
 	if (!pending) {
-		linked_fixture(&device);
+		linked_fixture(&device, format);
 	}
 	export_image(&device, exports, path, "pending-");
 	EXPECT(ext4_mount(&device.environment, &fs), EXT4_RECOVERY_REQUIRED);
@@ -999,6 +1403,11 @@ test_image(const char *path, bool pending, bool smoke, const char *exports, bool
 	EXPECT(ext4_recover(&device.environment, &device.writer, &report), EXT4_OK);
 	CHECK(report.cleaned_orphans == (pending ? 6U : TEST_LINKED_ORPHANS));
 	CHECK(report.orphan_transactions >= report.cleaned_orphans);
+	CHECK(report.orphan_file_transfers ==
+	    (pending			     ? (orphan_file ? 6U : 0U)
+		    : format == ORPHAN_FILE  ? TEST_LINKED_ORPHANS
+		    : format == ORPHAN_MIXED ? 1U
+					     : 0U));
 	allocations = device.allocations;
 	reads = device.reads;
 	events = device.events;
@@ -1013,7 +1422,11 @@ test_image(const char *path, bool pending, bool smoke, const char *exports, bool
 	CHECK(memcmp(device.cache, expected, device.size) == 0);
 	if (!smoke) {
 		if (!pending) {
-			malformed_cases(&device);
+			if (format == ORPHAN_LEGACY) {
+				malformed_cases(&device);
+			} else if (format == ORPHAN_FILE) {
+				orphan_file_malformed_cases(&device);
+			}
 			recount_cases(&device, expected);
 		}
 		resource_faults(
@@ -1045,6 +1458,7 @@ main(int argc, char **argv)
 	bool smoke = false;
 	bool live = false;
 	bool large = false;
+	enum orphan_format format = ORPHAN_LEGACY;
 	int index = 1;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
@@ -1061,6 +1475,12 @@ main(int argc, char **argv)
 		} else if (strcmp(argv[index], "--large") == 0) {
 			large = true;
 			index++;
+		} else if (strcmp(argv[index], "--orphan-file") == 0) {
+			format = ORPHAN_FILE;
+			index++;
+		} else if (strcmp(argv[index], "--mixed") == 0) {
+			format = ORPHAN_MIXED;
+			index++;
 		} else if (strcmp(argv[index], "--export") == 0) {
 			CHECK(index + 1 < argc);
 			exports = argv[index + 1];
@@ -1072,7 +1492,7 @@ main(int argc, char **argv)
 	CHECK(index < argc);
 	CHECK((!live || !pending) && (!large || live));
 	for (; index < argc; index++) {
-		test_image(argv[index], pending, smoke, exports, live, large);
+		test_image(argv[index], pending, smoke, exports, live, large, format);
 	}
 	return 0;
 }

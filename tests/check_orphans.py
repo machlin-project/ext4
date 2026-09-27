@@ -7,9 +7,13 @@ import json
 from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
 
 from generate_fixtures import resolve_tools
+
+ORPHAN_TAIL = struct.Struct("<II")
+ORPHAN_MAGIC = 0x0B10CA04
 
 
 def digest(path):
@@ -24,7 +28,8 @@ def accounting(header):
         if not match:
             raise RuntimeError(f"missing independent accounting: {field}")
         fields[field] = int(match[1])
-    if "needs_recovery" in header or not re.search(r"^Filesystem state:\s+clean$", header, re.M):
+    if ("needs_recovery" in header or "orphan_present" in header or
+            not re.search(r"^Filesystem state:\s+clean$", header, re.M)):
         raise RuntimeError("orphan cleanup did not cleanly finish")
     if re.search(r"^First orphan inode:", header, re.M):
         raise RuntimeError("orphan list was not emptied")
@@ -76,6 +81,42 @@ def main():
                 raise RuntimeError(f"failed ({done.returncode}): {command}")
             return done.stdout
 
+        def orphan_file(candidate, label, empty):
+            header = run([tools["dumpe2fs"], "-h", candidate])
+            match = re.search(r"^Orphan file inode:\s+(\d+)$", header, re.M)
+            if not match:
+                if "orphan_file" in header:
+                    raise RuntimeError("orphan-file feature has no independently reported inode")
+                return None
+            number = int(match[1])
+            block_size = int(re.search(r"^Block size:\s+(\d+)$", header, re.M)[1])
+            status = run([tools["debugfs"], "-R", f"stat <{number}>", candidate])
+            size = int(re.search(r"\bSize:\s+(\d+)", status)[1])
+            generation = int(re.search(r"\bGeneration:\s+(\d+)", status)[1])
+            sectors = int(re.search(r"Blockcount:\s+(\d+)", status)[1])
+            if size == 0 or size % block_size or size // block_size > 512:
+                raise RuntimeError("unexpected independent orphan-file size")
+            mappings = []
+            for logical in range(size // block_size):
+                text = run([tools["debugfs"], "-R", f"bmap <{number}> {logical}", candidate])
+                mapping = re.fullmatch(r"\s*(\d+)\s*", text)
+                if not mapping or int(mapping[1]) == 0:
+                    raise RuntimeError("orphan file acquired a hole or unwritten mapping")
+                mappings.append(int(mapping[1]))
+            contents = output / f"{image.stem}.{label}.orphan-file"
+            run([tools["debugfs"], "-R", f"dump <{number}> {contents}", candidate])
+            data = contents.read_bytes()
+            if len(data) != size:
+                raise RuntimeError("independent orphan-file dump has wrong size")
+            for logical in range(size // block_size):
+                block = data[logical * block_size:(logical + 1) * block_size]
+                magic, _checksum = ORPHAN_TAIL.unpack(block[-ORPHAN_TAIL.size:])
+                if magic != ORPHAN_MAGIC or (empty and any(block[:-ORPHAN_TAIL.size])):
+                    raise RuntimeError("orphan cleanup left entries or damaged a block tail")
+            return dict(inode=number, generation=generation, size=size, sectors=sectors,
+                        mappings=mappings, content_sha256=digest(contents))
+
+        pending_file = orphan_file(source, "pending", False)
         if linked:
             header = run([tools["dumpe2fs"], "-h", image])
             case["block_size"] = int(re.search(r"^Block size:\s+(\d+)$", header, re.M)[1])
@@ -87,6 +128,9 @@ def main():
         orphans = re.search(r"orphans=(\d+)", recovery)
         if not orphans or int(orphans[1]) != len(case["orphans"]):
             raise RuntimeError("portable recovery did not clean every pending orphan")
+        transfers = re.search(r"orphan_file_transfers=(\d+)", recovery)
+        if pending_file and (not transfers or (not linked and int(transfers[1]) != len(case["orphans"]))):
+            raise RuntimeError("Linux orphan-file entries were not independently identified in recovery")
         if linked and digest(image) != digest(Path(case["clean"])):
             raise RuntimeError("POSIX and modeled cleanup exports differ")
         run([tools["e2fsck"], "-fn", image])
@@ -115,6 +159,14 @@ def main():
         expected["Free blocks"] += record["oracle_directory_blocks_added"]
         if observed != expected:
             raise RuntimeError(f"portable cleanup leaked blocks/inodes: {observed} != {expected}")
+        if pending_file:
+            core_file = orphan_file(image, "core", True)
+            oracle_file = orphan_file(oracle, "oracle", True)
+            if core_file != oracle_file or any(core_file[key] != value for key, value in pending_file.items()
+                                               if key != "content_sha256"):
+                raise RuntimeError("portable and independent orphan-file recovery disagree")
+            record["orphan_file"] = core_file
+            record["orphan_file_transfers"] = int(transfers[1])
         for entry in case["orphans"]:
             for candidate in (image, oracle):
                 text = run([tools["debugfs"], "-R", f"testi <{entry['inode']}>", candidate])
@@ -125,7 +177,11 @@ def main():
         files = [("payload.bin", bytes((index * 17 + 23) & 255 for index in range(payload_size))),
                  ("hello.txt", b"Machlin" if linked else b"Machlin ext4\n")]
         if not linked:
-            files.append(("empty", bytes(case["block_size"] * 4 + 7) + b"T" + bytes(case["block_size"] * 5 + 5)))
+            # Linux's orphan probe leaves this existing file alone. Different
+            # independently checked input profiles may already have grown it.
+            original_empty = output / f"{image.stem}.baseline.empty"
+            run([tools["debugfs"], "-R", f"dump /empty {original_empty}", baseline])
+            files.append(("empty", original_empty.read_bytes()))
         for name, expected_data in files:
             for label, candidate in (("core", image), ("oracle", oracle)):
                 contents = output / f"{image.stem}.{label}.{name}"

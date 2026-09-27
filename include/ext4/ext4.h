@@ -86,6 +86,7 @@ struct ext4_recovery_report {
 	uint32_t revoked_blocks;
 	uint32_t cleaned_orphans;
 	uint32_t orphan_transactions;
+	uint32_t orphan_file_transfers;
 	bool accounting_updated;
 	bool discarded_tail;
 };

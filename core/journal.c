@@ -536,6 +536,7 @@ ext4_journal_set_recovery(struct ext4_journal *journal, bool recovery)
 	struct ext4_fs *fs = journal->fs;
 	struct ext4_super_disk *super;
 	uint32_t flags;
+	uint32_t ro_flags;
 	uint32_t checksum;
 	enum ext4_result error;
 
@@ -555,20 +556,28 @@ ext4_journal_set_recovery(struct ext4_journal *journal, bool recovery)
 	}
 	if (!recovery &&
 	    (!(ext4_le16(&super->state) & EXT4_VALID_FS) ||
-		(ext4_le16(&super->state) & EXT4_ERROR_FS) ||
-		ext4_le32(&super->last_orphan) != 0)) {
+		(ext4_le16(&super->state) & EXT4_ERROR_FS) || ext4_le32(&super->last_orphan) != 0 ||
+		(fs->orphan_file_inode != 0 &&
+		    (fs->orphan_file == NULL || fs->orphan_file->pending != 0)))) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
 	flags = ext4_le32(&super->feature_incompat);
+	ro_flags = ext4_le32(&super->feature_ro_compat);
 	if (recovery) {
 		flags |= EXT4_FEATURE_INCOMPAT_RECOVER;
+		if (fs->orphan_file_inode != 0) {
+			ro_flags |= EXT4_FEATURE_RO_ORPHAN_PRESENT;
+		}
 	} else {
 		flags &= ~EXT4_FEATURE_INCOMPAT_RECOVER;
+		ro_flags &= ~EXT4_FEATURE_RO_ORPHAN_PRESENT;
 	}
-	if (flags == ext4_le32(&super->feature_incompat)) {
+	if (flags == ext4_le32(&super->feature_incompat) &&
+	    ro_flags == ext4_le32(&super->feature_ro_compat)) {
 		return EXT4_OK;
 	}
 	ext4_encode32(&super->feature_incompat, flags);
+	ext4_encode32(&super->feature_ro_compat, ro_flags);
 	if (fs->metadata_checksum) {
 		checksum =
 		    ext4_crc32c(UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum));
@@ -580,6 +589,7 @@ ext4_journal_set_recovery(struct ext4_journal *journal, bool recovery)
 	}
 	if (error == EXT4_OK) {
 		fs->info.feature_incompat = flags;
+		fs->info.feature_ro_compat = ro_flags;
 	}
 	return error;
 }
@@ -761,6 +771,10 @@ ext4_transaction_prepare_super(struct ext4_transaction *transaction)
 		    EXT4_SUPER_OFFSET % fs->info.block_size);
 		ext4_encode32(&super->feature_incompat,
 		    ext4_le32(&super->feature_incompat) | EXT4_FEATURE_INCOMPAT_RECOVER);
+		if (fs->orphan_file_inode != 0) {
+			ext4_encode32(&super->feature_ro_compat,
+			    ext4_le32(&super->feature_ro_compat) | EXT4_FEATURE_RO_ORPHAN_PRESENT);
+		}
 		if (fs->metadata_checksum) {
 			ext4_encode32(&super->checksum,
 			    ext4_crc32c(

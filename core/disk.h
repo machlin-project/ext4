@@ -27,14 +27,17 @@
 #define EXT4_INDIRECT_LEVELS 3U
 #define EXT4_DIRECTORY_TAIL_TYPE 0xdeU
 #define EXT4_CRC32C_POLYNOMIAL 0x82f63b78U
+#define EXT4_ORPHAN_MAGIC 0x0b10ca04U
 
 #define EXT4_FEATURE_COMPAT_HAS_JOURNAL 0x0004U
 #define EXT4_FEATURE_COMPAT_EXT_ATTR 0x0008U
 #define EXT4_FEATURE_COMPAT_RESIZE_INODE 0x0010U
 #define EXT4_FEATURE_COMPAT_DIR_INDEX 0x0020U
+#define EXT4_FEATURE_COMPAT_ORPHAN_FILE 0x1000U
 #define EXT4_WRITABLE_COMPAT                                                                       \
 	(EXT4_FEATURE_COMPAT_HAS_JOURNAL | EXT4_FEATURE_COMPAT_EXT_ATTR |                          \
-	    EXT4_FEATURE_COMPAT_RESIZE_INODE | EXT4_FEATURE_COMPAT_DIR_INDEX)
+	    EXT4_FEATURE_COMPAT_RESIZE_INODE | EXT4_FEATURE_COMPAT_DIR_INDEX |                     \
+	    EXT4_FEATURE_COMPAT_ORPHAN_FILE)
 
 #define EXT4_FEATURE_INCOMPAT_FILETYPE 0x0002U
 #define EXT4_FEATURE_INCOMPAT_RECOVER 0x0004U
@@ -55,10 +58,11 @@
 #define EXT4_FEATURE_RO_GDT_CSUM 0x0010U
 #define EXT4_FEATURE_RO_BIGALLOC 0x0200U
 #define EXT4_FEATURE_RO_METADATA_CSUM 0x0400U
+#define EXT4_FEATURE_RO_ORPHAN_PRESENT 0x10000U
 #define EXT4_WRITABLE_RO_COMPAT                                                                    \
 	(EXT4_FEATURE_RO_SPARSE_SUPER | EXT4_FEATURE_RO_LARGE_FILE | EXT4_FEATURE_RO_HUGE_FILE |   \
 	    EXT4_FEATURE_RO_DIR_NLINK | EXT4_FEATURE_RO_EXTRA_ISIZE |                              \
-	    EXT4_FEATURE_RO_METADATA_CSUM)
+	    EXT4_FEATURE_RO_METADATA_CSUM | EXT4_FEATURE_RO_ORPHAN_PRESENT)
 #define EXT4_INODE_HUGE_FILE 0x00040000U
 #define EXT4_INODE_INDEX 0x00001000U
 #define EXT4_INODE_EXTENTS 0x00080000U
@@ -96,6 +100,16 @@ struct ext4_le16 {
 
 struct ext4_le32 {
 	uint8_t bytes[4];
+};
+
+struct ext4_orphan_tail_disk {
+	struct ext4_le32 magic;
+	struct ext4_le32 checksum;
+};
+
+struct ext4_block_number_disk {
+	struct ext4_le32 low;
+	struct ext4_le32 high;
 };
 
 /* Byte-array fields deliberately have alignment one. Field ordering follows the
@@ -337,5 +351,7 @@ _Static_assert(sizeof(struct ext4_group_disk) == EXT4_GROUP_64_SIZE, "group desc
 _Static_assert(sizeof(struct ext4_inode_disk) == EXT4_INODE_BASE_SIZE + 32, "inode wire prefix");
 _Static_assert(sizeof(struct ext4_extent_disk) == 12, "extent wire size");
 _Static_assert(sizeof(struct ext4_dir_tail_disk) == 12, "directory tail wire size");
+_Static_assert(sizeof(struct ext4_orphan_tail_disk) == 8, "orphan tail wire size");
+_Static_assert(sizeof(struct ext4_block_number_disk) == 8, "block number wire size");
 
 #endif

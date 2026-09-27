@@ -17,6 +17,19 @@ struct ext4_block_path {
 	uint16_t count;
 };
 
+#define EXT4_ORPHAN_FILE_MAX_BLOCKS 512U
+#define EXT4_ORPHAN_FILE_MAX_ENTRIES (1U << 20)
+
+struct ext4_orphan_file {
+	struct ext4_inode inode;
+	/* Data block addresses followed by unique mapping-node addresses. */
+	uint64_t *blocks;
+	size_t capacity;
+	uint32_t block_count;
+	uint32_t mapping_count;
+	uint32_t pending;
+};
+
 struct ext4_fs {
 	struct ext4_environment environment;
 	struct ext4_info info;
@@ -27,6 +40,7 @@ struct ext4_fs {
 	uint32_t first_inode;
 	uint32_t journal_inode;
 	uint32_t last_orphan;
+	uint32_t orphan_file_inode;
 	uint16_t reserved_gdt_blocks;
 	uint16_t inode_size;
 	uint16_t descriptor_size;
@@ -34,6 +48,7 @@ struct ext4_fs {
 	bool writer_attached;
 	bool aborted;
 	struct ext4_journal *journal;
+	struct ext4_orphan_file *orphan_file;
 	struct ext4_block_range *system_ranges;
 	size_t system_range_capacity;
 	size_t system_range_count;
@@ -73,6 +88,8 @@ enum ext4_result ext4_inode_apply(
     struct ext4_fs *fs, struct ext4_inode_disk *disk, const struct ext4_inode_update *update);
 enum ext4_result ext4_inode_allocated(struct ext4_fs *fs, uint32_t number);
 enum ext4_result ext4_orphan_cleanup(struct ext4_fs *fs, struct ext4_recovery_report *report);
+enum ext4_result ext4_orphan_file_prepare(struct ext4_fs *fs);
+void ext4_orphan_file_close(struct ext4_fs *fs);
 enum ext4_result ext4_data_block_valid(struct ext4_fs *fs, uint64_t block);
 
 enum ext4_result ext4_load(

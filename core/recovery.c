@@ -365,6 +365,10 @@ ext4_recovery_super(struct ext4_journal *journal)
 	/* Replaying a clean superblock must not hide an interrupted recovery. */
 	ext4_encode32(&super->feature_incompat,
 	    ext4_le32(&super->feature_incompat) | EXT4_FEATURE_INCOMPAT_RECOVER);
+	if (fs->orphan_file_inode != 0) {
+		ext4_encode32(&super->feature_ro_compat,
+		    ext4_le32(&super->feature_ro_compat) | EXT4_FEATURE_RO_ORPHAN_PRESENT);
+	}
 	if (fs->metadata_checksum) {
 		checksum =
 		    ext4_crc32c(UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum));
@@ -434,7 +438,8 @@ ext4_recovery_validate_home(struct ext4_journal *journal)
 	    fresh->info.block_size != fs->info.block_size ||
 	    fresh->info.inodes != fs->info.inodes || fresh->info.groups != fs->info.groups ||
 	    fresh->info.feature_compat != fs->info.feature_compat ||
-	    fresh->info.feature_ro_compat != fs->info.feature_ro_compat ||
+	    (fresh->info.feature_ro_compat | EXT4_FEATURE_RO_ORPHAN_PRESENT) !=
+		(fs->info.feature_ro_compat | EXT4_FEATURE_RO_ORPHAN_PRESENT) ||
 	    (fresh->info.feature_incompat | EXT4_FEATURE_INCOMPAT_RECOVER) !=
 		(fs->info.feature_incompat | EXT4_FEATURE_INCOMPAT_RECOVER) ||
 	    fresh->inode_size != fs->inode_size || fresh->descriptor_size != fs->descriptor_size ||
@@ -442,6 +447,7 @@ ext4_recovery_validate_home(struct ext4_journal *journal)
 	    fresh->inodes_per_group != fs->inodes_per_group ||
 	    fresh->checksum_seed != fs->checksum_seed || fresh->first_inode != fs->first_inode ||
 	    fresh->journal_inode != fs->journal_inode ||
+	    fresh->orphan_file_inode != fs->orphan_file_inode ||
 	    fresh->reserved_gdt_blocks != fs->reserved_gdt_blocks ||
 	    !ext4_equal(fresh->info.uuid, fs->info.uuid, EXT4_UUID_SIZE)) {
 		error = EXT4_UNSUPPORTED;
@@ -538,7 +544,9 @@ ext4_recover(const struct ext4_environment *environment,
 	if (error != EXT4_OK) {
 		return error;
 	}
-	if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER) && fs->last_orphan == 0) {
+	if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER) &&
+	    !(fs->info.feature_ro_compat & EXT4_FEATURE_RO_ORPHAN_PRESENT) &&
+	    fs->last_orphan == 0) {
 		ext4_unmount(fs);
 		error = ext4_mount(environment, &fs);
 		ext4_unmount(fs);
@@ -591,7 +599,7 @@ ext4_recover(const struct ext4_environment *environment,
 		error = ext4_recovery_account(fs, &completed);
 	}
 	if (error == EXT4_OK) {
-		if (fs->last_orphan != 0) {
+		if (fs->last_orphan != 0 || fs->orphan_file_inode != 0) {
 			error = ext4_system_ranges_build(fs);
 			if (error == EXT4_OK) {
 				error = ext4_orphan_cleanup(fs, &completed);

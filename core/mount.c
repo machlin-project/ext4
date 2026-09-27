@@ -33,7 +33,13 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 			return EXT4_CORRUPT;
 		}
 	}
-	if (!recovery && (incompat & EXT4_FEATURE_INCOMPAT_RECOVER)) {
+	if ((fs->info.feature_ro_compat & EXT4_FEATURE_RO_ORPHAN_PRESENT) &&
+	    !(fs->info.feature_compat & EXT4_FEATURE_COMPAT_ORPHAN_FILE)) {
+		return EXT4_CORRUPT;
+	}
+	if (!recovery &&
+	    ((incompat & EXT4_FEATURE_INCOMPAT_RECOVER) ||
+		(fs->info.feature_ro_compat & EXT4_FEATURE_RO_ORPHAN_PRESENT))) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
 	if (incompat & ~(EXT4_SUPPORTED_INCOMPAT | EXT4_FEATURE_INCOMPAT_RECOVER)) {
@@ -70,6 +76,15 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	    revision == 0 ? EXT4_FIRST_NON_RESERVED_INODE : ext4_le32(&super->first_inode);
 	fs->journal_inode = ext4_le32(&super->journal_inode);
 	fs->last_orphan = ext4_le32(&super->last_orphan);
+	fs->orphan_file_inode = (fs->info.feature_compat & EXT4_FEATURE_COMPAT_ORPHAN_FILE)
+	    ? ext4_le32(&super->orphan_file_inode)
+	    : 0;
+	if ((fs->info.feature_compat & EXT4_FEATURE_COMPAT_ORPHAN_FILE) &&
+	    (fs->orphan_file_inode == 0 || fs->orphan_file_inode < fs->first_inode ||
+		fs->orphan_file_inode > fs->info.inodes ||
+		fs->orphan_file_inode == fs->journal_inode)) {
+		return EXT4_CORRUPT;
+	}
 	fs->reserved_gdt_blocks = ext4_le16(&super->reserved_gdt_blocks);
 	fs->inode_size = revision == 0 ? EXT4_INODE_BASE_SIZE : ext4_le16(&super->inode_size);
 	fs->descriptor_size = (incompat & EXT4_FEATURE_INCOMPAT_64BIT)
@@ -168,6 +183,7 @@ ext4_unmount(struct ext4_fs *fs)
 	}
 	environment = fs->environment;
 	ext4_journal_close(fs->journal);
+	ext4_orphan_file_close(fs);
 	if (fs->system_ranges != NULL) {
 		environment.release(environment.context, fs->system_ranges,
 		    fs->system_range_capacity * sizeof(*fs->system_ranges));

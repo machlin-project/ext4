@@ -101,7 +101,7 @@ ext4_edit_inode(struct ext4_fs *fs, struct ext4_transaction *transaction, uint32
 		return EXT4_INVALID_ARGUMENT;
 	}
 	if ((number < fs->first_inode && number != EXT4_ROOT_INODE) ||
-	    number == fs->journal_inode) {
+	    number == fs->journal_inode || number == fs->orphan_file_inode) {
 		return EXT4_UNSUPPORTED;
 	}
 	error = ext4_inode_allocated(fs, number);

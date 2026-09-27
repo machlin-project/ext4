@@ -12,6 +12,7 @@ option(EXT4_BUILD_FUZZER "Build the bounded metadata mutation fuzzer with Clang"
 option(EXT4_EXTENDED_TESTS "Require the extended generated image profile" OFF)
 option(EXT4_INODE128_TEST "Require the generated 128-byte-inode write fixture" OFF)
 option(EXT4_UNWRITTEN_TESTS "Require independent unwritten-allocation fixtures" OFF)
+option(EXT4_ORPHAN_FILE_TESTS "Require independently allocated orphan-file fixtures" OFF)
 
 set(EXT4_CORE_SOURCES
     core/support.c core/mount.c core/inode.c core/read.c core/directory.c
@@ -109,6 +110,29 @@ add_test(NAME orphan-truncate-recovery COMMAND ext4-orphan-test ${EXT4_WRITE_IMA
 set_tests_properties(orphan-truncate-recovery PROPERTIES TIMEOUT 600)
 add_test(NAME live-truncate COMMAND ext4-orphan-test --live ${EXT4_WRITE_IMAGES})
 set_tests_properties(live-truncate PROPERTIES TIMEOUT 900)
+set(EXT4_ORPHAN_FILE_FIXTURES "${CMAKE_SOURCE_DIR}/artifacts/orphan-file-fixtures" CACHE PATH
+    "Independent orphan-file images")
+if(EXT4_ORPHAN_FILE_TESTS)
+    set(EXT4_ORPHAN_FILE_IMAGES)
+    foreach(source IN LISTS EXT4_WRITE_IMAGES)
+        get_filename_component(name "${source}" NAME)
+        list(APPEND EXT4_ORPHAN_FILE_IMAGES "${EXT4_ORPHAN_FILE_FIXTURES}/orphan-file-${name}")
+    endforeach()
+    add_test(NAME orphan-file-recovery COMMAND ext4-orphan-test --orphan-file ${EXT4_ORPHAN_FILE_IMAGES})
+    add_test(NAME orphan-file-mixed-recovery COMMAND ext4-orphan-test --mixed
+        "${EXT4_ORPHAN_FILE_FIXTURES}/orphan-file-ext4-1k.img"
+        "${EXT4_ORPHAN_FILE_FIXTURES}/orphan-file-ext4-4k.img")
+    add_test(NAME orphan-file-live-truncate COMMAND ext4-orphan-test --live ${EXT4_ORPHAN_FILE_IMAGES})
+    set_tests_properties(orphan-file-recovery orphan-file-mixed-recovery orphan-file-live-truncate
+        PROPERTIES TIMEOUT 900)
+    if(EXT4_EXTENDED_TESTS)
+        add_test(NAME orphan-file-indirect-recovery COMMAND ext4-orphan-test --orphan-file
+            "${EXT4_ORPHAN_FILE_FIXTURES}/mapped/orphan-file-ext4-indirect-1k.img")
+        add_test(NAME orphan-file-size-bound COMMAND ext4-orphan-test --orphan-file --smoke
+            "${EXT4_ORPHAN_FILE_FIXTURES}/maximum/orphan-file-ext4-indirect-1k.img")
+        set_tests_properties(orphan-file-indirect-recovery orphan-file-size-bound PROPERTIES TIMEOUT 900)
+    endif()
+endif()
 if(EXT4_EXTENDED_TESTS)
     add_test(NAME live-truncate-large COMMAND ext4-orphan-test --live --large
         "${EXT4_FIXTURES}/ext4-indirect-1k.img")

@@ -12,7 +12,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, sparse growth, unwritten conversion and truncate/freeing pass independent and Linux checks; live shrink spans transactions; directory mutation and platform writes pending |
-| Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine and legacy orphan cleanup pass portable faults and independent recovery; advanced journal/orphan-file formats and platform write integration remain pending |
+| Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine, legacy lists and modern orphan files pass portable faults, independent recovery and Linux reuse; advanced journal formats and platform write integration remain pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; ACLs/xattrs and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
@@ -210,7 +210,7 @@ kext architectures and universal FSKit build successfully; these new binaries
 have compilation evidence only and still expose read-only operations.
 
 Writes remain bounded atomic operations. Large requests, concurrent mapping
-ownership, inode/directory allocation, modern orphan files, policy
+ownership, inode/directory allocation, online orphan lifetime, policy
 for reserved space, platform durability and writable cache integration remain
 required work. The allocation tests do not complete the filesystem acceptance matrix.
 
@@ -253,7 +253,7 @@ The shared core also compiles in both unsigned kext architectures and universal 
 Those new adapter binaries remain read-only and have compilation evidence only.
 These tests exercise `ext4_truncate_atomic`, where changed mapping nodes and other
 metadata must fit one transaction. The separate live shrink contract is described
-below. Modern orphan files, open-unlinked lifetime and native UBC/FSKit resize
+below. Open-unlinked lifetime and native UBC/FSKit resize
 concurrency remain unaccepted.
 
 ## Legacy orphan recovery evidence
@@ -307,10 +307,10 @@ with the shared core; these binaries have compilation evidence only. Complete
 logs and the JUnit report are under `artifacts/checks/orphan-final-*` and
 `artifacts/orphan-tests.xml`.
 
-This accepts offline legacy-list cleanup for the tested inode profiles. It does
-not establish modern orphan-file support, orphaned ACL/xattr inodes, online
+This accepts offline legacy-list cleanup for the tested inode profiles. Modern
+orphan-file evidence is recorded below; orphaned ACL/xattr inodes, online
 open-unlinked lifetime or writable
-platform cache/concurrency behavior. Both adapters continue to expose read-only
+platform cache/concurrency behavior remain unaccepted. Both adapters continue to expose read-only
 operations.
 
 ## Live truncate evidence
@@ -370,7 +370,80 @@ Live growth retains the atomic credit limit when many written allocations beyond
 the previous EOF need zeroing. Very small journals retain the atomic shrink limit
 rather than admitting an intent they cannot complete. Mapping validation and all
 other documented format/resource bounds still apply. Native cache ownership,
-open-unlinked lifetime, modern orphan files and platform writes remain unaccepted.
+open-unlinked lifetime and platform writes remain unaccepted.
+
+## Modern orphan-file evidence
+
+`generate_orphan_file_fixtures.py` uses independent `tune2fs` to add an orphan file
+to ten clean profiles: 1 through 32 KiB blocks, indirect mapping, absent metadata
+checksums, an explicit checksum seed and 128-byte inodes. Separate indirect images
+have 17 and 512 file blocks, exercising external mapping nodes and the supported
+size bound. The generator verifies every physical mapping, tail and empty slot,
+exact feature changes, nonrepairing e2fsck and unchanged source hashes.
+
+The five orphan-file CTest suites cover linked entries at opposite ends of the
+file, mixed legacy/file ownership, indirect file mapping, the size bound and live
+truncate on modern volumes. Malformed cases cover feature/flag inconsistencies,
+private-inode identity and allocation, size/link/type/flag constraints, holes,
+aliases and protected mappings, block accounting, tail magic, checksum binding to
+generation and physical address, invalid entries and duplicates within or between
+representations. Across eleven malformed profiles, 381 cases pass and four
+checksum-specific cases are explicitly skipped on the checksum-absent image.
+Private file data, mapping nodes and the inode reject ordinary writes and freeing.
+An empty file with ORPHAN_PRESENT alone still requires explicit recovery.
+
+Thirteen cleanup profiles inject 2,003 allocation and 1,338 read errors. Repeated
+journal-mapping allocations/reads are sampled as described in [TESTING.md](TESTING.md);
+the unsampled paths contain 33,008 allocations and 17,042 reads. Every write/flush
+cut is exercised: 8,895 of 9,042 recover to the complete resource outside the
+journal, and 147 torn checksummed primary-superblock cases fail closed. The ten
+modern live-truncate profiles additionally check 378 allocation and 357 read
+faults, with 3,710 successful recoveries and 64 fail-closed cases across 3,774 cuts.
+These are modeled persistence/error contracts, not physical-device power-loss tests.
+
+All fourteen pending/clean cleanup export pairs and ten live-truncate profiles
+pass independent `debugfs`, e2fsck and repeated-recovery checks. The checker compares
+private-file identity, mappings and full cleared bytes with a separate e2fsck
+oracle. Three large indirect cleanup exports also pass nonrepairing e2fsck.
+Evidence is under `artifacts/orphan-file*-independent/`, with matching export
+directories; fixture reports are in `artifacts/orphan-file-fixtures/`.
+
+The identified Linux reference kernel generated seven modern pending images with
+six open-unlinked objects each: regular/sparse files, a directory, short/long
+symlinks and a FIFO. Portable recovery transfers and releases all six entries,
+preserves unrelated live bytes and matches independent e2fsck accounting and
+private-file contents. The seven actual Linux images also pass 1,471 allocation
+and 2,120 read-error injections, with repeated journal mapping sampled. Across
+9,924 write/flush cuts, 9,798 recover and 126 torn-super cases fail closed. Linux
+then remounted each cleaned image and created/unlinked six new objects; all seven
+returned images passed portable recovery and independent checking again.
+This verifies Linux-created state and Linux reuse of cleaned state; it does not
+claim a Linux mount at every modeled interruption of the transfer transaction.
+
+Linux reports and console logs are in the lab under
+`artifacts/ext4-journal/linux-reference/orphan-file-linux-pending/`,
+`artifacts/ext4-journal/linux-reference/orphan-file-reuse/` and
+`logs/ext4-orphan-file-*.log`. Core/oracle reports are in
+`artifacts/orphan-file-linux-independent-baseline/` and
+`artifacts/orphan-file-reuse-independent/`. The reference kernel has 4 KiB pages;
+8/16/32 KiB block profiles have portable/e2fsprogs evidence only.
+
+All eighteen optimized ASan/UBSan CTest suites pass, including the freestanding
+2 KiB frame check. After the final zero-private-inode guard, the five affected
+orphan-file suites pass again. Logs and JUnit reports are under
+`artifacts/checks/orphan-file-final-*`, `artifacts/checks/orphan-file-guard-*`,
+`artifacts/orphan-file-final-tests.xml` and `artifacts/orphan-file-guard-tests.xml`.
+Both unsigned kext architectures and universal FSKit compile with the final core;
+style, Python and CI workflow syntax checks pass. These adapters remain read-only
+and have compilation evidence only for this change. Online orphan insertion,
+file growth, ACL/xattr cleanup, native object lifetime and writable cache/durability
+contracts remain required work.
+
+The preceding live-truncate CI run exhausted runner storage after its CTest suites
+and ten ordinary independent live profiles passed. The workflow now removes each
+stage's generated images/dumps only after successful independent validation,
+retaining JSON reports, logs, hashes and JUnit output. This corrects CI storage
+use; that failed run is not counted as completed CI acceptance.
 
 ## FSKit build evidence
 

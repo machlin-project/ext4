@@ -24,7 +24,9 @@ independent debugfs journals and roundtrips through a real Linux kernel. General
 writable operations remain incomplete: selective inode updates, bounded writes,
 block allocation, sparse growth, unwritten conversion and truncate/freeing pass
 portable faults, independent e2fsck and Linux roundtrips. Live shrink can span
-bounded journal transactions, with legacy orphan recovery completing interrupted operations.
+bounded journal transactions, with orphan recovery completing interrupted operations.
+Offline recovery handles legacy lists and bounded modern orphan files, including
+Linux-authored open-unlinked objects and mixed representations.
 Directory mutation, ACLs/xattrs
 and Linux capability policy remain unimplemented. Both platform adapters remain
 read-only; FSKit has not been mounted. Read

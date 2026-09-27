@@ -128,6 +128,28 @@ copies and retains every source image. `ext4-orphan-test --pending IMAGE...`
 also runs the modeled fault matrix against those untouched Linux images.
 Only one prepared Linux runner may be operated at a time.
 
+Modern orphan-file profiles additionally need tune2fs in the same e2fsprogs build
+or on PATH. Generate the ordinary and mapped fixtures, then enable their tests:
+
+```sh
+python3 tests/generate_orphan_file_fixtures.py --fixtures artifacts/fixtures \
+  --tools-root /path/to/e2fsprogs/build --output artifacts/orphan-file-fixtures
+python3 tests/generate_orphan_file_fixtures.py --fixtures artifacts/fixtures \
+  --tools-root /path/to/e2fsprogs/build --case ext4-indirect-1k.img --blocks 17 \
+  --output artifacts/orphan-file-fixtures/mapped
+python3 tests/generate_orphan_file_fixtures.py --fixtures artifacts/fixtures \
+  --tools-root /path/to/e2fsprogs/build --case ext4-indirect-1k.img --blocks 512 \
+  --output artifacts/orphan-file-fixtures/maximum
+cmake -S . -B .build -DEXT4_ORPHAN_FILE_TESTS=ON
+```
+
+`EXT4_ORPHAN_FILE_FIXTURES` selects another fixture directory. The generator's
+default ten profiles require the base fixture generator's `--extended --inode128`.
+Use `ext4-orphan-test --orphan-file` or `--mixed` on these images; `--pending`
+accepts Linux-authored modern or legacy recovery states. The same independent
+checker handles both formats and verifies the modern file is emptied without
+changing its fixed inode or map. Keep each export mode in its own new directory.
+
 `ext4-orphan-test --live IMAGE...` exercises live multi-transaction shrink and
 all operation faults; add `--large` for a sparse indirect tree exceeding atomic
 capacity. For independent evidence use `--smoke --export NEW_EMPTY_DIRECTORY`,

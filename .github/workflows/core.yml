@@ -36,10 +36,19 @@ jobs:
           python3 tests/generate_fixtures.py --extended --inode128 2>&1 | tee artifacts/checks/fixtures.log
           python3 tests/generate_allocation_fixtures.py --fixtures artifacts/fixtures \
             --output artifacts/allocation-fixtures 2>&1 | tee artifacts/checks/allocation-fixtures.log
+          python3 tests/generate_orphan_file_fixtures.py --fixtures artifacts/fixtures \
+            --output artifacts/orphan-file-fixtures 2>&1 | tee artifacts/checks/orphan-file-fixtures.log
+          python3 tests/generate_orphan_file_fixtures.py --fixtures artifacts/fixtures \
+            --case ext4-indirect-1k.img --blocks 17 --output artifacts/orphan-file-fixtures/mapped \
+            2>&1 | tee artifacts/checks/orphan-file-mapped-fixtures.log
+          python3 tests/generate_orphan_file_fixtures.py --fixtures artifacts/fixtures \
+            --case ext4-indirect-1k.img --blocks 512 --output artifacts/orphan-file-fixtures/maximum \
+            2>&1 | tee artifacts/checks/orphan-file-maximum-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           cmake -S . -B .build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DEXT4_EXTENDED_TESTS=ON -DEXT4_INODE128_TEST=ON -DEXT4_UNWRITTEN_TESTS=ON
+            -DEXT4_EXTENDED_TESTS=ON -DEXT4_INODE128_TEST=ON -DEXT4_UNWRITTEN_TESTS=ON \
+            -DEXT4_ORPHAN_FILE_TESTS=ON
           cmake --build .build --parallel 2 2>&1 | tee artifacts/checks/build.log
       - name: Run conformance and fault tests
         run: ctest --test-dir .build --parallel 2 --output-on-failure --output-junit "$PWD/artifacts/core-tests.xml"
@@ -134,6 +143,41 @@ jobs:
             --recover .build/ext4-recover --output artifacts/live-large-independent \
             2>&1 | tee artifacts/checks/live-large-independent.log
           find artifacts/live-exports artifacts/live-large-exports artifacts/live-independent artifacts/live-large-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          df -h .
+      - name: Independently verify orphan-file recovery
+        run: |
+          mkdir artifacts/orphan-file-exports artifacts/orphan-file-mixed-exports \
+            artifacts/orphan-file-mapped-exports artifacts/orphan-file-maximum-exports \
+            artifacts/orphan-file-live-exports
+          .build/ext4-orphan-test --orphan-file --smoke --export artifacts/orphan-file-exports \
+            artifacts/orphan-file-fixtures/*.img 2>&1 | tee artifacts/checks/orphan-file-exports.log
+          .build/ext4-orphan-test --mixed --smoke --export artifacts/orphan-file-mixed-exports \
+            artifacts/orphan-file-fixtures/orphan-file-ext4-1k.img \
+            artifacts/orphan-file-fixtures/orphan-file-ext4-4k.img \
+            2>&1 | tee artifacts/checks/orphan-file-mixed-exports.log
+          .build/ext4-orphan-test --orphan-file --smoke --export artifacts/orphan-file-mapped-exports \
+            artifacts/orphan-file-fixtures/mapped/*.img 2>&1 | tee artifacts/checks/orphan-file-mapped-exports.log
+          .build/ext4-orphan-test --orphan-file --smoke --export artifacts/orphan-file-maximum-exports \
+            artifacts/orphan-file-fixtures/maximum/*.img 2>&1 | tee artifacts/checks/orphan-file-maximum-exports.log
+          for profile in orphan-file orphan-file-mixed orphan-file-mapped orphan-file-maximum; do
+            python3 tests/check_orphans.py --linked-exports "artifacts/$profile-exports" \
+              --recover .build/ext4-recover --output "artifacts/$profile-independent" \
+              2>&1 | tee "artifacts/checks/$profile-independent.log"
+          done
+          for image in artifacts/orphan-file*-exports/large-clean-*.img; do
+            e2fsck -fn "$image"
+          done
+          for profile in orphan-file orphan-file-mixed orphan-file-mapped orphan-file-maximum; do
+            find "artifacts/$profile-exports" "artifacts/$profile-independent" -type f \
+              ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          done
+          .build/ext4-orphan-test --live --smoke --export artifacts/orphan-file-live-exports \
+            artifacts/orphan-file-fixtures/*.img 2>&1 | tee artifacts/checks/orphan-file-live-exports.log
+          python3 tests/check_resize.py --exports artifacts/orphan-file-live-exports \
+            --recover .build/ext4-recover --output artifacts/orphan-file-live-independent \
+            2>&1 | tee artifacts/checks/orphan-file-live-independent.log
+          find artifacts/orphan-file-live-exports artifacts/orphan-file-live-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
       - name: Preserve test evidence

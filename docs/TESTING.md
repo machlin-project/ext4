@@ -41,6 +41,9 @@ contract, not physical power-loss protection on a particular disk.
 | Orphan recovery | Linked partial truncates and hardlinks; Linux-authored open-unlinked ordinary/sparse files, directories, short/long symlinks and FIFO; inode/data/mapping reclamation, partial-tail zeroing, repeated recovery |
 | Orphan validation | Reserved/free/out-of-range inode numbers, self/pair/tail cycles, zero/unsupported types and flags, xattrs, inode checksum/block-count errors and protected data targets; no cleanup transaction on rejection |
 | Orphan failures and scale | Every replay/recount/cleanup allocation/read, every write/flush cut with three survival patterns and torn writes; a 257-leaf indirect map exceeds atomic journal capacity but completes in batches |
+| Orphan-file recovery | Independently allocated modern files across writable profiles; entries at the first and last slots, mixed legacy/file ownership, indirect file maps, empty marker-only recovery and live truncate on modern volumes |
+| Orphan-file validation | Missing/inconsistent feature markers, private inode bounds/type/size/links/flags, tail magic/CRC/address/generation binding, sparse/aliased/protected maps, duplicate slots within/across blocks and against the legacy chain; late invalid entries reject before cleanup |
+| Orphan-file ownership and faults | Private inode, data and mapping nodes reject ordinary mutation; hidden slots reject clean writable mount; each transfer and cleanup allocation/read/write/barrier is faulted, retaining one recoverable owner per inode |
 | Corruption | Corrupt committed payload/descriptor rejects replay, invalid commit discards the incomplete tail; a torn checksummed control block fails closed |
 | Independent replay | debugfs-authored commits, unfinished tail, revokes and later reuse; exact recovered blocks, repeated recovery and e2fsck |
 | Linux roundtrip | Linux mounts/replays our pending log or checks a clean mutation export, commits metadata/growth/truncate, stops without unmount; our core replays the Linux-authored transaction, then contents, owners, mode and e2fsck are checked |
@@ -75,6 +78,23 @@ replayer, checks inode allocation and live contents, and requires a nonrepairing
 e2fsck pass on the core result before any oracle comparison. It measures unrelated
 directory indexing performed by e2fsck separately; unlinked cases must also return
 exactly to the pre-Linux baseline's free-block/inode totals.
+
+`generate_orphan_file_fixtures.py` uses tune2fs to add a fixed orphan file to
+copies of the checked clean fixtures. It verifies the exact feature change,
+private inode size, initialized mappings, empty tails, source hashes and e2fsck.
+The ordinary ten profiles have four file blocks; additional 17- and 512-block
+indirect fixtures exercise external mapping nodes and the supported size bound.
+`ext4-orphan-test --orphan-file` creates retained linked entries at opposite ends
+of that file; `--mixed` puts one inode in each representation. These run the same
+complete cleanup fault matrix as legacy lists. The size-bound case is a smoke
+test; the 17-block mapping case runs the full matrix.
+
+For modern Linux fixtures, the independent checker requires six reported slot
+transfers, six reclaimed inodes, restored baseline accounting and an empty orphan
+file identical to e2fsck's result. It verifies unchanged private-inode identity,
+size and physical mapping, and compares existing `/empty` contents to the actual
+hash-protected source baseline. Orphan generation must not assume that every
+accepted source profile began with the same size for that live file.
 
 `ext4-orphan-test --live` invokes the public live truncate API on ordinary and
 independently allocated unwritten fixtures. `--large` builds a sparse indirect
