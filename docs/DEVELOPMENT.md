@@ -369,6 +369,19 @@ extent/indirect mapping, full-disk and fault suites. Combine it with
 is `tests/check_allocation.py --exports DIRECTORY --tools-root E2FSPROGS_BUILD
 --output NEW_DIRECTORY`.
 
+`ext4-file-range-test IMAGE...` checks preallocation and hole punching, including
+partial progress, xattr transitions, extent splits and indirect path removal.
+`--faults` exercises resource failures and interrupted commits; `--export DIRECTORY`
+retains functional states plus committed/uncommitted journal images. Check them with
+`tests/check_file_ranges.py --fixtures FIXTURE_DIRECTORY --exports DIRECTORY
+--recover .build/ext4-recover --tools-root E2FSPROGS_BUILD --output NEW_DIRECTORY`.
+Its report feeds `tests/run_linux_journal.py --namespace`, with `--pending` for
+atomic records. Linux checks the retained file, creates its own preallocation and
+hole, then commits a journal for core/oracle replay. Run
+`ext4-file-range-test --linux-read RETURNED_CORE_IMAGE` to verify those Linux-authored
+bytes through the portable reader. Use the same isolated VM handoff as other
+Linux checks. The indirect profile supports punching and rejects reservation.
+
 Generate deliberately nonzero unwritten backing data with
 `tests/generate_allocation_fixtures.py --fixtures EXTENDED_FIXTURE_DIRECTORY
 --tools-root E2FSPROGS_BUILD --output NEW_DIRECTORY`. Enable its Meson suite with

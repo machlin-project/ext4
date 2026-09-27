@@ -162,6 +162,23 @@ after commit succeeds. The primary-superblock snapshot always retains RECOVER an
 a fresh checksum through checkpoint; only clean finish clears that marker.
 Large-volume performance and a concurrent allocator remain unaccepted.
 
+`ext4_fallocate` reserves holes as unwritten extents, with optional EOF growth or
+KEEP_SIZE. Reservation requires extent mapping; indirect files reject before any
+write. PUNCH_HOLE requires KEEP_SIZE and supports both maps: full blocks are freed,
+written partial edges are zeroed, and EOF remains unchanged. Removing a middle
+extent can split its leaf; empty extent or indirect paths are pruned, with small
+extent trees collapsed back into the inode. Hidden written data is cleared before
+publishing growth, using the same preparation as large writes and truncate.
+
+The complete ownership map and admitted attributes are validated before mutation.
+Bounded transactions report a durable byte prefix through `completed`, including
+runs already satisfying the request. Cancelled steps can reduce their work budget
+on allocation or credit exhaustion. Attributes accompany each checkpoint, while
+the xattr batch applies only to the first successful prefix. Uncertain commits
+poison the owner. The exclusive owner and orphan holds remain in force throughout.
+Unwritten conversion under allocator exhaustion remains part of capacity acceptance;
+the API does not yet establish the full future-write space guarantee of fallocate.
+
 `ext4_truncate_atomic` performs the size, tail-zeroing, data/mapping removal, bitmap,
 group/superblock accounting and admitted attribute transition in one journal
 transaction. It validates the entire inode map first: all physical ranges must

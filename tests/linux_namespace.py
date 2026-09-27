@@ -8,7 +8,7 @@ import shutil
 import stat
 import subprocess
 
-from check_namespace import inode_fields, symlink_bytes
+from check_namespace import inode_fields, symlink_bytes, INODE_EXTENTS
 from check_orphans import accounting, digest
 from check_rename import entries
 from check_index_write import entries as byte_entries
@@ -103,6 +103,9 @@ def prepare(case, tree, tools):
     elif renamed:
         paths = list(renamed)
         data_paths = [path for path, value in renamed.items() if value["inode"]["type"] == "regular"]
+    elif case.get("verified_range"):
+        paths += ["/empty"]
+        data_paths += ["/empty"]
     elif basic:
         paths += ["/created", "/created-dir", "/created-dir/child", "/created-dir/alias",
                   "/hello-link", "/symlink-alias"]
@@ -119,8 +122,11 @@ def prepare(case, tree, tools):
             data_paths += ["/kept-name"]
     else:
         paths += ["/atomic-entry"]
+    ranges = 0
+    if case.get("verified_range"):
+        ranges = 2 if case["verified_range"]["inode"]["flags"] & INODE_EXTENTS else 1
     (tree / "namespace-options").write_text(
-        f"{int(exhaust)} {int(basic)} {int(indexed)} {int(full_blocks)} {int(special_case(case))}\n")
+        f"{int(exhaust)} {int(basic)} {int(indexed)} {int(full_blocks)} {int(special_case(case))} {ranges}\n")
     inode_lines = []
     directories = []
     kinds = {"regular": stat.S_IFREG, "directory": stat.S_IFDIR, "symlink": stat.S_IFLNK,
@@ -238,6 +244,9 @@ def verify(case, image, output, tools, recover, run):
         if special_case(case):
             created_names += ["linux-device", "linux-device-renamed", "linux-fifo", "linux-socket"]
             created_paths += ["/" + name for name in created_names[3:]]
+        if case.get("verified_range"):
+            created_names += ["linux-range"]
+            created_paths += ["/linux-range"]
         for path in created_paths:
             inodes[path] = inode_fields(run([tools / "debugfs/debugfs", "-R", f"stat {path}", candidate]))
         retained_links = {}
@@ -268,6 +277,8 @@ def verify(case, image, output, tools, recover, run):
             expected_free -= 3
         if special_case(case):
             expected_free -= 4
+        if case.get("verified_range"):
+            expected_free -= 1
         if counts["Free inodes"] != expected_free:
             raise RuntimeError("Linux inode reuse or primary free-inode reconstruction disagrees")
         names = {}
@@ -330,6 +341,39 @@ def verify(case, image, output, tools, recover, run):
                         inode["size"], inode["blocks"]) != (kind, mode, major, minor, 0, 0, 1, 0, 0):
                     raise RuntimeError("Core replay lost a Linux special inode or whiteout")
                 retained_special[path] = inode
+        retained_range = {}
+        if case.get("verified_range"):
+            original_inode = inode_fields(run([tools / "debugfs/debugfs", "-R", "stat /empty", original]))
+            retained_inode = inode_fields(run([tools / "debugfs/debugfs", "-R", "stat /empty", candidate]))
+            source_dump = output / f"{prefix}-{image.stem}.range-source"
+            run([tools / "debugfs/debugfs", "-R", f"dump /empty {source_dump}", candidate])
+            if (retained_inode != original_inode or hashlib.sha256(source_dump.read_bytes()).hexdigest() !=
+                    case["verified_range"]["data_sha256"]):
+                raise RuntimeError("Linux changed the core-created file range")
+            if case["verified_range"]["attributes"]:
+                attribute_dump = output / f"{prefix}-{image.stem}.range-attribute"
+                run([tools / "debugfs/debugfs", "-R", f"ea_get -r -f {attribute_dump} /empty user.range", candidate])
+                if attribute_dump.read_bytes().hex() != case["verified_range"]["value"]:
+                    raise RuntimeError("Linux changed the range's retained attribute")
+            range_data = bytearray((index * 19 + 23) & 255 for index in range(75 * block_size + 73))
+            range_data[block_size - 7:4 * block_size + 22] = bytes(3 * block_size + 29)
+            range_dump = output / f"{prefix}-{image.stem}.linux-range"
+            run([tools / "debugfs/debugfs", "-R", f"dump /linux-range {range_dump}", candidate])
+            inode = inodes["/linux-range"]
+            if range_dump.read_bytes() != range_data or inode is None or (
+                    inode["size"], inode["mode"], inode["uid"], inode["gid"], inode["links"]) != (
+                    len(range_data), 0o600, 0, 0, 1):
+                raise RuntimeError("Reverse replay lost Linux range bytes or metadata")
+            for logical in (1, 2, 3):
+                if run([tools / "debugfs/debugfs", "-R", f"bmap /linux-range {logical}", candidate]).strip() != "0":
+                    raise RuntimeError("Linux-punched block remains allocated")
+            if inode["flags"] & INODE_EXTENTS:
+                for logical in range(77, 83):
+                    mapping = run([tools / "debugfs/debugfs", "-R", f"bmap /linux-range {logical}", candidate]).strip()
+                    if not re.fullmatch(r"[1-9]\d* \(uninit\)", mapping):
+                        raise RuntimeError("Linux preallocation lost an unwritten block")
+            retained_range = {"source": retained_inode, "linux": inode,
+                              "data_sha256": hashlib.sha256(range_data).hexdigest()}
         if original.name.startswith(("removed-", "remove-atomic-")):
             expected_names = entries(run([tools / "debugfs/debugfs", "-R", "ls -p /", original]))
             if "victim" in expected_names:
@@ -356,7 +400,8 @@ def verify(case, image, output, tools, recover, run):
         return {"inodes": inodes, "directories": names, "accounting": counts,
                 "retained_symlinks": retained_links, "retained_alias": retained_alias,
                 "retained_rename": retained_rename, "retained_index": retained_index,
-                "retained_space": retained_space, "retained_special": retained_special}, lag
+                "retained_space": retained_space, "retained_special": retained_special,
+                "retained_range": retained_range}, lag
 
     observed, _ = snapshot(image, "core")
     independent, lag = snapshot(oracle, "oracle", allow_summary_lag=True)

@@ -66,7 +66,10 @@ their 313-test CI run found an independent checker's stale index-flag expectatio
 That checker now admits verified automatic index creation. Special-file creation,
 legacy/extended device identities and atomic rename whiteouts pass focused faults,
 independent image checks and nine Linux recovery roundtrips. The expanded 338-test
-CI regression remains pending.
+CI regression remains pending. Bounded preallocation and hole punching also pass
+focused tests, eighteen independent image checks and five Linux roundtrips.
+Preallocation requires extents; punching also supports indirect files. Persistent
+inode flags and the future-write space guarantee under exhaustion remain open.
 Generated disk images and reports are not source artifacts.
 
 ## Layout

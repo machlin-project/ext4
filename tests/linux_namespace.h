@@ -332,6 +332,44 @@ namespace_full_blocks(uint32_t block_size)
 }
 
 static void
+check_file_ranges(uint32_t block_size, bool extents)
+{
+	struct stat metadata;
+	size_t length = 75U * block_size + 73U;
+	uint8_t *bytes = malloc(length);
+	size_t index;
+	int fd;
+
+	require(bytes != NULL, "allocate Linux range data");
+	for (index = 0; index < length; index++) {
+		bytes[index] = (uint8_t)(index * 19U + 23U);
+	}
+	fd = open("/mnt/linux-range", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, TEST_MODE);
+	require(fd >= 0, "Linux create range file");
+	if (extents) {
+		require(
+		    fallocate(fd, 0, 0, (off_t)length) == 0, "Linux preallocate range with growth");
+	} else {
+		require(fallocate(fd, 0, 0, (off_t)length) == -1 && errno == EOPNOTSUPP,
+		    "Linux rejects preallocation on indirect maps");
+	}
+	require(pwrite(fd, bytes, length, 0) == (ssize_t)length, "Linux write reserved range");
+	if (extents) {
+		require(fallocate(fd, FALLOC_FL_KEEP_SIZE, (off_t)(length + 2U * block_size),
+			    5U * block_size + 17U) == 0,
+		    "Linux reserve unwritten blocks past EOF");
+	}
+	require(fallocate(fd, FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE, block_size - 7U,
+		    3U * block_size + 29U) == 0,
+	    "Linux punch full blocks and zero partial edges");
+	require(fstat(fd, &metadata) == 0 && metadata.st_size == (off_t)length,
+	    "Linux range operations preserve EOF");
+	require(fsync(fd) == 0 && close(fd) == 0, "Linux commit range data and mappings");
+	free(bytes);
+	puts("LINUX_EXT4_FILE_RANGES_PASS");
+}
+
+static void
 check_namespace(uint32_t block_size)
 {
 	struct stat released;
@@ -352,6 +390,7 @@ check_namespace(uint32_t block_size)
 	unsigned int indexed;
 	unsigned int full_blocks;
 	unsigned int special;
+	unsigned int ranges;
 	unsigned int index;
 	int fd;
 	int directory;
@@ -359,8 +398,8 @@ check_namespace(uint32_t block_size)
 
 	input = fopen("/namespace-options", "r");
 	require(input != NULL, "open namespace options");
-	require(fscanf(input, "%u %u %u %u %u", &exhaust, &basic, &indexed, &full_blocks,
-		    &special) == 5,
+	require(fscanf(input, "%u %u %u %u %u %u", &exhaust, &basic, &indexed, &full_blocks,
+		    &special, &ranges) == 6,
 	    "read namespace options");
 	require(fclose(input) == 0, "close namespace options");
 	require(!indexed || (!exhaust && !basic), "validate indexed namespace options");
@@ -437,6 +476,9 @@ check_namespace(uint32_t block_size)
 			    "/mnt/linux-device-renamed", RENAME_WHITEOUT) == 0,
 		    "Linux atomically rename device and create whiteout");
 		puts("LINUX_EXT4_SPECIAL_FILES_PASS");
+	}
+	if (ranges != 0) {
+		check_file_ranges(block_size, ranges == 2);
 	}
 	directory = open(directory_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	root = open(parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);

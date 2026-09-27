@@ -312,6 +312,25 @@ enum ext4_result ext4_truncate_atomic(struct ext4_fs *fs, uint32_t number, uint3
  * result changes only on complete success. */
 enum ext4_result ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint64_t size, const struct ext4_inode_update *update, struct ext4_inode *result);
+
+enum ext4_fallocate_flags { EXT4_FALLOC_KEEP_SIZE = 1U << 0, EXT4_FALLOC_PUNCH_HOLE = 1U << 1 };
+
+/* Reserve a nonempty byte range, preserving existing data and allocating holes.
+ * Reservation requires extent mapping and leaves new extents unwritten. Without KEEP_SIZE,
+ * each committed prefix can grow EOF. PUNCH_HOLE requires KEEP_SIZE: whole blocks
+ * are freed, partial written blocks are zeroed, and size remains unchanged.
+ * Punching supports extent and indirect mappings.
+ * Like write_partial, this uses bounded transactions under one exclusive owner.
+ * completed records the byte prefix in successful checkpoints, including holes
+ * already satisfying the operation; a failed private step contributes nothing.
+ * An uncertain commit poisons the instance and recovery can add one whole step.
+ * The admitted write attributes accompany each step; its xattr batch applies
+ * only with the first successful prefix. Whole-range validation precedes writes.
+ * Growth can first zero hidden written preallocation without changing EOF or
+ * attributes, as with truncate. Refresh policy before retrying a partial call. */
+enum ext4_result ext4_fallocate(struct ext4_fs *fs, uint32_t number, uint32_t generation,
+    uint64_t offset, uint64_t length, uint32_t flags, const struct ext4_inode_update *update,
+    uint64_t *completed);
 /* Namespace mutations share the writable instance's exclusive owner. The caller
  * authorizes against fresh objects and supplies admitted creation attributes and
  * one captured namespace time; this interface does not confer policy authority.

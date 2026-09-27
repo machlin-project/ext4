@@ -40,7 +40,7 @@ counted as portable-core implementation.
 
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
-| Ordinary filesystem operations | Preallocation and hole punching; admitted persistent inode flags | Open; special files, atomic whiteout, automatic index creation and DIR_NLINK pass focused, independent and Linux acceptance |
+| Ordinary filesystem operations | Admitted persistent inode flags; future writes into preallocation under allocator exhaustion | Open; bounded preallocation/hole punching, special files, atomic whiteout, automatic index creation and DIR_NLINK pass focused, independent and Linux acceptance |
 | Format compatibility | META_BG and SPARSE_SUPER2 geometry; EA_INODE and INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open |
 | Journal compatibility | Checksum v1, asynchronous commit, fast commit and external journals, including interrupted replay and cross-implementation recovery | Open |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
@@ -59,6 +59,40 @@ create/link/symlink/mkdir/mknod/unlink/rmdir/rename and atomic whiteout; raw xat
 internal-journal recovery and both orphan representations; HTree creation, lookup
 and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
 the remaining blocks have equal size or that the full core is accepted.
+
+## Preallocation and hole punching
+
+`ext4_fallocate` reserves holes as unwritten extents, optionally preserving EOF.
+Hole punching supports extent and indirect maps, frees complete blocks and zeroes
+partial written edges without changing size. Large ranges span bounded transactions
+and report a durable prefix on failure. Attributes accompany each checkpoint;
+xattr CREATE/REMOVE applies once. Extent splitting, path pruning/collapse and held
+unlinked cleanup use the existing allocation and orphan ownership rules.
+
+All twelve focused range tests pass across ten writable profiles, with five
+unchanged allocation/write/truncate controls also passing. The final fault matrix
+covers 124 allocation failures, 68 read failures and 426 write/flush cuts: 414
+recover a complete old/new state, while twelve torn primary superblocks reject
+explicitly. Sanitized and freestanding builds pass. Evidence is under
+`artifacts/checks/file-range-development-evidence/`.
+
+Independent inspection accepts eighteen records across extent, indirect and
+128-byte-inode profiles: exact bytes, maps, attributes, namespace and allocation
+accounting. All 56 nonrepairing e2fsck checks, ten journal-only oracle replays and
+twenty core recovery/idempotence calls return zero. The initial checker exposed a
+real admission bug: indirect reservation past EOF produced an invalid image.
+Reservation now rejects that format before any write; indirect punching remains
+supported. The failed image and report are retained separately. Accepted evidence
+is in `artifacts/checks/file-range-independent-retry1-summary.json`.
+
+Five actual Linux roundtrips pass, including three pending core journals. Linux
+preserves the core-created ranges and authors new preallocation and holes; core
+and independent replay agree. All ten nonrepairing checks and five journal-only
+replays return zero, and the portable reader verifies all five returned images.
+Reports are in `artifacts/checks/file-range-linux-summary.json` and the lab's
+`artifacts/ext4-journal/linux-reference/file-range-{pending,functional}-linux/`.
+The expanded full CI regression is pending. This accepts bounded range behavior;
+the future-write space guarantee under exhaustion remains open above.
 
 ## Legacy group checksum evidence
 

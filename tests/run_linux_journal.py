@@ -313,6 +313,8 @@ def main():
             print(f"PASS {source.name}: Linux attributes/ACLs, core/oracle replay, core mutation and Linux return", flush=True)
             continue
         if args.namespace:
+            if case.get("verified_range") and "LINUX_EXT4_FILE_RANGES_PASS" not in console:
+                raise RuntimeError("Missing Linux preallocation and hole-punch evidence")
             if linux_namespace.special_case(case) and "LINUX_EXT4_SPECIAL_FILES_PASS" not in console:
                 raise RuntimeError("Missing Linux special-file creation and atomic whiteout evidence")
             if Path(case["image"]).name.startswith("exhaust-") and "LINUX_EXT4_NAMESPACE_REUSE_PASS" not in console:

@@ -246,6 +246,21 @@ jobs:
           find artifacts/partial-write-exports artifacts/partial-write-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
+      - name: Independently verify preallocation and hole punching
+        if: matrix.suite == 'core'
+        run: |
+          mkdir artifacts/file-range-exports
+          .build/ext4-file-range-test --export artifacts/file-range-exports \
+            artifacts/fixtures/ext4-1k.img artifacts/fixtures/ext4-indirect-1k.img \
+            artifacts/fixtures/ext4-inode128.img \
+            2>&1 | tee artifacts/checks/file-range-exports.log
+          python3 tests/check_file_ranges.py --fixtures artifacts/fixtures \
+            --exports artifacts/file-range-exports --recover .build/ext4-recover \
+            --output artifacts/file-range-independent \
+            2>&1 | tee artifacts/checks/file-range-independent.log
+          find artifacts/file-range-exports artifacts/file-range-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          df -h .
       - name: Independently verify growth through written preallocation
         if: matrix.suite == 'core'
         run: |

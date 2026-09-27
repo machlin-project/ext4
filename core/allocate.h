@@ -65,6 +65,15 @@ enum ext4_result ext4_write_map_lookup(struct ext4_allocation *allocation,
 enum ext4_result ext4_write_map_allocate(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t logical,
     uint64_t *physical, bool *zero);
+/* Reserve an extent-mapped hole without changing existing data. New allocations
+ * remain unwritten; indirect records cannot encode this reservation. */
+enum ext4_result ext4_write_map_reserve(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t logical);
+/* Remove an allocated run within one extent or one indirect data block. The
+ * complete map must have passed ownership validation before the first removal. */
+enum ext4_result ext4_write_map_punch(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t logical,
+    uint32_t length);
 /* Validate the entire inode's allocated map before releasing any part of it.
  * Reject shared physical ranges, invalid bitmaps and inconsistent i_blocks.
  * Validation reads the transaction view without enrolling mapping snapshots. */

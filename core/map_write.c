@@ -502,17 +502,69 @@ ext4_extent_merge(struct ext4_extent_disk *entries, uint16_t count)
 }
 
 static enum ext4_result
+ext4_extent_update(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_extent_path *path, uint8_t *records, uint16_t used)
+{
+	struct ext4_extent_header_disk *header;
+	struct ext4_extent_index_disk *indices;
+	struct ext4_extent_index_disk left;
+	struct ext4_extent_index_disk right;
+	uint16_t level = path->levels - 1;
+	uint16_t count;
+	uint16_t position;
+	uint16_t next;
+	bool removed;
+	bool split;
+	enum ext4_result error;
+
+	for (;;) {
+		removed = used == 0;
+		split = false;
+		if (removed) {
+			if (level == 0) {
+				header = (struct ext4_extent_header_disk *)path->nodes[0];
+				ext4_encode16(&header->depth, 0);
+				ext4_extent_install(
+				    allocation, inode, path->nodes[0], false, records, 0);
+				return EXT4_OK;
+			}
+			error = ext4_free_blocks(allocation, path->blocks[level], 1);
+		} else {
+			error = ext4_extent_replace(
+			    allocation, inode, path, level, records, used, &left, &right, &split);
+		}
+		if (error != EXT4_OK || level == 0) {
+			return error;
+		}
+		level--;
+		header = (struct ext4_extent_header_disk *)path->nodes[level];
+		indices = (struct ext4_extent_index_disk *)(header + 1);
+		count = ext4_le16(&header->entries);
+		position = path->positions[level];
+		ext4_copy(records, indices, position * sizeof(*indices));
+		next = position;
+		if (!removed) {
+			ext4_copy(records + next++ * sizeof(*indices), &left, sizeof(left));
+			if (split) {
+				ext4_copy(
+				    records + next++ * sizeof(*indices), &right, sizeof(right));
+			}
+		}
+		ext4_copy(records + next * sizeof(*indices), &indices[position + 1],
+		    (count - position - 1U) * sizeof(*indices));
+		used = count + (split ? 1U : 0U) - (removed ? 1U : 0U);
+	}
+}
+
+static enum ext4_result
 ext4_extent_insert(struct ext4_allocation *allocation, const struct ext4_inode *inode,
-    struct ext4_inode_disk *disk, uint32_t logical, uint64_t physical)
+    struct ext4_inode_disk *disk, uint32_t logical, uint64_t physical, bool unwritten)
 {
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_extent_path path;
 	struct ext4_extent_header_disk *header;
 	struct ext4_extent_disk *entries;
 	struct ext4_extent_disk *output;
-	struct ext4_extent_index_disk *indices;
-	struct ext4_extent_index_disk left;
-	struct ext4_extent_index_disk right;
 	uint8_t *records;
 	size_t record_bytes = fs->info.block_size + 2 * sizeof(*entries);
 	uint64_t start;
@@ -520,10 +572,8 @@ ext4_extent_insert(struct ext4_allocation *allocation, const struct ext4_inode *
 	uint16_t count;
 	uint16_t used = 0;
 	uint16_t index;
-	uint16_t position;
 	uint16_t level;
 	bool inserted = false;
-	bool split;
 	enum ext4_result error;
 
 	error = ext4_extent_path_get(allocation, inode, disk, logical, &path);
@@ -548,11 +598,12 @@ ext4_extent_insert(struct ext4_allocation *allocation, const struct ext4_inode *
 		start = ext4_le32(&entries[index].logical);
 		end = start + ext4_extent_length(&entries[index]);
 		if (!inserted && logical < start) {
-			ext4_extent_make(&output[used++], logical, physical, 1, false);
+			ext4_extent_make(&output[used++], logical, physical, 1, unwritten);
 			inserted = true;
 		}
 		if (logical >= start && logical < end) {
-			if (ext4_le16(&entries[index].length) <= EXT4_EXTENT_UNWRITTEN_LIMIT ||
+			if (unwritten ||
+			    ext4_le16(&entries[index].length) <= EXT4_EXTENT_UNWRITTEN_LIMIT ||
 			    physical != ext4_extent_physical(&entries[index]) + logical - start) {
 				error = EXT4_CORRUPT;
 				goto out;
@@ -573,30 +624,10 @@ ext4_extent_insert(struct ext4_allocation *allocation, const struct ext4_inode *
 		}
 	}
 	if (!inserted) {
-		ext4_extent_make(&output[used++], logical, physical, 1, false);
+		ext4_extent_make(&output[used++], logical, physical, 1, unwritten);
 	}
 	used = ext4_extent_merge(output, used);
-	for (;;) {
-		error = ext4_extent_replace(
-		    allocation, inode, &path, level, records, used, &left, &right, &split);
-		if (error != EXT4_OK || level == 0) {
-			break;
-		}
-		level--;
-		header = (struct ext4_extent_header_disk *)path.nodes[level];
-		indices = (struct ext4_extent_index_disk *)(header + 1);
-		count = ext4_le16(&header->entries);
-		position = path.positions[level];
-		ext4_copy(records, indices, position * sizeof(*indices));
-		ext4_copy(records + position * sizeof(*indices), &left, sizeof(left));
-		used = position + 1;
-		if (split) {
-			ext4_copy(records + used++ * sizeof(*indices), &right, sizeof(right));
-		}
-		ext4_copy(records + used * sizeof(*indices), &indices[position + 1],
-		    (count - position - 1U) * sizeof(*indices));
-		used = count + (split ? 1U : 0U);
-	}
+	error = ext4_extent_update(allocation, inode, &path, records, used);
 out:
 	fs->environment.release(fs->environment.context, records, record_bytes);
 	return error;
@@ -696,7 +727,31 @@ ext4_write_map_allocate(struct ext4_allocation *allocation, const struct ext4_in
 			return error;
 		}
 	}
-	return ext4_extent_insert(allocation, inode, disk, logical, *physical);
+	return ext4_extent_insert(allocation, inode, disk, logical, *physical, false);
+}
+
+enum ext4_result
+ext4_write_map_reserve(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk, uint32_t logical)
+{
+	struct ext4_map_run run;
+	uint64_t physical;
+	enum ext4_result error;
+
+	if (!(inode->flags & EXT4_INODE_EXTENTS)) {
+		return EXT4_UNSUPPORTED;
+	}
+	error = ext4_write_map_lookup(allocation, inode, disk, logical, &run);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (run.physical != 0) {
+		return EXT4_OK;
+	}
+	error = ext4_allocate_block(allocation, &physical);
+	return error == EXT4_OK
+	    ? ext4_extent_insert(allocation, inode, disk, logical, physical, true)
+	    : error;
 }
 
 #define EXT4_INODE_MAX_RANGES (1U << 20)
@@ -981,6 +1036,44 @@ ext4_extent_shorten(struct ext4_allocation *allocation, const struct ext4_inode 
 }
 
 static enum ext4_result
+ext4_extent_collapse(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk)
+{
+	struct ext4_extent_header_disk *root = (struct ext4_extent_header_disk *)disk->block_data;
+	struct ext4_extent_header_disk *header;
+	struct ext4_extent_index_disk *indices;
+	void *buffer;
+	uint64_t child;
+	uint16_t count;
+	uint16_t root_max = (EXT4_INODE_BLOCK_BYTES - sizeof(*root)) / sizeof(*indices);
+	enum ext4_result error;
+
+	/* A sole small child fits back into the inode, including repeated collapse
+	 * through an internal level. No block allocation is needed to shrink. */
+	while (ext4_le16(&root->depth) != 0 && ext4_le16(&root->entries) == 1) {
+		indices = (struct ext4_extent_index_disk *)(root + 1);
+		child = ext4_extent_child(&indices[0]);
+		error = ext4_transaction_buffer(allocation->transaction, child, &buffer);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		header = buffer;
+		count = ext4_le16(&header->entries);
+		if (count > root_max) {
+			break;
+		}
+		ext4_encode16(&root->depth, ext4_le16(&header->depth));
+		ext4_encode16(&root->maximum, root_max);
+		ext4_extent_install(allocation, inode, disk->block_data, false, header + 1, count);
+		error = ext4_free_blocks(allocation, child, 1);
+		if (error != EXT4_OK) {
+			return error;
+		}
+	}
+	return EXT4_OK;
+}
+
+static enum ext4_result
 ext4_extent_truncate(struct ext4_allocation *allocation, const struct ext4_inode *inode,
     struct ext4_inode_disk *disk, uint32_t first, uint64_t limit, bool *done)
 {
@@ -989,15 +1082,11 @@ ext4_extent_truncate(struct ext4_allocation *allocation, const struct ext4_inode
 	struct ext4_extent_header_disk *root = (struct ext4_extent_header_disk *)disk->block_data;
 	struct ext4_extent_disk *entries;
 	struct ext4_extent_disk *entry;
-	struct ext4_extent_index_disk *indices;
-	void *buffer;
 	uint64_t start;
-	uint64_t child;
 	uint16_t count;
 	uint16_t length;
 	uint16_t keep;
 	uint16_t level;
-	uint16_t root_max = (EXT4_INODE_BLOCK_BYTES - sizeof(*root)) / sizeof(*entries);
 	bool finished = false;
 	bool stopped = false;
 	bool unwritten;
@@ -1062,30 +1151,154 @@ ext4_extent_truncate(struct ext4_allocation *allocation, const struct ext4_inode
 			count = ext4_le16(&header->entries) - 1;
 		}
 	}
-	/* A sole small child fits back into the inode, including repeated collapse
-	 * through an internal level. No block allocation is needed to shrink. */
-	while (ext4_le16(&root->depth) != 0 && ext4_le16(&root->entries) == 1) {
-		indices = (struct ext4_extent_index_disk *)(root + 1);
-		child = ext4_extent_child(&indices[0]);
-		error = ext4_transaction_buffer(allocation->transaction, child, &buffer);
-		if (error != EXT4_OK) {
-			return error;
+	*done = finished;
+	return ext4_extent_collapse(allocation, inode, disk);
+}
+
+static enum ext4_result
+ext4_extent_punch(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk, uint32_t logical, uint32_t length)
+{
+	struct ext4_fs *fs = allocation->fs;
+	struct ext4_extent_path path;
+	struct ext4_extent_header_disk *header;
+	struct ext4_extent_disk *entries;
+	struct ext4_extent_disk *output;
+	uint8_t *records;
+	size_t record_bytes = fs->info.block_size + sizeof(*entries);
+	uint64_t start;
+	uint64_t end;
+	uint64_t removed_end = (uint64_t)logical + length;
+	uint64_t physical;
+	uint16_t count;
+	uint16_t used = 0;
+	uint16_t index;
+	bool removed = false;
+	bool unwritten;
+	enum ext4_result error;
+
+	error = ext4_extent_path_get(allocation, inode, disk, logical, &path);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	records = fs->environment.allocate(fs->environment.context, record_bytes);
+	if (records == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	header = (struct ext4_extent_header_disk *)path.nodes[path.levels - 1];
+	entries = (struct ext4_extent_disk *)(header + 1);
+	output = (struct ext4_extent_disk *)records;
+	count = ext4_le16(&header->entries);
+	for (index = 0; index < count; index++) {
+		start = ext4_le32(&entries[index].logical);
+		end = start + ext4_extent_length(&entries[index]);
+		if (logical < start || logical >= end) {
+			ext4_copy(&output[used++], &entries[index], sizeof(*entries));
+			continue;
 		}
-		header = buffer;
-		count = ext4_le16(&header->entries);
-		if (count > root_max) {
+		if (removed_end > end) {
+			error = EXT4_CORRUPT;
+			goto out;
+		}
+		physical = ext4_extent_physical(&entries[index]);
+		unwritten = ext4_le16(&entries[index].length) > EXT4_EXTENT_UNWRITTEN_LIMIT;
+		error = ext4_free_blocks(allocation, physical + logical - start, length);
+		if (error != EXT4_OK) {
+			goto out;
+		}
+		if (logical > start) {
+			ext4_extent_make(&output[used++], (uint32_t)start, physical,
+			    (uint16_t)(logical - start), unwritten);
+		}
+		if (removed_end < end) {
+			ext4_extent_make(&output[used++], (uint32_t)removed_end,
+			    physical + removed_end - start, (uint16_t)(end - removed_end),
+			    unwritten);
+		}
+		removed = true;
+	}
+	if (!removed) {
+		error = EXT4_CORRUPT;
+		goto out;
+	}
+	error = ext4_extent_update(allocation, inode, &path, records, used);
+	if (error == EXT4_OK) {
+		error = ext4_extent_collapse(allocation, inode, disk);
+	}
+out:
+	fs->environment.release(fs->environment.context, records, record_bytes);
+	return error;
+}
+
+static enum ext4_result
+ext4_indirect_punch(
+    struct ext4_allocation *allocation, struct ext4_inode_disk *disk, uint32_t logical)
+{
+	struct ext4_fs *fs = allocation->fs;
+	struct ext4_le32 *pointers = (struct ext4_le32 *)disk->block_data;
+	struct ext4_le32 *slots[EXT4_INDIRECT_LEVELS + 1];
+	struct ext4_le32 *nodes[EXT4_INDIRECT_LEVELS];
+	void *buffer;
+	uint64_t blocks[EXT4_INDIRECT_LEVELS + 1];
+	uint64_t remaining;
+	uint64_t span;
+	uint32_t per_block = fs->info.block_size / sizeof(*pointers);
+	uint32_t index;
+	uint16_t depth;
+	uint16_t level;
+	enum ext4_result error;
+
+	error = ext4_indirect_position(fs, logical, &depth, &remaining, &span);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	slots[0] = &pointers[depth == 0 ? logical : EXT4_DIRECT_BLOCKS + depth - 1];
+	for (level = 0; level <= depth; level++) {
+		blocks[level] = ext4_le32(slots[level]);
+		if (blocks[level] == 0) {
+			return EXT4_CORRUPT;
+		}
+		if (level == depth) {
 			break;
 		}
-		ext4_encode16(&root->depth, ext4_le16(&header->depth));
-		ext4_encode16(&root->maximum, root_max);
-		ext4_extent_install(allocation, inode, disk->block_data, false, header + 1, count);
-		error = ext4_free_blocks(allocation, child, 1);
+		error = ext4_transaction_buffer(allocation->transaction, blocks[level], &buffer);
 		if (error != EXT4_OK) {
 			return error;
 		}
+		nodes[level] = buffer;
+		span /= per_block;
+		slots[level + 1] = &nodes[level][remaining / span];
+		remaining %= span;
 	}
-	*done = finished;
-	return EXT4_OK;
+	for (;;) {
+		error = ext4_free_blocks(allocation, blocks[level], 1);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		ext4_encode32(slots[level], 0);
+		if (level == 0) {
+			return EXT4_OK;
+		}
+		level--;
+		for (index = 0; index < per_block; index++) {
+			if (ext4_le32(&nodes[level][index]) != 0) {
+				return EXT4_OK;
+			}
+		}
+	}
+}
+
+enum ext4_result
+ext4_write_map_punch(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk, uint32_t logical, uint32_t length)
+{
+	if (length == 0 || (uint64_t)logical + length > (uint64_t)UINT32_MAX + 1) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if (inode->flags & EXT4_INODE_EXTENTS) {
+		return ext4_extent_punch(allocation, inode, disk, logical, length);
+	}
+	return length == 1 ? ext4_indirect_punch(allocation, disk, logical) : EXT4_INVALID_ARGUMENT;
 }
 
 static enum ext4_result

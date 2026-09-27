@@ -484,35 +484,32 @@ ext4_growth_zero(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint6
 }
 
 static enum ext4_result
-ext4_growth_prepare(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t end,
-    const struct ext4_inode_update *update)
+ext4_growth_clear(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t end)
 {
-	struct ext4_inode inode;
 	struct ext4_write_target *targets;
 	uint32_t credits = ext4_journal_credits(fs->journal);
 	uint64_t position;
 	uint64_t next;
-	enum ext4_result error;
+	enum ext4_result error = EXT4_OK;
 
 	if (credits < 2) {
 		return EXT4_RANGE;
 	}
-	error = ext4_growth_check(fs, number, generation, end, update, &inode);
-	if (error != EXT4_OK || end <= inode.size) {
-		return error;
+	if (end <= inode->size) {
+		return EXT4_OK;
 	}
 	targets = fs->environment.allocate(
 	    fs->environment.context, (size_t)(credits - 1U) * sizeof(*targets));
 	if (targets == NULL) {
 		return EXT4_NO_MEMORY;
 	}
-	position = inode.size;
+	position = inode->size;
 	/* The exclusive owner retains a validated, unchanged mapping throughout.
 	 * Preparatory commits can survive an error without exposing new bytes or
 	 * applying the requested attributes. A later call can safely zero them again. */
 	while (position < end) {
-		error = ext4_growth_zero(
-		    fs, number, generation, inode.size, position, end, targets, credits, &next);
+		error = ext4_growth_zero(fs, inode->number, inode->generation, inode->size,
+		    position, end, targets, credits, &next);
 		if (error != EXT4_OK) {
 			break;
 		}
@@ -521,6 +518,17 @@ ext4_growth_prepare(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 	fs->environment.release(
 	    fs->environment.context, targets, (size_t)(credits - 1U) * sizeof(*targets));
 	return error;
+}
+
+static enum ext4_result
+ext4_growth_prepare(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t end,
+    const struct ext4_inode_update *update)
+{
+	struct ext4_inode inode;
+	enum ext4_result error;
+
+	error = ext4_growth_check(fs, number, generation, end, update, &inode);
+	return error == EXT4_OK ? ext4_growth_clear(fs, &inode, end) : error;
 }
 
 enum ext4_result
@@ -1105,5 +1113,198 @@ ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t
 		}
 	}
 	*result = inode;
+	return EXT4_OK;
+}
+
+static enum ext4_result
+ext4_file_range_step(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t offset,
+    uint64_t end, uint32_t flags, const struct ext4_inode_update *update, uint32_t budget,
+    uint64_t *next, bool *capacity_failed)
+{
+	struct ext4_transaction *transaction;
+	struct ext4_allocation allocation;
+	struct ext4_inode_disk *disk;
+	struct ext4_inode inode;
+	struct ext4_map_run run;
+	void *buffer;
+	uint64_t position = offset;
+	uint64_t run_end;
+	uint64_t amount;
+	uint64_t size;
+	uint64_t free_blocks;
+	uint32_t feature_compat;
+	uint32_t logical;
+	uint32_t within;
+	uint32_t blocks;
+	uint32_t work = 0;
+	bool allocation_ready = false;
+	bool punch = (flags & EXT4_FALLOC_PUNCH_HOLE) != 0;
+	enum ext4_result error;
+
+	*capacity_failed = false;
+	error =
+	    ext4_transaction_begin(fs->journal, ext4_journal_credits(fs->journal), &transaction);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	error = update->fields & EXT4_ATTR_XATTRS
+	    ? ext4_edit_inode_record(fs, transaction, number, generation, &disk, &inode)
+	    : ext4_edit_inode(fs, transaction, number, generation, &disk, &inode);
+	if (error == EXT4_OK) {
+		error = ext4_update_admitted(fs, disk, update);
+	}
+	if (error == EXT4_OK) {
+		error = ext4_inode_apply(fs, disk, update);
+	}
+	if (error == EXT4_OK) {
+		error = ext4_allocation_init(&allocation, fs, transaction, &inode);
+		allocation_ready = error == EXT4_OK;
+	}
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	/* The public operation validated the complete map before its first step.
+	 * Its exclusive owner prevents any other mutation between checkpoints. */
+	while (position < end && work < budget) {
+		logical = (uint32_t)(position / fs->info.block_size);
+		within = (uint32_t)(position % fs->info.block_size);
+		amount = fs->info.block_size - within;
+		if (amount > end - position) {
+			amount = end - position;
+		}
+		error = ext4_write_map_lookup(&allocation, &inode, disk, logical, &run);
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
+		if ((punch && run.physical == 0) || (!punch && run.physical != 0)) {
+			run_end = ((uint64_t)logical + run.length) * fs->info.block_size;
+			position = run_end < end ? run_end : end;
+			continue;
+		}
+		if (punch && within == 0 && amount == fs->info.block_size) {
+			amount = (end - position) / fs->info.block_size;
+			if (amount > run.length) {
+				amount = run.length;
+			}
+			if (amount > budget - work) {
+				amount = budget - work;
+			}
+			blocks = (uint32_t)amount;
+			error = ext4_write_map_punch(&allocation, &inode, disk, logical, blocks);
+			work += blocks;
+			amount *= fs->info.block_size;
+		} else if (punch) {
+			if (!run.unwritten) {
+				error = ext4_transaction_buffer(transaction, run.physical, &buffer);
+				if (error == EXT4_OK) {
+					ext4_zero((uint8_t *)buffer + within, (size_t)amount);
+				}
+				work++;
+			}
+		} else {
+			error = ext4_write_map_reserve(&allocation, &inode, disk, logical);
+			work++;
+		}
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
+		position += amount;
+	}
+	if (update->fields & EXT4_ATTR_XATTRS) {
+		error = ext4_xattr_apply(
+		    &allocation, &inode, disk, update->xattrs, update->xattr_count);
+	}
+	size = inode.size;
+	if (!(flags & EXT4_FALLOC_KEEP_SIZE) && position > size) {
+		size = position;
+	}
+	if (error == EXT4_OK) {
+		error = ext4_inode_account(&allocation, &inode, disk, size);
+	}
+	if (error == EXT4_OK && inode.links == 0) {
+		error = ext4_orphan_reserve(fs, &inode, disk);
+	}
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	ext4_inode_checksum_set(fs, number, disk);
+	free_blocks = allocation.free_blocks;
+	feature_compat = allocation.super == NULL ? fs->info.feature_compat
+						  : ext4_le32(&allocation.super->feature_compat);
+	ext4_allocation_destroy(&allocation);
+	error = ext4_edit_commit(fs, transaction);
+	if (error == EXT4_OK) {
+		fs->info.free_blocks = free_blocks;
+		fs->info.feature_compat = feature_compat;
+		*next = position;
+	}
+	return error;
+cancel:
+	*capacity_failed = ext4_transaction_capacity_failed(transaction);
+	if (allocation_ready) {
+		ext4_allocation_destroy(&allocation);
+	}
+	ext4_transaction_cancel(transaction);
+	return error;
+}
+
+enum ext4_result
+ext4_fallocate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t offset,
+    uint64_t length, uint32_t flags, const struct ext4_inode_update *update, uint64_t *completed)
+{
+	struct ext4_inode inode;
+	struct ext4_inode_update remaining;
+	uint64_t end;
+	uint64_t next;
+	uint32_t budget = EXT4_ORPHAN_BATCH_BLOCKS;
+	bool capacity_failed;
+	enum ext4_result error;
+
+	if (completed == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	*completed = 0;
+	if (length == 0 || (flags & ~(uint32_t)(EXT4_FALLOC_KEEP_SIZE | EXT4_FALLOC_PUNCH_HOLE)) ||
+	    ((flags & EXT4_FALLOC_PUNCH_HOLE) && !(flags & EXT4_FALLOC_KEEP_SIZE))) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	error = ext4_update_validate(fs, update);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if ((update->fields & ~(uint32_t)EXT4_ATTR_XATTRS) != EXT4_WRITE_FIELDS) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if (offset > UINT64_MAX - length) {
+		return EXT4_RANGE;
+	}
+	end = offset + length;
+	error = ext4_growth_check(fs, number, generation, end, update, &inode);
+	if (error == EXT4_OK && !(flags & EXT4_FALLOC_PUNCH_HOLE) &&
+	    !(inode.flags & EXT4_INODE_EXTENTS)) {
+		error = EXT4_UNSUPPORTED;
+	}
+	if (error == EXT4_OK && !(flags & EXT4_FALLOC_KEEP_SIZE)) {
+		error = ext4_growth_clear(fs, &inode, end);
+	}
+	if (error != EXT4_OK) {
+		return error;
+	}
+	remaining = *update;
+	while (*completed < length) {
+		error = ext4_file_range_step(fs, number, generation, offset + *completed, end,
+		    flags, &remaining, budget, &next, &capacity_failed);
+		if (error == EXT4_OK) {
+			*completed = next - offset;
+			remaining.xattrs = NULL;
+			remaining.xattr_count = 0;
+			continue;
+		}
+		if (fs->aborted || budget == 1 ||
+		    !((error == EXT4_RANGE && capacity_failed) || error == EXT4_NO_SPACE)) {
+			return error;
+		}
+		budget /= 2;
+	}
 	return EXT4_OK;
 }

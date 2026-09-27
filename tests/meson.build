@@ -231,6 +231,16 @@ foreach profile : ['4k', '1k']
 endforeach
 test('inode-and-file-write', programs['write'], args: write_images, timeout: 300, suite: 'core')
 test('file-write-partial', programs['write-partial'], args: write_images, timeout: 300, suite: 'core')
+foreach name : write_names
+  test('file-range-' + name, programs['file-range'], args: paths['fixtures'] / name,
+    timeout: 300, suite: 'core')
+endforeach
+foreach profile : ['ext4-1k.img', 'ext4-indirect-1k.img']
+  if profile in write_names
+    test('file-range-faults-' + profile, programs['file-range'],
+      args: ['--faults', paths['fixtures'] / profile], timeout: 600, suite: 'core')
+  endif
+endforeach
 test('file-growth-preallocation', programs['write-growth'], args: write_images,
   timeout: 300, suite: 'core')
 foreach profile : ['4k', '1k']

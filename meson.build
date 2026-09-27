@@ -53,6 +53,7 @@ foreach name, source : {
   'directory-index': 'directory_index', 'directory-lookup': 'directory_lookup', 'index-write': 'index_write',
   'reader': 'reader', 'read-ranges': 'read_ranges', 'corruption': 'corruption', 'journal': 'journal',
   'write': 'write', 'write-partial': 'write_partial', 'write-growth': 'write_growth',
+  'file-range': 'file_range',
   'namespace': 'namespace', 'removal': 'removal',
   'rename': 'rename', 'orphan': 'orphan',
 }
