@@ -1,5 +1,41 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "allocate.h"
+#include "xattr.h"
+
+#define EXT4_ORPHAN_MAPPED_CREDITS (3U * (2U * EXT4_EXTENT_MAX_DEPTH + 1U) + 6U)
+#define EXT4_ORPHAN_UNMAPPED_CREDITS 5U
+#define EXT4_ORPHAN_XATTR_CREDITS 3U
+
+enum ext4_result
+ext4_orphan_reserve(
+    struct ext4_fs *fs, const struct ext4_inode *inode, const struct ext4_inode_disk *disk)
+{
+	uint64_t units = ext4_le32(&disk->blocks_lo);
+	uint64_t attribute_units;
+	uint16_t type = inode->mode & EXT4_MODE_TYPE;
+	uint32_t credits;
+	bool external =
+	    ext4_le32(&disk->xattr_block_lo) != 0 || ext4_le16(&disk->xattr_block_hi) != 0;
+	bool mapped = type == EXT4_MODE_REGULAR || type == EXT4_MODE_DIRECTORY ||
+	    (type == EXT4_MODE_SYMLINK && !inode->fast_symlink);
+
+	if (fs->info.feature_ro_compat & EXT4_FEATURE_RO_HUGE_FILE) {
+		units |= (uint64_t)ext4_le16(&disk->blocks_hi) << 32;
+	}
+	attribute_units = !external ? 0
+	    : ext4_le32(&disk->flags) & EXT4_INODE_HUGE_FILE
+	    ? 1
+	    : fs->info.block_size / EXT4_SECTOR_SIZE;
+	if (units < attribute_units) {
+		return EXT4_CORRUPT;
+	}
+	credits = mapped && units > attribute_units ? EXT4_ORPHAN_MAPPED_CREDITS
+						    : EXT4_ORPHAN_UNMAPPED_CREDITS;
+	if (external) {
+		credits += EXT4_ORPHAN_XATTR_CREDITS;
+	}
+	return ext4_journal_credits(fs->journal) < credits ? EXT4_RANGE : EXT4_OK;
+}
 
 static uint32_t
 ext4_orphan_slots(const struct ext4_fs *fs)
@@ -122,7 +158,8 @@ ext4_orphan_file_prepare(struct ext4_fs *fs)
 		error = EXT4_NO_MEMORY;
 		goto out;
 	}
-	error = ext4_inode_writable(fs, disk, &file->inode);
+	error = ext4_inode_has_xattrs(fs, disk) ? EXT4_UNSUPPORTED
+						: ext4_inode_writable(fs, disk, &file->inode);
 	if (error == EXT4_OK) {
 		error = ext4_transaction_begin(fs->journal, 1, &transaction);
 	}
@@ -211,6 +248,7 @@ ext4_orphan_record(struct ext4_fs *fs, uint32_t number, struct ext4_inode_disk *
     struct ext4_inode *inode, bool *mapped)
 {
 	uint16_t type;
+	uint64_t attribute_sectors;
 	enum ext4_result error;
 
 	if (number < fs->first_inode || number > fs->info.inodes || number == fs->journal_inode ||
@@ -246,7 +284,12 @@ ext4_orphan_record(struct ext4_fs *fs, uint32_t number, struct ext4_inode_disk *
 	default:
 		return EXT4_CORRUPT;
 	}
-	if (!*mapped && (inode->blocks_512 != 0 || (inode->flags & EXT4_INODE_EXTENTS))) {
+	attribute_sectors =
+	    ext4_le32(&disk->xattr_block_lo) != 0 || ext4_le16(&disk->xattr_block_hi) != 0
+	    ? fs->info.block_size / EXT4_SECTOR_SIZE
+	    : 0;
+	if (!*mapped &&
+	    (inode->blocks_512 != attribute_sectors || (inode->flags & EXT4_INODE_EXTENTS))) {
 		return EXT4_CORRUPT;
 	}
 	return EXT4_OK;
@@ -744,7 +787,7 @@ ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool re
 	if (error == EXT4_OK && ext4_le32(&allocation.super->last_orphan) != fs->last_orphan) {
 		error = EXT4_CORRUPT;
 	}
-	if (error == EXT4_OK && validate && mapped) {
+	if (error == EXT4_OK && validate) {
 		error = ext4_write_map_validate(&allocation, &inode, disk);
 	}
 	first = inode.links == 0 && !retained
@@ -753,8 +796,12 @@ ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool re
 	if (error == EXT4_OK && mapped) {
 		error = ext4_write_map_trim(&allocation, &inode, disk, first, limit, &done);
 	}
-	if (error == EXT4_OK && done && (inode.links != 0 || retained)) {
+	if (error == EXT4_OK && done && mapped && (inode.links != 0 || retained)) {
 		error = ext4_orphan_tail(&allocation, &inode, disk);
+	}
+	if (error == EXT4_OK && done && !retained && inode.links == 0 &&
+	    ext4_inode_has_xattrs(fs, disk)) {
+		error = ext4_xattr_drop(&allocation, &inode, disk);
 	}
 	if (error == EXT4_OK) {
 		error = ext4_inode_account(&allocation, &inode, disk, inode.size);

@@ -50,6 +50,9 @@ compilation and 2 KiB frame budget. Evidence is in
 `artifacts/checks/meson-migration-acceptance.json` and
 `artifacts/checks/meson-toolchains-summary.txt`. This validates the build migration;
 it adds no filesystem-format or platform-runtime acceptance.
+Published Meson CI also passes all six jobs and 207 tests, with all 369 existing
+independent attribute mutation/packing/full-space states checked. The downloaded
+artifacts and run metadata are verified in `artifacts/checks/meson-ci-manifest.json`.
 
 ## Portable reader evidence
 
@@ -157,9 +160,9 @@ All 12,860 commands return zero and protected inputs remain unchanged. Evidence 
 in `artifacts/xattr-write-independent-tools/`; an earlier tool-path startup failure
 is retained separately and did not inspect or modify any image.
 
-This accepts the linked-inode raw attribute batch. Ordinary file writes, creation,
-namespace mutation and orphan cleanup still reject attribute-owning inodes. Their
-integration, ACL enforcement and Linux xattr roundtrips remain required. Full-space,
+This accepts the linked-inode raw attribute batch at that checkpoint. Attribute
+lifetime integration has separate evidence below; ACL enforcement and broader Linux
+xattr roundtrips remain required. Full-space,
 packing and additional ownership checks also pass: ten full-space profiles exercise
 in-place/unchanged writes, shared-block allocation rollback and reuse of a released
 block. Ten packing/ownership profiles cover maximum values, exact packing across
@@ -176,6 +179,55 @@ verification of all 369 writer, packing and full-space states. Complete logs ret
 the fault counts and explicit applicability skips. The downloaded evidence and
 reviewed hashes are in `artifacts/checks/xattr-write-ci-manifest.json`.
 Linux runtime roundtrips for these attribute mutations remain pending.
+
+## Attribute lifetime and first-attribute evidence
+
+The working core supports attributes through new files/directories and both symlink
+representations, ordinary writes/truncate, hard links, rename replacement, held
+unlinked mutation and final release. Ten profiles pass the targeted lifetime fault
+sweeps: 4,920 allocation failures, 4,107 read failures and 23,448 persistence cuts.
+The cuts recover 22,863 consistent states and reject 585 torn primary superblocks.
+Independent inspection records 760 clean states across these profiles; ten additional
+e2fsck replay outcomes fail and remain reported as failures, as described below.
+Evidence is in `artifacts/checks/xattr-lifetime-fault-remaining-summary.json` and
+`artifacts/checks/xattr-lifetime-independent-all-summary.json`.
+
+Final-release tests retain duplicate references and a second orphan ahead of the
+victim, covering shared/exclusive attributes, fast/mapped symlinks, directories and
+large files. The last reference must be consumed exactly once even on failure; the
+aborted instance must reject reads and recovery must complete the already committed
+deletions. Fifty sweeps inject 2,201 allocation failures, 1,930 read failures and
+7,236 persistence cuts, recovering 7,146 states
+and rejecting 90 torn superblocks. Independent core and e2fsck replay verifies all
+360 states. Evidence is in `artifacts/checks/xattr-release-summary.json` and
+`artifacts/checks/xattr-release-independent-summary.json`.
+
+Ten separate e2fsprogs-created images begin without EXT_ATTR and without attributes.
+First-attribute tests cover inode-body/external values, creation and compound
+data/size changes. They exposed and fixed recovery's rejection of a committed
+EXT_ATTR enablement. Repeated recovery must also reject clearing that feature or
+changing an unrelated compatibility bit without writing the image. Eighty sweeps
+inject 1,481 allocation failures, 1,097 read failures and 12,276 cuts: 11,916 recover
+and 360 reject torn superblocks. All 410 independent states pass e2fsck, exact values,
+accounting, feature flags and both recovery implementations. The original failure
+is retained separately from the corrected results in
+`artifacts/checks/xattr-enable-corrected-summary.json` and
+`artifacts/checks/xattr-enable-independent-summary.json`.
+
+The pinned e2fsck loses an external attribute when cleaning a linked truncate orphan,
+then reports stale inode block accounting. The same defect reproduces on an original
+e2fsprogs fixture with only debugfs setting its orphan head, without executing this
+core. That reproduction is in `artifacts/e2fsck-linked-xattr-reproducer/`.
+`check_xattr_lifetime.py --keep-going` retains failed replay images and returns nonzero;
+it does not reclassify them as successful recovery. Real Linux recovers and preserves
+the attributes on all eight profiles supported by its 4 KiB page size, followed by
+clean unmount, nonrepairing e2fsck and unchanged repeated core recovery. The 16/64 KiB
+profiles have portable/independent checks but no Linux runtime result. Linux evidence
+is in `artifacts/xattr-lifetime-linux-truncate-first/` and
+`artifacts/xattr-lifetime-linux-truncate-remaining/`.
+
+These targeted results do not replace the combined regression, broader bidirectional
+Linux xattr/ACL/security tests, performance acceptance or writable platform integration.
 
 ## Journal evidence
 

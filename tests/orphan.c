@@ -435,7 +435,6 @@ malformed_cases(struct device *device)
 			break;
 		case EXTERNAL_XATTR:
 			ext4_encode32(&disk->xattr_block_lo, fs->first_data_block + 1);
-			expected = EXT4_UNSUPPORTED;
 			break;
 		case WRONG_BLOCK_COUNT:
 			ext4_encode32(&disk->blocks_lo, ext4_le32(&disk->blocks_lo) + 1);

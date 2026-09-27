@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "directory_write.h"
+#include "xattr.h"
 
 #define EXT4_CREATE_FIELDS                                                                         \
 	(EXT4_ATTR_PERMISSIONS | EXT4_ATTR_UID | EXT4_ATTR_GID | EXT4_ATTR_ACCESS_TIME |           \
@@ -96,6 +97,7 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	struct ext4_directory_slot slot;
 	struct ext4_allocation allocation;
 	uint64_t free_blocks;
+	uint32_t feature_compat;
 	uint32_t flags;
 	size_t index;
 	bool ready = false;
@@ -108,7 +110,8 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	if (create_mode != 0 &&
 	    (attributes == NULL ||
 		(attributes->fields & EXT4_CREATE_FIELDS) != EXT4_CREATE_FIELDS ||
-		(attributes->fields & ~(uint32_t)(EXT4_CREATE_FIELDS | EXT4_ATTR_BIRTH_TIME)) ||
+		(attributes->fields &
+		    ~(uint32_t)(EXT4_CREATE_FIELDS | EXT4_ATTR_BIRTH_TIME | EXT4_ATTR_XATTRS)) ||
 		(attributes->permissions & ~EXT4_MODE_PERMISSIONS))) {
 		return EXT4_INVALID_ARGUMENT;
 	}
@@ -117,6 +120,13 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	}
 	if (fs->journal == NULL) {
 		return EXT4_READ_ONLY;
+	}
+	if (create_mode != 0 && (attributes->fields & EXT4_ATTR_XATTRS)) {
+		error =
+		    ext4_xattr_changes_validate(fs, attributes->xattrs, attributes->xattr_count);
+		if (error != EXT4_OK) {
+			return error;
+		}
 	}
 	if (create_mode == EXT4_MODE_SYMLINK) {
 		if (link_target == NULL || link_length == 0) {
@@ -151,6 +161,13 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	}
 	if (parent.links == 0) {
 		error = EXT4_NOT_FOUND;
+		goto cancel;
+	}
+	/* The owner supplies the admitted inheritance decision, including an
+	 * explicit empty batch when no parent ACL/security value should pass on. */
+	if (create_mode != 0 && ext4_inode_has_xattrs(fs, parent_disk) &&
+	    !(attributes->fields & EXT4_ATTR_XATTRS)) {
+		error = EXT4_INVALID_ARGUMENT;
 		goto cancel;
 	}
 	if (create_mode == EXT4_MODE_DIRECTORY &&
@@ -220,6 +237,10 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 			ext4_inode_checksum_set(fs, child.number, child_disk);
 			error = ext4_inode_decode(fs, child.number, child_disk, &child);
 		}
+		if (error == EXT4_OK && (attributes->fields & EXT4_ATTR_XATTRS)) {
+			error = ext4_xattr_apply(&allocation, &child, child_disk,
+			    attributes->xattrs, attributes->xattr_count);
+		}
 		if (error == EXT4_OK && create_mode == EXT4_MODE_DIRECTORY) {
 			error = ext4_directory_initialize(
 			    &allocation, &child, child_disk, parent.number);
@@ -227,6 +248,8 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		} else if (error == EXT4_OK && create_mode == EXT4_MODE_SYMLINK) {
 			error = ext4_symlink_initialize(
 			    &allocation, &child, child_disk, link_target, link_length);
+		} else if (error == EXT4_OK) {
+			error = ext4_inode_account(&allocation, &child, child_disk, 0);
 		}
 		if (error != EXT4_OK) {
 			goto cancel;
@@ -235,6 +258,7 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		 * free-space summary continues to include both allocations. */
 		allocation.allocated = 0;
 		allocation.freed = 0;
+		allocation.detached_shared_blocks = 0;
 	}
 	type = ext4_namespace_type(child.mode);
 	if (type == EXT4_FT_UNKNOWN) {
@@ -252,6 +276,8 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		goto cancel;
 	}
 	free_blocks = allocation.free_blocks;
+	feature_compat = allocation.super == NULL ? fs->info.feature_compat
+						  : ext4_le32(&allocation.super->feature_compat);
 	ext4_allocation_destroy(&allocation);
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
@@ -259,6 +285,7 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		return error;
 	}
 	fs->info.free_blocks = free_blocks;
+	fs->info.feature_compat = feature_compat;
 	if (create_mode != 0) {
 		fs->info.free_inodes--;
 	}
@@ -309,31 +336,19 @@ ext4_symlink(struct ext4_fs *fs, uint32_t directory, uint32_t generation, const 
 	    0, 0, attributes, target, target_length, directory_time, result);
 }
 
-/* Reserve both mapping paths, their allocation metadata, the inode and primary
- * superblock, the inode bitmap/group and an orphan predecessor. No committed
- * deletion may depend on cleanup that cannot fit the smallest bounded batch. */
-#define EXT4_REMOVE_RECOVERY_CREDITS (3U * (2U * EXT4_EXTENT_MAX_DEPTH + 1U) + 6U)
-#define EXT4_REMOVE_UNMAPPED_CREDITS 5U
-
 static enum ext4_result
 ext4_namespace_orphan_prepare(struct ext4_allocation *allocation, const struct ext4_inode *inode,
     struct ext4_inode_disk *disk, bool validated_directory)
 {
 	struct ext4_fs *fs = allocation->fs;
-	uint16_t type = inode->mode & EXT4_MODE_TYPE;
-	bool mapped = type == EXT4_MODE_REGULAR || type == EXT4_MODE_DIRECTORY ||
-	    (type == EXT4_MODE_SYMLINK && !inode->fast_symlink);
-	uint32_t required = mapped && inode->blocks_512 != 0 ? EXT4_REMOVE_RECOVERY_CREDITS
-							     : EXT4_REMOVE_UNMAPPED_CREDITS;
-	enum ext4_result error = EXT4_OK;
+	enum ext4_result error;
 
-	if (ext4_journal_credits(fs->journal) < required) {
-		return EXT4_RANGE;
+	error = ext4_orphan_reserve(fs, inode, disk);
+	if (error != EXT4_OK) {
+		return error;
 	}
-	if (mapped && !validated_directory) {
+	if (!validated_directory) {
 		error = ext4_write_map_validate(allocation, inode, disk);
-	} else if (!mapped && (inode->blocks_512 != 0 || (inode->flags & EXT4_INODE_EXTENTS))) {
-		error = EXT4_CORRUPT;
 	}
 	if (error == EXT4_OK) {
 		error = ext4_allocation_super(allocation);

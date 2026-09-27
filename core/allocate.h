@@ -6,6 +6,11 @@
 
 #define EXT4_ORPHAN_BATCH_BLOCKS 32U
 
+/* Live mutations must leave enough journal room for one bounded reclamation
+ * step, including an external attribute release and a nonhead predecessor. */
+enum ext4_result ext4_orphan_reserve(
+    struct ext4_fs *fs, const struct ext4_inode *inode, const struct ext4_inode_disk *disk);
+
 /* Private transaction state. Counters become visible in fs->info only after a
  * successful commit. The caller owns all snapshots through that commit. */
 struct ext4_allocation {

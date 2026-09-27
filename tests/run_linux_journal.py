@@ -39,6 +39,8 @@ def main():
                         help="verify completed or interrupted live truncates and Linux regrowth")
     parser.add_argument("--namespace", action="store_true",
                         help="verify independently checked namespace exports and Linux inode reuse")
+    parser.add_argument("--xattr-truncate", action="store_true",
+                        help="verify Linux preserves external attributes when recovering a linked truncate")
     parser.add_argument("--pending", action="store_true",
                         help="with --namespace, mount the exported pending journal instead of its clean result")
     parser.add_argument("--recover", type=Path,
@@ -47,14 +49,14 @@ def main():
                         help="select an exact exported image filename (repeatable)")
     args = parser.parse_args()
     if sum((args.file_writes, args.allocation, args.truncate, args.orphans,
-            args.live_truncate, args.namespace)) > 1:
+            args.live_truncate, args.namespace, args.xattr_truncate)) > 1:
         parser.error("select one mutation verification mode")
     if args.pending and not args.namespace:
         parser.error("--pending requires --namespace")
     if args.namespace and args.recover is None:
         parser.error("--namespace requires the exact prepared --recover executable")
     clean_exports = (args.file_writes or args.allocation or args.truncate or args.orphans or
-                     args.live_truncate or args.namespace)
+                     args.live_truncate or args.namespace or args.xattr_truncate)
     lab = args.lab.resolve()
     root = Path(__file__).resolve().parent.parent
     recover = args.recover.resolve() if args.recover else root / ".build/ext4-recover"
@@ -107,12 +109,17 @@ def main():
         command.insert(1, "-DEXT4_TEST_LIVE_TRUNCATE=1")
     if args.namespace:
         command.insert(1, "-DEXT4_TEST_NAMESPACE=1")
+    if args.xattr_truncate:
+        command.insert(1, "-DEXT4_TEST_XATTR_TRUNCATE=1")
     with (output / "build.log").open("wb") as log:
         subprocess.run([str(x) for x in command], stdout=log, stderr=subprocess.STDOUT, check=True)
     archives = {}
     if clean_exports:
         exports = json.loads(args.exports.resolve().read_text())
-        if not all(record.get("passed") for record in exports):
+        if args.xattr_truncate:
+            if not all(record.get("prepared_for_xattr_truncate") for record in exports):
+                raise RuntimeError("xattr truncate inputs must identify prepared pending images")
+        elif not all(record.get("passed") for record in exports):
             raise RuntimeError("file-write exports need successful independent checks")
     else:
         exports = [dict(json.loads(path.read_text()), image=str(path.with_suffix(".img")))
@@ -145,6 +152,8 @@ def main():
             if args.pending and (not case.get("pending") or case.get("recovered_outcome") != "new"):
                 raise RuntimeError("Pending namespace mode requires a checked committed namespace export")
         block_size = case["block_size"]
+        if args.xattr_truncate and block_size > 4096:
+            raise RuntimeError("Select xattr cases supported by the 4 KiB-page reference kernel")
         key = archive_key(case)
         if key in archives:
             continue
@@ -204,6 +213,23 @@ def main():
         console = run([runner, kernel, archives[key], "2", "512",
                        "console=hvc0 rdinit=/init panic=-1 loglevel=4", scratch])
         (output / f"{source.stem}.console.log").write_text(console)
+        if args.xattr_truncate:
+            for marker in ("LINUX_EXT4_XATTR_TRUNCATE_PASS", "LINUX_EXT4_PROBE_RESULT=PASS",
+                           f"Linux {module_report['kernel_release']} aarch64"):
+                if marker not in console:
+                    raise RuntimeError(f"missing attributed truncate evidence: {marker}")
+            run([tools / "e2fsck/e2fsck", "-fn", scratch])
+            clean_sha = digest(scratch)
+            if digest(recover) != recover_sha:
+                raise RuntimeError("Recovery executable changed during Linux verification")
+            run([recover, "--write", scratch])
+            if digest(scratch) != clean_sha or digest(source) != expected_sha:
+                raise RuntimeError("Clean recovery or Linux verification changed a protected image")
+            record.update(image=str(scratch), output_sha256=clean_sha,
+                          linux_linked_truncate_xattrs_preserved=True, passed=True)
+            (output / "report.json").write_text(json.dumps(results, indent=2) + "\n")
+            print(f"PASS {source.name}: Linux linked truncate, attributes, shared owner, clean unmount and e2fsck", flush=True)
+            continue
         if args.orphans:
             for marker in ("LINUX_EXT4_ORPHANS_PENDING", "LINUX_EXT4_COMMITTED_RECOVERY_PENDING",
                            "LINUX_EXT4_PROBE_RESULT=PASS", f"Linux {module_report['kernel_release']} aarch64"):

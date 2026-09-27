@@ -28,6 +28,16 @@ ACL_GROUP = 8
 ACL_MASK = 16
 ACL_OTHER = 32
 SECTOR_BYTES = 512
+XATTR_PROFILES = (
+    dict(name="xattr-1k"), dict(name="xattr-4k", block_size=4096),
+    dict(name="xattr-16k", block_size=16384), dict(name="xattr-64k", block_size=65536),
+    dict(name="xattr-indirect", exclude={"extent", "64bit", "flex_bg"}),
+    dict(name="xattr-no-checksum", exclude={"metadata_csum"}),
+    dict(name="xattr-checksum-seed", include={"metadata_csum_seed"}),
+    dict(name="xattr-inode128", inode_size=128, exclude={"extra_isize"}),
+    dict(name="xattr-inode512", inode_size=512),
+    dict(name="xattr-orphan-file", include={"orphan_file"}),
+)
 
 
 def payload(size):
@@ -53,14 +63,6 @@ def main():
     tools = resolve_tools(args.tools_root)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
-    profiles = [dict(name="xattr-1k"), dict(name="xattr-4k", block_size=4096),
-                dict(name="xattr-16k", block_size=16384), dict(name="xattr-64k", block_size=65536),
-                dict(name="xattr-indirect", exclude={"extent", "64bit", "flex_bg"}),
-                dict(name="xattr-no-checksum", exclude={"metadata_csum"}),
-                dict(name="xattr-checksum-seed", include={"metadata_csum_seed"}),
-                dict(name="xattr-inode128", inode_size=128, exclude={"extra_isize"}),
-                dict(name="xattr-inode512", inode_size=512),
-                dict(name="xattr-orphan-file", include={"orphan_file"})]
     values = {"tiny": b"abc", "binary": payload(600), "small": b"\0\x01\x80\xff/",
               "empty": b"", "high": payload(9), "marker": payload(19), "acl": acl()}
     for label, value in values.items():
@@ -70,7 +72,7 @@ def main():
     def save():
         (output / "report.json").write_text(json.dumps(records, indent=2) + "\n")
 
-    for profile in profiles:
+    for profile in XATTR_PROFILES:
         block_size = profile.get("block_size", 1024)
         inode_size = profile.get("inode_size", 256)
         features = (EXPECTED_FEATURES - {"resize_inode"} - profile.get("exclude", set()) |

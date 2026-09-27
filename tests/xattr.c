@@ -442,7 +442,8 @@ main(int argc, char **argv)
 	struct ext4_inode inode;
 	struct ext4_inode unchanged;
 	struct ext4_inode result;
-	struct ext4_inode_update update = { .fields = EXT4_ATTR_CHANGE_TIME,
+	struct ext4_inode_update update = { .fields = EXT4_ATTR_PERMISSIONS | EXT4_ATTR_CHANGE_TIME,
+		.permissions = 0600,
 		.change_time = { .seconds = 1700000070 } };
 	size_t count;
 	size_t index;
@@ -481,7 +482,7 @@ main(int argc, char **argv)
 	memset(&unchanged, 0xa5, sizeof(unchanged));
 	result = unchanged;
 	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &result),
-	    EXT4_UNSUPPORTED);
+	    EXT4_INVALID_ARGUMENT);
 	CHECK(memcmp(&result, &unchanged, sizeof(result)) == 0);
 	ext4_unmount(fs);
 	CHECK(device.live == 0 && device.writes == 0 && device.events == 0 &&

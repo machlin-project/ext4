@@ -406,12 +406,8 @@ ext4_xattr_apply(struct ext4_allocation *allocation, const struct ext4_inode *in
 
 	ext4_zero(&edit, sizeof(edit));
 	edit.changes_count = count;
-	error = ext4_xattr_open(fs, inode->number, inode->generation, &edit.snapshot);
+	error = ext4_xattr_open_inode(fs, inode, disk, &edit.snapshot);
 	if (error != EXT4_OK) {
-		goto out;
-	}
-	if (!ext4_equal(disk, edit.snapshot.inode, fs->inode_size)) {
-		error = EXT4_CORRUPT;
 		goto out;
 	}
 	if (count == 0) {
@@ -458,6 +454,22 @@ out:
 	if (edit.records != NULL) {
 		fs->environment.release(
 		    fs->environment.context, edit.records, edit.capacity * sizeof(*edit.records));
+	}
+	ext4_xattr_close(&edit.snapshot);
+	return error;
+}
+
+enum ext4_result
+ext4_xattr_drop(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk)
+{
+	struct ext4_xattr_edit edit;
+	enum ext4_result error;
+
+	ext4_zero(&edit, sizeof(edit));
+	error = ext4_xattr_open_inode(allocation->fs, inode, disk, &edit.snapshot);
+	if (error == EXT4_OK) {
+		error = ext4_xattr_external_edit(allocation, &edit, disk);
 	}
 	ext4_xattr_close(&edit.snapshot);
 	return error;

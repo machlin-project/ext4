@@ -195,7 +195,9 @@ enum ext4_xattr_policy { EXT4_XATTR_SET, EXT4_XATTR_CREATE, EXT4_XATTR_REPLACE, 
  * transaction with the other selected inode fields. CHANGE_TIME is required. CREATE/REPLACE
  * enforce existence against the original inode; REMOVE requires an existing key
  * and NULL/zero value. Caller-owned names and values remain valid through return.
- * ACL/security values are opaque; the owner supplies their admitted transition. */
+ * ACL/security values are opaque; the owner supplies their admitted transition.
+ * On an inode with attributes, permission/owner changes, writes and truncates
+ * require this selection. An empty batch explicitly admits preserving the keys. */
 struct ext4_xattr_change {
 	enum ext4_xattr_policy policy;
 	uint8_t name_index;
@@ -254,7 +256,8 @@ enum ext4_result ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32
  * Requests exceeding transaction capacity reject without writes. Ordinary
  * allocation preserves the filesystem's reserved-block pool. Data, allocation
  * metadata, size, permission bits, mtime and ctime share the transaction.
- * Those three attribute fields are required; no other fields may be selected.
+ * Those three attribute fields are required; XATTRS may also select an admitted
+ * batch in the same transaction and is required when the inode has attributes.
  * completed is length only on success, otherwise zero; an I/O error can have a
  * committed outcome that must be resolved by recovery. Zero length is a no-op. */
 enum ext4_result ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation,
@@ -283,7 +286,9 @@ enum ext4_result ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t gen
  * authorizes against fresh objects and supplies admitted creation attributes and
  * one captured namespace time; this interface does not confer policy authority.
  * Create/mkdir require permissions, UID/GID and atime/mtime/ctime; birth time is
- * optional and must be representable. They create an empty regular file or a
+ * optional and must be representable. XATTRS may provide admitted child attributes;
+ * it is required, even for an empty batch, when the parent has attributes. The
+ * owner decides ACL/security inheritance. They create an empty regular file or a
  * directory containing dot/dotdot. Parent ctime/mtime change to directory_time.
  * Existing names and dot/dotdot are rejected before writes. Linear and bounded
  * indexed directories use the same transaction and admitted attribute contract.

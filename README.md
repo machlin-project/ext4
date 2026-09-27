@@ -35,9 +35,11 @@ Indexed-directory mutation now passes portable functional/fault tests, independe
 e2fsprogs checks and Linux roundtrips, including collisions and bounded tree growth.
 The portable core reads, lists and transactionally changes inode-body and external
 xattrs, including copying shared blocks before modification. Attribute batches can
-commit together with inode permissions, ownership and times. Integration with ordinary
-file mutation and orphan cleanup, ACL enforcement and Linux capability policy remains
-pending. Work proceeds through portable-core acceptance, then FSKit integration
+commit together with inode permissions, ownership and times. Attribute lifetime now
+extends through creation, file writes, truncate, namespace changes and final orphan
+release. Targeted fault and independent checks pass; the combined regression and
+broader Linux metadata roundtrips remain separate acceptance work. ACL enforcement
+and Linux capability policy are not implemented. Work proceeds through portable-core acceptance, then FSKit integration
 on stock macOS, then LXNU policy.
 Both platform adapters remain
 read-only; FSKit has not been mounted. Read

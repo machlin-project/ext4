@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
+#include "xattr.h"
 
 static enum ext4_result
 ext4_decode_time(uint32_t seconds, uint32_t extra, struct ext4_timestamp *time)
@@ -175,30 +176,35 @@ ext4_inode_flags_writable(struct ext4_fs *fs, const struct ext4_inode *inode)
 	return EXT4_OK;
 }
 
+bool
+ext4_inode_has_xattrs(const struct ext4_fs *fs, const struct ext4_inode_disk *disk)
+{
+	size_t xattr_offset;
+	uint16_t extra_size;
+
+	if (ext4_le32(&disk->xattr_block_lo) != 0 || ext4_le16(&disk->xattr_block_hi) != 0) {
+		return true;
+	}
+	extra_size = fs->inode_size > EXT4_INODE_BASE_SIZE ? ext4_le16(&disk->extra_size) : 0;
+	xattr_offset = EXT4_INODE_BASE_SIZE + extra_size;
+	return extra_size != 0 && xattr_offset <= fs->inode_size - sizeof(struct ext4_le32) &&
+	    ext4_le32((const struct ext4_le32 *)((const uint8_t *)disk + xattr_offset)) ==
+	    EXT4_XATTR_MAGIC;
+}
+
 enum ext4_result
 ext4_inode_writable(
     struct ext4_fs *fs, const struct ext4_inode_disk *disk, const struct ext4_inode *inode)
 {
-	size_t xattr_offset;
-	uint16_t extra_size;
+	struct ext4_xattr_snapshot snapshot;
 	enum ext4_result error = ext4_inode_flags_writable(fs, inode);
 
-	if (error != EXT4_OK) {
+	if (error != EXT4_OK || !ext4_inode_has_xattrs(fs, disk)) {
 		return error;
 	}
-	/* Attribute ownership and ACL/security policy need their own transaction
-	 * contract, including releasing external attribute blocks on deletion. */
-	if (ext4_le32(&disk->xattr_block_lo) != 0 || ext4_le16(&disk->xattr_block_hi) != 0) {
-		return EXT4_UNSUPPORTED;
-	}
-	extra_size = fs->inode_size > EXT4_INODE_BASE_SIZE ? ext4_le16(&disk->extra_size) : 0;
-	xattr_offset = EXT4_INODE_BASE_SIZE + extra_size;
-	if (extra_size != 0 && xattr_offset <= fs->inode_size - sizeof(struct ext4_le32) &&
-	    ext4_le32((const struct ext4_le32 *)((const uint8_t *)disk + xattr_offset)) ==
-		EXT4_XATTR_MAGIC) {
-		return EXT4_UNSUPPORTED;
-	}
-	return EXT4_OK;
+	error = ext4_xattr_open_inode(fs, inode, disk, &snapshot);
+	ext4_xattr_close(&snapshot);
+	return error;
 }
 
 void

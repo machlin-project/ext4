@@ -246,10 +246,28 @@ Allocation and feature summaries become visible only after a successful commit.
 Validation, resource and capacity failures cancel the snapshots without device writes
 or changed output. An uncertain commit aborts the filesystem until recovery.
 
-Ordinary file/namespace mutation and orphan cleanup still reject attribute-owning
-inodes until their lifetime integration is implemented. The new batch API rejects
-unlinked inodes for the same reason. Raw ACL/security storage is implemented;
-authorization, inheritance and privilege semantics remain pending.
+Creation, data writes and truncate can include an admitted attribute batch in the
+same transaction. The attribute editor uses the private inode record, including
+a newly allocated record or preceding changes in that transaction. Creating below
+an attributed directory requires an explicit XATTRS field; an empty batch explicitly
+admits creating without inherited attributes. Permission or ownership changes on an
+attributed inode likewise require that field, with an empty batch admitting preservation.
+Time-only changes and hard links preserve existing attributes without deriving policy.
+
+Held unlinked inodes retain readable and mutable attributes. Copying a shared block
+and changing their data/attributes uses the same atomic writer; admission reserves
+enough journal credits for eventual orphan cleanup. Final release drops the attribute
+reference together with the inode, freeing an external block only for its last owner.
+Linked truncate recovery preserves attributes while freeing data beyond EOF. Inode
+block accounting includes external attributes for mapped files and fast symlinks.
+The private orphan-file inode cannot acquire ordinary attributes.
+
+The first attribute transaction enables EXT_ATTR with its inode/storage changes.
+The live feature summary is published only after commit. Replay permits that
+monotonic enablement, rejecting clearing EXT_ATTR or changing another compatibility
+feature before writing the replayed superblock. Raw ACL/security storage is implemented;
+authorization, inheritance decisions and privilege semantics remain owner policy
+and are not yet accepted in the platform adapters.
 
 ## Admitted inode and namespace changes
 
@@ -258,8 +276,8 @@ under the same owner lock as authorization and mutation. Ownership changes must
 include the admitted permission transition; a write requires final permissions,
 mtime and ctime. The core applies them in the data transaction, never repairs
 set-ID bits afterward. No untrusted ioctl exposes this authority. Unsupported flags
-(including immutable and append-only) reject mutation. Attribute-owning inodes can
-use the admitted attribute batch; other mutation paths await lifetime integration.
+(including immutable and append-only) reject mutation. Attribute-owning inodes use
+the explicit admitted attribute transition when their permissions or owners change.
 Native UBC/FSKit
 integration and LXNU policy acceptance remain separate from this portable API.
 

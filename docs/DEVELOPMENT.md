@@ -280,6 +280,59 @@ python3 tests/check_xattr_writes.py --full --fixtures artifacts/xattr-space-fixt
 The independent checker preserves source images and mutates only newly created
 recovery copies. CI uses `--discard-recovered` to delete each verified copy after
 recording its final hash, reducing disk use while retaining reports and commands.
+
+## Attribute lifetime and first-attribute tests
+
+The `xattr-lifetime-*` cases use the ordinary attribute fixtures. They include
+creation, admitted data/attribute transitions, held inode mutation and final-release
+fault sweeps. `--release` selects just the final-release cases when investigating
+that contract. Independent checking uses the same selection:
+
+```sh
+meson compile -C .build ext4-xattr-lifetime-test ext4-recover
+env -i PATH="$PATH" meson test -C .build 'xattr-lifetime-*' --no-rebuild -j 2 --print-errorlogs
+mkdir artifacts/xattr-release-exports
+.build/ext4-xattr-lifetime-test --release --smoke --export artifacts/xattr-release-exports \
+  artifacts/xattr-fixtures/*.img
+python3 tests/check_xattr_lifetime.py --release --fixtures artifacts/xattr-fixtures/report.json \
+  --exports artifacts/xattr-release-exports --recover .build/ext4-recover \
+  --tools-root /path/to/e2fsprogs/build --output artifacts/xattr-release-independent --discard-recovered
+```
+
+First-attribute tests require separately generated clean images whose EXT_ATTR
+feature is absent. They cover the feature bit, inode and new attribute in the same
+transaction, plus forbidden recovery feature changes:
+
+```sh
+python3 tests/generate_xattr_enable_fixtures.py --tools-root /path/to/e2fsprogs/build \
+  --output artifacts/xattr-enable-fixtures
+meson setup --reconfigure .build -Dxattr_enable_fixtures="$PWD/artifacts/xattr-enable-fixtures"
+meson compile -C .build ext4-xattr-lifetime-test ext4-recover
+env -i PATH="$PATH" meson test -C .build 'xattr-first-attribute-*' --no-rebuild -j 2 --print-errorlogs
+mkdir artifacts/xattr-enable-exports
+.build/ext4-xattr-lifetime-test --enable --smoke --export artifacts/xattr-enable-exports \
+  artifacts/xattr-enable-fixtures/*.img
+python3 tests/check_xattr_lifetime.py --enable --fixtures artifacts/xattr-enable-fixtures/report.json \
+  --exports artifacts/xattr-enable-exports --recover .build/ext4-recover \
+  --tools-root /path/to/e2fsprogs/build --output artifacts/xattr-enable-independent --discard-recovered
+```
+
+Without either selection, the independent lifetime checker inspects the ordinary
+creation/write/truncate/namespace exports. The pinned e2fsck linked-truncate defect
+described in ACCEPTANCE.md produces an actual failed replay in that mode.
+`--keep-going` retains those failures and their images while inspecting other states;
+the command still returns nonzero. It must not be used to turn a failed oracle into
+acceptance. The separate Linux `--xattr-truncate` probe covers recovery of the affected
+pending exports, with the same disposable-VM ownership handoff as other Linux probes.
+To reproduce the e2fsck defect directly from an unmodified tool-generated fixture:
+
+```sh
+python3 tests/reproduce_e2fsck_xattr_orphan.py --image artifacts/xattr-fixtures/xattr-1k.img \
+  --tools-root /path/to/e2fsprogs/build --output artifacts/e2fsck-linked-xattr-reproducer
+```
+
+This diagnostic succeeds only when the specified tool defect is reproduced; its
+report explicitly marks the oracle recovery as failed. It never executes the core.
 The default retains every recovery image. Full-space checks also hash all filler
 data/mapping blocks and require them to remain unchanged.
 

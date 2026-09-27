@@ -345,6 +345,15 @@ ext4_recovery_sort(struct ext4_recovery_record *records, uint32_t count)
 	}
 }
 
+static bool
+ext4_recovery_compat_valid(uint32_t original, uint32_t replayed)
+{
+	/* The first attribute can enable EXT_ATTR in its committed transaction.
+	 * Clearing it could hide existing attributes; no other format change is
+	 * compatible with the ownership captured before replay. */
+	return replayed == original || replayed == (original | EXT4_FEATURE_COMPAT_EXT_ATTR);
+}
+
 static enum ext4_result
 ext4_recovery_super(struct ext4_journal *journal)
 {
@@ -361,6 +370,10 @@ ext4_recovery_super(struct ext4_journal *journal)
 	    ext4_crc32c(UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum)) !=
 		ext4_le32(&super->checksum)) {
 		return EXT4_CORRUPT;
+	}
+	if (!ext4_recovery_compat_valid(
+		fs->info.feature_compat, ext4_le32(&super->feature_compat))) {
+		return EXT4_UNSUPPORTED;
 	}
 	/* Replaying a clean superblock must not hide an interrupted recovery. */
 	ext4_encode32(&super->feature_incompat,
@@ -437,7 +450,7 @@ ext4_recovery_validate_home(struct ext4_journal *journal)
 	if (fresh->info.blocks != fs->info.blocks ||
 	    fresh->info.block_size != fs->info.block_size ||
 	    fresh->info.inodes != fs->info.inodes || fresh->info.groups != fs->info.groups ||
-	    fresh->info.feature_compat != fs->info.feature_compat ||
+	    !ext4_recovery_compat_valid(fs->info.feature_compat, fresh->info.feature_compat) ||
 	    (fresh->info.feature_ro_compat | EXT4_FEATURE_RO_ORPHAN_PRESENT) !=
 		(fs->info.feature_ro_compat | EXT4_FEATURE_RO_ORPHAN_PRESENT) ||
 	    (fresh->info.feature_incompat | EXT4_FEATURE_INCOMPAT_RECOVER) !=

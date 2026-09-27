@@ -24,6 +24,10 @@ struct ext4_xattr_snapshot {
 
 enum ext4_result ext4_xattr_open(
     struct ext4_fs *fs, uint32_t number, uint32_t generation, struct ext4_xattr_snapshot *snapshot);
+/* Copy an already decoded, exclusively owned inode record. Its checksum may
+ * be stale inside a private transaction; external storage is still validated. */
+enum ext4_result ext4_xattr_open_inode(struct ext4_fs *fs, const struct ext4_inode *inode,
+    const struct ext4_inode_disk *disk, struct ext4_xattr_snapshot *snapshot);
 void ext4_xattr_close(struct ext4_xattr_snapshot *snapshot);
 int ext4_xattr_compare(
     const struct ext4_xattr_entry_disk *left, const struct ext4_xattr_entry_disk *right);
@@ -36,5 +40,7 @@ enum ext4_result ext4_xattr_changes_validate(
 enum ext4_result ext4_xattr_apply(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, struct ext4_inode_disk *disk,
     const struct ext4_xattr_change *changes, size_t count);
+enum ext4_result ext4_xattr_drop(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk);
 
 #endif

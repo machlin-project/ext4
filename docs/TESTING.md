@@ -243,6 +243,64 @@ reported separately from successfully recovered transactions. In particular,
 damaging a primary superblock across sectors can make its checksum unverifiable;
 the core rejects that medium instead of guessing geometry or declaring it clean.
 
+## Attribute lifetime and feature transitions
+
+`ext4-xattr-lifetime-test` combines raw attribute storage with creation, write,
+truncate, rename/removal and held unlinked inodes. The standard run also tests last
+reference release for shared blocks, fast/mapped symlinks, directories and a large
+file. A second held orphan makes the victim a nonhead list entry. Faults cover every
+allocation/read and write/flush boundary of final release; even a pre-write error
+must consume the hold once, poison the owner and leave recoverable deletion intent.
+
+`--enable` uses `generate_xattr_enable_fixtures.py` images with no EXT_ATTR feature.
+It tests first inode-body/external attributes and compound creation/data/size changes.
+Recovery must allow the committed feature enablement together with the attribute,
+while repeated attempts to clear EXT_ATTR or change another compatibility feature
+must reject without writes. These are registered as `xattr-first-attribute-*` when
+the `xattr_enable_fixtures` Meson option is selected.
+
+`check_xattr_lifetime.py` compares inode identities, complete directory names, exact
+attribute/data bytes, shared reference counts, feature flags and allocation totals.
+It applies core and e2fsck recovery separately to each pending/uncommitted export and
+requires clean e2fsck results and unchanged repeated core recovery. Release and first
+attribute modes pass both backends. The ordinary linked-truncate mode retains the
+known e2fsck attribute-loss failure; `--keep-going` collects later evidence without
+changing its failed status or exit code. Linux recovery is independent evidence for
+the affected case, not permission to discard that failure.
+
+## Portable performance acceptance
+
+Functional and crash-test passes do not establish throughput, latency or scaling.
+Before accepting the portable core, measure optimized builds without sanitizers
+and retain compiler options, fixture geometry, workload size, operation counts,
+read/write/flush callbacks, allocation counts, CPU time and latency distributions.
+Report cold and warm reads separately. Timings of the fault harness are not
+filesystem benchmarks. Core-only measurements and mounted platform measurements
+remain separate evidence.
+
+The workloads must include sequential and random reads/writes, small synchronous
+updates, large contiguous and fragmented files, sparse growth and truncate,
+directory lookup/enumeration and namespace churn, near-full allocation and files
+with external/shared attributes. Increase file extent counts, directory entries
+and live inode holds to expose scaling costs rather than repeating only small
+fixtures. Compare identical completed work and durability guarantees; a fully
+checkpointed core operation is not comparable to a buffered write that has not
+reached stable storage. Linux comparisons must record journal mode and flush
+boundaries as well as caching and thread counts.
+
+The current implementation has concrete unaccepted performance constraints:
+block-at-a-time reads allocate mapping scratch buffers repeatedly; CRC32C uses a
+bitwise fallback; public lookup scans directory entries even when a hash index is
+present, and enumeration rereads and checksums a block for each returned entry;
+attributed writes can validate the complete inode map; each
+transaction journals data and checkpoints synchronously; writable access is
+serialized by its owner. Measure these costs before choosing optimizations.
+Buffer reuse, range mapping and bounded metadata caching must preserve validation
+and mutation invalidation. Changes to transaction batching, checkpoint timing or
+concurrency require renewed crash, ordering and lifetime acceptance. Native page
+cache ownership stays in the adapters. These requirements remain pending until
+the generated measurements and representative application workloads are reviewed.
+
 ## Platform suites and remaining coverage
 
 Mounted tests verify the adapter's ordinary file operations, metadata, directory

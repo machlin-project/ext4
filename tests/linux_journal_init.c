@@ -27,8 +27,8 @@ power_off(int passed)
 	printf("LINUX_EXT4_PROBE_RESULT=%s\n", passed ? "PASS" : "FAIL");
 	fflush(stdout);
 	fflush(stderr);
-	/* Deliberately omit sync and unmount: fsync below has committed the file
-	 * transaction, and the next owner must recover this disposable image. */
+	/* Journal-write callers deliberately omit sync and unmount after fsync;
+	 * recovery-only callers may explicitly unmount before reaching this point. */
 	reboot(RB_POWER_OFF);
 	for (;;) {
 		pause();
@@ -53,6 +53,9 @@ decode_le32(const struct ext4_le32 *field)
 
 #ifdef EXT4_TEST_NAMESPACE
 #include "linux_namespace.h"
+#endif
+#ifdef EXT4_TEST_XATTR_TRUNCATE
+#include "linux_xattr_truncate.h"
 #endif
 
 #ifdef EXT4_TEST_FILE_WRITES
@@ -370,7 +373,8 @@ main(void)
     defined(EXT4_TEST_TRUNCATE) || defined(EXT4_TEST_ORPHANS)
 	require((decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_RECOVER) == 0,
 	    "verify cleanly finished writable filesystem");
-#elif !defined(EXT4_TEST_LIVE_TRUNCATE) && !defined(EXT4_TEST_NAMESPACE)
+#elif !defined(EXT4_TEST_LIVE_TRUNCATE) && !defined(EXT4_TEST_NAMESPACE) &&                        \
+    !defined(EXT4_TEST_XATTR_TRUNCATE)
 	require((decode_le32(&super.feature_incompat) & EXT4_FEATURE_INCOMPAT_RECOVER) != 0,
 	    "verify journal requires recovery");
 #endif
@@ -391,6 +395,10 @@ main(void)
 #endif
 #ifdef EXT4_TEST_NAMESPACE
 	check_namespace(block_size);
+	return 1;
+#endif
+#ifdef EXT4_TEST_XATTR_TRUNCATE
+	check_xattr_truncate(block_size);
 	return 1;
 #endif
 #ifdef EXT4_TEST_FILE_WRITES

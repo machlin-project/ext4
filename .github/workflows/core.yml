@@ -92,6 +92,8 @@ jobs:
             2>&1 | tee artifacts/checks/xattr-fixtures.log
           python3 tests/generate_xattr_space.py --fixtures artifacts/xattr-fixtures/report.json \
             --output artifacts/xattr-space-fixtures 2>&1 | tee artifacts/checks/xattr-space-fixtures.log
+          python3 tests/generate_xattr_enable_fixtures.py --output artifacts/xattr-enable-fixtures \
+            2>&1 | tee artifacts/checks/xattr-enable-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
@@ -107,7 +109,8 @@ jobs:
           fi
           if [[ '${{ matrix.suite }}' == core ]]; then
             xattr_options=(-Dxattr_fixtures="$PWD/artifacts/xattr-fixtures" \
-              -Dxattr_space_fixtures="$PWD/artifacts/xattr-space-fixtures")
+              -Dxattr_space_fixtures="$PWD/artifacts/xattr-space-fixtures" \
+              -Dxattr_enable_fixtures="$PWD/artifacts/xattr-enable-fixtures")
           fi
           meson setup .build --buildtype=debugoptimized -Db_sanitize=address,undefined \
             -Dextended_tests=true -Dinode128_test=true -Dunwritten_tests=true \
@@ -156,10 +159,38 @@ jobs:
           python3 tests/check_xattr_writes.py --full --fixtures artifacts/xattr-space-fixtures/report.json \
             --exports artifacts/xattr-full-exports --recover .build/ext4-recover \
             --output artifacts/xattr-full-independent 2>&1 | tee artifacts/checks/xattr-full-independent.log
-          find artifacts/xattr-fixtures artifacts/xattr-space-fixtures \
-            artifacts/xattr-write-exports artifacts/xattr-edge-exports artifacts/xattr-full-exports \
+          find artifacts/xattr-space-fixtures artifacts/xattr-write-exports \
+            artifacts/xattr-edge-exports artifacts/xattr-full-exports \
             artifacts/xattr-write-independent artifacts/xattr-edge-independent artifacts/xattr-full-independent \
             -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Independently verify final release and first attribute transactions
+        if: matrix.suite == 'core'
+        run: |
+          for mode in release enable; do
+            fixtures=artifacts/xattr-fixtures
+            prefix=xattr-
+            if [[ "$mode" == enable ]]; then
+              fixtures=artifacts/xattr-enable-fixtures
+              prefix=xattr-enable-
+            fi
+            for image in "$fixtures"/*.img; do
+              name=$(basename "$image" .img)
+              profile=${name#"$prefix"}
+              exports="artifacts/xattr-$mode-exports/$profile"
+              checked="artifacts/xattr-$mode-independent/$profile"
+              mkdir -p "$exports"
+              .build/ext4-xattr-lifetime-test --"$mode" --smoke --export "$exports" "$image" \
+                2>&1 | tee "artifacts/checks/xattr-$mode-$profile-exports.log"
+              python3 tests/check_xattr_lifetime.py --"$mode" --fixtures "$fixtures/report.json" \
+                --profile "$profile" --exports "$exports" --recover .build/ext4-recover \
+                --output "$checked" --discard-recovered \
+                2>&1 | tee "artifacts/checks/xattr-$mode-$profile-independent.log"
+              find "$exports" "$checked" -type f \
+                ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+            done
+          done
+          find artifacts/xattr-fixtures artifacts/xattr-enable-fixtures -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Export and independently verify file writes
         if: matrix.suite == 'core'
         run: |

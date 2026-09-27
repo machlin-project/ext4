@@ -787,15 +787,15 @@ metadata_guards(struct device *device)
 	ext4_encode32(&disk->flags, original_flags);
 	ext4_encode32(&disk->xattr_block_lo, 1);
 	ext4_inode_checksum_set(fs, inode.number, disk);
-	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after),
-	    EXT4_UNSUPPORTED);
+	EXPECT(
+	    ext4_set_attributes(fs, inode.number, inode.generation, &update, &after), EXT4_CORRUPT);
 	ext4_encode32(&disk->xattr_block_lo, 0);
 	if (fs->inode_size > EXT4_INODE_BASE_SIZE) {
 		extra = EXT4_INODE_BASE_SIZE + ext4_le16(&disk->extra_size);
 		ext4_encode32((struct ext4_le32 *)((uint8_t *)disk + extra), EXT4_XATTR_MAGIC);
 		ext4_inode_checksum_set(fs, inode.number, disk);
 		EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &after),
-		    EXT4_UNSUPPORTED);
+		    EXT4_INVALID_ARGUMENT);
 		ext4_encode32((struct ext4_le32 *)((uint8_t *)disk + extra), 0);
 	}
 	ext4_inode_checksum_set(fs, inode.number, disk);

@@ -168,6 +168,19 @@ ext4_edit_commit(struct ext4_fs *fs, struct ext4_transaction *transaction)
 	return error;
 }
 
+static enum ext4_result
+ext4_update_admitted(
+    struct ext4_fs *fs, const struct ext4_inode_disk *disk, const struct ext4_inode_update *update)
+{
+	/* An explicit empty batch admits preservation. Otherwise a mode/owner or
+	 * data change must not silently preserve an unreviewed ACL or capability. */
+	if ((update->fields & (EXT4_ATTR_PERMISSIONS | EXT4_ATTR_UID | EXT4_ATTR_GID)) &&
+	    !(update->fields & EXT4_ATTR_XATTRS) && ext4_inode_has_xattrs(fs, disk)) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	return EXT4_OK;
+}
+
 enum ext4_result
 ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     const struct ext4_inode_update *update, struct ext4_inode *result)
@@ -199,15 +212,12 @@ ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	error = update->fields & EXT4_ATTR_XATTRS
 	    ? ext4_edit_inode_record(fs, transaction, number, generation, &disk, &inode)
 	    : ext4_edit_inode(fs, transaction, number, generation, &disk, &inode);
+	if (error == EXT4_OK) {
+		error = ext4_update_admitted(fs, disk, update);
+	}
 	if (error == EXT4_OK && (update->fields & EXT4_ATTR_XATTRS)) {
-		/* Orphan teardown must own attribute references before an unlinked
-		 * inode can acquire or change them. */
-		if (inode.links == 0) {
-			error = EXT4_UNSUPPORTED;
-		} else {
-			error = ext4_allocation_init(&allocation, fs, transaction, &inode);
-			allocation_ready = error == EXT4_OK;
-		}
+		error = ext4_allocation_init(&allocation, fs, transaction, &inode);
+		allocation_ready = error == EXT4_OK;
 		if (error == EXT4_OK) {
 			error = ext4_write_map_validate(&allocation, &inode, disk);
 		}
@@ -221,6 +231,9 @@ ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	}
 	if (error == EXT4_OK) {
 		error = ext4_inode_apply(fs, disk, update);
+	}
+	if (error == EXT4_OK && inode.links == 0) {
+		error = ext4_orphan_reserve(fs, &inode, disk);
 	}
 	if (error == EXT4_OK) {
 		ext4_inode_checksum_set(fs, number, disk);
@@ -391,6 +404,7 @@ ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t of
 	uint64_t block_count;
 	uint64_t physical;
 	uint64_t free_blocks;
+	uint32_t feature_compat;
 	uint32_t credits;
 	uint32_t index;
 	uint32_t target_count = 0;
@@ -412,7 +426,7 @@ ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t of
 	if (error != EXT4_OK) {
 		return error;
 	}
-	if (update->fields != EXT4_WRITE_FIELDS) {
+	if ((update->fields & ~(uint32_t)EXT4_ATTR_XATTRS) != EXT4_WRITE_FIELDS) {
 		return EXT4_INVALID_ARGUMENT;
 	}
 	if (offset > UINT64_MAX - length ||
@@ -435,7 +449,9 @@ ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t of
 	if (error != EXT4_OK) {
 		return error;
 	}
-	error = ext4_edit_inode(fs, transaction, number, generation, &disk, &inode);
+	error = update->fields & EXT4_ATTR_XATTRS
+	    ? ext4_edit_inode_record(fs, transaction, number, generation, &disk, &inode)
+	    : ext4_edit_inode(fs, transaction, number, generation, &disk, &inode);
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
@@ -447,7 +463,10 @@ ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t of
 	if (length == 0) {
 		goto cancel;
 	}
-	error = ext4_inode_apply(fs, disk, update);
+	error = ext4_update_admitted(fs, disk, update);
+	if (error == EXT4_OK) {
+		error = ext4_inode_apply(fs, disk, update);
+	}
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
@@ -462,6 +481,12 @@ ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t of
 		goto cancel;
 	}
 	allocation_ready = true;
+	if ((update->fields & EXT4_ATTR_XATTRS) || ext4_inode_has_xattrs(fs, disk)) {
+		error = ext4_write_map_validate(&allocation, &inode, disk);
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
+	}
 	if (offset > inode.size) {
 		error = ext4_write_gap(
 		    &allocation, &inode, disk, offset, targets, &target_count, credits);
@@ -492,19 +517,31 @@ ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t of
 		consumed += chunk;
 		within = 0;
 	}
-	error = ext4_inode_account(
-	    &allocation, &inode, disk, offset + length > inode.size ? offset + length : inode.size);
+	if (update->fields & EXT4_ATTR_XATTRS) {
+		error = ext4_xattr_apply(
+		    &allocation, &inode, disk, update->xattrs, update->xattr_count);
+	}
+	if (error == EXT4_OK) {
+		error = ext4_inode_account(&allocation, &inode, disk,
+		    offset + length > inode.size ? offset + length : inode.size);
+	}
+	if (error == EXT4_OK && inode.links == 0) {
+		error = ext4_orphan_reserve(fs, &inode, disk);
+	}
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
 	ext4_inode_checksum_set(fs, number, disk);
 	free_blocks = allocation.free_blocks;
+	feature_compat = allocation.super == NULL ? fs->info.feature_compat
+						  : ext4_le32(&allocation.super->feature_compat);
 	ext4_allocation_destroy(&allocation);
 	fs->environment.release(
 	    fs->environment.context, targets, (size_t)credits * sizeof(*targets));
 	error = ext4_edit_commit(fs, transaction);
 	if (error == EXT4_OK) {
 		fs->info.free_blocks = free_blocks;
+		fs->info.feature_compat = feature_compat;
 		*completed = length;
 	}
 	return error;
@@ -544,6 +581,7 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 	uint32_t first;
 	uint32_t target_count = 0;
 	uint32_t credits;
+	uint32_t feature_compat;
 	bool allocation_ready = false;
 	bool done = true;
 	enum ext4_result error;
@@ -557,7 +595,7 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 	if (error != EXT4_OK) {
 		return error;
 	}
-	if (update->fields != EXT4_WRITE_FIELDS) {
+	if ((update->fields & ~(uint32_t)EXT4_ATTR_XATTRS) != EXT4_WRITE_FIELDS) {
 		return EXT4_INVALID_ARGUMENT;
 	}
 	if (size > (uint64_t)UINT32_MAX * fs->info.block_size) {
@@ -571,7 +609,9 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 	if (error != EXT4_OK) {
 		return error;
 	}
-	error = ext4_edit_inode(fs, transaction, number, generation, &disk, &inode);
+	error = update->fields & EXT4_ATTR_XATTRS
+	    ? ext4_edit_inode_record(fs, transaction, number, generation, &disk, &inode)
+	    : ext4_edit_inode(fs, transaction, number, generation, &disk, &inode);
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
@@ -589,7 +629,10 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 			goto cancel;
 		}
 	}
-	error = ext4_inode_apply(fs, disk, update);
+	error = ext4_update_admitted(fs, disk, update);
+	if (error == EXT4_OK) {
+		error = ext4_inode_apply(fs, disk, update);
+	}
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
@@ -598,6 +641,13 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 		goto cancel;
 	}
 	allocation_ready = true;
+	if (size > inode.size &&
+	    ((update->fields & EXT4_ATTR_XATTRS) || ext4_inode_has_xattrs(fs, disk))) {
+		error = ext4_write_map_validate(&allocation, &inode, disk);
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
+	}
 	first = (uint32_t)((size + fs->info.block_size - 1) / fs->info.block_size);
 	if (size <= inode.size) {
 		if (batch == 0) {
@@ -643,8 +693,15 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 		end = size;
 	}
 	error = ext4_write_gap(&allocation, &zero_from, disk, end, targets, &target_count, credits);
+	if (error == EXT4_OK && (update->fields & EXT4_ATTR_XATTRS)) {
+		error = ext4_xattr_apply(
+		    &allocation, &inode, disk, update->xattrs, update->xattr_count);
+	}
 	if (error == EXT4_OK) {
 		error = ext4_inode_account(&allocation, &inode, disk, size);
+	}
+	if (error == EXT4_OK && inode.links == 0) {
+		error = ext4_orphan_reserve(fs, &inode, disk);
 	}
 	if (error == EXT4_OK) {
 		ext4_inode_checksum_set(fs, number, disk);
@@ -654,12 +711,15 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 		goto cancel;
 	}
 	free_blocks = allocation.free_blocks;
+	feature_compat = allocation.super == NULL ? fs->info.feature_compat
+						  : ext4_le32(&allocation.super->feature_compat);
 	ext4_allocation_destroy(&allocation);
 	fs->environment.release(
 	    fs->environment.context, targets, (size_t)credits * sizeof(*targets));
 	error = ext4_edit_commit(fs, transaction);
 	if (error == EXT4_OK) {
 		fs->info.free_blocks = free_blocks;
+		fs->info.feature_compat = feature_compat;
 		if (!done && inode.links != 0) {
 			fs->last_orphan = number;
 		}

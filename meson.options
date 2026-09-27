@@ -23,6 +23,8 @@ option('xattr_fixtures', type: 'string', value: '',
   description: 'Enable inode-body, external and shared xattr image tests')
 option('xattr_space_fixtures', type: 'string', value: '',
   description: 'Enable full-space images with shared xattr blocks')
+option('xattr_enable_fixtures', type: 'string', value: '',
+  description: 'Enable first-attribute transactions on images without EXT_ATTR')
 option('space_fixtures', type: 'string', value: '',
   description: 'Enable fully allocated namespace image tests')
 option('index_fixtures', type: 'string', value: '',

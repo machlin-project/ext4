@@ -270,51 +270,27 @@ ext4_xattr_external(struct ext4_xattr_snapshot *snapshot, uint64_t block)
 	return EXT4_OK;
 }
 
-enum ext4_result
-ext4_xattr_open(
-    struct ext4_fs *fs, uint32_t number, uint32_t generation, struct ext4_xattr_snapshot *snapshot)
+static enum ext4_result
+ext4_xattr_parse_inode(struct ext4_xattr_snapshot *snapshot, const struct ext4_inode *inode)
 {
-	struct ext4_inode_disk *disk;
-	struct ext4_inode inode;
-	uint64_t offset = 0;
+	struct ext4_fs *fs = snapshot->fs;
+	struct ext4_inode_disk *disk = (struct ext4_inode_disk *)snapshot->inode;
+	uint64_t offset;
 	uint64_t block;
 	size_t body = fs->inode_size;
 	size_t extra;
 	bool body_present = false;
 	enum ext4_result error;
 
-	ext4_zero(snapshot, sizeof(*snapshot));
-	snapshot->fs = fs;
-	if (fs->aborted) {
-		return EXT4_RECOVERY_REQUIRED;
-	}
-	error = ext4_inode_allocated(fs, number);
-	if (error == EXT4_OK) {
-		error = ext4_inode_location(fs, number, &offset);
-	}
-	if (error != EXT4_OK) {
-		return error;
-	}
-	snapshot->inode = fs->environment.allocate(fs->environment.context, fs->inode_size);
-	if (snapshot->inode == NULL) {
-		return EXT4_NO_MEMORY;
-	}
-	error = ext4_device_read(fs, offset, snapshot->inode, fs->inode_size);
-	if (error == EXT4_OK) {
-		error = ext4_inode_decode_live(fs, number, snapshot->inode, &inode);
-	}
-	if (error != EXT4_OK) {
-		return error;
-	}
-	if (inode.generation != generation) {
-		return EXT4_STALE;
-	}
-	disk = (struct ext4_inode_disk *)snapshot->inode;
 	block =
 	    ext4_le32(&disk->xattr_block_lo) | ((uint64_t)ext4_le16(&disk->xattr_block_hi) << 32);
 	snapshot->external_block = block;
 	if (fs->inode_size > EXT4_INODE_BASE_SIZE) {
 		extra = ext4_le16(&disk->extra_size);
+		if (extra > fs->inode_size - EXT4_INODE_BASE_SIZE ||
+		    extra % EXT4_XATTR_ALIGNMENT != 0) {
+			return EXT4_CORRUPT;
+		}
 		offset = EXT4_INODE_BASE_SIZE + extra;
 		if (extra != 0 && offset <= fs->inode_size - sizeof(struct ext4_le32) &&
 		    ext4_le32((const struct ext4_le32 *)(snapshot->inode + offset)) ==
@@ -328,7 +304,7 @@ ext4_xattr_open(
 		return EXT4_CORRUPT;
 	}
 	if (block != 0) {
-		if (inode.blocks_512 < fs->info.block_size / EXT4_SECTOR_SIZE) {
+		if (inode->blocks_512 < fs->info.block_size / EXT4_SECTOR_SIZE) {
 			return EXT4_CORRUPT;
 		}
 		error = ext4_xattr_external(snapshot, block);
@@ -360,6 +336,60 @@ ext4_xattr_open(
 		}
 	}
 	return ext4_xattr_sort(snapshot);
+}
+
+enum ext4_result
+ext4_xattr_open_inode(struct ext4_fs *fs, const struct ext4_inode *inode,
+    const struct ext4_inode_disk *disk, struct ext4_xattr_snapshot *snapshot)
+{
+	ext4_zero(snapshot, sizeof(*snapshot));
+	snapshot->fs = fs;
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
+	snapshot->inode = fs->environment.allocate(fs->environment.context, fs->inode_size);
+	if (snapshot->inode == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	ext4_copy(snapshot->inode, disk, fs->inode_size);
+	return ext4_xattr_parse_inode(snapshot, inode);
+}
+
+enum ext4_result
+ext4_xattr_open(
+    struct ext4_fs *fs, uint32_t number, uint32_t generation, struct ext4_xattr_snapshot *snapshot)
+{
+	struct ext4_inode inode;
+	uint64_t offset = 0;
+	enum ext4_result error;
+
+	ext4_zero(snapshot, sizeof(*snapshot));
+	snapshot->fs = fs;
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
+	error = ext4_inode_allocated(fs, number);
+	if (error == EXT4_OK) {
+		error = ext4_inode_location(fs, number, &offset);
+	}
+	if (error != EXT4_OK) {
+		return error;
+	}
+	snapshot->inode = fs->environment.allocate(fs->environment.context, fs->inode_size);
+	if (snapshot->inode == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	error = ext4_device_read(fs, offset, snapshot->inode, fs->inode_size);
+	if (error == EXT4_OK) {
+		error = ext4_inode_decode_live(fs, number, snapshot->inode, &inode);
+	}
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (inode.generation != generation) {
+		return EXT4_STALE;
+	}
+	return ext4_xattr_parse_inode(snapshot, &inode);
 }
 
 enum ext4_result

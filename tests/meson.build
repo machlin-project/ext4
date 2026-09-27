@@ -3,7 +3,7 @@
 # required cases; missing images fail tests instead of silently removing them.
 paths = {}
 foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
-  'namespace_fixtures', 'xattr_fixtures', 'xattr_space_fixtures', 'space_fixtures',
+  'namespace_fixtures', 'xattr_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
   'index_fixtures', 'index_collisions', 'index_capacity']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
@@ -20,6 +20,15 @@ if paths['xattr_fixtures'] != ''
       args: stem + '.img', timeout: 600, suite: 'core')
     test('xattr-packing-' + profile, programs['xattr-write'],
       args: ['--edges', stem + '.img'], timeout: 300, suite: 'core')
+    test('xattr-lifetime-' + profile, programs['xattr-lifetime'],
+      args: stem + '.img', timeout: 600, suite: 'core')
+  endforeach
+endif
+if paths['xattr_enable_fixtures'] != ''
+  foreach profile : xattr_profiles
+    test('xattr-first-attribute-' + profile, programs['xattr-lifetime'],
+      args: ['--enable', paths['xattr_enable_fixtures'] / ('xattr-enable-' + profile + '.img')],
+      timeout: 600, suite: 'core')
   endforeach
 endif
 if paths['xattr_space_fixtures'] != ''

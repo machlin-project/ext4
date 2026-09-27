@@ -47,7 +47,7 @@ posix_dependency = declare_dependency(link_with: ext4_posix,
 # Keep executable paths stable for the independent image and VM harnesses.
 programs = {}
 foreach name, source : {
-  'xattr': 'xattr', 'xattr-write': 'xattr_write', 'space': 'space',
+  'xattr': 'xattr', 'xattr-write': 'xattr_write', 'xattr-lifetime': 'xattr_lifetime', 'space': 'space',
   'directory-index': 'directory_index', 'index-write': 'index_write',
   'reader': 'reader', 'corruption': 'corruption', 'journal': 'journal',
   'write': 'write', 'namespace': 'namespace', 'removal': 'removal',
