@@ -254,7 +254,7 @@ storage_equal(struct device *device, const uint8_t *expected)
 	return true;
 }
 
-static bool
+static inline bool
 storage_recover(struct device *device, const uint8_t *expected, bool committed)
 {
 	struct ext4_recovery_report report;
@@ -277,7 +277,7 @@ storage_recover(struct device *device, const uint8_t *expected, bool committed)
 	return true;
 }
 
-static void
+static inline void
 storage_export(struct device *device, const char *directory, const char *source, const char *prefix)
 {
 	const char *name = strrchr(source, '/');

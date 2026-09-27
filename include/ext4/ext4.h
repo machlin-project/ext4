@@ -165,6 +165,24 @@ struct ext4_dir_entry {
 	uint8_t name[EXT4_NAME_MAX + 1];
 };
 
+/* On-disk namespaces; the adapter owns their visibility and authorization. */
+enum ext4_xattr_namespace {
+	EXT4_XATTR_USER = 1,
+	EXT4_XATTR_POSIX_ACL_ACCESS = 2,
+	EXT4_XATTR_POSIX_ACL_DEFAULT = 3,
+	EXT4_XATTR_TRUSTED = 4,
+	EXT4_XATTR_SECURITY = 6,
+	EXT4_XATTR_SYSTEM = 7,
+	EXT4_XATTR_RICHACL = 8
+};
+
+struct ext4_xattr_key {
+	uint32_t value_size;
+	uint8_t name_index;
+	uint8_t name_length;
+	uint8_t name[EXT4_NAME_MAX];
+};
+
 /* Immutable read mapping; an adapter must not reuse it across future mutations. */
 struct ext4_mapping {
 	uint64_t device_offset;
@@ -194,6 +212,19 @@ enum ext4_result ext4_mount_writable(const struct ext4_environment *environment,
  * marker. unmount only releases memory; call sync first for a clean shutdown.
  * An uncertain commit poisons the instance, including reads: unmount and recover. */
 enum ext4_result ext4_sync(struct ext4_fs *fs);
+/* Inspect fresh, generation-checked xattrs without writing. Names exclude their
+ * namespace prefix and have no trailing NUL; values are opaque bytes, including
+ * ACL/security values. Both inode-body and external attributes are validated
+ * before any output changes. NULL buffer/keys with zero capacity queries size or
+ * count. An insufficient non-NULL buffer returns RANGE without changing outputs.
+ * List order is namespace, name length, then unsigned name bytes. Unknown namespace
+ * indices remain visible to the owning adapter. Mutation still requires its
+ * separate storage and admitted security-policy contract. */
+enum ext4_result ext4_get_xattr(struct ext4_fs *fs, uint32_t number, uint32_t generation,
+    uint8_t name_index, const uint8_t *name, size_t name_length, void *buffer, size_t capacity,
+    size_t *size);
+enum ext4_result ext4_list_xattrs(struct ext4_fs *fs, uint32_t number, uint32_t generation,
+    struct ext4_xattr_key *keys, size_t capacity, size_t *count);
 enum ext4_result ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     const struct ext4_inode_update *update, struct ext4_inode *result);
 /* Writes regular files, allocating holes, converting unwritten extents and

@@ -125,6 +125,7 @@ enum ext4_result ext4_orphan_validate_live(struct ext4_fs *fs);
 enum ext4_result ext4_orphan_file_prepare(struct ext4_fs *fs);
 void ext4_orphan_file_close(struct ext4_fs *fs);
 enum ext4_result ext4_data_block_valid(struct ext4_fs *fs, uint64_t block);
+enum ext4_result ext4_block_allocated(struct ext4_fs *fs, uint64_t block);
 
 enum ext4_result ext4_load(
     const struct ext4_environment *environment, bool recovery, struct ext4_fs **result);

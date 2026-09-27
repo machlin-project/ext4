@@ -19,6 +19,8 @@ contract, not physical power-loss protection on a particular disk.
 | --- | --- |
 | Reader | Eleven explicit format profiles; exact bytes, sparse/unwritten data, extents/indirects, indexed directories, cookies, links, timestamps and mappings |
 | Validation | Invalid geometry/features and checksums, malformed inode fields/timestamps, bounded reads/allocations |
+| Xattr reads | Ten independently authored profiles; inode-body/external/shared blocks, raw ACL and binary bytes, empty/full-block values, exact sorted get/list, generation identity, failure-atomic outputs, all allocation/read faults and malformed late/duplicate entries |
+| Xattr independent inspection | Exact values and lists against debugfs; unknown namespaces remain opaque and fsck-clean; synthetic aliased values are explicitly reader-only compatibility cases with expected e2fsck rejection |
 | Inode updates | Full-width UID/GID, permission bits, generation identity, selective updates, hardlink visibility, preserved mappings/counts and neighboring inode records |
 | Writable timestamps | Signed and extended epoch boundaries, nanosecond bounds, birth time, 128-byte inode limits and each extra_isize field boundary; rejected updates perform no writes |
 | File overwrite | Complete-file comparison after an unaligned three-block overwrite, preserved EOF and untouched bytes, hardlinks, zero-length operation and read-only rejection |

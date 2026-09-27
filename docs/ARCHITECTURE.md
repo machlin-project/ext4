@@ -22,6 +22,10 @@ mounting; an unknown read-only-compatible feature never permits writing.
 
 ## I/O and cache contract
 
+Implementation and acceptance proceed through the portable core first, FSKit on
+stock macOS second, and LXNU-specific policy third. Adapter development is deferred
+until the required core format, mutation, metadata and recovery contracts pass.
+
 A resource reports its byte size and exact-read operation. A short underlying
 read is an error unless the adapter completes it before returning. Reads never
 exceed the supplied resource. A read-only mount does not repair or replay media.
@@ -196,6 +200,34 @@ Linux's primary free-block/inode summaries may lag committed group-descriptor
 changes. Explicit recovery reconstructs those totals from the validated, replayed
 group descriptors in a journal transaction before cleanup. This is restricted to
 recovery; ordinary clean writable mounts still reject inconsistent summaries.
+
+## Extended attributes
+
+`ext4_get_xattr` and `ext4_list_xattrs` resolve the allocated inode and generation
+again, verify its checksum and snapshot its inode-body and external attribute
+storage before publishing any result. An external block must be allocated, have
+valid geometry and reference count, and pass the metadata checksum when enabled.
+Writable owners additionally exclude their protected system ranges. This is local
+storage validation, not a global cross-inode consistency check.
+
+The bounded parser validates all entries, names, sorted external keys, value
+ranges and nonzero hashes, including duplicate keys across both storage areas.
+It accepts zero legacy entry hashes and bounded shared value ranges for reading.
+Values remain opaque bytes, including compact POSIX ACLs and security metadata.
+The public key consists of an on-disk namespace index and the exact suffix bytes;
+the adapter owns visibility, naming and authorization. Unknown indices are retained
+for that decision. Lists sort by namespace, name length and unsigned name bytes.
+Queries and insufficient-buffer or failed-I/O paths leave outputs unchanged on error.
+
+The reader follows the documented [ext4 attribute layout](https://docs.kernel.org/filesystems/ext4/attributes.html).
+e2fsprogs can read the synthetic shared-value test, but e2fsck rejects its overlapping
+values and zero external entry hashes. That case establishes reader compatibility,
+not clean filesystem acceptance. Attribute writers, shared-block copy-on-write,
+reference release during orphan cleanup, EA_INODE storage and atomic ACL/security
+transitions remain unimplemented. Existing mutations still reject attribute-owning
+inodes; raw read support does not authorize access or enforce an ACL.
+
+## Admitted inode and namespace changes
 
 The admitted operation supplies final permission bits and captured timestamps
 under the same owner lock as authorization and mutation. Ownership changes must

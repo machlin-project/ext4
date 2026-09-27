@@ -2,6 +2,10 @@
 
 The end goal is a working read/write filesystem in stock macOS through FSKit and
 in Machlin through a kernel adapter, with the agreed Linux metadata contracts.
+Complete and validate the portable core first, then integrate FSKit on stock macOS,
+then implement LXNU-specific policy. Adapter development is deferred until the
+core's required format, mutation, metadata and recovery contracts are accepted.
+Unsigned builds remain the development default while signing is deferred.
 The rows below are requirements, not claims of implementation. A checkpoint does
 not complete the project. Format support must expand with tested real images;
 safe rejection of a feature is recorded separately from supporting it.
@@ -13,7 +17,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir/rename and bounded indexed mutation pass portable, independent and Linux checks; core holds retain open-unlinked or replaced objects; platform writes and broader capacity/concurrency acceptance pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine, legacy lists and modern orphan files pass portable faults, independent recovery and Linux reuse; advanced journal formats and platform write integration remain pending |
-| Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; ACLs/xattrs and platform policy pending |
+| Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list pass portable and independent checks; mutation, ACL enforcement and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
 | LXNU policy | CAP_FSETID and privilege removal, xattrs, mixed-ABI races, inherited descriptions and attachment restrictions | Not implemented |
@@ -70,6 +74,44 @@ the superblock, group descriptor, root inode and root directory, optionally
 repairing checksums to exercise structural validation. Reports are in
 `artifacts/checks/fuzzer-llvm-build.log` and `artifacts/checks/fuzzer-run.log`.
 This run does not cover every disk feature, recovery, writes or concurrency.
+
+## Portable extended-attribute reader evidence
+
+Ten independently generated profiles exercise inode-body, external and shared-block
+attributes at 1/4/16/64 KiB block sizes, indirect mapping, checksum variations,
+128/512-byte inodes and modern orphan files. Tests compare all 15 attributes per
+profile against raw debugfs output, including binary/empty values, long and non-ASCII
+names, compact access/default ACLs, short/mapped symlinks and a full-block value
+of 65,480 bytes on the largest profile. Get/list run under both read-only and
+exclusive writable owners while performing no writes.
+
+All ten sanitized suites pass. Forty complete get/list fault sweeps inject 600
+allocation/read failures, preserving output buffers, size/count results and
+allocation balance. There are 179 external malformed-record cases and 36 inode-body
+cases, including duplicates across both storage areas; each must reject both get
+and list before output changes. One checksum-absent case and four inode-body cases
+on 128-byte inodes are explicitly inapplicable. All 258 fixture files retain their
+hashes. Reports are in `artifacts/xattr-reader-edges.xml` and
+`artifacts/checks/xattr-reader-edges-summary.json`.
+
+Independent inspection checks 320 exact values across 20 exported states, plus
+complete names, inode metadata, accounting and protected input hashes. Ten unknown
+namespace states pass nonrepairing e2fsck. The other ten deliberately share value
+ranges and zero external entry hashes: debugfs reads the expected bytes, while
+e2fsck reports an allocation collision and invalid zero hash. Those ten are reader
+compatibility cases, not clean exports. Evidence is in
+`artifacts/xattr-independent-hex-names/`. The initial checker failed to decode
+debugfs's hex-rendered non-ASCII names; the corrected run used the same untouched
+images. The final selected-Xcode build, formatter and freestanding stack check
+pass, as do 23 combined xattr, image-reader, malformed-input, inode-write,
+journal and full-space suites. All 30 selected source images remain unchanged.
+Evidence is in `artifacts/xattr-final.xml` and
+`artifacts/checks/xattr-final-summary.json`. Published CI for the new reader
+remains pending.
+
+Raw attribute access does not implement POSIX ACL authorization, macOS xattr naming,
+attribute mutation or Linux privilege transitions. Existing mutation paths still
+reject attribute-owning inodes. Both platform adapters remain read-only.
 
 ## Journal evidence
 
@@ -799,9 +841,13 @@ replay, including its data and accounting; the original image remains unchanged.
 Evidence is in `artifacts/revoke-space-green.xml`,
 `artifacts/space-recovery-fixed-retained/` and `artifacts/checks/revoke-*`.
 
-Published CI coverage for the additional capacity cases remains pending. This
-bounded profile does not establish large-volume performance or writable native
-behavior.
+The complete local regression and published CI each pass 167 CTest suites with
+no failures or CTest-level skips. CI independently checks all eight capacity
+profiles and all 32 exported states. Explicit case-level applicability skips
+remain separate in the full test logs; JUnit can truncate successful-test output.
+Evidence is in `artifacts/space-acceptance.xml` and
+`artifacts/checks/space-ci-manifest.json`. This bounded profile does not establish
+large-volume performance or writable native behavior.
 
 The indexed core and recovery correction also compile into both unsigned kext
 architectures and the universal FSKit core. Symbol inspection confirms indexed

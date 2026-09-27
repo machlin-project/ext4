@@ -97,6 +97,8 @@
 #define EXT4_BITS_PER_BYTE 8U
 #define EXT4_SECTOR_SIZE 512U
 #define EXT4_XATTR_MAGIC 0xea020000U
+#define EXT4_XATTR_ALIGNMENT 4U
+#define EXT4_XATTR_REFCOUNT_MAX 1024U
 #define EXT4_TIME_EPOCH_MASK 3U
 #define EXT4_TIME_NANOSECOND_SHIFT 2U
 #define EXT4_NANOSECONDS_PER_SECOND 1000000000U
@@ -110,6 +112,24 @@ struct ext4_le16 {
 
 struct ext4_le32 {
 	uint8_t bytes[4];
+};
+
+struct ext4_xattr_header_disk {
+	struct ext4_le32 magic;
+	struct ext4_le32 references;
+	struct ext4_le32 blocks;
+	struct ext4_le32 hash;
+	struct ext4_le32 checksum;
+	struct ext4_le32 reserved[3];
+};
+
+struct ext4_xattr_entry_disk {
+	uint8_t name_length;
+	uint8_t name_index;
+	struct ext4_le16 value_offset;
+	struct ext4_le32 value_inode;
+	struct ext4_le32 value_size;
+	struct ext4_le32 hash;
 };
 
 struct ext4_orphan_tail_disk {
@@ -368,5 +388,7 @@ _Static_assert(sizeof(struct ext4_extent_disk) == 12, "extent wire size");
 _Static_assert(sizeof(struct ext4_dir_tail_disk) == 12, "directory tail wire size");
 _Static_assert(sizeof(struct ext4_orphan_tail_disk) == 8, "orphan tail wire size");
 _Static_assert(sizeof(struct ext4_block_number_disk) == 8, "block number wire size");
+_Static_assert(sizeof(struct ext4_xattr_header_disk) == 32, "xattr block header wire size");
+_Static_assert(sizeof(struct ext4_xattr_entry_disk) == 16, "xattr entry wire size");
 
 #endif

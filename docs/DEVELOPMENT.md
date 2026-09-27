@@ -21,6 +21,9 @@ These installed steps have not yet passed; signing is deferred.
 
 ## Kernel extension
 
+Complete portable-core acceptance before resuming adapter development. FSKit is
+the first platform priority after the core; LXNU policy follows it.
+
 `make kext` builds the same C core plus `adapters/xnu/` using the selected Xcode
 kernel headers. Outputs live in `artifacts/kext/arm64e/`, including the unsigned
 `MachlinExt4.kext` and a read-only `mount_machlin_ext4 DEVICE MOUNTPOINT` helper.
@@ -176,6 +179,29 @@ selected pending live intent, checks size/blocks/permissions/timestamps and all
 retained bytes, then grows and writes the file in Linux for reverse replay.
 Pending inputs require a generated selection report pinning their actual hashes
 and the independently verified new outcome. Use the same Sol/Luna handoff.
+
+## Extended-attribute reader tests
+
+Generate and inspect xattr reader fixtures with the same independent tools:
+
+```sh
+python3 tests/generate_xattr_fixtures.py --tools-root /path/to/e2fsprogs/build \
+  --output artifacts/xattr-fixtures
+cmake -S . -B .build -DEXT4_XATTR_FIXTURES="$PWD/artifacts/xattr-fixtures"
+cmake --build .build --target ext4-xattr-test
+ctest --test-dir .build -R '^xattr-reader-' --output-on-failure
+mkdir artifacts/xattr-exports
+for image in artifacts/xattr-fixtures/*.img; do
+  .build/ext4-xattr-test --export artifacts/xattr-exports "$image" "${image%.img}.expected"
+done
+python3 tests/check_xattrs.py --fixtures artifacts/xattr-fixtures/report.json \
+  --exports artifacts/xattr-exports --tools-root /path/to/e2fsprogs/build \
+  --output artifacts/xattr-independent
+```
+
+The checker distinguishes clean unknown-namespace exports from synthetic shared-value
+reader compatibility images. The latter deliberately fail e2fsck and are never
+reported as clean filesystem acceptance. No input image is repaired or modified.
 
 ## Inode and file-write tests
 

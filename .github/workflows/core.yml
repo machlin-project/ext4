@@ -95,10 +95,16 @@ jobs:
         run: |
           python3 tests/generate_space_fixtures.py --output artifacts/space-fixtures \
             2>&1 | tee artifacts/checks/space-fixtures.log
+      - name: Generate independent extended attributes
+        if: matrix.suite == 'core'
+        run: |
+          python3 tests/generate_xattr_fixtures.py --output artifacts/xattr-fixtures \
+            2>&1 | tee artifacts/checks/xattr-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
           space_options=()
+          xattr_options=()
           if [[ '${{ matrix.suite }}' == indexed ]]; then
             index_options=(-DEXT4_INDEX_FIXTURES="$PWD/artifacts/index-fixtures" \
               -DEXT4_INDEX_COLLISIONS="$PWD/artifacts/index-collisions/vectors.txt" \
@@ -107,9 +113,12 @@ jobs:
           if [[ '${{ matrix.suite }}' == namespace ]]; then
             space_options=(-DEXT4_SPACE_FIXTURES="$PWD/artifacts/space-fixtures")
           fi
+          if [[ '${{ matrix.suite }}' == core ]]; then
+            xattr_options=(-DEXT4_XATTR_FIXTURES="$PWD/artifacts/xattr-fixtures")
+          fi
           cmake -S . -B .build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DEXT4_EXTENDED_TESTS=ON -DEXT4_INODE128_TEST=ON -DEXT4_UNWRITTEN_TESTS=ON \
-            -DEXT4_ORPHAN_FILE_TESTS=ON -DEXT4_NAMESPACE_TESTS=ON "${index_options[@]}" "${space_options[@]}"
+            -DEXT4_ORPHAN_FILE_TESTS=ON -DEXT4_NAMESPACE_TESTS=ON "${index_options[@]}" "${space_options[@]}" "${xattr_options[@]}"
           cmake --build .build --parallel 2 2>&1 | tee artifacts/checks/build.log
       - name: Independently verify directory hashes and collision vectors
         if: matrix.suite == 'indexed'
@@ -120,6 +129,18 @@ jobs:
             --output artifacts/index-collisions 2>&1 | tee artifacts/checks/index-collisions.log
       - name: Run conformance and fault tests
         run: ctest --test-dir .build --parallel 2 ${{ matrix.test-filter }} --output-on-failure --output-junit "$PWD/artifacts/core-tests.xml"
+      - name: Independently inspect extended attribute representations
+        if: matrix.suite == 'core'
+        run: |
+          mkdir artifacts/xattr-exports
+          for image in artifacts/xattr-fixtures/*.img; do
+            .build/ext4-xattr-test --export artifacts/xattr-exports "$image" "${image%.img}.expected"
+          done 2>&1 | tee artifacts/checks/xattr-exports.log
+          python3 tests/check_xattrs.py --fixtures artifacts/xattr-fixtures/report.json \
+            --exports artifacts/xattr-exports --output artifacts/xattr-independent \
+            2>&1 | tee artifacts/checks/xattr-independent.log
+          find artifacts/xattr-fixtures artifacts/xattr-exports artifacts/xattr-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Export and independently verify file writes
         if: matrix.suite == 'core'
         run: |

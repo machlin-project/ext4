@@ -172,14 +172,13 @@ ext4_inode_allocated(struct ext4_fs *fs, uint32_t number)
 }
 
 enum ext4_result
-ext4_data_block_valid(struct ext4_fs *fs, uint64_t block)
+ext4_block_allocated(struct ext4_fs *fs, uint64_t block)
 {
 	struct ext4_group group;
 	uint64_t relative;
 	enum ext4_result error;
 
-	if (fs->system_ranges == NULL || block < fs->first_data_block || block >= fs->info.blocks ||
-	    ext4_system_block(fs, block)) {
+	if (block < fs->first_data_block || block >= fs->info.blocks) {
 		return EXT4_CORRUPT;
 	}
 	relative = block - fs->first_data_block;
@@ -192,4 +191,14 @@ ext4_data_block_valid(struct ext4_fs *fs, uint64_t block)
 	}
 	return ext4_bitmap_allocated(fs, group.block_bitmap, fs->blocks_per_group,
 	    group.block_bitmap_checksum, (uint32_t)(relative % fs->blocks_per_group));
+}
+
+enum ext4_result
+ext4_data_block_valid(struct ext4_fs *fs, uint64_t block)
+{
+
+	if (fs->system_ranges == NULL || ext4_system_block(fs, block)) {
+		return EXT4_CORRUPT;
+	}
+	return ext4_block_allocated(fs, block);
 }
