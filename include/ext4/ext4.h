@@ -172,6 +172,17 @@ struct ext4_mapping {
 	bool hole;
 };
 
+struct ext4_rename_entry {
+	uint32_t directory;
+	uint32_t directory_generation;
+	const uint8_t *name;
+	size_t name_length;
+	uint32_t inode;
+	uint32_t generation;
+};
+
+enum ext4_rename_flags { EXT4_RENAME_NOREPLACE = 1U << 0, EXT4_RENAME_EXCHANGE = 1U << 1 };
+
 enum ext4_result ext4_mount(const struct ext4_environment *environment, struct ext4_fs **result);
 /* The owner must serialize ALL access to a writable instance, including reads,
  * inode snapshots and mapping consumers, through each operation's completion.
@@ -257,6 +268,20 @@ enum ext4_result ext4_unlink(struct ext4_fs *fs, uint32_t directory, uint32_t di
 enum ext4_result ext4_rmdir(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation,
     const uint8_t *name, size_t name_length, uint32_t target, uint32_t target_generation,
     const struct ext4_timestamp *time, struct ext4_inode *result);
+
+/* Rename generation-checked entries atomically under the exclusive owner.
+ * Destination inode/generation zero requires absence; a nonzero inode with its
+ * generation identifies the expected destination; zero generation permits the
+ * current generation as in other mutation APIs. NOREPLACE and EXCHANGE are mutually exclusive.
+ * Parent times, child ctimes, directory dotdot/link counts and replacement orphan
+ * ownership share one transaction. An overwritten held inode remains accessible
+ * through its hold. The result is the source inode snapshot and changes only on
+ * success; a post-commit reclamation error poisons the instance, as with unlink.
+ * Renaming two names for the same inode is a no-op except with NOREPLACE. */
+enum ext4_result ext4_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source,
+    const struct ext4_rename_entry *destination, uint32_t flags, const struct ext4_timestamp *time,
+    struct ext4_inode *result);
+
 /* Offline recovery replays the journal, reconstructs allocation summaries and
  * completes legacy-list and modern orphan-file cleanup in bounded transactions.
  * A read-only mount never invokes this operation.

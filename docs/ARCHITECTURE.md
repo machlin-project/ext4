@@ -233,8 +233,8 @@ metadata checksum tails. Directory size is bounded to 1,048,576 blocks. Existing
 indexed parents explicitly reject mutation. Duplicate names, stale generations,
 invalid dot records, exhausted inodes, reserved-space exclusion and journal-credit
 exhaustion cancel before resource writes; uncertain commits poison the owner.
-These operations do not yet implement directory indexing or rename, and neither
-adapter exposes mutations.
+Directory indexing remains unsupported for mutation, and neither adapter exposes
+mutations.
 
 `ext4_unlink` and `ext4_rmdir` verify the named target's inode number and generation
 under that same owner. The complete parent directory is validated before removing
@@ -244,6 +244,30 @@ record in a later block becomes a reusable empty record. Name removal, link coun
 parent mtime/ctime and target ctime commit together. Removing the last link adds
 the inode to the legacy orphan list in that transaction, before any reclamation.
 Enough journal credits must be available to complete a minimal cleanup batch.
+
+`ext4_rename` receives two generation-checked parent/name/inode identities under
+the same exclusive owner. A zero destination inode requires absence; an existing
+destination must match its supplied identity. It supports ordinary replacement,
+NOREPLACE and EXCHANGE; the last two flags are mutually exclusive. Two names for
+the same inode are a no-op, except that NOREPLACE rejects an existing destination.
+Symlinks are renamed as objects without following their targets.
+
+One transaction owns both names, parent mtime/ctime, child ctimes, changed dotdot
+records and parent link counts. Cross-parent directory moves check the original
+ancestry before mutation, rejecting descendants and malformed parent-chain cycles
+without recursion. Replacement requires compatible directory/non-directory types;
+a replaced directory must be empty. Exchange permits different object types and
+populated directories while preserving an acyclic tree. Existing record space is
+reused, or the destination parent grows in that transaction. Credit exhaustion
+cancels the entire private change before any device write.
+
+A replaced last-link inode enters the same orphan/lifetime path as unlink. A held
+victim remains accessible after its old name resolves to the replacement; otherwise
+bounded cleanup finishes before returning. Replacing one of several hardlinks
+preserves the other names and allocation. Directory indexing, unknown directory
+link counts and whiteout creation are not implemented by this API. Authorization,
+sticky-directory rules and native rename locking remain responsibilities of the
+platform owner; the portable operation cannot authorize itself.
 
 The opaque `ext4_inode_hold` represents lifetime under the exclusive core owner.
 The platform retains one while a descriptor, mapping or other native object can

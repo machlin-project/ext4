@@ -120,6 +120,14 @@ add_test(NAME namespace-removal COMMAND ext4-removal-test ${EXT4_WRITE_IMAGES})
 set_tests_properties(namespace-removal PROPERTIES TIMEOUT 900)
 add_test(NAME namespace-removal-indexed-rejection COMMAND ext4-removal-test --indexed
     "${EXT4_FIXTURES}/ext4-indexed.img")
+add_executable(ext4-rename-test tests/rename.c)
+target_include_directories(ext4-rename-test PRIVATE core)
+target_link_libraries(ext4-rename-test PRIVATE ext4_posix)
+target_compile_options(ext4-rename-test PRIVATE -Wall -Wextra -Werror -Wdeclaration-after-statement)
+add_test(NAME namespace-rename COMMAND ext4-rename-test ${EXT4_WRITE_IMAGES})
+set_tests_properties(namespace-rename PROPERTIES TIMEOUT 900)
+add_test(NAME namespace-rename-indexed-rejection COMMAND ext4-rename-test --indexed
+    "${EXT4_FIXTURES}/ext4-indexed.img")
 add_test(NAME namespace-indexed-rejection COMMAND ext4-namespace-test --indexed
     "${EXT4_FIXTURES}/ext4-indexed.img")
 set(EXT4_NAMESPACE_FIXTURES "${CMAKE_SOURCE_DIR}/artifacts/namespace-fixtures" CACHE PATH
@@ -135,9 +143,11 @@ if(EXT4_NAMESPACE_TESTS)
     add_test(NAME namespace-symlink-small-formats COMMAND ext4-namespace-test --symlinks ${EXT4_NAMESPACE_IMAGES})
     add_test(NAME namespace-symlink-inode-groups COMMAND ext4-namespace-test --symlinks --groups ${EXT4_NAMESPACE_IMAGES})
     add_test(NAME namespace-removal-small-formats COMMAND ext4-removal-test ${EXT4_NAMESPACE_IMAGES})
+    add_test(NAME namespace-rename-small-formats COMMAND ext4-rename-test ${EXT4_NAMESPACE_IMAGES})
     set_tests_properties(namespace-small-formats namespace-inode-exhaustion
         namespace-inode-group-transition namespace-symlink-small-formats
-        namespace-symlink-inode-groups namespace-removal-small-formats PROPERTIES TIMEOUT 600)
+        namespace-symlink-inode-groups namespace-removal-small-formats
+        namespace-rename-small-formats PROPERTIES TIMEOUT 600)
 endif()
 add_executable(ext4-orphan-test tests/orphan.c)
 target_include_directories(ext4-orphan-test PRIVATE core)
@@ -165,7 +175,9 @@ if(EXT4_ORPHAN_FILE_TESTS)
     set_tests_properties(namespace-orphan-file PROPERTIES TIMEOUT 900)
     set_tests_properties(namespace-symlink-orphan-file PROPERTIES TIMEOUT 900)
     add_test(NAME namespace-removal-orphan-file COMMAND ext4-removal-test ${EXT4_ORPHAN_FILE_IMAGES})
+    add_test(NAME namespace-rename-orphan-file COMMAND ext4-rename-test ${EXT4_ORPHAN_FILE_IMAGES})
     set_tests_properties(namespace-removal-orphan-file PROPERTIES TIMEOUT 900)
+    set_tests_properties(namespace-rename-orphan-file PROPERTIES TIMEOUT 900)
     set_tests_properties(orphan-file-recovery orphan-file-mixed-recovery orphan-file-live-truncate
         PROPERTIES TIMEOUT 900)
     if(EXT4_EXTENDED_TESTS)

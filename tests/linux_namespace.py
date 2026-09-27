@@ -1,5 +1,6 @@
 """Independent expectations and reverse checks for the Linux namespace probe."""
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -9,14 +10,35 @@ import subprocess
 
 from check_namespace import inode_fields, symlink_bytes
 from check_orphans import accounting, digest
+from check_rename import entries
 
 
 def node_name(index):
     return f"node-{index:08d}".ljust(255, "n")
 
 
+def rename_objects(case):
+    state = case.get("verified_rename")
+    if state is None:
+        return {}
+    paths = {"root": "/", "hello": "/hello.txt", "left": "/left", "right": "/right",
+             "source": "/left/source", "destination": case["destination_path"],
+             "alias": "/kept-name", "filler": "/filler"}
+    result = {}
+    for key, path in paths.items():
+        value = state.get(key)
+        if value is not None:
+            result[path] = value
+            if "inside" in value:
+                result[path + "/inside"] = value["inside"]
+    return result
+
+
 def symlink_paths(case):
     name = Path(case["image"]).name
+    if case.get("verified_rename"):
+        return [path for path, value in rename_objects(case).items()
+                if value["inode"]["type"] == "symlink"]
     if name.startswith("symlinks-"):
         return [f"/{prefix}{index}" for index in range(6)
                 for prefix in ("symbolic-", "symbolic-alias-")]
@@ -47,10 +69,14 @@ def prepare(case, tree, tools):
     paths = ["/", "/hello.txt"]
     data_paths = ["/hello.txt"]
     links = symlink_paths(case)
+    renamed = rename_objects(case)
     link_lines = []
     expected = tree / "expected"
     expected.mkdir()
-    if basic:
+    if renamed:
+        paths = list(renamed)
+        data_paths = [path for path, value in renamed.items() if value["inode"]["type"] == "regular"]
+    elif basic:
         paths += ["/created", "/created-dir", "/created-dir/child", "/created-dir/alias",
                   "/hello-link", "/symlink-alias"]
         data_paths += ["/created", "/created-dir/child", "/created-dir/alias"]
@@ -201,24 +227,37 @@ def verify(case, image, output, tools, recover, run):
         for path in ("/", "/linux-dir"):
             names[path] = run([tools / "debugfs/debugfs", "-R", f"ls -p {path}", candidate])
         retained_alias = None
+        retained_rename = {}
         original = Path(case["image"])
+        for path, value in rename_objects(case).items():
+            observed = inode_fields(run([tools / "debugfs/debugfs", "-R", f"stat {path}", candidate]))
+            expected_inode = inode_fields(run([tools / "debugfs/debugfs", "-R", f"stat {path}", original]))
+            if observed is None or (path != "/" and observed != expected_inode):
+                raise RuntimeError(f"Linux changed a renamed inode's identity or attributes: {path}")
+            retained = {"inode": observed}
+            if value["inode"]["type"] == "directory":
+                expected_names = dict(value["names"])
+                if path == "/":
+                    for name in ("linux-dir", "linux-link", "linux-symlink"):
+                        expected_names[name] = inodes[f"/{name}"]["inode"]
+                listing = entries(run([tools / "debugfs/debugfs", "-R", f"ls -p {path}", candidate]))
+                if listing != expected_names:
+                    raise RuntimeError(f"Linux changed rename topology or restored an old name: {path}")
+                retained["names"] = listing
+            else:
+                if value["inode"]["type"] == "symlink":
+                    contents = bytes.fromhex(retained_links[path])
+                else:
+                    label = hashlib.sha256(path.encode()).hexdigest()[:16]
+                    dump = output / f"{prefix}-{image.stem}.rename-{label}.data"
+                    run([tools / "debugfs/debugfs", "-R", f"dump {path} {dump}", candidate])
+                    contents = dump.read_bytes()
+                actual_hash = hashlib.sha256(contents).hexdigest()
+                if len(contents) != value["data_size"] or actual_hash != value["data_sha256"]:
+                    raise RuntimeError(f"Linux changed the contents of a renamed object: {path}")
+                retained["data_sha256"] = actual_hash
+            retained_rename[path] = retained
         if original.name.startswith(("removed-", "remove-atomic-")):
-            def entries(listing):
-                result = {}
-                for line in listing.splitlines():
-                    if not line.strip():
-                        continue
-                    fields = line.split("/")
-                    if len(fields) != 8:
-                        raise RuntimeError("Malformed independently decoded removal directory")
-                    number = int(fields[1])
-                    if number == 0:
-                        continue
-                    if not fields[5] or fields[5] in result:
-                        raise RuntimeError("Missing or duplicate removal directory name")
-                    result[fields[5]] = number
-                return result
-
             expected_names = entries(run([tools / "debugfs/debugfs", "-R", "ls -p /", original]))
             if "victim" in expected_names:
                 raise RuntimeError("Independently checked removal still contains its victim")
@@ -240,7 +279,8 @@ def verify(case, image, output, tools, recover, run):
                 if retained_data.read_bytes() != original_data.read_bytes():
                     raise RuntimeError("Linux changed bytes reachable through the remaining hardlink")
         return {"inodes": inodes, "directories": names, "accounting": counts,
-                "retained_symlinks": retained_links, "retained_alias": retained_alias}, lag
+                "retained_symlinks": retained_links, "retained_alias": retained_alias,
+                "retained_rename": retained_rename}, lag
 
     observed, _ = snapshot(image, "core")
     independent, lag = snapshot(oracle, "oracle", allow_summary_lag=True)

@@ -11,7 +11,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Eleven read profiles pass; broader format and size coverage pending |
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
-| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir pass portable, independent and Linux checks; core holds retain open-unlinked objects; indexed mutation, rename and platform writes pending |
+| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir/rename pass portable, independent and Linux checks; core holds retain open-unlinked or replaced objects; indexed mutation and platform writes pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine, legacy lists and modern orphan files pass portable faults, independent recovery and Linux reuse; advanced journal formats and platform write integration remain pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; ACLs/xattrs and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
@@ -582,7 +582,11 @@ All four removal CTest suites pass under optimized ASan/UBSan. The earlier
 29-suite regression also passes with the same core, covering the reader, writers,
 namespace creation, truncate and both orphan representations. Evidence is under
 `artifacts/checks/removal-*`, `artifacts/removal-initial-regression.xml` and
-`artifacts/removal-lifetime-final.xml`.
+`artifacts/removal-lifetime-final.xml`. The published removal checkpoint also
+passes all 32 CI suites across three jobs, including independent namespace,
+symlink and removal checks. Downloaded CI evidence is retained under
+`artifacts/checks/removal-ci-artifacts/`; the reviewed manifest and acceptance
+report are in `artifacts/checks/`.
 
 Independent checks pass 156 records: 26 clean operation sequences and 130 atomic
 cases. Each atomic case checks both uncommitted rollback and durable-commit replay
@@ -607,7 +611,65 @@ inspection includes FSKit debug dylibs as well as their launcher executables and
 is recorded in `artifacts/checks/removal-platform-builds.json`. These new binaries
 have compilation evidence only. Both adapters remain read-only; native object
 lifetime, cache coherence, authorization, writable mounts and LXNU policy remain
-unaccepted. Rename, indexed mutation and ACL/xattr handling remain required work.
+unaccepted. Indexed mutation and ACL/xattr handling remain required work.
+
+## Portable rename evidence
+
+`ext4-rename-test` covers ten ordinary writable profiles, ten modern orphan-file
+profiles and six small multi-group profiles. Its 160 functional sequences per
+profile cover both parent relationships and creation orders, absent destinations,
+replacement, held victims, populated directory exchange, all file/symlink type
+combinations and mixed-type exchange. All 4,160 sequences pass with exact inode
+identity, contents, ctimes, parent times/link counts, dotdot and released space.
+NOREPLACE, same-inode aliases, stale identities, nonempty directories, read-only
+instances and held source lifetime have separate checks. Reserving all remaining
+free blocks rejects a rename that needs parent growth without changing media or
+output; a shorter name still succeeds by reusing existing record space. This is
+reserved-space exhaustion, not a completely allocated bitmap.
+
+Eleven fault sequences include parent growth, populated directory moves/exchange,
+inline/mapped symlinks, a retained hardlink and multibatch victim reclamation with
+or without a hold. Across 286 operation/profile combinations, every allocation
+and read after the prepared mount/lookup/hold is injected: 11,689 allocation and
+11,083 read failures. Every write/flush cut uses three pending-write survival
+patterns and partial writes. Of 57,312 cuts, 56,122 recover to the complete required
+resource outside the journal, while 1,190 deliberately torn checksummed primary
+superblocks reject recovery without writes. Once the namespace commit is durable,
+recovery must finish the new namespace and victim reclamation. These are modeled
+persistence tests, not physical-device power-loss tests.
+
+Malformed guards pass 335 cases, with three checksum-absent skips. They cover
+ancestry cycles, invalid parent types, wrong dotdot, late malformed records,
+duplicate queried names, invalid parent link counts, immutable parents and directory
+checksums. An actual indexed directory separately rejects four mutation paths
+without writes. All three rename fault suites and the earlier 32-suite regression
+pass under optimized ASan/UBSan. The expanded functional/indexed matrix passes
+separately with the final tests. Reports are `artifacts/rename-fault1-regression.xml`,
+`artifacts/rename-existing-regression.xml` and `artifacts/checks/rename-final-*`.
+
+Independent checks pass all 286 atomic cases. Each compares durable-commit replay
+and uncommitted rollback with separate e2fsprogs journal-only recovery, including
+exact topology, identities, data, attributes, allocation and idempotent recovery.
+Nonrepairing e2fsck passes for the completed and recovered states. Reports are in
+`artifacts/rename-final-*-independent/`, with 1,170 protected source exports in the
+corresponding export directories.
+
+The actual Linux reference kernel passes 240 cases with 1/2/4 KiB blocks: 20 clean
+exchanged-directory images and all 220 pending operation/profile combinations.
+It verifies the retained namespace and objects, creates more objects and leaves a
+committed Linux journal. Portable reverse replay and independent e2fsprogs agree,
+preserving renamed data, attributes, dotdot and names. Reports and console evidence
+are in the lab under `artifacts/ext4-journal/linux-reference/rename-linux-*` and
+`logs/ext4-rename-linux-*`; the separate two-case smoke is excluded from 240.
+Larger block profiles have portable/e2fsprogs evidence only.
+
+Both unsigned kext architectures and universal FSKit compile with this core.
+The final FSKit extension remains read-only and does not link the unused namespace
+object; the universal core library contains the new API. Platform build evidence
+is in `artifacts/checks/rename-platform-builds.json`. No new mounted native tests
+are claimed for this change. The owner must serialize core operations; native
+rename locking, authorization, cache coherence, writable adapters, directory
+indexing, whiteouts and ACL/xattr policy remain unaccepted.
 
 ## FSKit build evidence
 

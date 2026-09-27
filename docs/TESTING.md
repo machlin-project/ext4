@@ -33,6 +33,9 @@ contract, not physical power-loss protection on a particular disk.
 | Removal validation | Invalid names/arguments, stale parent/target generation, mismatched target identity, readonly/type errors, indexed directories, malformed late/duplicate entries, immutable objects, protected target mappings and minimum cleanup credits; no mutation on rejection |
 | Held unlinked objects | Shared hold identity/refcounts, reads/writes/setattr/truncate after unlink, independent linked truncate while orphans remain, held directories/symlinks, no early inode reuse, generation advance after release, nonhead orphan removal, sync markers and unmount without implicit writes |
 | Removal and release failures | Every operation allocation/read and every write/flush cut for unlink/rmdir, held unlinked truncate and final release at the head or inside the orphan list; consumed-reference error poisoning, leak balance, committed deletion completion and whole-resource comparison outside the journal |
+| Rename | Same/cross-parent moves, both directory-record orders, regular files/directories/inline and mapped symlinks, replacement of held victims, mixed-type and populated-directory exchange, dotdot/parent links, unchanged source identity and captured times |
+| Rename validation | Same-inode hardlink no-op, NOREPLACE, stale identities, invalid names/arguments, nonempty replacement, descendant moves, malformed ancestry cycles/types, late corrupt/duplicate entries, parent link limits, indexed rejection, cleanup-credit exhaustion and reserved-space rejection with successful record reuse |
+| Rename failures | Every allocation/read and every write/flush cut for eleven move/replacement/exchange/growth cases, including 35-block victims, retained hardlinks and held victim release; exact old/new resource comparison outside the journal and independent replay of both commit outcomes |
 | Allocation and growth | Unaligned initial writes, sparse gaps, written allocations beyond EOF, deterministic fragmented insertion, extent root/leaf/parent splits, and direct through triple-indirect boundaries |
 | Unwritten conversion | Independent debugfs allocation with deliberately nonzero backing bytes; partial writes preserve zero semantics and split/merge extent records |
 | Free-space ownership | Group and superblock counters, inode data/mapping block counts, lazy bitmaps, short final groups, exhaustion to zero free blocks, reserved-space rejection, late credit failure with no writes |
@@ -116,6 +119,32 @@ directory link counts, released inode/data/mapping space and both commit outcome
 Linux checks the removed namespace and remaining hardlink before creating its own
 objects; reverse recovery requires that no removed name reappears and the alias's
 identity, metadata and bytes remain intact.
+
+`ext4-rename-test` runs 160 functional sequences per writable profile, varying
+parent identity, entry creation order, source type, replacement, lifetime and
+exchange, including every mixed non-directory replacement and every exchange type
+pair. Separate guards verify unchanged media/output on rejection and retained
+identity for hardlink aliases and held sources. The actual indexed fixture is a
+separate rejection suite. `--functional-only` omits the fault/export scenarios;
+it does not stand in for the complete CTest matrix.
+
+Eleven fault scenarios cover a same-parent file move, a cross-parent populated
+directory move, last-link file/directory/short-symlink/long-symlink replacement,
+replacement of one hardlink, mixed file/directory exchange, replacement and final
+release of a held file, destination growth with a NAME_MAX entry, and exchange of
+two populated directories. Allocation/read failures start after the prepared
+mount/lookups/hold. Every write/flush cut combines the three survival patterns and
+partial writes. A known durable namespace commit must recover the complete new
+state, including victim cleanup.
+
+`--smoke --export DIR` preserves `rename-before-`, `rename-atomic-`,
+`rename-pending-` and `rename-uncommitted-` images for all eleven operations.
+`check_rename.py` independently decodes names, dotdot, inode identity, generations,
+owners/times, link counts, mappings and contents. It checks exact free-space
+changes, nonrepairing e2fsck, separate journal/orphan replay for both outcomes,
+idempotence and unchanged protected input hashes. Linux roundtrips consume those
+checked expectations and require the complete renamed tree to remain unchanged
+after Linux creates additional objects and commits its own journal transaction.
 
 The Linux namespace probe reads expectations independently decoded from the
 checked clean image. It checks stat, lookup, complete readdir, file bytes and

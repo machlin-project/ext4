@@ -27,9 +27,11 @@ portable faults, independent e2fsck and Linux roundtrips. Live shrink can span
 bounded journal transactions, with orphan recovery completing interrupted operations.
 Offline recovery handles legacy lists and bounded modern orphan files, including
 Linux-authored open-unlinked objects and mixed representations.
-Atomic creation, mkdir, symlinks, hard links and removal now have portable fault and
-independent image tests. The serialized core retains open-unlinked inodes until
-their last hold is released. Indexed-directory mutation, rename, ACLs/xattrs and Linux
+Atomic creation, mkdir, symlinks, hard links, removal and rename now have portable
+fault, independent image and Linux tests. Rename includes replacement, NOREPLACE,
+EXCHANGE and cross-parent directory moves. The serialized core retains
+open-unlinked or replaced inodes until their last hold is released.
+Indexed-directory mutation, ACLs/xattrs and Linux
 capability policy remain unimplemented. Both platform adapters remain
 read-only; FSKit has not been mounted. Read
 [the acceptance matrix](docs/ACCEPTANCE.md) before using an image with this code.
