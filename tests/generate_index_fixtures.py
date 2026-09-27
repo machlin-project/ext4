@@ -28,14 +28,69 @@ DIRECTORY_TAIL_BYTES = 12
 DIRECTORY_ALIGNMENT = 4
 
 
+def lookup_expectations(image, parents, debugfs, expected_hash):
+    """Save independent name-to-inode identities without reading through the core."""
+    def digest(path):
+        with path.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+
+    if digest(image) != expected_hash:
+        raise RuntimeError(f"Indexed fixture changed before lookup inspection: {image}")
+    commands = []
+    rows = []
+    directories = {}
+    for parent in ["/"] + ["/" + name for name in parents]:
+        outputs = []
+        for operation in ("stat", "ls -p"):
+            command = [str(debugfs), "-R", f"{operation} {parent}", str(image)]
+            done = subprocess.run(command, capture_output=True, text=True,
+                                  errors="strict", timeout=120)
+            commands.append(dict(command=command, status=done.returncode,
+                                 stdout=done.stdout, stderr=done.stderr))
+            if done.returncode != 0:
+                raise RuntimeError(f"Independent lookup inspection failed: {command}")
+            outputs.append(done.stdout)
+        inode = inode_fields(outputs[0])
+        names = directory_entries(outputs[1])
+        if inode is None or inode["type"] != "directory" or names.get(".") != inode["inode"]:
+            raise RuntimeError(f"Invalid independent directory identity: {parent}")
+        for name, number in names.items():
+            # These generated fixture names are ASCII. Do not reinterpret
+            # debugfs quoting as raw name bytes if that fixture contract changes.
+            if not name.isascii() or "\\" in name or not 0 < len(name) <= NAME_MAX:
+                raise RuntimeError(f"Unexpected encoded fixture name: {name!r}")
+            rows.append(f"{inode['inode']} {name.encode('ascii').hex()} {number}\n")
+        directories[parent] = dict(inode=inode["inode"], entries=len(names))
+    if digest(image) != expected_hash:
+        raise RuntimeError(f"Lookup inspection changed its input: {image}")
+    expected = image.with_suffix(".lookup")
+    expected.write_text("".join(rows), encoding="ascii")
+    return dict(image=str(image), input_sha256=expected_hash, expected=str(expected),
+                expected_sha256=digest(expected), entries=len(rows),
+                directories=directories, commands=commands, passed=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tools-root", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--capacity", action="store_true", help="Generate only a full-root capacity fixture")
+    parser.add_argument("--lookup-only", action="store_true",
+                        help="Inspect existing verified images and save lookup expectations without changing images")
     args = parser.parse_args()
     tools = resolve_tools(args.tools_root)
     output = args.output.resolve()
+    if args.lookup_only:
+        inspected = []
+        for record in json.loads((output / "report.json").read_text()):
+            if record.get("passed") is not True:
+                raise RuntimeError("Lookup inspection requires a verified fixture")
+            image = output / Path(record["image"]).name
+            inspected.append(lookup_expectations(image, record["directories"],
+                                                  tools["debugfs"], record["input_sha256"]))
+            (output / "lookup-report.json").write_text(json.dumps(inspected, indent=2) + "\n")
+            print(f"PASS independent lookup expectations {image.name}: {inspected[-1]['entries']}", flush=True)
+        return
     output.mkdir(parents=True, exist_ok=False)
     profiles = []
     for algorithm in HASH_VERSIONS:
@@ -159,6 +214,7 @@ def main():
         with image.open("rb") as stream:
             image_hash = hashlib.file_digest(stream, "sha256").hexdigest()
         record.update(directories=directories, input_sha256=image_hash, features=sorted(features), passed=True)
+        record["lookup"] = lookup_expectations(image, parents, tools["debugfs"], image_hash)
         save()
         print(f"PASS {image.name}: {algorithm}/{signedness}, {directories['indexed']}", flush=True)
 

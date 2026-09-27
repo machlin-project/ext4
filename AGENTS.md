@@ -28,6 +28,15 @@ computer operations to GPT-6 Sol (gpt-6-sol). Give exact commands, directories,
 limits and success criteria. Only one worker may operate each VM. Keep expensive
 builds serialized and use bounded fixture sizes until scale is the test subject.
 
+Develop in coherent batches of related implementation and tests. During a batch,
+use compilation and focused checks for the affected behavior. Run the full
+regression and applicable independent/Linux acceptance at the batch boundary,
+not after every small edit or local commit. Repeat completed checks only when a
+change, failure or unresolved concern affects their evidence. Documentation and
+format-only edits do not justify another full filesystem acceptance run. Keep an
+active run tied to its compiled source revision and unchanged binaries/inputs so
+development can continue without rebuilding or restarting that run.
+
 Standalone driver commands may run from this repository. Machlin build, VM and
 acceptance commands run from the absolute lab directory. Use only dedicated
 disposable VMs for kernel and installed FSKit tests. Host boot policy, kernel,

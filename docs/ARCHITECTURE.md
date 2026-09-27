@@ -313,6 +313,22 @@ edge, hash interval, child ownership and checksum before choosing an eligible le
 The hash implementation handles legacy, half-MD4 and TEA, each with signed and
 unsigned byte variants. Filename bytes need not be UTF-8.
 
+Public read-only lookup follows the HTree hash ranges and scans continuation
+leaves, including continuations across internal-node boundaries. It validates
+the checksum, layout, sorted ranges and child bounds of each visited index node,
+then every record and hash range in the selected leaf before publishing an inode.
+Selected child aliases and references from leaves back to index nodes are rejected.
+This is path validation, not the complete graph validation required for mutation.
+The directory traversal owns three block buffers regardless of directory size;
+ordinary mapping and inode decoding retain their own bounded scratch allocations.
+Linear directories read each block once per lookup. An older indexed image without
+hash-signedness flags uses that exact-byte linear path instead of guessing which
+architecture wrote its names. Explicit unsigned hash versions remain unambiguous.
+The mount captures the checked hash seed and signedness; writable ownership does
+not permit another agent to change them behind its back. Failed lookup leaves the
+caller's output unchanged. These read paths obey the same owner serialization as
+other core operations and perform no writes, including on a writable mount.
+
 An indexed insertion reuses record slack, compacts a fragmented leaf, or splits
 the leaf at a balanced record boundary. Equal hashes retain the collision
 continuation bit. Separator insertion, internal-node splitting, root height growth,
@@ -321,7 +337,7 @@ Checksums and structural bounds are checked again on fresh buffers before editin
 Removal preserves the index and coalesces leaf records; a moved indexed directory
 updates dotdot with the root's index checksum.
 
-Directory size is bounded to 1,048,576 blocks. The temporary graph is bounded to
+Indexed mutation bounds directory size to 1,048,576 blocks. The temporary graph is bounded to
 24 MiB; there is no recursive traversal. The current index supports a root alone
 or one internal level. A full root at that level requires the unsupported LARGEDIR
 format and cancels without resource writes. Linear directories do not automatically

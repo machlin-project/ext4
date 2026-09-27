@@ -177,6 +177,224 @@ edge_finish(struct device *device, struct ext4_fs *fs)
 	free(clean);
 }
 
+struct edge_leaf_reference {
+	uint32_t hash;
+	uint32_t logical;
+};
+
+static bool
+edge_leaf_empty(struct edge_view *view, uint32_t logical)
+{
+	struct ext4_dir_entry entry;
+	uint64_t physical;
+	uint32_t offset = 0;
+	uint32_t length;
+
+	EXPECT(ext4_index_read(&view->tree, logical, &physical), EXT4_OK);
+	while (offset < view->allocation.fs->info.block_size) {
+		EXPECT(ext4_directory_entry_decode(
+			   view->allocation.fs, view->allocation.scratch, offset, &entry, &length),
+		    EXT4_OK);
+		if (entry.inode != 0) {
+			return false;
+		}
+		offset += length;
+	}
+	return true;
+}
+
+/* Put the verified collision separator in the root as well as the leaf index.
+ * Repartition existing leaves; if a third node is needed, reuse an empty leaf.
+ * Every mapped block stays reachable and allocation/inode accounting is unchanged. */
+static void
+edge_collision_boundary(struct ext4_fs *fs, const struct ext4_inode *parent,
+    const struct edge_collision *collision, uint32_t first, uint32_t second)
+{
+	struct edge_view view;
+	struct edge_leaf_reference *leaves;
+	struct ext4_dx_entry_disk *entries;
+	struct ext4_dx_count_disk *counts;
+	struct ext4_dir_header_disk *header;
+	struct ext4_map_run run;
+	uint32_t nodes[3] = { 0 };
+	uint32_t starts[4] = { 0 };
+	uint32_t count = 0;
+	uint32_t split = 0;
+	uint32_t node_count = 2;
+	uint32_t position;
+	uint32_t group;
+	uint32_t spare;
+	uint32_t capacity;
+	uint64_t physical;
+	uint16_t entry;
+	uint16_t entries_count;
+	uint16_t limit;
+	uint8_t *buffer;
+	void *snapshot;
+
+	edge_open(fs, parent, &view);
+	if (view.tree.levels == 0) {
+		edge_close(&view);
+		return;
+	}
+	EXPECT(ext4_index_read(&view.tree, 0, &physical), EXT4_OK);
+	counts = (struct ext4_dx_count_disk *)(view.allocation.scratch +
+	    sizeof(struct ext4_dx_root_prefix_disk));
+	entries = (struct ext4_dx_entry_disk *)counts;
+	CHECK(view.tree.levels == 1 && ext4_le16(&counts->count) == 2);
+	limit = ext4_le16(&counts->limit);
+	nodes[0] = ext4_le32(&entries[0].block);
+	nodes[1] = ext4_le32(&entries[1].block);
+	capacity = (fs->info.block_size - sizeof(*header) -
+		       (fs->metadata_checksum ? sizeof(struct ext4_dx_tail_disk) : 0U)) /
+	    sizeof(*counts);
+	leaves = calloc(view.tree.blocks, sizeof(*leaves));
+	CHECK(leaves != NULL);
+	for (group = 0; group < 2; group++) {
+		EXPECT(ext4_index_read(&view.tree, nodes[group], &physical), EXT4_OK);
+		counts = (struct ext4_dx_count_disk *)(view.allocation.scratch + sizeof(*header));
+		entries = (struct ext4_dx_entry_disk *)counts;
+		entries_count = ext4_le16(&counts->count);
+		for (entry = 0; entry < entries_count; entry++) {
+			CHECK(count < view.tree.blocks);
+			leaves[count].logical = ext4_le32(&entries[entry].block);
+			leaves[count].hash = view.tree.ranges[leaves[count].logical].lower;
+			if (leaves[count].logical == second) {
+				split = count;
+			}
+			count++;
+		}
+	}
+	CHECK(split > 0 && split < count && leaves[split - 1U].logical == first &&
+	    leaves[split].hash == (collision->major | 1U));
+	if (split > capacity || count - split > capacity) {
+		for (spare = 0; spare < count; spare++) {
+			if (leaves[spare].logical != first && leaves[spare].logical != second &&
+			    edge_leaf_empty(&view, leaves[spare].logical)) {
+				break;
+			}
+		}
+		CHECK(spare < count);
+		nodes[2] = leaves[spare].logical;
+		memmove(
+		    leaves + spare, leaves + spare + 1U, (count - spare - 1U) * sizeof(*leaves));
+		count--;
+		if (spare < split) {
+			split--;
+		}
+		node_count = 3;
+	}
+	leaves[0].hash = 0;
+	if (node_count == 2) {
+		starts[1] = split;
+	} else if (split > capacity) {
+		starts[1] = capacity;
+		starts[2] = split;
+	} else if (count - split > capacity) {
+		starts[1] = split;
+		starts[2] = split + capacity;
+	} else if (split > 1U) {
+		starts[1] = split - 1U;
+		starts[2] = split;
+	} else {
+		starts[1] = split;
+		starts[2] = split + 1U;
+	}
+	starts[node_count] = count;
+	for (group = 0; group < node_count; group++) {
+		entries_count = (uint16_t)(starts[group + 1U] - starts[group]);
+		CHECK(entries_count > 0 && entries_count <= capacity);
+		EXPECT(ext4_write_map_lookup(
+			   &view.allocation, &view.inode, view.disk, nodes[group], &run),
+		    EXT4_OK);
+		EXPECT(ext4_transaction_buffer(view.transaction, run.physical, &snapshot), EXT4_OK);
+		buffer = snapshot;
+		memset(buffer, 0, fs->info.block_size);
+		header = (struct ext4_dir_header_disk *)buffer;
+		ext4_encode16(&header->record_length, (uint16_t)fs->info.block_size);
+		counts = (struct ext4_dx_count_disk *)(buffer + sizeof(*header));
+		entries = (struct ext4_dx_entry_disk *)counts;
+		ext4_encode16(&counts->limit, (uint16_t)capacity);
+		ext4_encode16(&counts->count, entries_count);
+		for (entry = 0; entry < entries_count; entry++) {
+			position = starts[group] + entry;
+			if (entry != 0) {
+				ext4_encode32(&entries[entry].hash, leaves[position].hash);
+			}
+			ext4_encode32(&entries[entry].block, leaves[position].logical);
+		}
+		ext4_index_checksum_set(fs, parent, nodes[group], buffer);
+	}
+	EXPECT(ext4_write_map_lookup(&view.allocation, &view.inode, view.disk, 0, &run), EXT4_OK);
+	EXPECT(ext4_transaction_buffer(view.transaction, run.physical, &snapshot), EXT4_OK);
+	buffer = snapshot;
+	counts = (struct ext4_dx_count_disk *)(buffer + sizeof(struct ext4_dx_root_prefix_disk));
+	memset(counts, 0, fs->info.block_size - sizeof(struct ext4_dx_root_prefix_disk));
+	entries = (struct ext4_dx_entry_disk *)counts;
+	ext4_encode16(&counts->limit, limit);
+	ext4_encode16(&counts->count, (uint16_t)node_count);
+	for (group = 0; group < node_count; group++) {
+		if (group != 0) {
+			ext4_encode32(&entries[group].hash, leaves[starts[group]].hash);
+		}
+		ext4_encode32(&entries[group].block, nodes[group]);
+	}
+	ext4_index_checksum_set(fs, parent, 0, buffer);
+	ext4_index_close(&view.tree);
+	ext4_allocation_destroy(&view.allocation);
+	EXPECT(ext4_transaction_commit(view.transaction), EXT4_OK);
+	free(leaves);
+	edge_open(fs, parent, &view);
+	CHECK(view.tree.ranges[first].parent != view.tree.ranges[second].parent &&
+	    view.tree.ranges[first].upper == (collision->major | 1U) &&
+	    view.tree.ranges[second].lower == (collision->major | 1U));
+	edge_close(&view);
+	printf("PASS collision crosses internal nodes=%" PRIu32 " leaves=%" PRIu32 ",%" PRIu32 "\n",
+	    node_count, first, second);
+}
+
+static void
+edge_lookup_faults(struct device *device, struct ext4_fs *fs, const struct ext4_inode *parent,
+    const uint8_t *name, uint32_t number)
+{
+	struct ext4_inode result;
+	struct ext4_inode before;
+	uint32_t allocations = device->allocations;
+	uint32_t reads = device->reads;
+	uint32_t writes = device->writes;
+	uint32_t events = device->events;
+	uint32_t live = device->live;
+	uint32_t fault;
+	enum ext4_result expected;
+
+	expected = number == 0 ? EXT4_NOT_FOUND : EXT4_OK;
+	EXPECT(ext4_lookup(fs, parent, name, EXT4_NAME_MAX, &result), expected);
+	if (number != 0) {
+		CHECK(result.number == number);
+	}
+	allocations = device->allocations - allocations;
+	reads = device->reads - reads;
+	for (fault = 1; fault <= allocations + reads; fault++) {
+		memset(&result, 0xa5, sizeof(result));
+		memcpy(&before, &result, sizeof(before));
+		if (fault <= allocations) {
+			device->fail_allocation = device->allocations + fault;
+			expected = EXT4_NO_MEMORY;
+		} else {
+			device->fail_read = device->reads + fault - allocations;
+			expected = EXT4_IO;
+		}
+		EXPECT(ext4_lookup(fs, parent, name, EXT4_NAME_MAX, &result), expected);
+		CHECK(memcmp(&before, &result, sizeof(before)) == 0 && device->live == live &&
+		    device->writes == writes && device->events == events && !fs->aborted);
+		device->fail_read = 0;
+		device->fail_allocation = 0;
+	}
+	printf("PASS collision lookup faults target=%" PRIu32 " allocations=%" PRIu32
+	       " reads=%" PRIu32 "\n",
+	    number, allocations, reads);
+}
+
 static void
 collision_chain(struct device *device, const char *path, const char *vectors, const char *exports)
 {
@@ -239,6 +457,9 @@ collision_chain(struct device *device, const char *path, const char *vectors, co
 	CHECK(view.tree.ranges[first.logical].upper == (collision.major | 1U) &&
 	    view.tree.ranges[second.logical].lower == (collision.major | 1U));
 	edge_close(&view);
+	edge_collision_boundary(fs, &parent, &collision, first.logical, second.logical);
+	edge_lookup_faults(device, fs, &parent, collision.names[0], hello.number);
+	edge_lookup_faults(device, fs, &parent, collision.names[1], other.number);
 	writes = device->writes;
 	for (side = 0; side < 2; side++) {
 		EXPECT(ext4_link(fs, parent.number, parent.generation, collision.names[side],
@@ -258,6 +479,8 @@ collision_chain(struct device *device, const char *path, const char *vectors, co
 	edge_unlink(fs, &parent, &hello, guard[0], EXT4_NAME_MAX);
 	result = lookup(fs, &parent, (const char *)collision.names[1]);
 	CHECK(result.number == other.number && result.generation == other.generation);
+	edge_lookup_faults(device, fs, &parent, collision.names[0], 0);
+	edge_lookup_faults(device, fs, &parent, collision.names[1], other.number);
 	EXPECT(ext4_sync(fs), EXT4_OK);
 	storage_export(device, exports, path, "indexed-collision-retained-");
 	edge_unlink(fs, &parent, &other, collision.names[1], EXT4_NAME_MAX);

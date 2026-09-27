@@ -6,6 +6,14 @@ it. Tests compare contents and metadata, and use independent filesystem tools or
 Linux where the wire format or semantics are the subject. A successful build or
 fixture-generation command does not prove the corresponding runtime behavior.
 
+Develop related implementation and tests as one batch. Compilation and focused
+checks provide feedback during development; complete regression and applicable
+independent/Linux checks establish acceptance after the batch is ready. A small
+edit or local commit does not by itself require another full run. Repeat checks
+when later changes affect the behavior they covered, and preserve completed
+evidence for unchanged code. An active run keeps its compiled revision, binaries
+and inputs while development continues on the next batch.
+
 ## Portable suites
 
 `make test` runs the reader, malformed-image, namespace, file-write, allocation, truncate, orphan and journal tests
@@ -181,6 +189,28 @@ It also creates separated free record gaps whose combined capacity fits a long
 name; insertion must compact without growing the directory or allocating blocks.
 The independent edge checker verifies both collision states and the compacted
 image, including the empty leading leaf, exact identities and accounting.
+Deep fixtures also place the odd collision separator in the root: the two leaves
+belong to different internal nodes, even after the leading leaf becomes empty.
+Repartitioning retains every mapped block, reusing an empty leaf as an additional
+index node when needed. The independent dump must show those distinct parents;
+nonrepairing e2fsck still checks the complete exported image. Lookup allocation
+and read failures are injected for both colliding names and the removed name.
+
+`directory-lookup-*` compares every root, indexed and peer name against independently
+decoded debugfs inode identities. The generator saves byte names as hex in `.lookup`
+files. Both read-only and exclusive writable owners must leave resource bytes
+unchanged. The same suite covers every lookup allocation/read failure for found,
+absent, dot and dotdot queries, unchanged outputs, invalid arguments, malformed
+root/node/leaf records, child aliases, wrong hash ranges and missing or conflicting
+hash-signedness flags. Header decoding must preserve its input on success and error.
+The full-root capacity fixture uses the same checks, with a callback/allocation
+bound that detects a return to entry-by-entry indexed lookup. These bounds count
+core work; they are not wall-clock benchmarks. Existing verified images can gain
+independent expectations without regeneration:
+
+```sh
+python3 tests/generate_index_fixtures.py --lookup-only --output artifacts/index-fixtures
+```
 
 The Linux namespace probe reads expectations independently decoded from the
 checked clean image. It checks stat, lookup, complete readdir, file bytes and
@@ -307,8 +337,7 @@ boundaries as well as caching and thread counts.
 
 The current implementation has concrete unaccepted performance constraints:
 block-at-a-time reads allocate mapping scratch buffers repeatedly; CRC32C uses a
-bitwise fallback; public lookup scans directory entries even when a hash index is
-present, and enumeration rereads and checksums a block for each returned entry;
+bitwise fallback; enumeration rereads and checksums a block for each returned entry;
 attributed writes can validate the complete inode map; each
 transaction journals data and checkpoints synchronously; writable access is
 serialized by its owner. Measure these costs before choosing optimizations.
@@ -318,24 +347,28 @@ concurrency require renewed crash, ordering and lifetime acceptance. Native page
 cache ownership stays in the adapters. These requirements remain pending until
 the generated measurements and representative application workloads are reviewed.
 
-An initial read-only probe confirms the public directory lookup cost on three
+The read-only probe compares public directory lookup cost on three
 independently generated indexed images. It links the optimized freestanding core
 without sanitizers, then counts POSIX resource callbacks and environment
 allocations for a lookup of an absent name after complete enumeration:
 
-| Directory entries | Directory blocks | Read callbacks | Allocations |
+| Directory entries | Directory blocks | Read callbacks before / after indexed lookup | Allocations before / after |
 | --- | --- | --- | --- |
-| 99 | 33 | 131 | 231 |
-| 515 | 174 | 688 | 1,204 |
-| 46,122 | 15,497 | 61,618 | 107,741 |
+| 99 | 33 | 131 / 2 | 231 / 3 |
+| 515 | 174 | 688 / 3 | 1,204 / 4 |
+| 46,122 | 15,497 | 61,618 / 3 | 107,741 / 4 |
+
+On those same images, looking up the final enumerated entry takes 4, 5 and 5 read
+callbacks, respectively, including inode loading. Enumeration itself retains its
+earlier counts. The input hashes, compiler options, exact work and allocation
+balance are recorded in `artifacts/checks/core-read-cost-report.json` and
+`artifacts/checks/indexed-lookup-cost-report.json`. This demonstrates the reduced
+search work for these inputs; it does not measure physical I/O or throughput.
 
 All three images remain unchanged, with zero writes and balanced allocations.
-The results are in `artifacts/checks/core-read-cost-report.json`; the probe source,
-compiler options and identities are retained alongside that report. An earlier
-input-selection mistake is preserved separately and excluded from these counts.
-These are software operation counts, not physical-device I/O, throughput or a
-comparison with Linux. They establish a concrete scaling problem to address with
-indexed lookup and reusable directory-reading state.
+The probe source is retained alongside the reports. These software operation
+counts are not a comparison with Linux; reusable directory-reading state and
+representative timing workloads remain separate work.
 
 ## Platform suites and remaining coverage
 

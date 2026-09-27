@@ -11,6 +11,7 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	uint64_t group_count;
 	uint64_t inode_groups;
 	uint16_t state;
+	unsigned int word;
 
 	if (ext4_le16(&super->magic) != EXT4_SUPER_MAGIC) {
 		return EXT4_NOT_EXT4;
@@ -120,6 +121,11 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	fs->checksum_seed = (incompat & EXT4_FEATURE_INCOMPAT_CSUM_SEED)
 	    ? ext4_le32(&super->checksum_seed)
 	    : ext4_crc32c(UINT32_MAX, super->uuid, sizeof(super->uuid));
+	fs->directory_hash_flags =
+	    ext4_le32(&super->flags) & (EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH);
+	for (word = 0; word < 4; word++) {
+		fs->directory_hash_seed[word] = ext4_le32(&super->hash_seed[word]);
+	}
 	return EXT4_OK;
 }
 

@@ -31,94 +31,102 @@ ext4_index_read(struct ext4_directory_index *index, uint32_t logical, uint64_t *
 	return ext4_transaction_read(allocation->transaction, run.physical, allocation->scratch);
 }
 
-static enum ext4_result
-ext4_index_root(struct ext4_directory_index *index)
+enum ext4_result
+ext4_index_decode(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
+    uint8_t *buffer, struct ext4_index_metadata *result)
 {
-	struct ext4_fs *fs = index->allocation->fs;
-	struct ext4_dx_root_prefix_disk *root =
-	    (struct ext4_dx_root_prefix_disk *)index->allocation->scratch;
-	const struct ext4_super_disk *super = index->allocation->super;
-	uint32_t flags =
-	    ext4_le32(&super->flags) & (EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH);
-	uint32_t parent = ext4_le32(&root->dotdot.inode);
-	bool filetype = (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_FILETYPE) != 0;
-	unsigned int word;
-
-	if (ext4_le32(&root->dot.inode) != index->inode->number ||
-	    ext4_directory_record_length(fs, &root->dot) !=
-		offsetof(struct ext4_dx_root_prefix_disk, dotdot) ||
-	    root->dot.name_length != 1 || root->dot_name[0] != '.' || parent == 0 ||
-	    parent > fs->info.inodes ||
-	    (index->inode->number == EXT4_ROOT_INODE && parent != EXT4_ROOT_INODE) ||
-	    ext4_directory_record_length(fs, &root->dotdot) !=
-		fs->info.block_size - offsetof(struct ext4_dx_root_prefix_disk, dotdot) ||
-	    root->dotdot.name_length != 2 || root->dotdot_name[0] != '.' ||
-	    root->dotdot_name[1] != '.' ||
-	    (filetype &&
-		((root->dot.type != EXT4_FT_DIRECTORY && root->dot.type != EXT4_FT_UNKNOWN) ||
-		    (root->dotdot.type != EXT4_FT_DIRECTORY &&
-			root->dotdot.type != EXT4_FT_UNKNOWN))) ||
-	    (!filetype && (root->dot.type != 0 || root->dotdot.type != 0)) ||
-	    ext4_le32(&root->reserved) != 0 ||
-	    root->info_length !=
-		sizeof(*root) - offsetof(struct ext4_dx_root_prefix_disk, reserved)) {
-		return EXT4_CORRUPT;
-	}
-	if (root->flags != 0 || root->hash_version > EXT4_HASH_TEA_UNSIGNED ||
-	    root->indirect_levels > EXT4_DX_MAX_INDIRECT_LEVELS || flags == 0) {
-		return EXT4_UNSUPPORTED;
-	}
-	if (flags == (EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH)) {
-		return EXT4_CORRUPT;
-	}
-	index->parent_number = parent;
-	index->levels = root->indirect_levels;
-	index->version = root->hash_version;
-	if (index->version <= EXT4_HASH_TEA && flags == EXT4_UNSIGNED_DIRECTORY_HASH) {
-		index->version += EXT4_HASH_LEGACY_UNSIGNED;
-	}
-	for (word = 0; word < 4; word++) {
-		index->seed[word] = ext4_le32(&super->hash_seed[word]);
-	}
-	return EXT4_OK;
-}
-
-static enum ext4_result
-ext4_index_header(struct ext4_directory_index *index, uint32_t logical)
-{
-	struct ext4_allocation *allocation = index->allocation;
-	struct ext4_fs *fs = allocation->fs;
-	struct ext4_dir_header_disk *header;
-	struct ext4_dx_count_disk *counts;
-	uint32_t base = logical == 0 ? sizeof(struct ext4_dx_root_prefix_disk) : sizeof(*header);
+	const struct ext4_dx_root_prefix_disk *root;
+	const struct ext4_dir_header_disk *header;
+	const struct ext4_dx_count_disk *counts;
+	struct ext4_index_metadata decoded = { 0 };
+	uint32_t base = logical == 0 ? sizeof(*root) : sizeof(*header);
 	uint32_t tail = fs->metadata_checksum ? sizeof(struct ext4_dx_tail_disk) : 0;
 	uint16_t limit;
-	uint16_t count;
+	bool filetype = (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_FILETYPE) != 0;
 	enum ext4_result error;
 
-	error = ext4_directory_checksum(fs, index->inode, logical, allocation->scratch);
+	error = ext4_directory_checksum(fs, inode, logical, buffer);
 	if (error != EXT4_OK) {
 		return error;
 	}
 	if (logical == 0) {
-		error = ext4_index_root(index);
-		if (error != EXT4_OK) {
-			return error;
+		root = (const struct ext4_dx_root_prefix_disk *)buffer;
+		decoded.parent = ext4_le32(&root->dotdot.inode);
+		if (ext4_le32(&root->dot.inode) != inode->number ||
+		    ext4_directory_record_length(fs, &root->dot) !=
+			offsetof(struct ext4_dx_root_prefix_disk, dotdot) ||
+		    root->dot.name_length != 1 || root->dot_name[0] != '.' || decoded.parent == 0 ||
+		    decoded.parent > fs->info.inodes ||
+		    (inode->number == EXT4_ROOT_INODE && decoded.parent != EXT4_ROOT_INODE) ||
+		    ext4_directory_record_length(fs, &root->dotdot) !=
+			fs->info.block_size - offsetof(struct ext4_dx_root_prefix_disk, dotdot) ||
+		    root->dotdot.name_length != 2 || root->dotdot_name[0] != '.' ||
+		    root->dotdot_name[1] != '.' ||
+		    (filetype &&
+			((root->dot.type != EXT4_FT_DIRECTORY &&
+			     root->dot.type != EXT4_FT_UNKNOWN) ||
+			    (root->dotdot.type != EXT4_FT_DIRECTORY &&
+				root->dotdot.type != EXT4_FT_UNKNOWN))) ||
+		    (!filetype && (root->dot.type != 0 || root->dotdot.type != 0)) ||
+		    ext4_le32(&root->reserved) != 0 ||
+		    root->info_length !=
+			sizeof(*root) - offsetof(struct ext4_dx_root_prefix_disk, reserved)) {
+			return EXT4_CORRUPT;
 		}
+		if (root->flags != 0 || root->hash_version > EXT4_HASH_TEA_UNSIGNED ||
+		    root->indirect_levels > EXT4_DX_MAX_INDIRECT_LEVELS) {
+			return EXT4_UNSUPPORTED;
+		}
+		decoded.levels = root->indirect_levels;
+		decoded.version = root->hash_version;
 	} else {
-		header = (struct ext4_dir_header_disk *)allocation->scratch;
+		header = (const struct ext4_dir_header_disk *)buffer;
 		if (ext4_le32(&header->inode) != 0 || header->name_length != 0 ||
 		    header->type != 0 ||
 		    ext4_directory_record_length(fs, header) != fs->info.block_size) {
 			return EXT4_CORRUPT;
 		}
 	}
-	counts = (struct ext4_dx_count_disk *)(allocation->scratch + base);
+	counts = (const struct ext4_dx_count_disk *)(buffer + base);
 	limit = ext4_le16(&counts->limit);
-	count = ext4_le16(&counts->count);
-	if (limit != (fs->info.block_size - base - tail) / sizeof(*counts) || count == 0 ||
-	    count > limit) {
+	decoded.count = ext4_le16(&counts->count);
+	if (limit != (fs->info.block_size - base - tail) / sizeof(*counts) || decoded.count == 0 ||
+	    decoded.count > limit) {
 		return EXT4_CORRUPT;
+	}
+	*result = decoded;
+	return EXT4_OK;
+}
+
+static enum ext4_result
+ext4_index_header(struct ext4_directory_index *index, uint32_t logical)
+{
+	const struct ext4_super_disk *super = index->allocation->super;
+	struct ext4_index_metadata decoded;
+	uint32_t flags =
+	    ext4_le32(&super->flags) & (EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH);
+	unsigned int word;
+	enum ext4_result error;
+
+	error = ext4_index_decode(
+	    index->allocation->fs, index->inode, logical, index->allocation->scratch, &decoded);
+	if (error != EXT4_OK || logical != 0) {
+		return error;
+	}
+	if (flags == 0) {
+		return EXT4_UNSUPPORTED;
+	}
+	if (flags == (EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH)) {
+		return EXT4_CORRUPT;
+	}
+	index->parent_number = decoded.parent;
+	index->levels = decoded.levels;
+	index->version = decoded.version;
+	if (index->version <= EXT4_HASH_TEA && flags == EXT4_UNSIGNED_DIRECTORY_HASH) {
+		index->version += EXT4_HASH_LEGACY_UNSIGNED;
+	}
+	for (word = 0; word < 4; word++) {
+		index->seed[word] = ext4_le32(&super->hash_seed[word]);
 	}
 	return EXT4_OK;
 }

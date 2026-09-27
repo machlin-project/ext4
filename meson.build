@@ -11,6 +11,7 @@ endif
 
 core_sources = files(
   'core/support.c', 'core/mount.c', 'core/inode.c', 'core/read.c', 'core/directory.c',
+  'core/directory_lookup.c',
   'core/journal.c', 'core/recovery.c', 'core/group.c', 'core/system.c',
   'core/allocate.c', 'core/map_write.c', 'core/write.c', 'core/orphan.c',
   'core/inode_allocate.c', 'core/namespace.c', 'core/lifetime.c',
@@ -48,7 +49,7 @@ posix_dependency = declare_dependency(link_with: ext4_posix,
 programs = {}
 foreach name, source : {
   'xattr': 'xattr', 'xattr-write': 'xattr_write', 'xattr-lifetime': 'xattr_lifetime', 'space': 'space',
-  'directory-index': 'directory_index', 'index-write': 'index_write',
+  'directory-index': 'directory_index', 'directory-lookup': 'directory_lookup', 'index-write': 'index_write',
   'reader': 'reader', 'corruption': 'corruption', 'journal': 'journal',
   'write': 'write', 'namespace': 'namespace', 'removal': 'removal',
   'rename': 'rename', 'orphan': 'orphan',

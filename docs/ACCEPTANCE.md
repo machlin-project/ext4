@@ -964,6 +964,51 @@ These results establish the bounded portable
 profile; large-volume performance, automatic indexing of linear directories,
 writable adapters, native concurrency and policy remain separate requirements.
 
+## Portable indexed lookup evidence
+
+The public lookup path follows checked HTree ranges and collision continuations
+instead of enumerating the entire indexed directory. Its directory buffers are
+bounded independently of the number of entries. Ordinary linear lookup reads
+each directory block once; enumeration still has its earlier per-entry cost.
+
+Twenty format profiles and the full-root capacity image pass 21 targeted sanitized
+suites. They perform 107,840 successful name-to-inode comparisons against independent
+debugfs expectations under read-only and exclusive writable owners. All 298 lookup
+fault sweeps pass: 1,129 allocation failures and 835 read failures preserve output,
+allocation balance and device bytes. The 1,284 structure checks include checksum,
+pointer, alias, record and hash-range damage, unsupported headers, and the valid
+reserved checksum-tail field. Another 312 checks are explicitly inapplicable
+because a node level or checksum is absent. Explicit unsigned hash versions without
+superblock signedness flags are exercised on four profiles; the other 17 are
+reported separately. Missing signedness retains exact-byte linear lookup, and
+conflicting flags reject lookup. Invalid argument checks run under both owners.
+
+Three deep profiles repartition the independently verified collision names across
+different internal nodes. Both names retain distinct inode identities; the second
+remains reachable after deletion empties the leading leaf. All nine collision,
+retained and compaction exports pass independent topology, namespace, accounting
+and nonrepairing e2fsck checks. Six actual Linux boots verify the collision and
+retained states, commit additional indexed operations, and leave journals that
+the core and separate e2fsprogs replay agree on. Original byte names, data and
+metadata survive, and repeated core recovery is unchanged. The independently
+counted oracle-only primary-summary lag uses the namespace contract documented
+in [the portable test suite](TESTING.md#portable-suites); the core results have
+correct primary accounting.
+
+The optimized freestanding build stays within the 2 KiB frame limit; formatting,
+Python syntax and Clang analysis of the four changed translation units pass with
+no diagnostics. Callback measurements on the 46,122-entry image reduce an absent
+lookup from 61,618 reads and 107,741 allocations to three reads and four allocations.
+These are resource callback counts, not physical I/O or throughput. Timing, broader
+scale, enumeration optimization and native concurrency remain unaccepted.
+
+Evidence is in `artifacts/checks/indexed-lookup-targeted-review.json`,
+`artifacts/checks/indexed-lookup-edges-summary.json`,
+`artifacts/indexed-lookup-linux/report.json`, and the compiler, source and input
+reports under `artifacts/checks/indexed-lookup-*`. The complete regression for this
+implementation is still running; the earlier 227-test acceptance is not substituted
+for that result.
+
 ## Namespace on completely allocated block bitmaps
 
 Eight independently generated 8 MiB profiles have no free blocks in any group and

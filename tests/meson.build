@@ -51,6 +51,9 @@ test('directory-hash', programs['directory-hash'], suite: 'indexed')
 if paths['index_capacity'] != ''
   test('indexed-capacity', programs['index-write'], args: ['--capacity', paths['index_capacity']],
     timeout: 300, suite: 'indexed')
+  test('directory-lookup-capacity', programs['directory-lookup'],
+    args: [paths['index_capacity'], paths['index_capacity'].replace('.img', '.lookup')],
+    timeout: 300, suite: 'indexed')
 endif
 if paths['index_fixtures'] != ''
   foreach profile : ['legacy-signed', 'legacy-unsigned', 'half_md4-signed', 'half_md4-unsigned',
@@ -59,6 +62,9 @@ if paths['index_fixtures'] != ''
     'orphan-file', 'orphan-file-deep']
     image = paths['index_fixtures'] / ('index-' + profile + '.img')
     test('directory-index-' + profile, programs['directory-index'], args: image,
+      timeout: 300, suite: 'indexed')
+    test('directory-lookup-' + profile, programs['directory-lookup'],
+      args: [image, paths['index_fixtures'] / ('index-' + profile + '.lookup')],
       timeout: 300, suite: 'indexed')
     test('indexed-write-' + profile, programs['index-write'], args: image,
       timeout: 300, suite: 'indexed')

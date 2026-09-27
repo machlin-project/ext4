@@ -33,6 +33,9 @@ EXCHANGE and cross-parent directory moves. The serialized core retains
 open-unlinked or replaced inodes until their last hold is released.
 Indexed-directory mutation now passes portable functional/fault tests, independent
 e2fsprogs checks and Linux roundtrips, including collisions and bounded tree growth.
+Name lookup follows the directory hash index, including collision continuations
+across internal nodes. Independent name comparisons and targeted fault tests pass;
+directory enumeration and broader read-path performance still need work.
 The portable core reads, lists and transactionally changes inode-body and external
 xattrs, including copying shared blocks before modification. Attribute batches can
 commit together with inode permissions, ownership and times. Attribute lifetime now

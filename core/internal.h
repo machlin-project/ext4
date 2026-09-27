@@ -51,6 +51,8 @@ struct ext4_fs {
 	uint32_t blocks_per_group;
 	uint32_t inodes_per_group;
 	uint32_t checksum_seed;
+	uint32_t directory_hash_seed[4];
+	uint32_t directory_hash_flags;
 	uint32_t first_inode;
 	uint32_t journal_inode;
 	uint32_t last_orphan;
@@ -113,6 +115,8 @@ enum ext4_result ext4_edit_inode(struct ext4_fs *fs, struct ext4_transaction *tr
     uint32_t number, uint32_t generation, struct ext4_inode_disk **disk, struct ext4_inode *inode);
 uint32_t ext4_directory_record_length(
     struct ext4_fs *fs, const struct ext4_dir_header_disk *header);
+enum ext4_result ext4_directory_entry_decode(struct ext4_fs *fs, const uint8_t *buffer,
+    uint32_t offset, struct ext4_dir_entry *entry, uint32_t *record_length);
 /* The caller resolves the on-disk signedness policy into a hash version.
  * Seed words are host-order; NULL/all-zero uses the specified default seed.
  * Failure leaves result unchanged. This hashes bytes without name normalization. */

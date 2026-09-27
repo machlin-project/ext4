@@ -72,24 +72,73 @@ ext4_directory_checksum(
 	ext4_zero(&dx_tail->checksum, sizeof(dx_tail->checksum));
 	checksum = ext4_crc32c(ext4_inode_seed(fs, inode), buffer, base + count * sizeof(*counts));
 	checksum = ext4_crc32c(checksum, dx_tail, sizeof(*dx_tail));
+	ext4_encode32(&dx_tail->checksum, expected);
 	return checksum == expected ? EXT4_OK : EXT4_CORRUPT;
+}
+
+enum ext4_result
+ext4_directory_entry_decode(struct ext4_fs *fs, const uint8_t *buffer, uint32_t offset,
+    struct ext4_dir_entry *entry, uint32_t *record_length)
+{
+	const struct ext4_dir_header_disk *header;
+	uint32_t length;
+	uint32_t number;
+	uint16_t names;
+	size_t index;
+	bool checksum_tail;
+	bool filetype = (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_FILETYPE) != 0;
+
+	if (offset > fs->info.block_size || fs->info.block_size - offset < sizeof(*header)) {
+		return EXT4_CORRUPT;
+	}
+	header = (const struct ext4_dir_header_disk *)(buffer + offset);
+	length = ext4_directory_record_length(fs, header);
+	number = ext4_le32(&header->inode);
+	names = header->name_length;
+	checksum_tail = fs->metadata_checksum &&
+	    offset == fs->info.block_size - sizeof(struct ext4_dir_tail_disk) && number == 0 &&
+	    names == 0 && header->type == EXT4_DIRECTORY_TAIL_TYPE &&
+	    length == sizeof(struct ext4_dir_tail_disk);
+	/* A checksum tail retains its marker byte without the FILETYPE feature. */
+	if (!filetype && !checksum_tail) {
+		names |= (uint16_t)((uint16_t)header->type << 8);
+	}
+	if (length < sizeof(*header) || length % EXT4_DIRECTORY_ALIGNMENT != 0 ||
+	    length > fs->info.block_size - offset || names > length - sizeof(*header) ||
+	    names > EXT4_NAME_MAX || number > fs->info.inodes) {
+		return EXT4_CORRUPT;
+	}
+	if (number != 0) {
+		if (names == 0 || (filetype && header->type > EXT4_FT_SYMLINK)) {
+			return EXT4_CORRUPT;
+		}
+		for (index = 0; index < names; index++) {
+			if (buffer[offset + sizeof(*header) + index] == 0 ||
+			    buffer[offset + sizeof(*header) + index] == '/') {
+				return EXT4_CORRUPT;
+			}
+		}
+		ext4_copy(entry->name, buffer + offset + sizeof(*header), names);
+		entry->name[names] = 0;
+	}
+	entry->inode = number;
+	entry->name_length = names;
+	entry->type = filetype ? (enum ext4_file_type)header->type : EXT4_FT_UNKNOWN;
+	*record_length = length;
+	return EXT4_OK;
 }
 
 enum ext4_result
 ext4_next_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *cookie,
     struct ext4_dir_entry *entry)
 {
-	struct ext4_dir_header_disk *header;
+	struct ext4_dir_entry decoded;
 	uint8_t *buffer;
 	uint64_t block_offset;
-	size_t offset;
-	size_t wanted;
 	size_t completed;
-	size_t index;
+	uint32_t offset;
+	uint32_t wanted;
 	uint32_t record_length;
-	uint32_t number;
-	uint16_t name_length;
-	bool checksum_tail;
 	enum ext4_result error;
 
 	if (fs == NULL || directory == NULL || cookie == NULL || entry == NULL) {
@@ -110,7 +159,7 @@ ext4_next_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *
 	}
 	error = EXT4_NOT_FOUND;
 	while (*cookie < directory->size) {
-		wanted = (size_t)(*cookie % fs->info.block_size);
+		wanted = (uint32_t)(*cookie % fs->info.block_size);
 		block_offset = *cookie - wanted;
 		error =
 		    ext4_read(fs, directory, block_offset, buffer, fs->info.block_size, &completed);
@@ -128,60 +177,23 @@ ext4_next_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *
 		}
 		offset = 0;
 		while (offset < fs->info.block_size) {
-			if (fs->info.block_size - offset < sizeof(*header)) {
-				error = EXT4_CORRUPT;
+			error = ext4_directory_entry_decode(
+			    fs, buffer, offset, &decoded, &record_length);
+			if (error != EXT4_OK) {
 				goto out;
 			}
-			header = (struct ext4_dir_header_disk *)(buffer + offset);
-			record_length = ext4_directory_record_length(fs, header);
-			number = ext4_le32(&header->inode);
-			name_length = header->name_length;
-			checksum_tail = fs->metadata_checksum &&
-			    offset == fs->info.block_size - sizeof(struct ext4_dir_tail_disk) &&
-			    number == 0 && name_length == 0 &&
-			    header->type == EXT4_DIRECTORY_TAIL_TYPE &&
-			    record_length == sizeof(struct ext4_dir_tail_disk);
-			/* A checksum tail keeps its marker byte even with legacy 16-bit
-			 * directory name lengths and no FILETYPE feature. */
-			if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_FILETYPE) &&
-			    !checksum_tail) {
-				name_length |= (uint16_t)((uint16_t)header->type << 8);
-			}
-			if (record_length < sizeof(*header) || (record_length & 3U) ||
-			    record_length > fs->info.block_size - offset ||
-			    name_length > record_length - sizeof(*header) ||
-			    name_length > EXT4_NAME_MAX || number > fs->info.inodes ||
-			    (offset < wanted && offset + record_length > wanted)) {
+			if (offset < wanted && offset + record_length > wanted) {
 				error = EXT4_CORRUPT;
 				goto out;
 			}
 			if (offset >= wanted) {
 				*cookie = block_offset + offset + record_length;
-				if (number != 0) {
-					if (name_length == 0 ||
-					    ((fs->info.feature_incompat &
-						 EXT4_FEATURE_INCOMPAT_FILETYPE) &&
-						header->type > EXT4_FT_SYMLINK)) {
-						error = EXT4_CORRUPT;
-						goto out;
-					}
-					for (index = 0; index < name_length; index++) {
-						if (buffer[offset + sizeof(*header) + index] == 0 ||
-						    buffer[offset + sizeof(*header) + index] ==
-							'/') {
-							error = EXT4_CORRUPT;
-							goto out;
-						}
-					}
-					entry->inode = number;
-					entry->type = (fs->info.feature_incompat &
-							  EXT4_FEATURE_INCOMPAT_FILETYPE)
-					    ? (enum ext4_file_type)header->type
-					    : EXT4_FT_UNKNOWN;
-					entry->name_length = name_length;
-					ext4_copy(entry->name, buffer + offset + sizeof(*header),
-					    name_length);
-					entry->name[name_length] = 0;
+				if (decoded.inode != 0) {
+					entry->inode = decoded.inode;
+					entry->type = decoded.type;
+					entry->name_length = decoded.name_length;
+					ext4_copy(
+					    entry->name, decoded.name, decoded.name_length + 1U);
 					error = EXT4_OK;
 					goto out;
 				}
@@ -193,35 +205,4 @@ ext4_next_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *
 out:
 	fs->environment.release(fs->environment.context, buffer, fs->info.block_size);
 	return error;
-}
-
-enum ext4_result
-ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_t *name,
-    size_t name_length, struct ext4_inode *inode)
-{
-	struct ext4_dir_entry entry;
-	uint64_t cookie = 0;
-	size_t index;
-	enum ext4_result error;
-
-	if (name == NULL || inode == NULL || name_length == 0) {
-		return EXT4_INVALID_ARGUMENT;
-	}
-	if (name_length > EXT4_NAME_MAX) {
-		return EXT4_NAME_TOO_LONG;
-	}
-	for (index = 0; index < name_length; index++) {
-		if (name[index] == 0 || name[index] == '/') {
-			return EXT4_INVALID_ARGUMENT;
-		}
-	}
-	for (;;) {
-		error = ext4_next_dir(fs, directory, &cookie, &entry);
-		if (error != EXT4_OK) {
-			return error;
-		}
-		if (name_length == entry.name_length && ext4_equal(name, entry.name, name_length)) {
-			return ext4_get_inode(fs, entry.inode, inode);
-		}
-	}
 }

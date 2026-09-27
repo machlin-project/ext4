@@ -21,6 +21,13 @@ struct ext4_index_range {
 	uint8_t kind;
 };
 
+struct ext4_index_metadata {
+	uint32_t parent;
+	uint16_t count;
+	uint8_t levels;
+	uint8_t version;
+};
+
 /* The tree belongs to the caller's private transaction view. Its range array is
  * bounded by directory size and covers every mapped logical directory block. */
 struct ext4_directory_index {
@@ -35,6 +42,10 @@ struct ext4_directory_index {
 	uint8_t version;
 };
 
+/* Decode one index header without interpreting its child pointers. The buffer
+ * and result remain unchanged on failure; checksum verification is read-only. */
+enum ext4_result ext4_index_decode(struct ext4_fs *fs, const struct ext4_inode *inode,
+    uint32_t logical, uint8_t *buffer, struct ext4_index_metadata *result);
 enum ext4_result ext4_index_open(struct ext4_allocation *allocation, const struct ext4_inode *inode,
     struct ext4_inode_disk *disk, struct ext4_directory_index *index);
 void ext4_index_close(struct ext4_directory_index *index);

@@ -13,6 +13,21 @@ from check_orphans import accounting, digest
 from generate_fixtures import resolve_tools
 
 
+def leaf_parents(dump):
+    """Read the independently decoded node sections of a one-level HTree."""
+    nodes = list(re.finditer(rb"\nEntry #\d+: Hash 0x[0-9a-f]+, block (\d+)\n"
+                             rb"Number of entries \(count\):", dump))
+    parents = {}
+    for index, node in enumerate(nodes):
+        end = nodes[index + 1].start() if index + 1 < len(nodes) else len(dump)
+        for leaf in re.findall(rb"Reading directory block (\d+),", dump[node.end():end]):
+            logical = int(leaf)
+            if logical in parents:
+                raise RuntimeError("Independent index dump repeats a leaf")
+            parents[logical] = int(node[1])
+    return parents
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixtures", type=Path, required=True)
@@ -145,6 +160,18 @@ def main():
             if kind != "compacted":
                 require(f"Hash 0x{vector['major'] | 1:08x}".encode() in htree,
                         "Missing odd collision continuation separator")
+                if fixture["directories"]["indexed"]["levels"] == 1:
+                    parents = leaf_parents(htree)
+                    leading = baseline["leaves"][first]
+                    continuation = baseline["leaves"][second]
+                    require(leading in parents and continuation in parents and
+                            parents[leading] != parents[continuation],
+                            "Collision continuation did not cross internal nodes")
+                    root_dump = htree.split(b"\n\n", 1)[0]
+                    require(f"Hash 0x{vector['major'] | 1:08x}".encode() in root_dump,
+                            "Root lacks the odd collision continuation separator")
+                    record["collision_node_boundary"] = dict(leading=parents[leading],
+                                                               continuation=parents[continuation])
                 other = stat(image, f"<{listing[second]}>")
                 require((other["type"], other["mode"], other["uid"], other["gid"], other["links"],
                          other["size"], other["blocks"]) == ("regular", 0o750, 70000, 80000, 1, 0, 0) and
