@@ -13,6 +13,9 @@ edit or local commit does not by itself require another full run. Repeat checks
 when later changes affect the behavior they covered, and preserve completed
 evidence for unchanged code. An active run keeps its compiled revision, binaries
 and inputs while development continues on the next batch.
+The full GitHub workflow ignores pushes and pull requests that change only
+Markdown or `.clang-format`; manual dispatch remains available. Publish related
+code commits together at the batch boundary to schedule one complete CI run.
 
 ## Portable suites
 
@@ -290,6 +293,27 @@ complete bytes, single-application attribute changes, unchanged neighbors, names
 identity, free counts and clean nonrepairing e2fsck. The core CI suite includes both
 the focused cases and this independent check. Changing only a fixture workload or
 export path does not require repeating unchanged fault matrices during development.
+
+`file-growth-preallocation` checks write and truncate growth through written blocks
+beyond EOF, with a sparse gap, partial first/last blocks and retained unlinked inodes.
+The requested zeroing exceeds maximum transaction credits. Atomic APIs still reject
+without writes; growing APIs preserve the existing visible prefix, skip sparse holes,
+apply external xattr REMOVE/CREATE once, and retain hidden bytes after the requested
+end. Invalid attribute transitions and timestamps reject before preparation writes.
+
+The two `file-growth-faults-*` tests use small journals with extent and indirect maps.
+One write gap fits alone but exceeds capacity with its external xattr; truncate
+requires two preparation commits followed by final publication. Every observed
+allocation/read failure and write/flush cut is injected, with three survival patterns
+and torn writes. Old-size outcomes must retain the exact old inode and visible data;
+new-size outcomes must contain the complete zeroed gap and admitted metadata. Both
+can resume safely, and torn primary-superblock rejection is reported separately.
+
+`ext4-write-growth-test --export DIRECTORY IMAGES...` exports completed write and
+truncate states. `tests/check_growth.py --fixtures FIXTURE_DIRECTORY --exports
+DIRECTORY --output REPORT_DIRECTORY` checks their bytes, sparse mappings, retained
+hidden tail, xattrs, namespace, free counts and nonrepairing e2fsck. CI runs the same
+checker. Generated evidence records distinguish pending, focused and full acceptance.
 
 ## Attribute lifetime and feature transitions
 

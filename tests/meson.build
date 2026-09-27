@@ -108,8 +108,18 @@ foreach profile : ['4k', '1k']
 endforeach
 test('inode-and-file-write', programs['write'], args: write_images, timeout: 300, suite: 'core')
 test('file-write-partial', programs['write-partial'], args: write_images, timeout: 300, suite: 'core')
+test('file-growth-preallocation', programs['write-growth'], args: write_images,
+  timeout: 300, suite: 'core')
 foreach profile : ['4k', '1k']
   test('file-write-partial-faults-' + profile, programs['write-partial'],
+    args: ['--faults', paths['fixtures'] / ('ext4-' + profile + '.img')], timeout: 600, suite: 'core')
+endforeach
+growth_fault_profiles = ['4k']
+if get_option('extended_tests')
+  growth_fault_profiles += ['indirect-1k']
+endif
+foreach profile : growth_fault_profiles
+  test('file-growth-faults-' + profile, programs['write-growth'],
     args: ['--faults', paths['fixtures'] / ('ext4-' + profile + '.img')], timeout: 600, suite: 'core')
 endforeach
 test('allocation-and-growth', programs['write'], args: ['--allocation'] + write_images,

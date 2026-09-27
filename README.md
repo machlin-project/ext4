@@ -44,7 +44,7 @@ The portable core reads, lists and transactionally changes inode-body and extern
 xattrs, including copying shared blocks before modification. Attribute batches can
 commit together with inode permissions, ownership and times. Attribute lifetime now
 extends through creation, file writes, truncate, namespace changes and final orphan
-release. The combined 248-test regression passes for the indexed-lookup checkpoint,
+release. The combined 249-test CI regression passes for the read-path checkpoint,
 alongside targeted fault and independent checks. Bidirectional Linux
 attribute/ACL/security roundtrips and direct
 Linux replay of core attribute transactions pass on eight format profiles. ACL
@@ -52,8 +52,10 @@ enforcement and Linux capability policy are not implemented. Work proceeds throu
 portable-core acceptance, then FSKit integration on stock macOS, then LXNU policy.
 Both platform adapters remain read-only; FSKit has not been mounted. Read
 [the acceptance matrix](docs/ACCEPTANCE.md) before using an image with this code.
-The completed read-path batch passes 24 focused tests; its full CI regression is
-pending. Native adapters have not yet adopted the streamed enumeration API.
+Native adapters have not yet adopted the streamed enumeration API. Large-write and
+checksum changes have a separate combined CI run. Bounded zeroing of written
+preallocation now passes focused faults and independent image checks for both
+write and truncate growth; its full regression remains pending.
 Generated disk images and reports are not source artifacts.
 
 ## Layout

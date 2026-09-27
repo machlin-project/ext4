@@ -273,8 +273,9 @@ enum ext4_result ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t genera
  * batch commits only with the first successful prefix, then is preserved.
  * A caller retrying after partial progress must refresh policy and must not
  * replay that already applied xattr batch. Whole-request overflow rejects before
- * writes. Zero length follows ext4_write. Zeroing an allocated gap before the
- * first byte still has to fit one transaction; that bound can return RANGE. */
+ * writes. Zero length follows ext4_write. Written preallocation in an EOF gap
+ * can be zeroed in preparatory transactions without changing size or attributes.
+ * An error may retain those invisible zeros even when completed is zero. */
 enum ext4_result ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint64_t offset, const void *buffer, size_t length, const struct ext4_inode_update *update,
     size_t *completed);
@@ -293,8 +294,11 @@ enum ext4_result ext4_truncate_atomic(struct ext4_fs *fs, uint32_t number, uint3
  * that commit poisons the instance, including reads. Successful completion has
  * released all suffix blocks and removed the intent. Before the first commit,
  * private failures leave the resource unchanged. Journals too small to reserve
- * cleanup paths retain the atomic limit, as does growth. result changes only
- * on complete success. */
+ * cleanup paths retain the atomic shrink limit. Growth can first zero written
+ * preallocation in bounded transactions, retaining the old size and attributes
+ * until the final transaction. On error those invisible zeros can persist; an
+ * uncertain final commit can expose the complete requested size after recovery.
+ * result changes only on complete success. */
 enum ext4_result ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint64_t size, const struct ext4_inode_update *update, struct ext4_inode *result);
 /* Namespace mutations share the writable instance's exclusive owner. The caller

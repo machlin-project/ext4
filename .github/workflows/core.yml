@@ -3,7 +3,9 @@ name: Portable filesystem
 on:
   push:
     branches: [development, main]
+    paths-ignore: ['**/*.md', '.clang-format']
   pull_request:
+    paths-ignore: ['**/*.md', '.clang-format']
   workflow_dispatch:
 
 permissions:
@@ -222,6 +224,23 @@ jobs:
             --exports artifacts/partial-write-exports --output artifacts/partial-write-independent \
             2>&1 | tee artifacts/checks/partial-write-independent.log
           find artifacts/partial-write-exports artifacts/partial-write-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          df -h .
+      - name: Independently verify growth through written preallocation
+        if: matrix.suite == 'core'
+        run: |
+          mkdir artifacts/growth-exports
+          .build/ext4-write-growth-test --export artifacts/growth-exports \
+            artifacts/fixtures/ext4-1k.img artifacts/fixtures/ext4-2k.img \
+            artifacts/fixtures/ext4-4k.img artifacts/fixtures/ext4-8k.img \
+            artifacts/fixtures/ext4-16k.img artifacts/fixtures/ext4-32k.img \
+            artifacts/fixtures/ext4-indirect-1k.img artifacts/fixtures/ext4-no-checksum.img \
+            artifacts/fixtures/ext4-checksum-seed.img artifacts/fixtures/ext4-inode128.img \
+            2>&1 | tee artifacts/checks/growth-exports.log
+          python3 tests/check_growth.py --fixtures artifacts/fixtures \
+            --exports artifacts/growth-exports --output artifacts/growth-independent \
+            2>&1 | tee artifacts/checks/growth-independent.log
+          find artifacts/growth-exports artifacts/growth-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
       - name: Recover independently authored journals

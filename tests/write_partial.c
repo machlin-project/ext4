@@ -296,50 +296,6 @@ trace_write(void *context, uint64_t offset, const void *buffer, size_t length)
 	return device_write(trace->device, offset, buffer, length);
 }
 
-static void
-allocated_gap(struct device *device)
-{
-	struct ext4_inode inode;
-	struct ext4_inode_disk *disk;
-	struct ext4_fs *fs;
-	struct ext4_inode_update update = write_update(NULL);
-	uint8_t *prepared = small_journal(device);
-	size_t length = (PARTIAL_SMALL_CREDITS + 3U) * device->block_size;
-	uint8_t *bytes = pattern(length, 47);
-	uint8_t *before = malloc(device->size);
-	uint64_t location;
-	size_t completed;
-	uint32_t writes;
-
-	CHECK(before != NULL);
-	device_reset(device, prepared);
-	fs = mount_file(device, &inode);
-	EXPECT(ext4_write_partial(
-		   fs, inode.number, inode.generation, 0, bytes, length, &update, &completed),
-	    EXT4_OK);
-	EXPECT(ext4_sync(fs), EXT4_OK);
-	EXPECT(ext4_inode_location(fs, inode.number, &location), EXT4_OK);
-	/* Keep valid written preallocation beyond a shortened EOF in this model.
-	 * Exposing the gap must never publish its old nonzero bytes. */
-	disk = (struct ext4_inode_disk *)(device->cache + location);
-	ext4_encode32(&disk->size_lo, 1);
-	ext4_encode32(&disk->size_hi, 0);
-	ext4_inode_checksum_set(fs, inode.number, disk);
-	memcpy(device->stable, device->cache, device->size);
-	memcpy(before, device->cache, device->size);
-	writes = device->writes;
-	EXPECT(ext4_write_partial(
-		   fs, inode.number, inode.generation, length, bytes, 1, &update, &completed),
-	    EXT4_RANGE);
-	CHECK(completed == 0 && !fs->aborted && device->writes == writes &&
-	    memcmp(device->cache, before, device->size) == 0);
-	ext4_unmount(fs);
-	free(before);
-	free(bytes);
-	free(prepared);
-	puts("PASS allocated EOF gap: explicit atomic zeroing limit, unchanged data and metadata");
-}
-
 static enum ext4_result
 trace_flush(void *context)
 {
@@ -553,14 +509,12 @@ main(int argc, char **argv)
 		} else {
 			operations(&device, exports, argv[index]);
 			/* Export mode prepares the three states for independent inspection;
-			 * ordinary test mode additionally checks guards and bounded gaps. */
+			 * ordinary test mode additionally checks guards and capacity. */
 			if (exports == NULL) {
 				device_reset(&device, device.base);
 				guards(&device);
 				device_reset(&device, device.base);
 				reserved_space(&device);
-				device_reset(&device, device.base);
-				allocated_gap(&device);
 			}
 		}
 		storage_close(&device);

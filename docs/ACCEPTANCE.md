@@ -382,8 +382,9 @@ The admitted xattr change accompanies the first successful batch only. Later
 batches retain its result and the same captured permissions and times.
 
 Ten existing format profiles pass large unaligned growth, overwrite, one-time
-xattr CREATE/REMOVE, held-unlinked writes, invalid inputs, reserved-space exhaustion
-and the explicit limit on zeroing written preallocation before the first byte.
+xattr CREATE/REMOVE, held-unlinked writes, invalid inputs and reserved-space exhaustion.
+That checkpoint also verified an explicit limit on zeroing written preallocation;
+the subsequent growth batch removes it from the non-atomic APIs.
 The workload exceeds the maximum transaction capacity while fitting the ordinary
 free pool of each fixture. The previous atomic-write suite also passes unchanged.
 
@@ -400,10 +401,45 @@ debugfs byte/metadata/attribute comparisons, exact free-block/inode accounting a
 nonrepairing e2fsck. Original inputs remain unchanged. Evidence is under
 `artifacts/checks/partial-write-development-*`,
 `artifacts/checks/partial-write-independent-summary.json` and
-`artifacts/partial-write-independent/`. This batch's full regression is pending;
-the concurrent read-path CI run uses an earlier immutable source snapshot. Platform
+`artifacts/partial-write-independent/`. This batch's full regression is pending
+in the combined large-write/checksum CI run. The accepted read-path regression
+uses an earlier source snapshot. Platform
 adapters still expose read-only operations, and concurrent writable owners remain
 outside this evidence.
+
+## Growth through written preallocation
+
+Large writes and live truncate growth can prepare a written EOF gap in bounded
+transactions. Each preparatory commit retains the old size and attributes; the
+final transaction publishes the new data/size and captured attribute transition.
+Errors can leave invisible zeros beyond the old EOF, without contributing to the
+write's completed byte count. Atomic APIs retain their original capacity limit.
+
+The development batch compiles under sanitizers and the freestanding 2 KiB frame
+limit, and passes nine focused tests including the existing write, allocation,
+truncate and live-shrink controls. Ten profiles pass growth beyond maximum
+transaction capacity, sparse gaps, partial first/last blocks, external xattr
+REMOVE/CREATE, unchanged hidden tails and retained unlinked objects. Invalid
+timestamps and attribute transitions reject before any preparation writes.
+
+The extent and indirect small-journal cases pass 907 allocation/read failures and
+1,404 write/flush cuts. Of those cuts, 1,398 recover the exact old visible file or
+the complete requested growth; six torn primary superblocks explicitly reject
+before recovery writes. Retried old-size outcomes finish successfully. The write
+case exhausts credits only when its external xattr is included, while truncate
+requires two preparation commits before final publication. These are modeled
+storage results, recorded under `artifacts/checks/growth-development-evidence/`
+and `artifacts/checks/growth-development-summary.json`.
+
+All 20 completed states across ten profiles pass independent byte, inode, external
+attribute, sparse-map, hidden-tail, namespace and allocation comparisons, and
+nonrepairing e2fsck. Inputs and exports remain unchanged. Reports are under
+`artifacts/growth-independent/` and
+`artifacts/checks/growth-independent-retry2-summary.json`. Earlier attempts stopped
+on a command input path and report-directory setup; no filesystem checks failed.
+The default Meson profile also configures correctly without the optional indirect
+fixture. Full regression is pending at this batch boundary. Writable platform and
+concurrent-cache acceptance remain separate.
 
 ## Portable namespace evidence
 
@@ -1077,9 +1113,12 @@ from 251.692 to 75.986 ms, callbacks from 61,618 to 15,497 and allocations from
 device I/O, writes, concurrency and mounted-filesystem performance remain pending.
 
 Evidence is in `artifacts/checks/read-path-batch-targeted-retry1-summary.json` and
-`artifacts/checks/read-path-benchmark-results/`. The full 249-test regression is
-delegated to the batch's CI run; it has not yet been accepted. The earlier local
-248-test run is not counted as acceptance of these changes.
+`artifacts/checks/read-path-benchmark-results/`. All six jobs in the batch's CI run
+pass the exact 249-test inventory, with no Meson failures or skips. Independent
+reports contain no failed states; declared reader-only compatibility cases and
+embedded format-applicability notices remain separate. Downloaded artifacts and
+the bounded review are under `artifacts/checks/read-path-ci-36339470208/`. This
+accepts the read-path snapshot, independently of later write/checksum development.
 
 ## Portable checksum execution evidence
 

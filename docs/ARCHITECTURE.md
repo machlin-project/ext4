@@ -113,9 +113,26 @@ admitted xattr changes apply only with the first successful prefix; later batche
 preserve that state instead of repeating CREATE/REMOVE or security transitions.
 A caller retrying a suffix must refresh policy and preserve already applied changes.
 The input buffer and update remain immutable while the owner serializes the entire
-call. Zeroing written preallocation between the old EOF and the first requested byte
-still has to fit one transaction; that case retains an explicit range limit. Native
-adapters must translate the progress/error result into their cache and I/O contracts.
+call. Native adapters must translate the progress/error result into their cache and
+I/O contracts.
+
+If written preallocation in an EOF gap exceeds available transaction credits,
+`ext4_write_partial` and growing `ext4_truncate` first prepare that gap in bounded
+transactions. Preparation validates the complete inode ownership map and admitted
+attribute transition before writing. Its exclusive owner then retains the unchanged
+mapping throughout the call; no allocation or persistent validation cache is added.
+Each step resolves the inode again and zeros only bytes beyond its old visible size.
+Sparse and unwritten runs require no data snapshots. The old size, attributes and
+visible prefix remain intact until the final size/data transaction publishes growth.
+The same preparation handles a gap that fits alone but exhausts credits together
+with the final data or attribute change.
+
+A private failure can therefore leave durable zeros outside EOF without changing
+visible data or metadata. A later call can repeat preparation safely. Uncertain
+commits poison the instance as usual; recovery before publication retains the old
+size, while a committed publication exposes the fully prepared range. Preparation
+does not contribute to a partial write's completed byte count. The atomic write and
+truncate APIs retain their no-write rejection on capacity exhaustion.
 
 The allocator validates group descriptors, bitmap checksums and free counts before
 selecting blocks. It initializes lazy block bitmaps from protected system ranges
@@ -168,10 +185,10 @@ Errors before the first commit leave the caller's result and resource unchanged;
 an uncertain commit still requires recovery. A crash may therefore leave the
 original file or finish the captured size and attributes during recovery.
 
-Journals too small to reserve the minimum cleanup paths retain the atomic
+Journals too small to reserve the minimum cleanup paths retain the atomic shrink
 contract, preventing an intent that a later cleanup batch cannot fit. Live growth
-still uses a single transaction: sparse and unwritten runs need no data snapshots,
-but zeroing many written allocations beyond the previous EOF remains credit-bound.
+uses the preparation contract above when its existing written backing exceeds one
+transaction; its final inode and admitted attribute update must still fit together.
 An unlinked inode retained by a core hold can also shrink in batches; it remains
 on the orphan list after cleanup reaches its new EOF. A linked truncate intent
 can coexist with those held objects and removes only its own list entry.
@@ -371,7 +388,7 @@ Checksums and range validation precede each returned mapping; there is no mappin
 cache shared across operations or retained across mutations. Native mappings end
 at the block containing EOF even if later blocks are preallocated. The platform
 owner zeroes padding in that final block before exposing it through its page cache.
-Focused tests and warm-cache benchmarks pass; full regression remains pending.
+Focused tests, warm-cache benchmarks and the full 249-test CI regression pass.
 
 An indexed insertion reuses record slack, compacts a fragmented leaf, or splits
 the leaf at a balanced record boundary. Equal hashes retain the collision
