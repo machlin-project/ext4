@@ -1224,11 +1224,11 @@ bitmap_corruption(struct device *device)
 					ext4_encode16(&descriptor->block_bitmap_checksum_hi,
 					    (uint16_t)(checksum >> 16));
 				}
-				ext4_group_checksum_set(fs, group_index, descriptor);
 				ext4_encode32(&super->checksum,
 				    ext4_crc32c(UINT32_MAX, super,
 					offsetof(struct ext4_super_disk, checksum)));
 			}
+			ext4_group_checksum_set(fs, group_index, descriptor);
 		}
 		EXPECT(ext4_write(fs, inode.number, inode.generation, inode.size, "a", 1, &update,
 			   &completed),

@@ -30,6 +30,7 @@ contract, not physical power-loss protection on a particular disk.
 | --- | --- |
 | Reader | Eleven explicit format profiles; exact bytes, sparse/unwritten data, extents/indirects, indexed directories, cookies, links, timestamps and mappings |
 | Validation | Invalid geometry/features and checksums, malformed inode fields/timestamps, bounded reads/allocations |
+| Legacy group checksums | CRC16 vectors and independent polynomial reference; 32 through 1024-byte descriptors, group identity and every descriptor byte; real 32/64-byte groups, lazy bitmap/table initialization, allocation/freeing and recovery |
 | Xattr reads | Ten independently authored profiles; inode-body/external/shared blocks, raw ACL and binary bytes, empty/full-block values, exact sorted get/list, generation identity, failure-atomic outputs, all allocation/read faults and malformed late/duplicate entries |
 | Xattr independent inspection | Exact values and lists against debugfs; unknown namespaces remain opaque and fsck-clean; synthetic aliased values are explicitly reader-only compatibility cases with expected e2fsck rejection |
 | Xattr mutation | Atomic distinct-key batches and inode metadata; create/replace/remove existence policy; shared-block copy-on-write and reference release; symlink storage preservation; every allocation/read failure and write/flush interruption |

@@ -1,28 +1,45 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
 
+static uint16_t
+ext4_group_checksum(struct ext4_fs *fs, uint32_t group, struct ext4_group_disk *disk)
+{
+	struct ext4_le32 group_wire;
+	uint32_t checksum;
+	uint16_t saved;
+	uint16_t legacy;
+	size_t checksum_offset = offsetof(struct ext4_group_disk, checksum);
+	size_t suffix = checksum_offset + sizeof(disk->checksum);
+
+	ext4_encode32(&group_wire, group);
+	if (fs->metadata_checksum) {
+		saved = ext4_le16(&disk->checksum);
+		ext4_encode16(&disk->checksum, 0);
+		checksum = ext4_crc32c(fs->checksum_seed, &group_wire, sizeof(group_wire));
+		checksum = ext4_crc32c(checksum, disk, fs->descriptor_size);
+		ext4_encode16(&disk->checksum, saved);
+		return (uint16_t)checksum;
+	}
+	/* CRC16 omits the checksum field rather than including two zero bytes.
+	 * Extended descriptors include every byte after that skipped field. */
+	legacy = ext4_crc16(UINT16_MAX, fs->info.uuid, sizeof(fs->info.uuid));
+	legacy = ext4_crc16(legacy, &group_wire, sizeof(group_wire));
+	legacy = ext4_crc16(legacy, disk, checksum_offset);
+	return ext4_crc16(legacy, (const uint8_t *)disk + suffix, fs->descriptor_size - suffix);
+}
+
 enum ext4_result
 ext4_group_decode(
     struct ext4_fs *fs, uint32_t group, struct ext4_group_disk *disk, struct ext4_group *result)
 {
-	struct ext4_le32 group_wire;
 	struct ext4_group decoded;
-	uint32_t checksum;
-	uint16_t expected;
 
 	if (group >= fs->info.groups) {
 		return EXT4_CORRUPT;
 	}
-	if (fs->metadata_checksum) {
-		expected = ext4_le16(&disk->checksum);
-		ext4_encode16(&disk->checksum, 0);
-		ext4_encode32(&group_wire, group);
-		checksum = ext4_crc32c(fs->checksum_seed, &group_wire, sizeof(group_wire));
-		checksum = ext4_crc32c(checksum, disk, fs->descriptor_size);
-		ext4_encode16(&disk->checksum, expected);
-		if ((uint16_t)checksum != expected) {
-			return EXT4_CORRUPT;
-		}
+	if ((fs->info.feature_ro_compat & EXT4_GROUP_CHECKSUM_FEATURES) &&
+	    ext4_group_checksum(fs, group, disk) != ext4_le16(&disk->checksum)) {
+		return EXT4_CORRUPT;
 	}
 	ext4_zero(&decoded, sizeof(decoded));
 	decoded.block_bitmap = ext4_le32(&disk->block_bitmap_lo);
@@ -63,17 +80,10 @@ ext4_group_decode(
 void
 ext4_group_checksum_set(struct ext4_fs *fs, uint32_t group, struct ext4_group_disk *disk)
 {
-	struct ext4_le32 group_wire;
-	uint32_t checksum;
-
-	if (!fs->metadata_checksum) {
+	if (!(fs->info.feature_ro_compat & EXT4_GROUP_CHECKSUM_FEATURES)) {
 		return;
 	}
-	ext4_encode16(&disk->checksum, 0);
-	ext4_encode32(&group_wire, group);
-	checksum = ext4_crc32c(fs->checksum_seed, &group_wire, sizeof(group_wire));
-	checksum = ext4_crc32c(checksum, disk, fs->descriptor_size);
-	ext4_encode16(&disk->checksum, (uint16_t)checksum);
+	ext4_encode16(&disk->checksum, ext4_group_checksum(fs, group, disk));
 }
 
 enum ext4_result

@@ -46,10 +46,8 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	if (incompat & ~(EXT4_SUPPORTED_INCOMPAT | EXT4_FEATURE_INCOMPAT_RECOVER)) {
 		return EXT4_UNSUPPORTED;
 	}
-	/* Cluster allocation changes geometry even for reads. GDT CRC16 requires
-	 * its own verifier and is not silently accepted in its absence. */
-	if ((fs->info.feature_ro_compat & EXT4_FEATURE_RO_BIGALLOC) ||
-	    ((fs->info.feature_ro_compat & EXT4_FEATURE_RO_GDT_CSUM) && !fs->metadata_checksum)) {
+	/* Cluster allocation changes geometry even for reads. */
+	if (fs->info.feature_ro_compat & EXT4_FEATURE_RO_BIGALLOC) {
 		return EXT4_UNSUPPORTED;
 	}
 	state = ext4_le16(&super->state);

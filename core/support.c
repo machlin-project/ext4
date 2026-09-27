@@ -345,6 +345,31 @@ ext4_crc32c(uint32_t checksum, const void *buffer, size_t length)
 	return checksum;
 }
 
+/* Legacy group descriptors use CRC16 with a raw caller-supplied seed.
+ * Two nibble steps need only a 32-byte immutable remainder table. */
+#define EXT4_CRC16_NIBBLE_BITS 4U
+#define EXT4_CRC16_NIBBLE_MASK 0x0fU
+_Static_assert(EXT4_CRC16_POLYNOMIAL == 0xa001U, "CRC16 table polynomial");
+static const uint16_t ext4_crc16_table[EXT4_CRC16_NIBBLE_MASK + 1U] = { 0x0000U, 0xcc01U, 0xd801U,
+	0x1400U, 0xf001U, 0x3c00U, 0x2800U, 0xe401U, 0xa001U, 0x6c00U, 0x7800U, 0xb401U, 0x5000U,
+	0x9c01U, 0x8801U, 0x4400U };
+
+uint16_t
+ext4_crc16(uint16_t checksum, const void *buffer, size_t length)
+{
+	const uint8_t *bytes = buffer;
+	size_t index;
+
+	for (index = 0; index < length; index++) {
+		checksum ^= bytes[index];
+		checksum = (uint16_t)((checksum >> EXT4_CRC16_NIBBLE_BITS) ^
+		    ext4_crc16_table[checksum & EXT4_CRC16_NIBBLE_MASK]);
+		checksum = (uint16_t)((checksum >> EXT4_CRC16_NIBBLE_BITS) ^
+		    ext4_crc16_table[checksum & EXT4_CRC16_NIBBLE_MASK]);
+	}
+	return checksum;
+}
+
 uint32_t
 ext4_inode_seed(const struct ext4_fs *fs, const struct ext4_inode *inode)
 {

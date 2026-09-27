@@ -128,7 +128,7 @@ ext4_allocation_bitmap(struct ext4_allocation *allocation)
 	enum ext4_result error;
 
 	if (uninitialized) {
-		if (!fs->metadata_checksum) {
+		if (!(fs->info.feature_ro_compat & EXT4_GROUP_CHECKSUM_FEATURES)) {
 			return EXT4_CORRUPT;
 		}
 		ext4_zero(allocation->bitmap, fs->info.block_size);
@@ -184,8 +184,8 @@ ext4_allocation_account(struct ext4_allocation *allocation)
 		if (fs->descriptor_size >= EXT4_GROUP_64_SIZE) {
 			ext4_encode16(&disk->block_bitmap_checksum_hi, (uint16_t)(checksum >> 16));
 		}
-		ext4_group_checksum_set(fs, allocation->group_index, disk);
 	}
+	ext4_group_checksum_set(fs, allocation->group_index, disk);
 }
 
 enum ext4_result

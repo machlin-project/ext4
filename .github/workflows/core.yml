@@ -96,11 +96,17 @@ jobs:
             --output artifacts/xattr-space-fixtures 2>&1 | tee artifacts/checks/xattr-space-fixtures.log
           python3 tests/generate_xattr_enable_fixtures.py --output artifacts/xattr-enable-fixtures \
             2>&1 | tee artifacts/checks/xattr-enable-fixtures.log
+      - name: Generate legacy group checksum images
+        if: matrix.suite == 'core'
+        run: |
+          python3 tests/generate_group_checksum_fixtures.py --output artifacts/group-checksum-fixtures \
+            2>&1 | tee artifacts/checks/group-checksum-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
           space_options=()
           xattr_options=()
+          group_options=()
           if [[ '${{ matrix.suite }}' == indexed ]]; then
             index_options=(-Dindex_fixtures="$PWD/artifacts/index-fixtures" \
               -Dindex_collisions="$PWD/artifacts/index-collisions/vectors.txt" \
@@ -110,6 +116,7 @@ jobs:
             space_options=(-Dspace_fixtures="$PWD/artifacts/space-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == core ]]; then
+            group_options=(-Dgroup_checksum_fixtures="$PWD/artifacts/group-checksum-fixtures")
             xattr_options=(-Dxattr_fixtures="$PWD/artifacts/xattr-fixtures" \
               -Dxattr_space_fixtures="$PWD/artifacts/xattr-space-fixtures" \
               -Dxattr_enable_fixtures="$PWD/artifacts/xattr-enable-fixtures")
@@ -117,7 +124,7 @@ jobs:
           meson setup .build --buildtype=debugoptimized -Db_sanitize=address,undefined \
             -Dextended_tests=true -Dinode128_test=true -Dunwritten_tests=true \
             -Dorphan_file_tests=true -Dnamespace_tests=true \
-            "${index_options[@]}" "${space_options[@]}" "${xattr_options[@]}" \
+            "${index_options[@]}" "${space_options[@]}" "${xattr_options[@]}" "${group_options[@]}" \
             2>&1 | tee artifacts/checks/configure.log
           meson compile -C .build -j 2 2>&1 | tee artifacts/checks/build.log
       - name: Independently verify directory hashes and collision vectors
@@ -243,6 +250,53 @@ jobs:
           find artifacts/growth-exports artifacts/growth-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
+      - name: Independently verify legacy group checksum mutations
+        if: matrix.suite == 'core'
+        run: |
+          images=(artifacts/group-checksum-fixtures/gdt-1k32.img \
+            artifacts/group-checksum-fixtures/gdt-4k64.img \
+            artifacts/group-checksum-fixtures/gdt-indirect.img \
+            artifacts/group-checksum-fixtures/gdt-inode128.img)
+          for mode in write allocation truncate; do
+            options=()
+            checker=tests/check_writes.py
+            checker_options=()
+            if [[ "$mode" != write ]]; then
+              options=(--"$mode")
+              checker=tests/check_allocation.py
+            fi
+            if [[ "$mode" == truncate ]]; then
+              checker_options=(--truncate)
+            fi
+            exports="artifacts/group-checksum-$mode-exports"
+            checked="artifacts/group-checksum-$mode-independent"
+            mkdir "$exports"
+            .build/ext4-write-test "${options[@]}" --export-only --export "$exports" \
+              "${images[@]}" 2>&1 | tee "artifacts/checks/group-checksum-$mode-exports.log"
+            python3 "$checker" "${checker_options[@]}" --exports "$exports" --output "$checked" \
+              2>&1 | tee "artifacts/checks/group-checksum-$mode-independent.log"
+            find "$exports" "$checked" -type f \
+              ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          done
+          mkdir artifacts/group-checksum-growth-exports
+          .build/ext4-write-growth-test --export artifacts/group-checksum-growth-exports \
+            "${images[@]}" 2>&1 | tee artifacts/checks/group-checksum-growth-exports.log
+          python3 tests/check_growth.py --fixtures artifacts/group-checksum-fixtures \
+            --exports artifacts/group-checksum-growth-exports \
+            --output artifacts/group-checksum-growth-independent \
+            2>&1 | tee artifacts/checks/group-checksum-growth-independent.log
+          mkdir artifacts/group-checksum-namespace-exports
+          for options in '--smoke' '--smoke --groups' '--exhaust'; do
+            .build/ext4-namespace-test $options --export artifacts/group-checksum-namespace-exports \
+              artifacts/group-checksum-fixtures/gdt-small*.img
+          done 2>&1 | tee artifacts/checks/group-checksum-namespace-exports.log
+          python3 tests/check_namespace.py --fixtures artifacts/group-checksum-fixtures \
+            --exports artifacts/group-checksum-namespace-exports --recover .build/ext4-recover \
+            --output artifacts/group-checksum-namespace-independent \
+            2>&1 | tee artifacts/checks/group-checksum-namespace-independent.log
+          find artifacts/group-checksum-growth-exports artifacts/group-checksum-growth-independent \
+            artifacts/group-checksum-namespace-exports artifacts/group-checksum-namespace-independent \
+            -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Recover independently authored journals
         if: matrix.suite == 'core'
         run: |

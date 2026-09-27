@@ -144,6 +144,7 @@ void ext4_copy(void *destination, const void *source, size_t length);
 void ext4_zero(void *destination, size_t length);
 bool ext4_equal(const void *left, const void *right, size_t length);
 uint32_t ext4_crc32c(uint32_t checksum, const void *buffer, size_t length);
+uint16_t ext4_crc16(uint16_t checksum, const void *buffer, size_t length);
 uint32_t ext4_inode_seed(const struct ext4_fs *fs, const struct ext4_inode *inode);
 enum ext4_result ext4_device_read(struct ext4_fs *fs, uint64_t offset, void *buffer, size_t length);
 enum ext4_result ext4_block_read(struct ext4_fs *fs, uint64_t block, void *buffer);

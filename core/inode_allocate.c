@@ -19,7 +19,8 @@ ext4_inode_bitmap_prepare(struct ext4_fs *fs, uint32_t index, const struct ext4_
 		available = fs->inodes_per_group;
 	}
 	if (unused > fs->inodes_per_group ||
-	    (uninitialized && (!fs->metadata_checksum || index == 0))) {
+	    (uninitialized &&
+		(!(fs->info.feature_ro_compat & EXT4_GROUP_CHECKSUM_FEATURES) || index == 0))) {
 		return EXT4_CORRUPT;
 	}
 	if (uninitialized) {

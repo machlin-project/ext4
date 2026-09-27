@@ -30,6 +30,32 @@ in Git. Generated images never enter source history. Unsupported advanced ext4
 features remain visible requirements or explicit scope decisions; they may not be
 silently reclassified to declare the project complete.
 
+## Legacy group checksum evidence
+
+`GDT_CSUM` descriptor verification and mutation are implemented with CRC16;
+lazy inode and block initialization now admits this format as well as metadata
+checksums. Six independently generated images pass exact feature/geometry checks
+and nonrepairing e2fsck. They cover 32/64-byte descriptors, 1/4 KiB blocks, extent
+and indirect maps, and 128-byte inodes. Both small eight-group profiles retain
+lazy block/inode bitmaps and seven uninitialized inode tables.
+
+The sanitized build and optimized freestanding 2 KiB frame check pass. All 17
+selected Meson tests pass: the 14 format tests plus checksum, existing reader
+and malformed-image controls. They exercise allocation/freeing, large writes,
+growth, namespace mutations, group transitions, orphan cleanup and interrupted
+commits. Both small images exhaust all 115 available inodes across eight groups.
+The independent polynomial reference agrees on 2,016 seeded/aligned CRC16 cases;
+72 descriptor profiles check CRC16/CRC32C selection, and 8,064 descriptor-byte
+mutations reject without publishing output. Bitmap/inode/directory checksum cases
+remain explicitly inapplicable where that checksum format is absent.
+
+Evidence is under `artifacts/group-checksum-fixtures/` and
+`artifacts/checks/group-checksum-development-retry1-*`. The first configuration
+attempt stopped on the stale Meson option cache before compilation or tests;
+regenerating that cache admitted the new option. No failed filesystem test was
+rerun. Independent mutation checks, Linux roundtrips and complete regression
+remain pending; large-volume and native writable behavior are not established.
+
 ## Meson build acceptance
 
 Meson replaces CMake for the portable library, utilities, tests and CI. The complete

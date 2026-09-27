@@ -25,6 +25,15 @@ state API used by UUID, inode, group and journal checksum chains, with no implic
 initial or final complement. Byte loads admit unaligned buffers on every target;
 there is no initialization, allocation, mutable global state or CPU-feature probe.
 
+Legacy `GDT_CSUM` group descriptors use CRC16 over the UUID, little-endian group
+number and full descriptor with the checksum field omitted. The 32-byte remainder
+table is immutable. `METADATA_CSUM` takes precedence and retains its CRC32C rules.
+Both formats verify descriptors before trusting geometry or lazy-initialization
+flags, and update their checksum whenever allocation counters or flags change.
+Legacy group checksums do not add checksums to bitmaps, inodes or directory data.
+Lazy inode/block initialization uses the same protected-range and accounting
+validation for both formats. See the [ext4 group descriptor format](https://docs.kernel.org/filesystems/ext4/group_descr.html).
+
 ## I/O and cache contract
 
 Implementation and acceptance proceed through the portable core first, FSKit on

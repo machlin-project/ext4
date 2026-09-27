@@ -28,6 +28,8 @@ sets them while retaining other choices. Fixture paths can be absolute or relati
 to the source directory. Enabling a profile requires all its images; none are
 silently skipped. Test executables and `ext4-recover` remain directly in the build
 directory for the independent checkers and VM harnesses.
+After adding a new Meson option, first regenerate an existing build with
+`meson setup --reconfigure .build`, then set the new option with `-D`.
 
 `meson test -C .build --list` lists the configured cases. The six disjoint suites
 are `core`, `orphan-file`, `namespace`, `removal`, `rename` and `indexed`; select one
@@ -518,6 +520,27 @@ configure `-Dextended_tests=true` along with the generated directory in
 variations. It covers block sizes from 1 through 64 KiB, 32-bit group descriptors
 with indirect mapping, metadata without checksums and an explicit checksum seed.
 The 64 KiB image omits the journal to keep its total size at 64 MiB.
+
+Legacy group checksums have a separate optional format package:
+
+```sh
+python3 tests/generate_group_checksum_fixtures.py --tools-root E2FSPROGS_BUILD \
+  --output artifacts/group-checksum-fixtures
+meson setup --reconfigure .build \
+  -Dgroup_checksum_fixtures=artifacts/group-checksum-fixtures
+meson compile -C .build -j 4
+env -i PATH="$PATH" meson test -C .build --no-rebuild -j 2 \
+  metadata-checksum 'group-checksum-*' --print-errorlogs
+```
+
+The generator requests `uninit_bg` without `metadata_csum`, checks the exact
+feature set and runs nonrepairing e2fsck. Four ordinary images cover 32/64-byte
+descriptors, 1/4 KiB blocks, extent/indirect maps and 128-byte inodes. Two small
+eight-group images retain lazy inode bitmaps, block bitmaps and inode tables.
+The package exercises reading, writes, growth, allocation/freeing, orphan cleanup,
+namespace mutations, inode exhaustion, group transitions and interrupted commits.
+CI also exports writes, allocation, truncate, growth and namespace states for the
+existing independent checkers; no new filesystem oracle is shared with the core.
 
 The selected Xcode clang compiles a second, optimized freestanding archive
 with the same source and a 2048-byte frame-size check. This is a portability

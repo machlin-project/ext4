@@ -4,7 +4,7 @@
 paths = {}
 foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'namespace_fixtures', 'xattr_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
-  'index_fixtures', 'index_collisions', 'index_capacity']
+  'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
 endforeach
@@ -98,6 +98,32 @@ foreach name : write_names
   write_images += paths['fixtures'] / name
 endforeach
 test('metadata-checksum', programs['checksum'], timeout: 60, suite: 'core')
+if paths['group_checksum_fixtures'] != ''
+  gdt = paths['group_checksum_fixtures']
+  gdt_readers = [gdt / 'gdt-1k32.img', gdt / 'gdt-4k64.img', gdt / 'gdt-indirect.img']
+  gdt_writers = gdt_readers + [gdt / 'gdt-inode128.img']
+  gdt_small = [gdt / 'gdt-small64.img', gdt / 'gdt-small-indirect.img']
+  # One format package owns these checks, including lazy allocation/recovery.
+  foreach item : [
+    ['reader', 'reader', gdt_readers],
+    ['write', 'write', gdt_writers],
+    ['allocation', 'write', ['--allocation'] + gdt_writers],
+    ['truncate', 'write', ['--truncate'] + gdt_writers],
+    ['partial-write', 'write-partial', gdt_writers],
+    ['growth', 'write-growth', gdt_writers],
+    ['growth-faults', 'write-growth', ['--faults', gdt / 'gdt-1k32.img']],
+    ['orphan-recovery', 'orphan', [gdt / 'gdt-1k32.img', gdt / 'gdt-indirect.img']],
+    ['live-truncate', 'orphan', ['--live', gdt / 'gdt-1k32.img', gdt / 'gdt-indirect.img']],
+    ['namespace', 'namespace', gdt_small],
+    ['inode-exhaustion', 'namespace', ['--exhaust'] + gdt_small],
+    ['inode-groups', 'namespace', ['--groups'] + gdt_small],
+    ['removal', 'removal', gdt_small],
+    ['rename', 'rename', gdt_small],
+  ]
+    test('group-checksum-' + item[0], programs[item[1]], args: item[2],
+      timeout: 900, suite: 'core')
+  endforeach
+endif
 test('image-reader', programs['reader'], args: reader_images, timeout: 300, suite: 'core')
 test('file-read-ranges', programs['read-ranges'], timeout: 60, suite: 'core')
 test('malformed-images', programs['corruption'], args: paths['fixtures'] / 'ext4-4k.img',
