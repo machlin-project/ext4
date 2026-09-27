@@ -65,8 +65,9 @@ overflow also pass focused faults, independent image checks and Linux recovery;
 their 313-test CI run found an independent checker's stale index-flag expectation.
 That checker now admits verified automatic index creation. Special-file creation,
 legacy/extended device identities and atomic rename whiteouts pass focused faults,
-independent image checks and nine Linux recovery roundtrips. The expanded 338-test
-CI regression remains pending. Bounded preallocation and hole punching also pass
+independent image checks and nine Linux recovery roundtrips. Full CI acceptance
+remains pending after correcting a second stale index-flag expectation in the
+full-space checker; its eight profiles now pass independent checks. Bounded preallocation and hole punching also pass
 focused tests, eighteen independent image checks and five Linux roundtrips.
 Preallocation requires extents; punching also supports indirect files. Persistent
 inode flags and the future-write space guarantee under exhaustion remain open.

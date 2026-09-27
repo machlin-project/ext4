@@ -287,7 +287,12 @@ nonrepairing checks and nine journal-only replays return zero. The portable read
 then verifies all nine returned images without writes. Source images and prepared
 binaries remain unchanged. Evidence is in `artifacts/checks/special-files-linux-summary.json`
 and the lab's `artifacts/ext4-journal/linux-reference/special-files-pending-linux/`
-and `whiteout-pending-linux/`. The expanded 338-test full CI regression is pending.
+and `whiteout-pending-linux/`. The expanded CI run caught another stale INDEX-flag
+expectation in the independent full-space mkdir checker. The corrected checker
+accepts only the bounded one-block linear-to-indexed transition; exact identity,
+names, bytes, counters and e2fsck remain required. All eight profiles and 32 states
+pass locally, with forty successful nonrepairing checks. Evidence is in
+`artifacts/checks/space-autoindex-summary.json`; full CI acceptance remains pending.
 
 ## Meson build acceptance
 

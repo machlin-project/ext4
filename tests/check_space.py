@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 
 from check_index_write import entries
-from check_namespace import inode_fields
+from check_namespace import inode_fields, INODE_INDEX
 from check_orphans import accounting, digest
 from generate_fixtures import resolve_tools
 from generate_space_fixtures import NAME_MAX, RESERVE_BLOCKS
@@ -179,9 +179,16 @@ def main():
                     "Full-space mkdir has incorrect dot entries")
             require(parent["names"] == {**parent_old["names"], name.hex(): child["inode"]},
                     "Full-space mkdir changed unexpected names")
-            require(parent["inode"] == dict(parent_old["inode"], links=parent_old["inode"]["links"] + 1,
-                                             mtime=MUTATION_TIME, ctime=MUTATION_TIME,
-                                             size=parent["inode"]["size"], blocks=parent["inode"]["blocks"]) and
+            expected_parent = dict(parent_old["inode"], links=parent_old["inode"]["links"] + 1,
+                                   mtime=MUTATION_TIME, ctime=MUTATION_TIME,
+                                   size=parent["inode"]["size"], blocks=parent["inode"]["blocks"])
+            if (kind == "linear" and parent_old["inode"]["size"] == block_size and
+                    not parent_old["inode"]["flags"] & INODE_INDEX and
+                    parent["inode"]["flags"] == parent_old["inode"]["flags"] | INODE_INDEX):
+                require(parent["inode"]["size"] in (2 * block_size, 3 * block_size),
+                        "Automatic index creation has an invalid size")
+                expected_parent["flags"] |= INODE_INDEX
+            require(parent["inode"] == expected_parent and
                     parent["inode"]["size"] > parent_old["inode"]["size"], "Mkdir lost parent metadata or did not grow")
             reserve_old = prepared["objects"]["/reserve"]["inode"]
             reserve = written["objects"]["/reserve"]["inode"]
