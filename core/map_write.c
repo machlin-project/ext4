@@ -1413,11 +1413,50 @@ ext4_write_map_inspect(struct ext4_allocation *allocation, const struct ext4_ino
 	return error;
 }
 
+static void
+ext4_map_record_read(const struct ext4_inode_disk *disk, struct ext4_map_record *record)
+{
+	ext4_zero(record, sizeof(*record));
+	ext4_copy(record->block_data, disk->block_data, sizeof(record->block_data));
+	record->size_lo = disk->size_lo;
+	record->size_hi = disk->size_hi;
+	record->blocks_lo = disk->blocks_lo;
+	record->flags = disk->flags;
+	record->xattr_block_lo = disk->xattr_block_lo;
+	record->xattr_block_hi = disk->xattr_block_hi;
+	record->blocks_hi = disk->blocks_hi;
+	record->mode = disk->mode;
+}
+
 enum ext4_result
 ext4_write_map_validate(struct ext4_allocation *allocation, const struct ext4_inode *inode,
     struct ext4_inode_disk *disk)
 {
-	return ext4_write_map_inspect(allocation, inode, disk, false);
+	struct ext4_fs *fs = allocation->fs;
+	struct ext4_validated_map *entry;
+	struct ext4_map_record record;
+	uint32_t index;
+	enum ext4_result error;
+
+	if (!fs->validated_maps_enabled) {
+		return ext4_write_map_inspect(allocation, inode, disk, false);
+	}
+	ext4_map_record_read(disk, &record);
+	for (index = 0; index < EXT4_VALIDATED_MAPS; index++) {
+		entry = &fs->validated_maps[index];
+		if (entry->number == inode->number && entry->generation == inode->generation &&
+		    ext4_equal(&entry->record, &record, sizeof(record))) {
+			return EXT4_OK;
+		}
+	}
+	error = ext4_write_map_inspect(allocation, inode, disk, false);
+	if (error == EXT4_OK) {
+		entry = &fs->validated_maps[fs->validated_map_next++ % EXT4_VALIDATED_MAPS];
+		entry->number = inode->number;
+		entry->generation = inode->generation;
+		entry->record = record;
+	}
+	return error;
 }
 
 enum ext4_result

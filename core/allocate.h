@@ -21,6 +21,11 @@ struct ext4_allocation {
 	struct ext4_group group;
 	uint8_t *bitmap;
 	uint8_t *scratch;
+	/* A verified committed block bitmap reused while validating ranges in the
+	 * same group; a bitmap already in the transaction is read in place. */
+	uint8_t *validated;
+	uint64_t validated_bitmap;
+	uint32_t validated_group;
 	uint64_t free_blocks;
 	uint64_t reserved_blocks;
 	uint64_t maximum_block;

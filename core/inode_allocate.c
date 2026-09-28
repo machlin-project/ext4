@@ -137,6 +137,7 @@ ext4_allocate_inode(struct ext4_allocation *allocation, uint16_t mode,
 	uint8_t *bitmap;
 	void *buffer;
 	uint64_t offset = 0;
+	uint64_t loaded = UINT64_MAX;
 	uint32_t index = allocation->group_index;
 	uint32_t visited;
 	uint32_t within;
@@ -181,13 +182,16 @@ ext4_allocate_inode(struct ext4_allocation *allocation, uint16_t mode,
 	}
 	for (visited = 0; visited < fs->info.groups; visited++) {
 		error = ext4_group_descriptor_offset(fs, index, &offset);
-		if (error == EXT4_OK) {
+		/* Consecutive full groups share descriptor blocks; read each block once. */
+		if (error == EXT4_OK && offset / fs->info.block_size != loaded) {
+			loaded = UINT64_MAX;
 			error = ext4_transaction_read(allocation->transaction,
 			    offset / fs->info.block_size, allocation->scratch);
 		}
 		if (error != EXT4_OK) {
 			return error;
 		}
+		loaded = offset / fs->info.block_size;
 		descriptor =
 		    (struct ext4_group_disk *)(allocation->scratch + offset % fs->info.block_size);
 		error = ext4_group_decode(fs, index, descriptor, &group);

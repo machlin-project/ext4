@@ -918,7 +918,7 @@ ext4_transaction_begin_recovery(struct ext4_journal *journal, uint32_t sequence,
 
 static enum ext4_result
 ext4_transaction_snapshot(
-    struct ext4_transaction *transaction, uint64_t block, bool primary, void **result)
+    struct ext4_transaction *transaction, uint64_t block, bool primary, bool blank, void **result)
 {
 	struct ext4_journal *journal;
 	struct ext4_fs *fs;
@@ -954,7 +954,12 @@ ext4_transaction_snapshot(
 	if (buffer == NULL) {
 		return EXT4_NO_MEMORY;
 	}
-	error = ext4_block_read(fs, block, buffer);
+	if (blank) {
+		ext4_zero(buffer, fs->info.block_size);
+		error = EXT4_OK;
+	} else {
+		error = ext4_block_read(fs, block, buffer);
+	}
 	if (error != EXT4_OK) {
 		fs->environment.release(fs->environment.context, buffer, fs->info.block_size);
 		return error;
@@ -969,7 +974,13 @@ ext4_transaction_snapshot(
 enum ext4_result
 ext4_transaction_buffer(struct ext4_transaction *transaction, uint64_t block, void **result)
 {
-	return ext4_transaction_snapshot(transaction, block, false, result);
+	return ext4_transaction_snapshot(transaction, block, false, false, result);
+}
+
+enum ext4_result
+ext4_transaction_buffer_blank(struct ext4_transaction *transaction, uint64_t block, void **result)
+{
+	return ext4_transaction_snapshot(transaction, block, false, true, result);
 }
 
 bool
@@ -1000,7 +1011,7 @@ ext4_transaction_super(struct ext4_transaction *transaction, struct ext4_super_d
 	enrolled =
 	    ext4_transaction_peek(transaction, EXT4_SUPER_OFFSET / fs->info.block_size) != NULL;
 	error = ext4_transaction_snapshot(
-	    transaction, EXT4_SUPER_OFFSET / fs->info.block_size, true, &buffer);
+	    transaction, EXT4_SUPER_OFFSET / fs->info.block_size, true, false, &buffer);
 	if (error != EXT4_OK) {
 		return error;
 	}

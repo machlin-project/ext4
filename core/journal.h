@@ -166,6 +166,11 @@ enum ext4_result ext4_transaction_begin_recovery(struct ext4_journal *journal, u
     uint32_t credits, struct ext4_transaction **result);
 enum ext4_result ext4_transaction_buffer(
     struct ext4_transaction *transaction, uint64_t block, void **result);
+/* Enroll a block whose previous contents the caller replaces completely: a new
+ * snapshot starts zeroed without reading the device. An enrolled block is returned
+ * unchanged. */
+enum ext4_result ext4_transaction_buffer_blank(
+    struct ext4_transaction *transaction, uint64_t block, void **result);
 /* A snapshot request exhausted this transaction's credits. Inspect before cancel;
  * other RANGE failures do not authorize retrying a smaller operation. */
 bool ext4_transaction_capacity_failed(const struct ext4_transaction *transaction);

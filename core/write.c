@@ -57,6 +57,7 @@ ext4_mount_writable_with_journal(const struct ext4_environment *environment,
 		ext4_unmount(fs);
 		return error;
 	}
+	fs->validated_maps_enabled = true;
 	*result = fs;
 	return EXT4_OK;
 }
@@ -370,7 +371,8 @@ ext4_file_size_valid(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_
 
 static enum ext4_result
 ext4_write_snapshot(struct ext4_allocation *allocation, struct ext4_write_target *targets,
-    uint32_t *count, uint32_t capacity, uint32_t logical, uint64_t physical, void **snapshot)
+    uint32_t *count, uint32_t capacity, uint32_t logical, uint64_t physical, bool blank,
+    void **snapshot)
 {
 	uint32_t index;
 	enum ext4_result error;
@@ -394,7 +396,9 @@ ext4_write_snapshot(struct ext4_allocation *allocation, struct ext4_write_target
 	}
 	error = ext4_allocation_valid(allocation, physical);
 	if (error == EXT4_OK) {
-		error = ext4_transaction_buffer(allocation->transaction, physical, snapshot);
+		error = blank
+		    ? ext4_transaction_buffer_blank(allocation->transaction, physical, snapshot)
+		    : ext4_transaction_buffer(allocation->transaction, physical, snapshot);
 	}
 	return error;
 }
@@ -437,8 +441,8 @@ ext4_write_gap(struct ext4_allocation *allocation, const struct ext4_inode *inod
 			chunk = end - position;
 		}
 		if (run.physical != 0 && !run.unwritten) {
-			error = ext4_write_snapshot(
-			    allocation, targets, count, capacity, logical, run.physical, &snapshot);
+			error = ext4_write_snapshot(allocation, targets, count, capacity, logical,
+			    run.physical, false, &snapshot);
 			if (error != EXT4_OK) {
 				return error;
 			}
@@ -1035,17 +1039,19 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 			}
 			goto cancel;
 		}
+		chunk = fs->info.block_size - within;
+		if (chunk > length - consumed) {
+			chunk = length - consumed;
+		}
+		/* A new or completely overwritten block needs no previous contents. */
 		error = ext4_write_snapshot(&allocation, targets, &target_count, credits,
-		    (uint32_t)(logical + index), physical, &snapshot);
+		    (uint32_t)(logical + index), physical, zero || chunk == fs->info.block_size,
+		    &snapshot);
 		if (error != EXT4_OK) {
 			goto cancel;
 		}
 		if (zero) {
 			ext4_zero(snapshot, fs->info.block_size);
-		}
-		chunk = fs->info.block_size - within;
-		if (chunk > length - consumed) {
-			chunk = length - consumed;
 		}
 		ext4_copy((uint8_t *)snapshot + within, (const uint8_t *)buffer + consumed, chunk);
 		consumed += chunk;

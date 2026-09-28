@@ -39,6 +39,29 @@ struct ext4_orphan_file {
 };
 
 #define EXT4_QUOTA_TYPES 3U
+#define EXT4_VALIDATED_MAPS 64U
+
+/* The raw inode fields that define and account for an inode's block map. */
+struct ext4_map_record {
+	uint8_t block_data[EXT4_INODE_BLOCK_BYTES];
+	struct ext4_le32 size_lo;
+	struct ext4_le32 size_hi;
+	struct ext4_le32 blocks_lo;
+	struct ext4_le32 flags;
+	struct ext4_le32 xattr_block_lo;
+	struct ext4_le16 xattr_block_hi;
+	struct ext4_le16 blocks_hi;
+	struct ext4_le16 mode;
+	struct ext4_le16 padding;
+};
+
+/* An inode generation whose complete allocation map passed validation while its
+ * record held these map fields. */
+struct ext4_validated_map {
+	uint32_t number;
+	uint32_t generation;
+	struct ext4_map_record record;
+};
 
 /* Consecutive inode tables: groups first_group through first_group + groups - 1
  * each occupy the filesystem's inode_table_blocks, starting at block. */
@@ -101,6 +124,13 @@ struct ext4_fs {
 	struct ext4_inode_table_run *inode_table_runs;
 	size_t inode_table_run_count;
 	uint32_t inode_table_blocks;
+	/* A writable mount owns the device exclusively and changes maps only through
+	 * validated operations, so an unchanged map needs one complete validation.
+	 * Any change to the record's map fields requires another. Recovery rebuilds
+	 * maps from logs and never uses this cache. */
+	struct ext4_validated_map validated_maps[EXT4_VALIDATED_MAPS];
+	uint32_t validated_map_next;
+	bool validated_maps_enabled;
 	struct ext4_journal *journal;
 	struct ext4_orphan_file *orphan_file;
 	struct ext4_inode_hold *holds;

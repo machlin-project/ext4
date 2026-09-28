@@ -6,6 +6,10 @@
 #define EXT4_ORPHAN_MAPPED_CREDITS (3U * (2U * EXT4_EXTENT_MAX_DEPTH + 1U) + 6U)
 #define EXT4_ORPHAN_UNMAPPED_CREDITS 5U
 #define EXT4_ORPHAN_XATTR_CREDITS 3U
+/* A reclamation step releases up to half the inode's remaining blocks, as a power
+ * of two from EXT4_ORPHAN_BATCH_BLOCKS to this bound. A step exceeding its credits
+ * halves and retries, down to the single block the reserve guarantees. */
+#define EXT4_ORPHAN_STEP_MAX_BLOCKS 65536U
 
 enum ext4_result
 ext4_orphan_reserve(
@@ -717,9 +721,24 @@ ext4_orphan_tail(struct ext4_allocation *allocation, const struct ext4_inode *in
 	return error;
 }
 
+/* The step size depends only on the inode's current allocation and the caller's
+ * cap, so recovery after an interruption repeats exactly the remaining steps of an
+ * uninterrupted reclamation and reaches the same bytes. */
+static uint32_t
+ext4_orphan_step_blocks(const struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t cap)
+{
+	uint64_t half = inode->blocks_512 / (fs->info.block_size / EXT4_SECTOR_SIZE) / 2U;
+	uint32_t limit = EXT4_ORPHAN_BATCH_BLOCKS;
+
+	while (limit < EXT4_ORPHAN_STEP_MAX_BLOCKS && (uint64_t)limit * 2U <= half) {
+		limit *= 2U;
+	}
+	return limit < cap ? limit : cap;
+}
+
 static enum ext4_result
 ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool retained,
-    uint32_t limit, bool validate, bool *completed, struct ext4_recovery_report *report)
+    uint32_t *limit, bool validate, bool *completed, struct ext4_recovery_report *report)
 {
 	struct ext4_transaction *transaction;
 	struct ext4_allocation allocation;
@@ -755,6 +774,7 @@ ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool re
 		goto cancel;
 	}
 	next = ext4_le32(&disk->deletion_time);
+	*limit = ext4_orphan_step_blocks(fs, &inode, *limit);
 	error = ext4_allocation_init(&allocation, fs, transaction, &inode);
 	if (error != EXT4_OK) {
 		goto cancel;
@@ -771,7 +791,7 @@ ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool re
 	    ? 0
 	    : (uint32_t)((inode.size + fs->info.block_size - 1) / fs->info.block_size);
 	if (error == EXT4_OK && mapped) {
-		error = ext4_write_map_trim(&allocation, &inode, disk, first, limit, &done);
+		error = ext4_write_map_trim(&allocation, &inode, disk, first, *limit, &done);
 	}
 	if (error == EXT4_OK && done && mapped && (inode.links != 0 || retained)) {
 		error = ext4_orphan_tail(&allocation, &inode, disk);
@@ -868,7 +888,7 @@ ext4_orphan_finish_inode(struct ext4_fs *fs, uint32_t number, uint32_t generatio
 	uint64_t offset = 0;
 	uint32_t cursor = fs->last_orphan;
 	uint32_t previous = 0;
-	uint32_t limit = EXT4_ORPHAN_BATCH_BLOCKS;
+	uint32_t limit = EXT4_ORPHAN_STEP_MAX_BLOCKS;
 	bool mapped;
 	bool completed = false;
 	bool validate = true;
@@ -912,7 +932,7 @@ ext4_orphan_finish_inode(struct ext4_fs *fs, uint32_t number, uint32_t generatio
 	ext4_zero(&report, sizeof(report));
 	while (!completed) {
 		error = ext4_orphan_step(
-		    fs, number, previous, retained, limit, validate, &completed, &report);
+		    fs, number, previous, retained, &limit, validate, &completed, &report);
 		if (error == EXT4_RANGE && !fs->aborted && limit > 1) {
 			limit /= 2;
 			continue;
@@ -921,6 +941,7 @@ ext4_orphan_finish_inode(struct ext4_fs *fs, uint32_t number, uint32_t generatio
 			return error;
 		}
 		validate = false;
+		limit = EXT4_ORPHAN_STEP_MAX_BLOCKS;
 	}
 	return EXT4_OK;
 }
@@ -958,11 +979,11 @@ ext4_orphan_cleanup(struct ext4_fs *fs, struct ext4_recovery_report *report)
 			}
 		}
 		number = fs->last_orphan;
-		limit = EXT4_ORPHAN_BATCH_BLOCKS;
+		limit = EXT4_ORPHAN_STEP_MAX_BLOCKS;
 		validate = true;
 		do {
 			error = ext4_orphan_step(
-			    fs, number, 0, false, limit, validate, &completed, report);
+			    fs, number, 0, false, &limit, validate, &completed, report);
 			if (error == EXT4_RANGE && !fs->aborted && limit > 1) {
 				limit /= 2;
 				continue;
@@ -971,6 +992,7 @@ ext4_orphan_cleanup(struct ext4_fs *fs, struct ext4_recovery_report *report)
 				return error;
 			}
 			validate = false;
+			limit = EXT4_ORPHAN_STEP_MAX_BLOCKS;
 		} while (fs->last_orphan == number);
 	}
 	return EXT4_OK;

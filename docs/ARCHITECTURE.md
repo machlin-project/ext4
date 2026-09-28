@@ -354,7 +354,36 @@ triple-indirect blocks. Both mapping nodes and data contribute to inode block
 accounting. Allocation counters become visible in the filesystem instance only
 after commit succeeds. The primary-superblock snapshot always retains RECOVER and
 a fresh checksum through checkpoint; only clean finish clears that marker.
-Large-volume performance and a concurrent allocator remain unaccepted.
+A concurrent allocator remains unaccepted.
+
+Per-operation costs avoid repeating work whose inputs cannot have changed. An
+allocation context reads and checksums a group's block bitmap once while validating
+ranges in that group; a bitmap its transaction already holds takes precedence.
+Inode allocation reads each group-descriptor block once while skipping consecutive
+full groups. A block that a write replaces completely, or a new block it zeroes,
+enters the transaction without reading its old contents. Each orphan reclamation
+step releases up to half of the inode's remaining blocks, as a power of two from
+32 to 65,536, and halves within the step when it exceeds its credits. Because the
+size depends only on the inode's current allocation, recovery after an interruption
+repeats exactly the remaining steps of an uninterrupted reclamation.
+
+A writable mount remembers the last 64 inode generations whose complete map passed
+validation, with the raw record fields that define and account for the map: the
+map root, size, block count, flags, mode and attribute block. An operation whose
+record still holds those fields skips repeating the complete walk. The mount owns
+the device exclusively and afterwards only validated transactions change maps;
+any change to those fields, including one made behind the mount, requires another
+complete validation. Every mapping node read still checks its structure and
+checksum. Recovery, fast-commit replay and read-only mounts do not use this record.
+
+Indexed-directory operations still read every index node and classify every
+directory block before changing the directory, so reads per operation grow with
+the number of index nodes, and time and a temporary allocation of 24 bytes per
+block grow with directory blocks, up to the 1,048,576-block directory limit. With
+4 KiB blocks the root alone indexes about 500 leaves; with 1 KiB blocks a second
+index level appears early. Linux probes one root-to-leaf path. Replacing the whole-
+tree classification requires an equivalent guarantee against shared or misplaced
+leaves first.
 
 `ext4_fallocate` reserves holes as unwritten extents, with optional EOF growth or
 KEEP_SIZE. Reservation requires extent mapping; indirect files reject before any
