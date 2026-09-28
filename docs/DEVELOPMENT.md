@@ -123,6 +123,28 @@ symlink target and attribute value with debugfs. The `sustained` suite runs ever
 writable base profile and two wide profiles; CI additionally exports five runs for
 independent verification. Seeds make each failing sequence reproducible.
 
+## Scale measurements
+
+`ext4-scale IMAGE WORKLOAD SIZE [RESULT]` loads an image into memory and runs one
+workload against the optimized, unsanitized freestanding core. `sequential MIB`
+appends a file in 1 MiB partial writes, overwrites 1,000 random 64 KiB ranges and
+truncates it to zero. `directory ENTRIES` creates empty files in one directory,
+reporting every 10,000 creations, then looks up 1,000 names. `fragmented FILES`
+fills a directory with 4 KiB files, removes every other one and writes 64 MiB into
+the resulting holes. `reclamation MIB` unlinks a held file of that size, unmounts
+and measures offline orphan reclamation. Each phase prints one JSON object with
+elapsed time, device reads, writes, flushes and bytes, core allocation calls, peak
+live core allocation, write amplification and the resulting extent count. Device
+flushes cost nothing, so times measure the core rather than the medium.
+`RESULT` receives the image after the workload.
+
+`tests/run_scale.py --tools-root E2FSPROGS_BUILD --scale EXT4_SCALE --output NEW
+--label NAME` runs every workload on fresh 1 GiB e2fsprogs volumes with 4 KiB and
+1 KiB blocks, requires strict nonrepairing fsck of each result and writes
+`measurements.jsonl`. Compare source revisions with the same `tools/scale.c` driver
+on a quiet host: add it and its `meson.build` executable to a `git archive` of the
+baseline revision, build both with the same options and run them in turn.
+
 ## Multi-mount protection tests
 
 `tests/generate_mmp_fixtures.py --output artifacts/mmp-fixtures` authors four MMP

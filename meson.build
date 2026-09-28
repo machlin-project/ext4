@@ -73,6 +73,10 @@ executable('ext4-read-benchmark', ['tools/benchmark_read.c', 'adapters/posix/ima
   include_directories: [public_headers, posix_headers], c_args: posix_arguments,
   link_with: freestanding_core,
   override_options: ['optimization=2', 'b_sanitize=none', 'b_coverage=false', 'b_lto=false'])
+# Scale measurements run the optimized freestanding core on an in-memory image.
+executable('ext4-scale', 'tools/scale.c', include_directories: public_headers,
+  c_args: posix_arguments, link_with: freestanding_core,
+  override_options: ['optimization=2', 'b_sanitize=none', 'b_coverage=false', 'b_lto=false'])
 
 threads = dependency('threads')
 foreach name : ['mounted', 'mounted-symlink']
