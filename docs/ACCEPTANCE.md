@@ -90,8 +90,35 @@ the separate private-orphan check passes six. Earlier fault evidence is retained
 separately in `artifacts/checks/ea-inode-hardening-summary.json`; final evidence is
 in `artifacts/checks/ea-inode-{compatibility,orphans}-summary.json`.
 
-The expanded 432-test CI regression, actual Linux roundtrips and independent
-replay of interrupted large-value updates remain pending. Large values on short
+Forty-eight interrupted-transaction states also pass independent replay: two
+profiles, four operations and clean/committed/uncommitted inputs. Both engines
+preserve exact metadata, values and data, and repeated core recovery is unchanged.
+All 1,674 commands return zero, including 48 nonrepairing checks and sixteen
+journal-only replays. Evidence is in
+`artifacts/checks/ea-inode-interop-prepare-summary.json`. Fixtures with a larger
+journal repeat these 48 states and pass 24 functional states; their preparation
+is reviewed in `artifacts/checks/ea-inode-native-inputs-summary.json`.
+
+The expanded 432-test CI regression and complete native matrix remain pending.
+The initial core CI job failed while compiling its fixture helper because Linux
+requires `sys/types.h` before the e2fsprogs header; other suites are collected
+separately. A full 4 KiB Linux/core/Linux roundtrip passes, including matching
+recovery of a Linux-authored open-unlinked owner and a subsequent core mutation.
+The initial 1 KiB fixture exposed Linux's journal credit requirement for a 64 KiB
+replacement: 341 requested credits exceed the default small journal's 335-credit
+limit. Fixtures now reserve at least 2 MiB and 1,024 journal blocks. This failed
+native invocation is not counted as filesystem acceptance.
+
+The pinned e2fsprogs journal-only orphan cleaner also leaves an EA value reference
+stale in a Linux-authored image: its later nonrepairing check reports five
+references instead of four. Core cleanup passes strict fsck and matches actual
+Linux recovery. The failed oracle result remains in the lab's
+`artifacts/ext4-journal/ea-inode-clean/report.json`. Native orphan acceptance uses
+Linux itself as the independent replayer, with strict nonrepairing checks after
+both implementations; the no-orphan transaction matrix above retains e2fsprogs
+replay. No oracle image is repaired to make a pass.
+
+Large values on short
 symlinks reject before writes: their logical block charge conflicts with Linux's
 fast-symlink interpretation. Small short-symlink attributes remain supported.
 Legacy Lustre value-inode encodings and new-value deduplication are unsupported;

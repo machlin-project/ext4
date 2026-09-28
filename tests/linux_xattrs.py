@@ -9,7 +9,7 @@ import stat
 import struct
 import subprocess
 
-from check_namespace import inode_fields, symlink_bytes
+from check_namespace import inode_fields, symlink_bytes, INODE_BLOCK_DATA_SIZE
 from check_orphans import accounting, digest
 from check_rename import entries
 from check_xattrs import PREFIXES, listed_name
@@ -96,7 +96,9 @@ def snapshot(image, output, tools, run, *, allow_summary_lag=False):
     output.mkdir(parents=True, exist_ok=False)
     check = run([tool(tools, "e2fsck"), "-fn", image],
                 allowed=(0, 4) if allow_summary_lag else (0,))
-    counts = accounting(run([tool(tools, "dumpe2fs"), "-h", image]))
+    header = run([tool(tools, "dumpe2fs"), "-h", image])
+    counts = accounting(header)
+    ea_inode = re.search(r"^Filesystem features:.*\bea_inode\b", header, re.M) is not None
     groups = run([tool(tools, "dumpe2fs"), image])
     totals = re.findall(r"^\s+(\d+) free blocks, (\d+) free inodes, \d+ directories", groups, re.M)
     if not totals or len(totals) != len(re.findall(r"^Group \d+:", groups, re.M)):
@@ -161,6 +163,12 @@ def snapshot(image, output, tools, run, *, allow_summary_lag=False):
                 raise RuntimeError("Missing independent attribute block pointer")
             data_inode = dict(inode)
             data_inode["blocks"] -= int(int(external[1]) != 0) * counts["Block size"] // SECTOR_BYTES
+            if ea_inode:
+                # The preceding strict fsck validates total data plus logical
+                # value charges. Resolve the symlink target independently via
+                # bmap below; its data-only accounting excludes private values.
+                data_inode["blocks"] = (int(inode["size"] >= INODE_BLOCK_DATA_SIZE) *
+                                        counts["Block size"] // SECTOR_BYTES)
             item["data"] = symlink_bytes(image, path, data_inode, counts["Block size"],
                                          tool(tools, "debugfs"), run).hex()
         elif inode["type"] == "regular":
@@ -217,6 +225,8 @@ def prepare(case, tree, tools, *, verify_only=False):
                             ("xattr-data", data_lines)):
         (tree / filename).write_text("\n".join(lines) + "\n")
     (tree / "xattr-options").write_text(f"{int(verify_only)}\n")
+    if case.get("ea_inode"):
+        (tree / "ea-inode").touch()
     (tree / "linux-acl").write_bytes(acl_bytes(LINUX_ACL_ENTRIES, userspace=True))
     (tree / "linux-capability").write_bytes(struct.pack(
         "<IIIII", CAPABILITY_REVISION_2 | CAPABILITY_EFFECTIVE, 1 << CAP_NET_BIND_SERVICE, 0, 0, 0))
@@ -301,7 +311,10 @@ def write_core_expectations(state, output):
     return manifest
 
 
-def verify(case, image, output, tools, recover, reader, run):
+def verify(case, image, output, tools, recover, reader, run, *, native_replay=None):
+    if case.get("ea_inode"):
+        from linux_ea_inode import verify as verify_ea
+        return verify_ea(case, image, output, tools, recover, reader, run, native_replay)
     oracle = output / f"oracle-{image.name}"
     shutil.copyfile(image, oracle)
     replay = run([recover, "--write", image])

@@ -7,12 +7,18 @@ on:
   pull_request:
     paths-ignore: ['**/*.md', '.clang-format']
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Suite to run after a change limited to its tests or fixtures
+        type: choice
+        default: all
+        options: [all, core, orphan-file, namespace, removal, rename, indexed]
 
 permissions:
   contents: read
 
 concurrency:
-  group: core-${{ github.ref }}
+  group: core-${{ github.ref }}-${{ inputs.suite || 'all' }}
   cancel-in-progress: true
 
 jobs:
@@ -23,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [core, orphan-file, namespace, removal, rename, indexed]
+        suite: ${{ inputs.suite != '' && inputs.suite != 'all' && fromJSON(format('["{0}"]', inputs.suite)) || fromJSON('["core","orphan-file","namespace","removal","rename","indexed"]') }}
     env:
       CC: clang
     defaults:
@@ -178,7 +184,15 @@ jobs:
           python3 tests/check_ea_inode.py --fixtures artifacts/ea-inode-fixtures/report.json \
             --exports artifacts/ea-inode-exports --output artifacts/ea-inode-independent \
             2>&1 | tee artifacts/checks/ea-inode-independent.log
+          mkdir artifacts/ea-inode-fault-exports
+          .build/ext4-ea-inode-test --fault-smoke --export artifacts/ea-inode-fault-exports \
+            artifacts/ea-inode-fixtures/ea-inode-1k.img artifacts/ea-inode-fixtures/ea-inode-inode128.img \
+            2>&1 | tee artifacts/checks/ea-inode-fault-exports.log
+          python3 tests/check_ea_inode_faults.py --exports artifacts/ea-inode-fault-exports \
+            --recover .build/ext4-recover --output artifacts/ea-inode-fault-independent \
+            2>&1 | tee artifacts/checks/ea-inode-fault-independent.log
           find artifacts/ea-inode-fixtures artifacts/ea-inode-exports artifacts/ea-inode-independent \
+            artifacts/ea-inode-fault-exports artifacts/ea-inode-fault-independent \
             -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Independently verify persistent inode flags and recovery
         if: matrix.suite == 'core'

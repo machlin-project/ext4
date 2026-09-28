@@ -289,6 +289,8 @@ def main():
                        "LINUX_EXT4_PROBE_RESULT=PASS", f"Linux {module_report['kernel_release']} aarch64"):
             if marker not in console:
                 raise RuntimeError(f"missing guest evidence: {marker}")
+        if case.get("ea_inode") and "LINUX_EXT4_EA_INODE_PASS" not in console:
+            raise RuntimeError("Missing Linux EA_INODE mutation evidence")
         header = run([tools / "misc/dumpe2fs", "-h", scratch])
         if "needs_recovery" not in header:
             raise RuntimeError("Linux did not leave a pending journal for the reverse roundtrip")
@@ -321,23 +323,31 @@ def main():
         if args.xattrs:
             if digest(reader) != reader_sha:
                 raise RuntimeError("Attribute executable changed during the roundtrip")
-            checked = linux_xattrs.verify(case, scratch, output, tools, recover, reader, run)
+
+            def verify_native_attributes(candidate, expected, label):
+                tree = output / f"root-{label}-{Path(case['image']).name}"
+                original_tree = output / f"root-{archive_key(case)}"
+                shutil.copytree(original_tree, tree)
+                shutil.rmtree(tree / "expected")
+                expected_case = dict(image=str(expected), input_sha256=digest(expected))
+                linux_xattrs.prepare(expected_case, tree, tools, verify_only=True)
+                archive = output / f"initramfs-{tree.name}.cpio"
+                archive_tree(tree, archive)
+                text = run([runner, kernel, archive, "2", "512",
+                            "console=hvc0 rdinit=/init panic=-1 loglevel=4", candidate])
+                (output / f"{source.stem}-{label}.console.log").write_text(text)
+                for marker in ("LINUX_EXT4_XATTR_RETURN_PASS", "LINUX_EXT4_PROBE_RESULT=PASS",
+                               f"Linux {module_report['kernel_release']} aarch64"):
+                    if marker not in text:
+                        raise RuntimeError(f"Missing Linux {label} attribute evidence: {marker}")
+                if any(message in text for message in ("EXT4-fs error", "Aborting journal",
+                                                       "JBD2: Detected IO errors")):
+                    raise RuntimeError(f"Linux {label} reported a filesystem failure")
+
+            checked = linux_xattrs.verify(case, scratch, output, tools, recover, reader, run,
+                                         native_replay=verify_native_attributes)
             returned = Path(checked["returned_image"])
-            return_tree = output / f"root-returned-{case['image'].split('/')[-1]}"
-            original_tree = output / f"root-{archive_key(case)}"
-            shutil.copytree(original_tree, return_tree)
-            shutil.rmtree(return_tree / "expected")
-            return_case = dict(image=str(returned), input_sha256=digest(returned))
-            linux_xattrs.prepare(return_case, return_tree, tools, verify_only=True)
-            return_archive = output / f"initramfs-{return_tree.name}.cpio"
-            archive_tree(return_tree, return_archive)
-            console = run([runner, kernel, return_archive, "2", "512",
-                           "console=hvc0 rdinit=/init panic=-1 loglevel=4", returned])
-            (output / f"{source.stem}-returned.console.log").write_text(console)
-            for marker in ("LINUX_EXT4_XATTR_RETURN_PASS", "LINUX_EXT4_PROBE_RESULT=PASS",
-                           f"Linux {module_report['kernel_release']} aarch64"):
-                if marker not in console:
-                    raise RuntimeError(f"Missing Linux returned-attribute evidence: {marker}")
+            verify_native_attributes(returned, returned, "returned")
             final = linux_xattrs.snapshot(returned, output / f"final-{source.stem}-checked", tools, run)
             if final != checked["returned_state"]:
                 raise RuntimeError("Linux verification changed the returned inode/attribute state")

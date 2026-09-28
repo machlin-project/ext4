@@ -454,12 +454,15 @@ main(int argc, char **argv)
 	const char *exports = NULL;
 	bool faults = false;
 	bool orphans = false;
+	bool smoke = false;
 	int argument = 1;
 
 	CHECK(argc >= 2);
 	while (argument < argc && argv[argument][0] == '-') {
-		if (strcmp(argv[argument], "--faults") == 0) {
+		if (strcmp(argv[argument], "--faults") == 0 ||
+		    strcmp(argv[argument], "--fault-smoke") == 0) {
 			faults = true;
+			smoke = strcmp(argv[argument], "--fault-smoke") == 0;
 			argument++;
 		} else if (strcmp(argv[argument], "--value-orphans") == 0) {
 			orphans = true;
@@ -479,7 +482,7 @@ main(int argc, char **argv)
 			continue;
 		}
 		if (faults) {
-			mutation_faults(&device, exports, argv[argument]);
+			mutation_faults(&device, exports, argv[argument], smoke);
 			storage_close(&device);
 			continue;
 		}

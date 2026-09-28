@@ -78,7 +78,7 @@ fault_attempt(struct device *device, enum ea_fault_operation operation, const ui
 }
 
 static void
-mutation_faults(struct device *device, const char *exports, const char *path)
+mutation_faults(struct device *device, const char *exports, const char *path, bool smoke)
 {
 	static const char *const labels[] = { "create", "replace", "remove", "copy" };
 	struct ext4_fs *fs;
@@ -114,6 +114,9 @@ mutation_faults(struct device *device, const char *exports, const char *path)
 			memcpy(device->base, device->cache, device->size);
 		}
 		device_reset(device, device->base);
+		CHECK(
+		    snprintf(prefix, sizeof(prefix), "ea-fault-before-%s-", labels[operation]) > 0);
+		storage_export(device, exports, path, prefix);
 		EXPECT(fault_attempt(device, operation, bytes, 0, 0, 0, false, &baseline), EXT4_OK);
 		memcpy(expected, device->stable, device->size);
 		CHECK(
@@ -121,7 +124,7 @@ mutation_faults(struct device *device, const char *exports, const char *path)
 		storage_export(device, exports, path, prefix);
 		recovered = 0;
 		torn = 0;
-		for (fault = 1; fault <= 2; fault++) {
+		for (fault = 1; !smoke && fault <= 2; fault++) {
 			limit = fault == 1 ? baseline.allocations : baseline.reads;
 			for (point = 1; point <= limit; point++) {
 				device_reset(device, device->base);
@@ -131,7 +134,7 @@ mutation_faults(struct device *device, const char *exports, const char *path)
 				CHECK(storage_recover(device, expected, trace.committed));
 			}
 		}
-		for (point = 1; point <= baseline.events; point++) {
+		for (point = 1; !smoke && point <= baseline.events; point++) {
 			for (survival = 0; survival < 3; survival++) {
 				for (partial = 0; partial < 2; partial++) {
 					device_reset(device, device->base);
@@ -168,10 +171,10 @@ mutation_faults(struct device *device, const char *exports, const char *path)
 			storage_export(device, exports, path, prefix);
 			CHECK(storage_recover(device, expected, false));
 		}
-		printf("PASS EA_INODE faults operation=%s allocations=%u reads=%u cuts=%u "
+		printf("PASS EA_INODE faults operation=%s smoke=%u allocations=%u reads=%u cuts=%u "
 		       "recovered=%u torn_super_fail_closed=%u\n",
-		    labels[operation], baseline.allocations, baseline.reads, baseline.events * 6,
-		    recovered, torn);
+		    labels[operation], smoke, baseline.allocations, baseline.reads,
+		    smoke ? 0 : baseline.events * 6, recovered, torn);
 	}
 	memcpy(device->base, original, device->size);
 	free(bytes);

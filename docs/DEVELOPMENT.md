@@ -275,7 +275,9 @@ reported as clean filesystem acceptance. No input image is repaired or modified.
 
 EA_INODE fixtures use the pinned e2fsprogs build's static libext2fs and a small
 fixture-only helper. This avoids debugfs's one-block input limit for `ea_set -f`.
-The helper is not linked into the portable core. Generate all six profiles and
+The helper is not linked into the portable core. The journal is at least 2 MiB
+and 1,024 blocks, allowing Linux's 64 KiB replacement credit reservation.
+Generate all six profiles and
 run their reader, mutation, corruption, fault and private-orphan tests with:
 
 ```sh
@@ -301,6 +303,29 @@ copy with `e2fsck -y -E journal_only`, rejects any full-check passes at this sta
 then verifies exact values, namespace and counters before `e2fsck -fn`. Use repeated
 `--state` arguments to inspect only named states during a focused development
 batch. CI runs the complete 108-state matrix at the feature boundary.
+
+`ext4-ea-inode-test --fault-smoke --export DIRECTORY IMAGE...` emits before,
+after, committed-pending and uncommitted states for create/replace/remove and
+shared-block copy. It omits the already registered exhaustive failure sweeps.
+Check the 1 KiB and 128-byte-inode exports using
+`tests/check_ea_inode_faults.py --exports DIRECTORY --recover EXECUTABLE
+--tools-root E2FSPROGS_BUILD --output DIRECTORY`. The 48-state oracle comparison
+includes exact metadata/value/data transitions, clean nonrepairing fsck and
+idempotent recovery. Its `linux-pending.json` selects two verified committed inputs.
+
+Prepare native clean inputs from the functional checker's report using
+`tests/prepare_ea_inode_linux.py --report REPORT --recover EXECUTABLE
+--tools-root E2FSPROGS_BUILD --output DIRECTORY`. The resulting `selection.json`
+and pending selection feed `tests/run_linux_journal.py --xattrs --xattr-reader
+EXECUTABLE --recover EXECUTABLE` from the explicit lab directory; add `--pending`
+for the latter. The Sol/Luna VM handoff applies. The EA profile compares core and
+actual Linux recovery of Linux-authored journals and open-unlinked owners, then
+mutates shared values through the core and checks the returned image in Linux.
+Retain e2fsprogs journal-only orphan failures separately; they are not clean passes.
+
+CI defaults to all six suites. A manual workflow dispatch can select one suite
+after changes limited to its tests or fixtures. Keep the completed evidence for
+unchanged suites, and run every affected suite when the portable core changes.
 
 ## Extended-attribute mutation tests
 

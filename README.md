@@ -46,8 +46,9 @@ EA_INODE adds values up to 64 KiB, shared value references, transactional update
 and staged reclamation. Six format profiles pass focused mutation/corruption
 checks, 96 independent image states and twelve private-orphan recovery states.
 Power-cut tests cover create, replace, remove and shared-block copying.
-Native Linux roundtrips and the expanded full
-regression remain pending. Large attributes on short symlinks and legacy Lustre
+Independent replay accepts 48 transaction states. A full 4 KiB Linux roundtrip
+passes; the remaining native profiles and expanded regression are pending.
+Large attributes on short symlinks and legacy Lustre
 value-inode encodings are explicitly unsupported.
 
 Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.

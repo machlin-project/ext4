@@ -493,6 +493,8 @@ return_linux_attributes(struct device *device, struct ext4_fs *fs, const char *o
 	CHECK(fclose(stream) == 0);
 }
 
+#include "xattr_return_ea.h"
+
 int
 main(int argc, char **argv)
 {
@@ -511,6 +513,7 @@ main(int argc, char **argv)
 	const char *roundtrip = NULL;
 	const uint8_t *binary = NULL;
 	bool verify_only = false;
+	bool ea_roundtrip = false;
 	int argument = 1;
 
 	CHECK(argc >= 3 && cases != NULL);
@@ -522,8 +525,10 @@ main(int argc, char **argv)
 		CHECK(argc == 4);
 		verify_only = true;
 		argument++;
-	} else if (strcmp(argv[argument], "--roundtrip") == 0) {
+	} else if (strcmp(argv[argument], "--roundtrip") == 0 ||
+	    strcmp(argv[argument], "--ea-roundtrip") == 0) {
 		CHECK(argc == 5);
+		ea_roundtrip = strcmp(argv[argument], "--ea-roundtrip") == 0;
 		verify_only = true;
 		roundtrip = argv[2];
 		argument += 2;
@@ -563,7 +568,11 @@ main(int argc, char **argv)
 		CHECK(memcmp(&result, &unchanged, sizeof(result)) == 0);
 	}
 	if (roundtrip != NULL) {
-		return_linux_attributes(&device, fs, roundtrip);
+		if (ea_roundtrip) {
+			return_linux_ea_values(&device, fs, roundtrip);
+		} else {
+			return_linux_attributes(&device, fs, roundtrip);
+		}
 	}
 	ext4_unmount(fs);
 	CHECK(device.live == 0);

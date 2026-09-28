@@ -21,6 +21,8 @@ PROFILES = (
     dict(name="ea-inode-orphan-file", include={"orphan_file"}),
 )
 VALUE_MAX = 65536
+JOURNAL_MIB = 2
+JOURNAL_MIN_BLOCKS = 1024
 
 
 def main():
@@ -47,6 +49,9 @@ def main():
     reports = []
     for profile in PROFILES:
         block_size = profile.get("block_size", 1024)
+        # Linux's 64 KiB value replacement needs more credits than the default
+        # 1 MiB journal at 1 KiB blocks; mke2fs also requires 1024 journal blocks.
+        journal_mib = max(JOURNAL_MIB, JOURNAL_MIN_BLOCKS * block_size // (1024 * 1024))
         inode_size = profile.get("inode_size", 256)
         name = profile["name"]
         image = output / f"{name}.img"
@@ -81,6 +86,7 @@ def main():
             extended += ",orphan_file_size=4"
         run([tools["mke2fs"], "-F", "-t", "ext4", "-b", block_size, "-g", 1024,
              "-N", 512, "-I", inode_size, "-m", 0, "-O", "none," + ",".join(sorted(features)),
+             "-J", f"size={journal_mib}",
              "-U", UUID, "-E", extended, "-d", tree, image, 16 * 1024 * 1024 // block_size])
         values = {"maximum": payload(VALUE_MAX), "medium": payload(3 * block_size + 7),
                   "small": payload(13), "empty": b""}

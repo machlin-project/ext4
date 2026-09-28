@@ -257,6 +257,8 @@ xattr_check_acl_access(void)
 	    "Linux named ACL user, mask and trusted namespace restrictions");
 }
 
+#include "linux_ea_inode.h"
+
 static void
 check_xattrs(void)
 {
@@ -280,6 +282,9 @@ check_xattrs(void)
 		require(umount("/mnt") == 0, "cleanly unmount returned attributes");
 		puts("LINUX_EXT4_XATTR_RETURN_PASS");
 		power_off(1);
+	}
+	if (access("/ea-inode", F_OK) == 0) {
+		check_ea_inodes();
 	}
 	for (index = 0; index < sizeof(bytes); index++) {
 		bytes[index] = (uint8_t)(index * 23U + 0x67U);
