@@ -12,7 +12,7 @@ on:
         description: Suite to run after a change limited to its tests or fixtures
         type: choice
         default: all
-        options: [all, core, orphan-file, namespace, removal, rename, indexed]
+        options: [all, core, orphan-file, namespace, removal, rename, indexed, sustained]
 
 permissions:
   contents: read
@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ inputs.suite != '' && inputs.suite != 'all' && fromJSON(format('["{0}"]', inputs.suite)) || fromJSON('["core","orphan-file","namespace","removal","rename","indexed"]') }}
+        suite: ${{ inputs.suite != '' && inputs.suite != 'all' && fromJSON(format('["{0}"]', inputs.suite)) || fromJSON('["core","orphan-file","namespace","removal","rename","indexed","sustained"]') }}
     env:
       CC: clang
     defaults:
@@ -971,6 +971,29 @@ jobs:
             2>&1 | tee artifacts/checks/directory-growth-independent.log
           find "$exports" artifacts/directory-growth-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Export and independently verify sustained operation
+        if: matrix.suite == 'sustained'
+        run: |
+          seed=101
+          exports=()
+          for image in ext4-4k.img ext4-1k.img ext4-indirect-1k.img ext4-inode128.img; do
+            directory="artifacts/sustained-exports/${image%.img}"
+            mkdir -p "$directory"
+            .build/ext4-sustained-test "artifacts/fixtures/$image" "$seed" 1500 \
+              --export "$directory" 2>&1 | tee "artifacts/checks/sustained-export-${image%.img}.log"
+            exports+=(--exports "$directory")
+            seed=$((seed + 1))
+          done
+          directory=artifacts/sustained-exports/ext4-4k-wide
+          mkdir -p "$directory"
+          .build/ext4-sustained-test artifacts/fixtures/ext4-4k.img "$seed" 3000 --objects 1000 \
+            --entries 2000 --directories 3 --export "$directory" \
+            2>&1 | tee artifacts/checks/sustained-export-ext4-4k-wide.log
+          exports+=(--exports "$directory")
+          python3 tests/check_sustained.py --tools-root vendor/e2fsprogs/build "${exports[@]}" \
+            --output artifacts/sustained-independent 2>&1 | tee artifacts/checks/sustained-independent.log
+          find artifacts/sustained-exports artifacts/sustained-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' ! -name 'manifest.txt' -delete
       - name: Remove fixture-host symlinks before artifact discovery
         if: always()
         run: |

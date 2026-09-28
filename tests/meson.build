@@ -552,3 +552,19 @@ if get_option('unwritten_tests')
   test('unwritten-truncate', programs['write'], args: ['--truncate'] + unwritten_images,
     timeout: 300, suite: 'core')
 endif
+
+# Deterministic mixed-operation sequences with model verification and power cuts.
+sustained_seed = 1
+foreach name : write_names
+  test('sustained-' + name, programs['sustained'],
+    args: [paths['fixtures'] / name, sustained_seed.to_string(), '4000'],
+    timeout: 600, suite: 'sustained')
+  sustained_seed += 1
+endforeach
+foreach name : ['ext4-4k.img', 'ext4-1k.img']
+  test('sustained-wide-' + name, programs['sustained'],
+    args: [paths['fixtures'] / name, sustained_seed.to_string(), '8000', '--objects', '1000',
+      '--entries', '2000', '--directories', '3'],
+    timeout: 900, suite: 'sustained')
+  sustained_seed += 1
+endforeach

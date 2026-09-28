@@ -524,6 +524,23 @@ The 46,122-entry warm directory median decreases from 76.088 to 49.252 ms. Six
 extent/indirect write exports are byte-identical to the previously independently
 verified images, preserving checksum conventions as well as filesystem contents.
 
+## Sustained operation
+
+The `sustained` suite runs long deterministic sequences of mixed public operations
+against an in-memory model: namespace creation and removal, links, renames with
+replacement/NOREPLACE/EXCHANGE, atomic and partial writes, truncate, preallocation,
+hole punching, user attributes, permission changes and inode holds. Ballast files
+repeatedly fill the volume, so allocation exhaustion occurs during ordinary work.
+Every result is checked against the model; periodic walks and clean read-only
+remounts compare every name, inode identity, type, link count, permission, byte,
+symlink target and attribute. About one in six eligible atomic operations is
+repeated from a clean snapshot with a random power cut, cache-survival mode and
+optional torn write. Recovery must produce the exact old or new image outside the
+journal, and a durable commit must produce the new one. CI exports five final images
+for strict e2fsck and debugfs comparison with the model. See the development guide
+for options and the exact exclusions. This is sequential crash testing under the
+core's single owner; it does not exercise platform concurrency.
+
 ## Platform suites and remaining coverage
 
 Mounted tests verify the adapter's ordinary file operations, metadata, directory

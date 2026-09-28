@@ -31,9 +31,9 @@ directory for the independent checkers and VM harnesses.
 After adding a new Meson option, first regenerate an existing build with
 `meson setup --reconfigure .build`, then set the new option with `-D`.
 
-`meson test -C .build --list` lists the configured cases. The six disjoint suites
-are `core`, `orphan-file`, `namespace`, `removal`, `rename` and `indexed`; select one
-with `--suite NAME`, or use quoted test-name patterns. Complete output, per-test
+`meson test -C .build --list` lists the configured cases. The seven disjoint suites
+are `core`, `orphan-file`, `namespace`, `removal`, `rename`, `indexed` and `sustained`;
+select one with `--suite NAME`, or use quoted test-name patterns. Complete output, per-test
 JSON records and JUnit results are in `.build/meson-logs/testlog.txt`,
 `testlog.json` and `testlog.junit.xml`. CI retains all three, including successful
 fault-test output and explicit applicability skips.
@@ -90,6 +90,38 @@ privileged `ext4-mounted-lifetime-test MOUNTPOINT` additionally checks busy
 unmount with a retained descriptor or mapping; it unmounts the volume on success.
 Run these tools only against the dedicated fixture mounts. Device identifiers
 can change on every guest boot and must not be inferred from an earlier report.
+
+## Sustained mixed operations
+
+`ext4-sustained-test IMAGE SEED OPERATIONS` runs a deterministic random sequence of
+create, mkdir, symlink, mknod, atomic and partial writes, both truncate forms,
+preallocation and hole punching, link, unlink, rmdir, rename with replacement,
+NOREPLACE and EXCHANGE, user attributes, permission changes and inode holds.
+An in-memory model defines the expected namespace, bytes, link counts, permissions
+and attribute values. It checks every result against the model, walks every
+directory and file every 50 operations, and remounts cleanly every 200 operations,
+including a read-only verification mount. Existing names, populated rmdir targets
+and invalid renames must reject without changing state or poisoning the owner.
+
+About one in six eligible atomic operations first runs from a clean snapshot to
+produce the new image, then repeats from the same bytes with a power cut at a random
+write or barrier, a random cache-survival mode and optional torn write. Recovery
+must reproduce the exact old or new image outside the journal; a durable commit
+requires the new image. A third run applies the operation to the model and must
+produce the same bytes. Partial writes, preallocation and inode holds do not take
+part in this byte comparison because their durable prefix or orphan lifetime is
+not one of two images. Ballast files fill the volume with seeded data, so writes,
+growth and namespace operations also run near and at allocation exhaustion.
+
+`--objects`, `--entries` and `--directories` raise the model's limits; the wide
+cases keep up to 2,000 names in three directories to exercise indexed growth and
+splits. `--export DIRECTORY` writes the final clean image, a manifest and expected
+file/symlink bytes. `tests/check_sustained.py --tools-root E2FSPROGS_BUILD --exports
+DIRECTORY --output NEW_DIRECTORY` then requires strict nonrepairing e2fsck and
+compares every directory, inode identity, type, link count, permission, file byte,
+symlink target and attribute value with debugfs. The `sustained` suite runs every
+writable base profile and two wide profiles; CI additionally exports five runs for
+independent verification. Seeds make each failing sequence reproducible.
 
 ## Metadata fuzzing
 
@@ -466,7 +498,7 @@ actual Linux recovery of Linux-authored journals and open-unlinked owners, then
 mutates shared values through the core and checks the returned image in Linux.
 Retain e2fsprogs journal-only orphan failures separately; they are not clean passes.
 
-CI defaults to all six suites. A manual workflow dispatch can select one suite
+CI defaults to all seven suites. A manual workflow dispatch can select one suite
 after changes limited to its tests or fixtures. Keep the completed evidence for
 unchanged suites, and run every affected suite when the portable core changes.
 
