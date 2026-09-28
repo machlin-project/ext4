@@ -3,15 +3,6 @@
 
 #define EXT4_SYSTEM_MAX_RANGES (1U << 20)
 
-static bool
-ext4_power_of(uint32_t value, uint32_t base)
-{
-	while (value > 1 && value % base == 0) {
-		value /= base;
-	}
-	return value == 1;
-}
-
 static enum ext4_result
 ext4_system_add(struct ext4_fs *fs, uint64_t first, uint64_t length)
 {
@@ -87,14 +78,12 @@ enum ext4_result
 ext4_system_ranges_build(struct ext4_fs *fs)
 {
 	struct ext4_group group;
+	struct ext4_block_range fixed;
 	struct ext4_journal *journal = fs->journal;
 	uint64_t capacity;
-	uint64_t reserved;
-	uint64_t first;
 	uint64_t free_blocks = 0;
 	uint64_t free_inodes = 0;
 	uint32_t index;
-	bool super;
 	enum ext4_result error;
 
 	if (journal == NULL || fs->system_ranges != NULL) {
@@ -113,20 +102,13 @@ ext4_system_ranges_build(struct ext4_fs *fs)
 	if (fs->system_ranges == NULL) {
 		return EXT4_NO_MEMORY;
 	}
-	reserved = 1 +
-	    ((uint64_t)fs->info.groups * fs->descriptor_size + fs->info.block_size - 1) /
-		fs->info.block_size +
-	    fs->reserved_gdt_blocks;
 	for (index = 0; index < fs->info.groups; index++) {
-		first = fs->first_data_block + (uint64_t)index * fs->blocks_per_group;
-		super = !(fs->info.feature_ro_compat & EXT4_FEATURE_RO_SPARSE_SUPER) ||
-		    index == 0 || ext4_power_of(index, 3) || ext4_power_of(index, 5) ||
-		    ext4_power_of(index, 7);
-		if (super) {
-			error = ext4_system_add(fs, first, reserved);
-			if (error != EXT4_OK) {
-				return error;
-			}
+		error = ext4_group_reserved(fs, index, &fixed);
+		if (error == EXT4_OK && fixed.length != 0) {
+			error = ext4_system_add(fs, fixed.first, fixed.length);
+		}
+		if (error != EXT4_OK) {
+			return error;
 		}
 		error = ext4_group_get(fs, index, &group);
 		if (error != EXT4_OK) {

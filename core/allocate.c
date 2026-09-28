@@ -20,10 +20,11 @@ ext4_allocation_group(
 	struct ext4_fs *fs = allocation->fs;
 	enum ext4_result error;
 
-	*offset = (uint64_t)(fs->first_data_block + 1) * fs->info.block_size +
-	    (uint64_t)index * fs->descriptor_size;
-	error = ext4_transaction_read(
-	    allocation->transaction, *offset / fs->info.block_size, allocation->scratch);
+	error = ext4_group_descriptor_offset(fs, index, offset);
+	if (error == EXT4_OK) {
+		error = ext4_transaction_read(
+		    allocation->transaction, *offset / fs->info.block_size, allocation->scratch);
+	}
 	if (error != EXT4_OK) {
 		return error;
 	}

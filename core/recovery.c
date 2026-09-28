@@ -388,6 +388,15 @@ ext4_recovery_super(struct ext4_journal *journal)
 		fs->info.feature_ro_compat, ext4_le32(&super->feature_ro_compat))) {
 		return EXT4_UNSUPPORTED;
 	}
+	if (((fs->info.feature_incompat ^ ext4_le32(&super->feature_incompat)) &
+		EXT4_FEATURE_INCOMPAT_META_BG) ||
+	    ((fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_META_BG) &&
+		fs->first_meta_group != ext4_le32(&super->first_meta_group)) ||
+	    ((fs->info.feature_compat & EXT4_FEATURE_COMPAT_SPARSE_SUPER2) &&
+		(fs->backup_groups[0] != ext4_le32(&super->backup_groups[0]) ||
+		    fs->backup_groups[1] != ext4_le32(&super->backup_groups[1])))) {
+		return EXT4_UNSUPPORTED;
+	}
 	/* Replaying a clean superblock must not hide an interrupted recovery. */
 	ext4_encode32(&super->feature_incompat,
 	    ext4_le32(&super->feature_incompat) | EXT4_FEATURE_INCOMPAT_RECOVER);
@@ -475,6 +484,8 @@ ext4_recovery_validate_home(struct ext4_journal *journal)
 	    fresh->journal_inode != fs->journal_inode ||
 	    fresh->orphan_file_inode != fs->orphan_file_inode ||
 	    fresh->reserved_gdt_blocks != fs->reserved_gdt_blocks ||
+	    fresh->first_meta_group != fs->first_meta_group ||
+	    !ext4_equal(fresh->backup_groups, fs->backup_groups, sizeof(fs->backup_groups)) ||
 	    !ext4_equal(fresh->info.uuid, fs->info.uuid, EXT4_UUID_SIZE)) {
 		error = EXT4_UNSUPPORTED;
 	} else {

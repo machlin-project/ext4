@@ -631,8 +631,10 @@ ext4_orphan_free_inode(struct ext4_allocation *allocation, struct ext4_inode_dis
 	    fs->info.free_inodes == fs->info.inodes) {
 		return EXT4_CORRUPT;
 	}
-	offset = (uint64_t)(fs->first_data_block + 1) * fs->info.block_size +
-	    (uint64_t)index * fs->descriptor_size;
+	error = ext4_group_descriptor_offset(fs, index, &offset);
+	if (error != EXT4_OK) {
+		return error;
+	}
 	error =
 	    ext4_transaction_buffer(allocation->transaction, offset / fs->info.block_size, &buffer);
 	if (error != EXT4_OK) {

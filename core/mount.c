@@ -4,6 +4,7 @@
 static enum ext4_result
 ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, bool recovery)
 {
+	struct ext4_block_range primary;
 	uint32_t logarithm;
 	uint32_t revision;
 	uint32_t incompat;
@@ -45,6 +46,11 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	}
 	if (incompat & ~(EXT4_SUPPORTED_INCOMPAT | EXT4_FEATURE_INCOMPAT_RECOVER)) {
 		return EXT4_UNSUPPORTED;
+	}
+	/* Distributed descriptors replace the reserved-GDT resize inode layout. */
+	if ((incompat & EXT4_FEATURE_INCOMPAT_META_BG) &&
+	    (fs->info.feature_compat & EXT4_FEATURE_COMPAT_RESIZE_INODE)) {
+		return EXT4_CORRUPT;
 	}
 	/* Cluster allocation changes geometry even for reads. */
 	if (fs->info.feature_ro_compat & EXT4_FEATURE_RO_BIGALLOC) {
@@ -113,6 +119,22 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 		return EXT4_CORRUPT;
 	}
 	fs->info.groups = (uint32_t)group_count;
+	if (incompat & EXT4_FEATURE_INCOMPAT_META_BG) {
+		fs->first_meta_group = ext4_le32(&super->first_meta_group);
+		if (fs->first_meta_group >
+		    (group_count * fs->descriptor_size + fs->info.block_size - 1U) /
+			fs->info.block_size) {
+			return EXT4_CORRUPT;
+		}
+	}
+	if (fs->info.feature_compat & EXT4_FEATURE_COMPAT_SPARSE_SUPER2) {
+		for (word = 0; word < 2; word++) {
+			fs->backup_groups[word] = ext4_le32(&super->backup_groups[word]);
+			if (fs->backup_groups[word] >= fs->info.groups) {
+				return EXT4_CORRUPT;
+			}
+		}
+	}
 	ext4_copy(fs->info.uuid, super->uuid, sizeof(fs->info.uuid));
 	ext4_copy(fs->info.volume_name, super->volume_name, EXT4_VOLUME_NAME_SIZE);
 	fs->info.volume_name[EXT4_VOLUME_NAME_SIZE] = '\0';
@@ -124,7 +146,7 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	for (word = 0; word < 4; word++) {
 		fs->directory_hash_seed[word] = ext4_le32(&super->hash_seed[word]);
 	}
-	return EXT4_OK;
+	return ext4_group_reserved(fs, 0, &primary);
 }
 
 enum ext4_result

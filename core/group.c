@@ -1,6 +1,96 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
 
+static bool
+ext4_power_of(uint32_t value, uint32_t base)
+{
+	while (value > 1 && value % base == 0) {
+		value /= base;
+	}
+	return value == 1;
+}
+
+bool
+ext4_group_has_super(const struct ext4_fs *fs, uint32_t group)
+{
+	if (group == 0) {
+		return true;
+	}
+	if (fs->info.feature_compat & EXT4_FEATURE_COMPAT_SPARSE_SUPER2) {
+		return group == fs->backup_groups[0] || group == fs->backup_groups[1];
+	}
+	return !(fs->info.feature_ro_compat & EXT4_FEATURE_RO_SPARSE_SUPER) ||
+	    ext4_power_of(group, 3) || ext4_power_of(group, 5) || ext4_power_of(group, 7);
+}
+
+enum ext4_result
+ext4_group_reserved(const struct ext4_fs *fs, uint32_t group, struct ext4_block_range *range)
+{
+	uint32_t per_block = fs->info.block_size / fs->descriptor_size;
+	uint32_t position = group % per_block;
+	uint64_t count = 0;
+	uint64_t first;
+	uint64_t available;
+	bool meta = (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_META_BG) != 0;
+	bool super = ext4_group_has_super(fs, group);
+
+	if (group >= fs->info.groups) {
+		return EXT4_CORRUPT;
+	}
+	first = fs->first_data_block + (uint64_t)group * fs->blocks_per_group;
+	if (first >= fs->info.blocks) {
+		return EXT4_CORRUPT;
+	}
+	if (!meta || group / per_block < fs->first_meta_group) {
+		if (super) {
+			count = meta ? fs->first_meta_group
+				     : ((uint64_t)fs->info.groups + per_block - 1U) / per_block +
+				fs->reserved_gdt_blocks;
+		}
+	} else if (position == 0 || position == 1 || position == per_block - 1U) {
+		/* Each metagroup owns one primary descriptor block and two backups,
+		 * including groups that have no superblock of their own. */
+		count = 1;
+	}
+	count += super ? 1U : 0U;
+	available = fs->info.blocks - first;
+	if (available > fs->blocks_per_group) {
+		available = fs->blocks_per_group;
+	}
+	if (count > available) {
+		return EXT4_CORRUPT;
+	}
+	range->first = first;
+	range->length = count;
+	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_group_descriptor_offset(const struct ext4_fs *fs, uint32_t group, uint64_t *offset)
+{
+	uint32_t per_block = fs->info.block_size / fs->descriptor_size;
+	uint32_t table = group / per_block;
+	uint32_t owner;
+	uint64_t block;
+
+	if (group >= fs->info.groups) {
+		return EXT4_CORRUPT;
+	}
+	if ((fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_META_BG) &&
+	    table >= fs->first_meta_group) {
+		owner = group - group % per_block;
+		block = fs->first_data_block + (uint64_t)owner * fs->blocks_per_group +
+		    (ext4_group_has_super(fs, owner) ? 1U : 0U);
+	} else {
+		block = (uint64_t)fs->first_data_block + 1U + table;
+	}
+	if (block >= fs->info.blocks) {
+		return EXT4_CORRUPT;
+	}
+	*offset = block * fs->info.block_size + (uint64_t)(group % per_block) * fs->descriptor_size;
+	return EXT4_OK;
+}
+
 static uint16_t
 ext4_group_checksum(struct ext4_fs *fs, uint32_t group, struct ext4_group_disk *disk)
 {
@@ -100,9 +190,10 @@ ext4_group_get(struct ext4_fs *fs, uint32_t group, struct ext4_group *result)
 	if (buffer == NULL) {
 		return EXT4_NO_MEMORY;
 	}
-	offset = (uint64_t)(fs->first_data_block + 1) * fs->info.block_size +
-	    (uint64_t)group * fs->descriptor_size;
-	error = ext4_device_read(fs, offset, buffer, fs->descriptor_size);
+	error = ext4_group_descriptor_offset(fs, group, &offset);
+	if (error == EXT4_OK) {
+		error = ext4_device_read(fs, offset, buffer, fs->descriptor_size);
+	}
 	if (error == EXT4_OK) {
 		error = ext4_group_decode(fs, group, buffer, result);
 	}

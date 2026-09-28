@@ -371,6 +371,32 @@ check_file_ranges(uint32_t block_size, bool extents)
 }
 
 static void
+namespace_geometry_checks(uint32_t block_size)
+{
+	FILE *input = fopen("/namespace-geometry", "r");
+	struct stat before;
+	struct stat after;
+	uint8_t byte = 0;
+	int fd;
+
+	if (input == NULL) {
+		require(errno == ENOENT, "inspect geometry test marker");
+		return;
+	}
+	require(fclose(input) == 0, "close geometry test marker");
+	fd = open("/mnt/geometry-file", O_RDWR | O_CLOEXEC);
+	require(fd >= 0 && fstat(fd, &before) == 0 && pread(fd, &byte, 1, block_size + 7U) == 1,
+	    "read core data in last block group");
+	byte ^= 0x5aU;
+	require(pwrite(fd, &byte, 1, block_size + 7U) == 1 && fsync(fd) == 0 &&
+		fstat(fd, &after) == 0 && close(fd) == 0,
+	    "commit Linux change in last block group");
+	require(before.st_size == after.st_size && before.st_blocks == after.st_blocks,
+	    "preserve geometry file EOF and allocation");
+	puts("LINUX_EXT4_GEOMETRY_WRITE_PASS");
+}
+
+static void
 check_namespace(uint32_t block_size)
 {
 	struct stat released;
@@ -427,6 +453,7 @@ check_namespace(uint32_t block_size)
 		    "verify hardlink to symlink");
 	}
 	puts("LINUX_EXT4_NAMESPACE_PASS");
+	namespace_geometry_checks(block_size);
 	if (namespace_flag_checks()) {
 		puts("LINUX_EXT4_COMMITTED_RECOVERY_PENDING");
 		power_off(1);

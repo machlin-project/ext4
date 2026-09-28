@@ -14,6 +14,7 @@ from check_rename import entries
 from check_index_write import entries as byte_entries
 import linux_index
 import linux_space
+import linux_geometry
 
 
 def node_name(index):
@@ -90,7 +91,13 @@ def prepare(case, tree, tools):
     link_lines = []
     expected = tree / "expected"
     expected.mkdir()
-    if case.get("verified_flags"):
+    if case.get("verified_geometry"):
+        paths = linux_geometry.paths(case)
+        data_paths = [path for path in paths
+                      if case["verified_geometry"]["objects"][path]["inode"]["type"] == "regular"]
+        if case["geometry_operation"] == "write":
+            (tree / "namespace-geometry").touch()
+    elif case.get("verified_flags"):
         objects = case["verified_flags"]["objects"]
         paths = [path for path, value in objects.items() if value["inode"]["type"] in ("regular", "directory")]
         data_paths = [path for path in paths if objects[path]["inode"]["type"] == "regular"]
@@ -430,11 +437,13 @@ def verify(case, image, output, tools, recover, run):
                     raise RuntimeError("Linux changed bytes reachable through the remaining hardlink")
         retained_index = linux_index.retained(case, candidate, output, tools, run, inodes, prefix) if indexed and not full_blocks else {}
         retained_space = linux_space.retained(case, candidate, output, tools, run, inodes, prefix, counts) if full_blocks else {}
+        retained_geometry = (linux_geometry.retained(case, candidate, output, tools, run, inodes, prefix)
+                             if case.get("verified_geometry") else {})
         return {"inodes": inodes, "directories": names, "accounting": counts,
                 "retained_symlinks": retained_links, "retained_alias": retained_alias,
                 "retained_rename": retained_rename, "retained_index": retained_index,
                 "retained_space": retained_space, "retained_special": retained_special,
-                "retained_range": retained_range}, lag
+                "retained_range": retained_range, "retained_geometry": retained_geometry}, lag
 
     observed, _ = snapshot(image, "core")
     independent, lag = snapshot(oracle, "oracle", allow_summary_lag=True)

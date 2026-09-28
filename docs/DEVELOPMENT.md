@@ -596,6 +596,30 @@ namespace mutations, inode exhaustion, group transitions and interrupted commits
 CI also exports writes, allocation, truncate, growth and namespace states for the
 existing independent checkers; no new filesystem oracle is shared with the core.
 
+Distributed descriptor and sparse-superblock layouts have their own bounded images:
+
+```sh
+python3 tests/generate_geometry_fixtures.py --tools-root E2FSPROGS_BUILD \
+  --output artifacts/geometry-fixtures
+meson configure .build -Dgeometry_fixtures=artifacts/geometry-fixtures
+meson compile -C .build -j 2
+env -i PATH="$PATH" meson test -C .build --no-rebuild -j 2 \
+  'group-geometry-*' --print-errorlogs
+mkdir artifacts/geometry-exports
+for image in artifacts/geometry-fixtures/*.img; do
+  .build/ext4-geometry-test --export artifacts/geometry-exports "$image" "${image%.img}.geometry"
+done
+python3 tests/check_geometry.py --tools-root E2FSPROGS_BUILD \
+  --fixtures artifacts/geometry-fixtures --exports artifacts/geometry-exports \
+  --recover .build/ext4-recover --output artifacts/geometry-independent
+```
+
+The generator obtains expected block locations from `dumpe2fs -g`; mke2fs's
+`MKE2FS_FIRST_META_BG` input creates the hybrid profile. The independent checker
+batches all inode statistics and file dumps in debugfs, compares every created
+inode and file, and verifies both journal outcomes with the core and e2fsck.
+The `core` CI job runs the eleven registered cases and all 27 exported transitions.
+
 The selected Xcode clang compiles a second, optimized freestanding archive
 with the same source and a 2048-byte frame-size check. This is a portability
 check, not a linked or boot-tested kernel artifact. Kernel stack-protector symbols

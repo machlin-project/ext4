@@ -57,6 +57,8 @@ struct ext4_fs {
 	uint32_t journal_inode;
 	uint32_t last_orphan;
 	uint32_t orphan_file_inode;
+	uint32_t first_meta_group;
+	uint32_t backup_groups[2];
 	uint16_t reserved_gdt_blocks;
 	uint16_t inode_size;
 	uint16_t descriptor_size;
@@ -86,6 +88,14 @@ struct ext4_group {
 
 /* Sort, reject overlaps and merge adjacent already-bounded physical ranges. */
 enum ext4_result ext4_ranges_sort(struct ext4_block_range *ranges, size_t *count);
+/* Geometry is shared by reads, transactional mutation and metadata exclusion.
+ * A group's fixed prefix can be empty; bitmap/table locations remain in its
+ * descriptor and can belong to another group when FLEX_BG is enabled. */
+bool ext4_group_has_super(const struct ext4_fs *fs, uint32_t group);
+enum ext4_result ext4_group_reserved(
+    const struct ext4_fs *fs, uint32_t group, struct ext4_block_range *range);
+enum ext4_result ext4_group_descriptor_offset(
+    const struct ext4_fs *fs, uint32_t group, uint64_t *offset);
 enum ext4_result ext4_group_get(struct ext4_fs *fs, uint32_t group, struct ext4_group *result);
 enum ext4_result ext4_group_decode(
     struct ext4_fs *fs, uint32_t group, struct ext4_group_disk *disk, struct ext4_group *result);

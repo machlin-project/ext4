@@ -110,6 +110,8 @@ jobs:
         run: |
           python3 tests/generate_group_checksum_fixtures.py --output artifacts/group-checksum-fixtures \
             2>&1 | tee artifacts/checks/group-checksum-fixtures.log
+          python3 tests/generate_geometry_fixtures.py --output artifacts/geometry-fixtures \
+            2>&1 | tee artifacts/checks/geometry-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
@@ -129,7 +131,8 @@ jobs:
             space_options=(-Dspace_fixtures="$PWD/artifacts/space-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == core ]]; then
-            group_options=(-Dgroup_checksum_fixtures="$PWD/artifacts/group-checksum-fixtures")
+            group_options=(-Dgroup_checksum_fixtures="$PWD/artifacts/group-checksum-fixtures" \
+              -Dgeometry_fixtures="$PWD/artifacts/geometry-fixtures")
             xattr_options=(-Dxattr_fixtures="$PWD/artifacts/xattr-fixtures" \
               -Dxattr_space_fixtures="$PWD/artifacts/xattr-space-fixtures" \
               -Dxattr_enable_fixtures="$PWD/artifacts/xattr-enable-fixtures")
@@ -291,6 +294,19 @@ jobs:
           find artifacts/growth-exports artifacts/growth-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
+      - name: Independently verify distributed group layouts and recovery
+        if: matrix.suite == 'core'
+        run: |
+          mkdir artifacts/geometry-exports
+          for image in artifacts/geometry-fixtures/*.img; do
+            .build/ext4-geometry-test --export artifacts/geometry-exports "$image" "${image%.img}.geometry"
+          done 2>&1 | tee artifacts/checks/geometry-exports.log
+          python3 tests/check_geometry.py --fixtures artifacts/geometry-fixtures \
+            --exports artifacts/geometry-exports --recover .build/ext4-recover \
+            --output artifacts/geometry-independent \
+            2>&1 | tee artifacts/checks/geometry-independent.log
+          find artifacts/geometry-exports artifacts/geometry-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Independently verify legacy group checksum mutations
         if: matrix.suite == 'core'
         run: |

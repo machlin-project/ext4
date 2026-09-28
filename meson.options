@@ -21,6 +21,8 @@ option('namespace_fixtures', type: 'string', value: 'artifacts/namespace-fixture
   description: 'Independent namespace allocation images')
 option('group_checksum_fixtures', type: 'string', value: '',
   description: 'Enable legacy CRC16 group descriptors and lazy allocation images')
+option('geometry_fixtures', type: 'string', value: '',
+  description: 'Enable distributed descriptors and sparse-superblock images')
 option('xattr_fixtures', type: 'string', value: '',
   description: 'Enable inode-body, external and shared xattr image tests')
 option('xattr_space_fixtures', type: 'string', value: '',

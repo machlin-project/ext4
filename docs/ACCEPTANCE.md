@@ -40,8 +40,8 @@ counted as portable-core implementation.
 
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
-| Ordinary filesystem operations | Full regression of admitted persistent inode flags; metadata-space guarantee for future KEEP_SIZE growth under allocator exhaustion | Open; flag mutation/protection passes focused, independent and Linux checks; bounded preallocation/hole punching, special files, atomic whiteout, automatic index creation and DIR_NLINK pass focused, independent and Linux acceptance; full-disk writes within existing EOF also pass Linux roundtrips |
-| Format compatibility | META_BG and SPARSE_SUPER2 geometry; EA_INODE and INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open |
+| Ordinary filesystem operations | Metadata-space guarantee for future KEEP_SIZE growth under allocator exhaustion | Open; persistent inode flags pass full regression, focused, independent and Linux checks; bounded preallocation/hole punching, special files, atomic whiteout, automatic index creation and DIR_NLINK pass focused, independent and Linux acceptance; full-disk writes within existing EOF also pass Linux roundtrips |
+| Format compatibility | Full META_BG/SPARSE_SUPER2 regression; EA_INODE and INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; distributed geometry passes focused faults, independent checks and eight Linux roundtrips |
 | Journal compatibility | Checksum v1, asynchronous commit, fast commit and external journals, including interrupted replay and cross-implementation recovery | Open |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
@@ -93,7 +93,50 @@ allocation count; all twelve nonrepairing checks and six journal-only replays pa
 The portable reader accepts all six returned images. No guest warnings occur.
 Evidence is in `artifacts/checks/inode-flags-linux-summary.json` and the lab's
 `artifacts/ext4-journal/linux-reference/inode-flags-{functional,pending}-linux/`.
-The expanded 373-test full regression is pending.
+The expanded 373-test full regression passes all six jobs with exact inventory,
+zero skipped/failed cases and the twelve independently checked flag transitions.
+Raw evidence is in `artifacts/checks/inode-flags-ci-36360670891/`; see the
+[accepted CI run](https://github.com/machlin-project/ext4/actions/runs/36360670891).
+
+## Distributed descriptors and sparse superblocks
+
+The shared geometry implementation handles META_BG, hybrid contiguous/distributed
+descriptor tables and SPARSE_SUPER2 with zero, one or two backup superblocks.
+Allocation excludes every descriptor backup, including copies in groups without
+superblocks. Mount rejects invalid first-metagroup/backup bounds and contradictory
+resize formats; replay rejects geometry changes before writing home blocks.
+
+Nine independent mke2fs profiles cover 1/4 KiB blocks, 32/64-byte descriptors,
+CRC16/CRC32C and FLEX_BG on/off. Public creation traverses all 19–67 groups and
+writes data in each, then allocates, writes and finally releases an inode in the
+last group. Fifteen selected development tests pass, including existing geometry,
+journal and group-checksum controls. Two fault profiles cover 228 allocation and
+318 read failures, plus 1,008 write/barrier cuts: 980 recover to the correct state
+and 28 reject torn primary-superblock checksums without recovery writes.
+
+All 27 exported transitions pass independent comparison of every inode, file byte,
+root name, group location and free count. Core and e2fsck agree on committed and
+uncommitted recovery; repeated core recovery changes no bytes. The 1,188 unique
+oracle commands include 171 nonrepairing fsck checks and 54 journal-only replays,
+all successful. All 108 export images and original fixtures remain unchanged.
+Evidence is in `artifacts/checks/geometry-development-retry2-evidence/` and
+`artifacts/geometry-independent-retry1/report.json`. The original report repeats
+each profile's command list across its three records; the counts above deduplicate
+by the retained command-log path. Future reports assign commands once.
+
+Eight actual Linux roundtrips pass on the identified reference kernel: six clean
+profiles and two pending journals, covering 32/64-byte descriptors, 1/4 KiB blocks,
+CRC16, hybrid tables and sparse backups. Linux reads the prepared namespace and
+data from every group, writes a distinct byte into the last-group file, and commits
+ordinary namespace changes. Core and e2fsck replay agree on all retained inodes,
+file bytes and descriptor locations. All 24 nonrepairing/replay fsck invocations
+and all eight portable reads pass, with no guest warnings. Evidence is in
+`artifacts/checks/geometry-linux-summary.json` and the lab's
+`artifacts/ext4-journal/linux-reference/geometry-{functional-linux-retry1,pending-linux}/`.
+The later invalid META_BG/RESIZE_INODE admission guard passes four final focused
+checks in `artifacts/checks/geometry-final-evidence/`; it does not change the valid
+images accepted using the frozen Linux-test binaries. The expanded 394-test full
+regression remains pending.
 
 ## Preallocation and hole punching
 

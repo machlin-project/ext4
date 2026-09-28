@@ -34,6 +34,17 @@ Legacy group checksums do not add checksums to bitmaps, inodes or directory data
 Lazy inode/block initialization uses the same protected-range and accounting
 validation for both formats. See the [ext4 group descriptor format](https://docs.kernel.org/filesystems/ext4/group_descr.html).
 
+Group descriptor lookup is shared by inode reads, block/inode allocation and final
+inode release. META_BG places each descriptor block in its owning metagroup, while
+`first_meta_bg` retains the contiguous prefix of hybrid filesystems. The protected
+range index includes the second/last-group descriptor backups even when those
+groups have no superblock. SPARSE_SUPER2 selects only its two explicit backup group
+fields, with zero denoting an unused slot; it takes precedence over SPARSE_SUPER.
+Bitmap and inode-table placement remains descriptor-owned, including FLEX_BG.
+Mount validates geometry bounds and rejects the incompatible META_BG/RESIZE_INODE
+combination. Journal replay cannot change these captured geometry fields. Online
+filesystem resizing is not implemented. See the [ext4 block-group layouts](https://docs.kernel.org/filesystems/ext4/blockgroup.html).
+
 ## I/O and cache contract
 
 Implementation and acceptance proceed through the portable core first, FSKit on

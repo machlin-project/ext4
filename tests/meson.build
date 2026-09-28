@@ -4,7 +4,7 @@
 paths = {}
 foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'namespace_fixtures', 'xattr_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
-  'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures',
+  'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures', 'geometry_fixtures',
   'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
   'directory_index_64k_fixture']
   value = get_option(option)
@@ -227,6 +227,19 @@ if paths['directory_links_fixture'] != ''
     timeout: 600, suite: 'indexed')
 endif
 test('metadata-checksum', programs['checksum'], timeout: 60, suite: 'core')
+if paths['geometry_fixtures'] != ''
+  foreach profile : ['meta-1k', 'meta-32', 'meta-4k', 'meta-gdt', 'meta-hybrid',
+    'meta-sparse2', 'sparse2-0', 'sparse2-1', 'sparse2-2']
+    stem = paths['geometry_fixtures'] / profile
+    test('group-geometry-' + profile, programs['geometry'],
+      args: [stem + '.img', stem + '.geometry'], timeout: 300, suite: 'core')
+  endforeach
+  foreach profile : ['meta-hybrid', 'meta-sparse2']
+    stem = paths['geometry_fixtures'] / profile
+    test('group-geometry-faults-' + profile, programs['geometry'],
+      args: ['--faults', stem + '.img', stem + '.geometry'], timeout: 900, suite: 'core')
+  endforeach
+endif
 if paths['group_checksum_fixtures'] != ''
   gdt = paths['group_checksum_fixtures']
   gdt_readers = [gdt / 'gdt-1k32.img', gdt / 'gdt-4k64.img', gdt / 'gdt-indirect.img']
