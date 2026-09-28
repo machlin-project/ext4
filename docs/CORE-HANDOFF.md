@@ -152,17 +152,26 @@ uses `PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin` and `CC=/usr/bin/cla
 
 Continue the actual remaining queue in `docs/ACCEPTANCE.md`:
 
-- Complete fast-commit format combinations, broader ownership-corruption checks
-  and interrupted foreign replay. Preserve unresolved native-reference failures;
-  a repaired diagnostic image is not an accepted oracle.
-- Address directory/file growth, fragmentation, allocator and recovery cost,
-  bounded memory/write amplification and larger transaction/prefix capacity.
-  Back performance claims with equivalent measured workloads.
+- Fast-commit BIGALLOC, casefold, quota and 64 KiB profiles, ownership-corruption
+  rejection and interrupted e2fsck replay of ordinary logs are accepted. Interrupted
+  fast-commit replay by a foreign implementation remains: e2fsck's fast-commit
+  replay cannot grow a directory, so record Linux's own replay below the
+  filesystem, for example with `dm-log-writes` from the reference module set, and
+  check each state with strict fsck and independent namespace and data reads,
+  since Linux places names differently from the core. Preserve unresolved
+  native-reference failures; a repaired diagnostic image is not an accepted oracle.
+- Growth, fragmentation, allocator and recovery cost, memory and write
+  amplification are measured ("Scale measurement evidence"). Remaining: whole-tree
+  index classification on each indexed operation, first-fit fragmentation of large
+  writes, and decisions on larger live transactions, ordered data writes and
+  group commit. Back performance claims with equivalent measured workloads.
 - Expand required geometry/format compatibility. MMP, quota/project accounting,
-  casefold, encryption and verity remain unsupported requirements. Implement them
-  or obtain an explicit product scope decision; do not silently remove them.
-- Add sustained mixed-operation/crash sequences and meaningful fuzz coverage.
-  Fix discovered contracts at their owning layer, not in the test harness.
+  casefold, keyless encryption and verity reading are implemented; quota limit
+  enforcement, key-based encryption and enabling verity need explicit product
+  scope decisions; do not silently remove them.
+- Sustained mixed-operation/crash sequences, operations fuzzing and
+  checksum-repairing journal fuzzing are in place; keep extending them. Fix
+  discovered contracts at their owning layer, not in the test harness.
 
 The core currently has a serialized resource owner. Native locking, page-cache
 coordination, authorization and adapter lifetime acceptance come later. FSKit and

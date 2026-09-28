@@ -41,9 +41,9 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Wider geometry and format coverage; quota limit enforcement and key-based encryption await product decisions; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, pending the complete CI regressions that include them. BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
-| Journal compatibility | A 64 KiB fast-commit fixture; interrupted fast-commit replay by a foreign implementation | Open; BIGALLOC, casefold and quota fast-commit profiles, ownership-corruption rejection and interrupted e2fsck replay of ordinary logs are accepted (see "Fast-commit combinations and interrupted foreign replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
-| Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; larger live transactions; broader fuzz targets | Open; indexed namespace operations now validate only hash-eligible leaves, and the sustained suite plus operations fuzzing are in place (see "Sustained operation and fuzzing evidence") |
+| Format compatibility | Wider geometry and format coverage; quota limit enforcement and key-based encryption await product decisions; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
+| Journal compatibility | Interrupted fast-commit replay by a foreign implementation: e2fsck's fast-commit replay cannot add a name to a full directory block, so the oracle must record Linux's own replay | Open; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection and interrupted e2fsck replay of ordinary logs are accepted (see "Fast-commit combinations and interrupted foreign replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
+| Scale and sustained operation | Indexed operations still classify the whole index tree; first-fit allocation fragments large writes in fragmented free space; decisions on larger live transactions, ordered data writes and group commit | Open; measured workloads show bounded peak memory, about 2.1 times device writes for journaled data and five barriers per operation, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence" and "Sustained operation and fuzzing evidence") |
 
 MMP, fs-verity reading with protected writable metadata, encrypted volumes without
 keys, casefolded directories and quota/project accounting are implemented. Quota
@@ -63,6 +63,49 @@ internal-journal recovery and both orphan representations; HTree creation, looku
 and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
 the remaining blocks have equal size or that the full core is accepted.
 
+## Scale measurement evidence
+
+`tests/run_scale.py` ran every `ext4-scale` workload on fresh 1 GiB e2fsprogs
+volumes with 4 KiB and 1 KiB blocks, alternating two runs each of the parent
+revision of this work and of the changed core with the same driver on the
+development host; strict fsck accepted every resulting image. Times are means of
+the two runs on an in-memory device and exclude device latency; counts are exact.
+
+| Workload | Block | Time (ms) | Device reads | Device writes / barriers |
+| --- | --- | --- | --- | --- |
+| 256 MiB sequential write | 4 KiB | 181.8 → 123.4 | 142,998 → 12,120 | 140,293 / 3,841, unchanged |
+| 1,000 random 64 KiB overwrites | 4 KiB | 45.5 → 8.6 | 91,003 → 7,009 | 38,002 / 5,002, unchanged |
+| Truncate 256 MiB to zero | 4 KiB | 7.4 → 0.2 | 14,363 → 175 | 24,582 / 10,242 → 270 / 112 |
+| Offline reclamation of a 256 MiB orphan | 4 KiB | 7.5 → 0.3 | 14,443 → 191 | 24,584 / 10,243 → 152 / 63 |
+| 64 MiB write into fragmented free space | 4 KiB | 929.5 → 441.4 | 1,880,579 → 15,975 | 35,867 / 961, unchanged |
+| 50,000 creates in one directory | 4 KiB | 673.8 → 642.3 | 930,377 → 702,570 | 802,669 / 250,001 → 802,489 / 250,001 |
+| 256 MiB sequential write | 1 KiB | 503.3 → 435.5 | 1,319,333 → 566,610 | 557,717 / 11,521, unchanged |
+| 1,000 random 64 KiB overwrites | 1 KiB | 138.5 → 41.1 | 586,018 → 315,943 | 134,002 / 5,002, unchanged |
+| Truncate 256 MiB to zero | 1 KiB | 14.8 → 0.6 | 77,051 → 319 | 111,386 / 40,962 → 396 / 132 |
+| 64 MiB write into fragmented free space | 1 KiB | 620.7 → 479.8 | 2,081,666 → 199,206 | 140,929 / 2,881, unchanged |
+| 50,000 creates in one directory | 1 KiB | 597.8 → 557.9 | 3,728,195 → 1,339,971 | 813,101 / 250,001 → 812,987 / 250,001 |
+
+Directory creation with 4 KiB blocks now reads 14 blocks per create at every size
+up to 50,000 entries, down from 16 to 21. With 1 KiB blocks it reads 16 to 36 per
+create from the first to the fifth 10,000 entries, down from 27 to 120; the
+remaining growth is the whole-tree index classification. A lookup reads four blocks
+with 4 KiB blocks and five with 1 KiB blocks at 50,000 entries.
+
+Peak live core allocation stays at 1.16 MiB with 4 KiB blocks and 372 KiB with
+1 KiB blocks for 256 MiB files, the bound of a 256-snapshot transaction, and at
+156 KiB for the directory workloads. Journaled file data costs 2.09 to 2.38 times
+the requested bytes in device writes. Every namespace operation commits on its own
+with five barriers, which a real device's flush latency would dominate. First-fit
+allocation fills single-block holes: the 64 MiB write into fragmented free space
+produces 4,067 extents with 4 KiB blocks and 2,617 with 1 KiB blocks.
+
+The complete 627-test regression passes (`artifacts/checks/scale-regression-11/`).
+Its predecessor, `artifacts/checks/scale-regression-10/`, preserves the failures
+that exposed two defects in the first version of this work: a map record changed
+behind a writable mount skipped revalidation, and a history-dependent reclamation
+step made recovery after a power cut differ from the uninterrupted image.
+Measurements are in `artifacts/checks/scale-measurements-2/`.
+
 ## Sustained operation and fuzzing evidence
 
 `ext4-sustained-test` drives deterministic mixed operations against a model and
@@ -73,15 +116,23 @@ e2fsck and debugfs comparison. Locally, 200 additional seeds of 5,000 operations
 passed under ASan/UBSan: one million operations, 55,968 recoveries after a power cut
 (25,555 from a durable commit), 950 torn-superblock rejections, 112,232
 allocation-exhaustion rejections and directories of up to 741 names. Evidence is in
-`artifacts/checks/sustained-soak-1/`. These are sequential core sequences; they do
-not exercise platform concurrency.
+`artifacts/checks/sustained-soak-1/`. After the allocation and reclamation changes,
+120 further runs of 5,000 operations on 4 KiB, 1 KiB and wide 4 KiB profiles passed:
+600,000 operations, 33,883 power cuts (15,337 after a durable commit) and 506
+torn-superblock rejections (`artifacts/checks/sustained-soak-2/`). These are
+sequential core sequences; they do not exercise platform concurrency.
 
 `ext4-operations-fuzzer` mutates nonzero blocks through a copy-on-write overlay and
 then runs recovery, a read-only walk and writable operations. Four 25-minute
 campaigns without checksums, with an indirect map, with a pending ordinary journal
 and with a pending fast-commit prefix executed about 950,000 inputs without a finding.
-Corpora and logs are under `artifacts/fuzz-operations/`. This is bounded coverage;
-checksum-repairing mutation of journal and fast-commit records remains to be added.
+Corpora and logs are under `artifacts/fuzz-operations/`.
+
+Checksum-repairing journal mutation then ran four further 25-minute campaigns: the
+1 KiB fast-commit prefix without metadata checksums, continuing its corpus, pending
+4 KiB and indirect 4 KiB fast-commit prefixes, and an ordinary v3-checksum log with
+revokes. About 612,000 inputs found nothing. The fast-commit corpus grew from 8,666
+edges and 32,515 features to 10,295 and 41,976. This remains bounded coverage.
 
 ## Multi-mount protection evidence
 
@@ -186,6 +237,14 @@ range claiming an inode-table block and one claiming a block of `lost+found`, re
 without writes; before this change the second replayed and would have cross-linked
 the block. The fast-commit suite passes all 113 cases.
 
+A 64 KiB profile needs a 64 MiB journal, the 1,024-block minimum of mke2fs, on a
+2,176-block volume; a smaller volume silently received no journal. The core replays
+its three commits exactly, through 156 interrupted recoveries and every allocation
+and read failure, and strict e2fsck and independent namespace and data reads accept
+the result (`artifacts/checks/fast-commit-64k-independent/`). The pinned Linux
+reference uses 4 KiB pages, so this profile has portable and independent evidence
+only. The fast-commit suite now passes all 117 cases in the 627-test regression.
+
 e2fsck, whose jbd2 recovery code is a copy of the kernel's, replayed six
 debugfs-authored logs and fifteen logs Linux left pending in the lab's cluster,
 inline and attribute runs while a preload library recorded its 1,094 writes and
@@ -196,7 +255,15 @@ had emptied the log, during its unjournaled orphan release and superblock update
 56 recover cleanly, the core refuses 119 and 17 remain for fsck, as mount-time
 recovery does not audit every bitmap; every complete state recovers cleanly. Evidence
 is in `artifacts/checks/interrupted-replay-first/` and
-`artifacts/checks/scale-regression-9/`.
+`artifacts/checks/scale-regression-9/`. CI run 36483787970 repeated the six
+debugfs-authored cases with `LD_PRELOAD` on Linux.
+
+e2fsck cannot yet serve as the foreign replayer of fast-commit logs: on the 4 KiB
+profile its replay stops with "No free space in the directory" in
+`ext4_fc_handle_link_and_create`, because it does not grow a directory while
+adding names, and it leaves the volume marked with errors. The remaining oracle is
+Linux's own replay, recorded below the filesystem, for example with the
+`dm-log-writes` target that the reference kernel's module set provides.
 
 ## Fast-commit development evidence
 
