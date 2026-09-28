@@ -41,7 +41,7 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Finish INLINE_DATA Linux/regression acceptance; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; INLINE_DATA focused faults and independent states/replay pass; EA_INODE and distributed geometry retain accepted evidence |
+| Format compatibility | Finish INLINE_DATA regression acceptance; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; INLINE_DATA focused faults, independent states/replay and eight Linux roundtrips pass; EA_INODE and distributed geometry retain accepted evidence |
 | Journal compatibility | Fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; v1 and async compatibility pass focused faults, independent replay, eight Linux roundtrips and their combined full regression |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
@@ -93,9 +93,27 @@ The main-agent review is `artifacts/checks/inline-focused-accepted.json`; raw lo
 are under `artifacts/checks/inline-development/acceptance-*`. Reports are
 `artifacts/inline-accepted-independent/report.json`,
 `artifacts/inline-full-independent/report.json` and
-`artifacts/inline-fault-independent/report.json`. The prepared native Linux
-roundtrip and expanded 444-test regression are pending. This evidence does not
-establish installed FSKit or kext inline reads.
+`artifacts/inline-fault-independent/report.json`.
+
+All eight native Linux/core/Linux roundtrips pass: six clean profiles and two
+pending core journals. Twenty-four boots identify Linux 6.12.94-0-virt aarch64.
+Linux validates core-authored contents, attributes and directory identities,
+mutates across the 60-byte boundary, creates inline files/directories and leaves
+an open-unlinked inline inode. Core replay of 80 Linux transactions reclaims all
+eight orphans and exactly matches native Linux recovery. Core reads and changes
+Linux-authored objects, converts attributed data when needed, removes a child,
+renames its directory and creates another inline file; the final Linux mount
+validates the complete returned state. All 3,358 recorded commands and 32 strict
+nonrepairing fsck checks exit zero. Raw internal data attributes are compared
+between recovery implementations but excluded from the native xattr manifest.
+
+The main-agent review is `artifacts/checks/inline-linux-accepted.json`; lab reports
+are `artifacts/ext4-journal/inline-clean-retry1/report.json` and
+`artifacts/ext4-journal/inline-pending-retry2/report.json`. Two earlier harness
+failures remain recorded: creation-only fields supplied to a write, and a
+127-character manifest path limit that rejected a valid 255-byte directory name.
+Neither required a core change. The expanded 444-test regression is pending.
+This evidence does not establish installed FSKit or kext inline reads.
 
 ## Large values in private attribute inodes
 

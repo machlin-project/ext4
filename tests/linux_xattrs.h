@@ -15,9 +15,13 @@
 #define LINUX_XATTR_INHERITED "/mnt/directory/linux-inherited"
 #define LINUX_XATTR_NAMED_USER 70000U
 #define LINUX_XATTR_UNRELATED_GROUP 90000U
+#define LINUX_XATTR_PATH_CHARS 4095
+#define LINUX_XATTR_STRING_(value) #value
+#define LINUX_XATTR_STRING(value) LINUX_XATTR_STRING_(value)
+#define LINUX_XATTR_PATH_SCAN "%" LINUX_XATTR_STRING(LINUX_XATTR_PATH_CHARS) "s"
 
 struct linux_xattr_value {
-	char path[128];
+	char path[LINUX_XATTR_PATH_CHARS + 1];
 	char name[256];
 	uint8_t *value;
 	size_t size;
@@ -118,8 +122,8 @@ xattr_check_all(void)
 	struct linux_xattr_value *item;
 	struct stat metadata;
 	FILE *input;
-	char relative[128];
-	char path[256];
+	char relative[LINUX_XATTR_PATH_CHARS + 1];
+	char path[LINUX_XATTR_PATH_CHARS + sizeof("/mnt")];
 	char source[128];
 	char hex[511];
 	uint8_t *expected;
@@ -146,7 +150,8 @@ xattr_check_all(void)
 	for (;;) {
 		require(count < LINUX_XATTR_CASES, "bound Linux attribute cases");
 		item = &values[count];
-		fields = fscanf(input, "%127s %510s %127s %d", item->path, hex, source, &flag);
+		fields = fscanf(
+		    input, LINUX_XATTR_PATH_SCAN " %510s %127s %d", item->path, hex, source, &flag);
 		if (fields == EOF) {
 			break;
 		}
@@ -166,8 +171,8 @@ xattr_check_all(void)
 	require(fclose(input) == 0, "close attribute value manifest");
 	input = fopen("/xattr-inodes", "r");
 	require(input != NULL, "open attributed inode manifest");
-	while ((fields = fscanf(input, "%127s %llu %o %u %u %llu %zu", relative, &number, &mode,
-		    &uid, &gid, &file_size, &attributes)) != EOF) {
+	while ((fields = fscanf(input, LINUX_XATTR_PATH_SCAN " %llu %o %u %u %llu %zu", relative,
+		    &number, &mode, &uid, &gid, &file_size, &attributes)) != EOF) {
 		require(fields == 7, "parse attributed inode identity");
 		snprintf(path, sizeof(path), "/mnt%s", relative);
 		require(lstat(path, &metadata) == 0 && metadata.st_ino == number &&
@@ -180,7 +185,8 @@ xattr_check_all(void)
 	require(fclose(input) == 0, "close attributed inode manifest");
 	input = fopen("/xattr-data", "r");
 	require(input != NULL, "open attributed contents manifest");
-	while ((fields = fscanf(input, "%127s %127s %d", relative, source, &flag)) != EOF) {
+	while ((fields = fscanf(
+		    input, LINUX_XATTR_PATH_SCAN " %127s %d", relative, source, &flag)) != EOF) {
 		require(fields == 3, "parse attributed contents case");
 		expected = xattr_load(source, &size);
 		actual = malloc(size + 1);
