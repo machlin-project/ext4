@@ -198,7 +198,10 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 						entry->type != EXT4_FT_UNKNOWN)))) {
 					return EXT4_CORRUPT;
 				}
-				for (index = 0; index < names; index++) {
+				/* Encrypted names are ciphertext and may contain any byte. */
+				for (index = 0;
+				    !(parent->flags & EXT4_INODE_ENCRYPT) && index < names;
+				    index++) {
 					if (entry_name[index] == 0 || entry_name[index] == '/') {
 						return EXT4_CORRUPT;
 					}

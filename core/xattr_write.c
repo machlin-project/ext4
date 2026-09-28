@@ -67,6 +67,10 @@ ext4_xattr_changes_validate(
 		if (ext4_inline_key(change->name_index, change->name, change->name_length)) {
 			return EXT4_INVALID_ARGUMENT;
 		}
+		/* The fscrypt context binds ciphertext to its policy and key. */
+		if (change->name_index == EXT4_XATTR_INDEX_ENCRYPTION) {
+			return EXT4_PERMISSION_DENIED;
+		}
 		if ((fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EA_INODE) &&
 		    change->value_size > EXT4_XATTR_VALUE_MAX) {
 			return EXT4_RANGE;

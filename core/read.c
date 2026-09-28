@@ -39,6 +39,9 @@ ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offse
 	if (fs->aborted) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
+	if (inode->flags & EXT4_INODE_ENCRYPT) {
+		return EXT4_ENCRYPTED;
+	}
 	/* Native mappings would bypass Merkle verification; use ext4_read. */
 	if (inode->flags & EXT4_INODE_VERITY) {
 		return EXT4_UNSUPPORTED;
@@ -420,6 +423,9 @@ ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, v
 	    (inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY &&
 	    (inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_SYMLINK) {
 		return EXT4_UNSUPPORTED;
+	}
+	if (inode->flags & EXT4_INODE_ENCRYPT) {
+		return EXT4_ENCRYPTED;
 	}
 	if (inode->flags & EXT4_INODE_VERITY) {
 		return ext4_verity_read(fs, inode, offset, buffer, length, completed);

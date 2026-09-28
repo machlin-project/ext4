@@ -41,13 +41,15 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Wider geometry and format coverage; retain the Linux delayed-allocation maximum-offset exception | Open; BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
-| Journal compatibility | Fast commit, including interrupted semantic replay and cross-implementation recovery | Open; external journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
-| Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
+| Format compatibility | Wider geometry and format coverage; quota/project accounting and casefold; key-based encryption awaits a product decision; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity and keyless encryption are implemented with their own evidence below, pending the complete CI regressions that include them. BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
+| Journal compatibility | Fast commit format combinations, broader ownership corruption and interrupted foreign replay | Open; fast-commit conversions may now exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
+| Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; larger live transactions; broader fuzz targets | Open; indexed namespace operations now validate only hash-eligible leaves, and the sustained suite plus operations fuzzing are in place (see "Sustained operation and fuzzing evidence") |
 
-MMP, quota/project accounting, casefold, encryption and verity also remain
-unsupported compatibility requirements awaiting implementation or an explicit
-product scope decision. They are not accepted merely because mounting rejects
+Quota/project accounting and casefold remain unsupported compatibility requirements
+awaiting implementation or an explicit product scope decision. MMP, fs-verity reading
+with protected writable metadata and encrypted volumes without keys are implemented.
+Enabling verity, measurement, built-in signatures and any key-based decryption need
+product decisions: the core has no key source and performs no cryptography. They are not accepted merely because mounting rejects
 them safely. They must not disappear from a future readiness claim. The core
 currently requires one serialized resource owner; native operation locking,
 page-cache coordination, ACL authorization and platform lifetime acceptance belong
@@ -59,6 +61,63 @@ create/link/symlink/mkdir/mknod/unlink/rmdir/rename and atomic whiteout; raw xat
 internal-journal recovery and both orphan representations; HTree creation, lookup
 and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
 the remaining blocks have equal size or that the full core is accepted.
+
+## Sustained operation and fuzzing evidence
+
+`ext4-sustained-test` drives deterministic mixed operations against a model and
+repeats about one in six eligible atomic operations with a power cut. The CI
+`sustained` suite runs every writable base profile and two wide profiles; CI run
+36450344817 passed all twelve cases and its five exported images passed strict
+e2fsck and debugfs comparison. Locally, 200 additional seeds of 5,000 operations each
+passed under ASan/UBSan: one million operations, 55,968 recoveries after a power cut
+(25,555 from a durable commit), 950 torn-superblock rejections, 112,232
+allocation-exhaustion rejections and directories of up to 741 names. Evidence is in
+`artifacts/checks/sustained-soak-1/`. These are sequential core sequences; they do
+not exercise platform concurrency.
+
+`ext4-operations-fuzzer` mutates nonzero blocks through a copy-on-write overlay and
+then runs recovery, a read-only walk and writable operations. Four 25-minute
+campaigns without checksums, with an indirect map, with a pending ordinary journal
+and with a pending fast-commit prefix executed about 950,000 inputs without a finding.
+Corpora and logs are under `artifacts/fuzz-operations/`. This is bounded coverage;
+checksum-repairing mutation of journal and fast-commit records remains to be added.
+
+## Multi-mount protection evidence
+
+MMP acquisition, refresh, release and offline-recovery ownership pass the `format`
+suite on four e2fsprogs profiles, including a 40-second interval. Independently,
+released images pass strict fsck with a clean sequence and the core's node name and
+check interval, e2fsck acquires a released 4 KiB image read-write, and the POSIX
+recovery utility waits, replays and releases each pending image. The complete local
+583-test regression with MMP passes (`artifacts/checks/scale-regression-3/`). Linux
+acquisition after a core release has not yet been run in the reference VM.
+
+## fs-verity evidence
+
+Independently authored fs-verity files at 4 KiB SHA-256, salted 1 KiB SHA-256 and salted
+4 KiB SHA-512 verify through `ext4_read`, including every allocation and read failure
+on the largest file. Damaged data and tree blocks fail exactly at the covered block,
+and invalid root hashes, versions and descriptor sizes reject. Linux 6.12 in the
+reference VM reads the same images: FS_IOC_MEASURE_VERITY matches every independently
+computed digest, valid files read completely and damaged files return EIO or fail to
+open. After a writable core owner changes permissions, adds an attribute, links,
+renames and unlinks names and deletes another verity file, the images pass strict
+fsck, and Linux still verifies the renamed file with its original digest. Evidence is
+in `artifacts/verity-fixtures/`, `artifacts/checks/verity-first/` and the lab's
+`artifacts/ext4-verity/readback/` and `artifacts/ext4-verity/mutated-readback/`.
+
+## Encryption without keys evidence
+
+The pinned Linux 6.12 kernel creates a v2 fscrypt tree on a 4 KiB ENCRYPT volume.
+The core denies encrypted names, contents, symlink targets, data changes and context
+changes, then renames plain names, moves the encrypted directory object and back,
+removes an empty encrypted directory and changes an encrypted file's permissions.
+The result passes strict fsck, and Linux with the original key reads all 24
+encrypted files byte for byte and the encrypted symlink target. Synthetic encrypted
+trees on the 4 KiB and 1 KiB base images exercise the same core rules in the `format`
+suite. Evidence is in `artifacts/checks/encrypt-first/` and the lab's
+`artifacts/ext4-encrypt/created/` and `artifacts/ext4-encrypt/verified/`. Keys and
+decryption remain outside the core.
 
 ## Fast-commit development evidence
 
@@ -252,6 +311,22 @@ evidence is in `artifacts/checks/fast-commit-release-benchmark-scaled/`. The san
 sampled 4 KiB fault case takes 99 seconds locally, and the complete sanitized 563-test
 local regression passes (`artifacts/checks/scale-regression-1/`). These are memory-backed
 recovery measurements, not mounted or device throughput.
+
+The push-triggered CI for that fix and the sustained suite (run 36450344817) passed
+all seven jobs: 575 unique tests with no failures, errors or skips, including the
+563-test inventory expected at handoff, every independent step and artifact upload.
+The sampled 4 KiB large-prefix fault case took 196 seconds on the hosted runner.
+Reports are under `artifacts/checks/ci-36450344817/`.
+
+Fast-commit conversions may now use a recovery transaction bound derived from half
+of the ordinary ring and 32 MiB of snapshot buffers. The huge-prefix profile creates
+1,024 long-name files at 1 KiB; the handoff executable rejects it as unsupported
+because its conversion exceeds 256 snapshots. The new core replays it, passes
+sampled fault and resource tests and strict independent verification, and an actual
+Linux 6.12 boot reads all 1,024 files with two strict fsck checks and 3,089 passing
+commands. Evidence is in `artifacts/fast-commit-huge-independent/`,
+`artifacts/checks/recovery-capacity-frozen/` and the lab's
+`artifacts/ext4-journal/fast-commit-huge-prefix-readback/`.
 
 Open work includes larger transaction/prefix capacity, additional format combinations,
 broader ownership-corruption coverage and interrupted foreign replay. Native fixture

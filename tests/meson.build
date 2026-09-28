@@ -76,6 +76,11 @@ if paths['mmp_fixtures'] != ''
   endforeach
 endif
 
+foreach name : ['ext4-4k.img', 'ext4-1k.img']
+  test('encrypt-no-key-' + name, programs['encrypt'],
+    args: ['--synthetic', paths['fixtures'] / name], timeout: 300, suite: 'format')
+endforeach
+
 if paths['verity_fixtures'] != ''
   foreach profile : ['4k', '1k-salted', 'sha512']
     stem = paths['verity_fixtures'] / ('verity-' + profile)

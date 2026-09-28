@@ -60,7 +60,7 @@ foreach name, source : {
   'write': 'write', 'write-partial': 'write_partial', 'write-growth': 'write_growth',
   'file-range': 'file_range', 'large-file': 'large_file', 'large-volume': 'large_volume', 'inode-flags': 'inode_flags',
   'namespace': 'namespace', 'removal': 'removal', 'sustained': 'sustained', 'mmp': 'mmp',
-  'verity': 'verity',
+  'verity': 'verity', 'encrypt': 'encrypt',
   'rename': 'rename', 'orphan': 'orphan',
 }
   programs += {name: executable('ext4-' + name + '-test', 'tests/' + source + '.c',

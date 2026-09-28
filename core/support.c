@@ -507,6 +507,8 @@ ext4_result_string(enum ext4_result result)
 		return "directory not empty";
 	case EXT4_BUSY:
 		return "device is in use by another host";
+	case EXT4_ENCRYPTED:
+		return "encrypted object requires an unavailable key";
 	case EXT4_PERMISSION_DENIED:
 		return "inode policy forbids this operation";
 	}

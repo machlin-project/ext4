@@ -179,6 +179,10 @@ ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_
 	if ((directory->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
 		return EXT4_NOT_DIRECTORY;
 	}
+	/* Encrypted names can be neither presented nor resumed without a key. */
+	if (directory->flags & EXT4_INODE_ENCRYPT) {
+		return EXT4_ENCRYPTED;
+	}
 	size = directory->flags & EXT4_INODE_INLINE_DATA ? fs->info.block_size : directory->size;
 	if (size % fs->info.block_size != 0 || *cookie > size) {
 		return EXT4_CORRUPT;

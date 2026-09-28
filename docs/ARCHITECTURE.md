@@ -549,6 +549,29 @@ beyond EOF. Final deletion releases the complete map, including that metadata.
 Offline cleanup refuses a linked orphan with the flag instead of truncating its tree.
 Enabling verity on a file, measurement and signature policy are not implemented.
 
+## Encryption without keys
+
+Volumes with the ENCRYPT incompatibility, and the STABLE_INODES compatibility
+feature that some fscrypt policies require, are admitted. The core holds no keys and
+performs no cryptography. Objects with the ENCRYPT inode flag keep ciphertext
+contents, names and symlink targets, so every operation needing plaintext returns
+`EXT4_ENCRYPTED`: reads and native mappings of encrypted files and symlinks,
+iteration and lookup in encrypted directories, any name addition, removal or rename
+whose parent directory is encrypted, and writes, truncation, preallocation or growth
+of encrypted files. Denials occur before any write.
+
+Operations that need no plaintext remain available: owner, permission, timestamp and
+ordinary attribute changes on encrypted objects; rename, link and removal of an
+encrypted object whose parent is unencrypted, including a moved directory's dotdot
+update; rmdir of an empty encrypted directory; and final deletion, which releases
+the complete map. Directory validation accepts any name byte in encrypted
+directories, whose names are ciphertext, while still checking records, checksums and
+the index hash of the stored bytes. The fscrypt context attribute (index 9) cannot be
+created, replaced or removed. Offline cleanup refuses a linked encrypted orphan, since
+its partial-block zeroing would corrupt ciphertext; unlinked encrypted orphans are
+released. Supplying keys, deriving per-file keys and presenting Linux-style no-key
+names are product decisions and are not implemented.
+
 ## Persistent inode flags
 
 `ext4_set_inode_flags` changes selected policy bits and captured ctime in one

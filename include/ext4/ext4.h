@@ -36,7 +36,8 @@ enum ext4_result {
 	EXT4_TOO_MANY_LINKS,
 	EXT4_NOT_EMPTY,
 	EXT4_PERMISSION_DENIED,
-	EXT4_BUSY
+	EXT4_BUSY,
+	EXT4_ENCRYPTED
 };
 
 enum ext4_file_type {

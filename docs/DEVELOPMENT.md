@@ -178,6 +178,27 @@ for each damaged one. Linux records the invalid descriptor location in the super
 error fields even on a read-only mount; that primary-superblock record is the only
 permitted image change.
 
+## Encryption tests
+
+`ext4-encrypt-test --synthetic IMAGE` builds a tree through the core on a base image,
+then marks a directory subtree and an empty top-level directory encrypted in memory
+and sets the ENCRYPT feature. The `format` suite runs it on the 4 KiB and 1 KiB base
+images. Without `--synthetic`, IMAGE must come from the Linux probe. Both modes find
+encrypted objects by inode scan, require `EXT4_ENCRYPTED` for their names, contents,
+targets and data changes, deny changes to the fscrypt context attribute, and then
+rename the unencrypted tree, move the encrypted directory and back, remove the empty
+encrypted directory and change an encrypted file's permissions. An optional export
+directory receives the changed image. Synthetic images lack real fscrypt contexts and
+are not fsck oracles.
+
+`tests/run_linux_encrypt.py --create` runs from the lab with `--lab`, `--prepared`,
+`--runner` and a fresh `--output`. Linux adds a raw key, sets a v2 AES-256-XTS/CTS
+policy with 32-byte name padding, and creates encrypted files up to 197 KiB, long
+names, a subdirectory, a symlink, an empty encrypted top-level directory and plain
+files; the image must pass strict fsck. After the core test changes a copy,
+`--verify IMAGE` adds the same key and requires every encrypted byte, the symlink
+target, the removed directory and the renamed plain file, followed by strict fsck.
+
 ## Metadata fuzzing
 
 `-Dfuzzer=true` builds `ext4-image-fuzzer` using Clang's libFuzzer runtime,

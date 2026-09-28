@@ -285,9 +285,11 @@ ext4_orphan_record(struct ext4_fs *fs, uint32_t number, struct ext4_inode_disk *
 		return error;
 	}
 	type = inode->mode & EXT4_MODE_TYPE;
-	/* Linked cleanup truncates beyond EOF, where verity metadata lives. */
+	/* Linked cleanup truncates beyond EOF, where verity metadata lives, and
+	 * zeroes a partial block that an encrypted file keeps as ciphertext. */
 	if (inode->links != 0 &&
-	    (type != EXT4_MODE_REGULAR || (inode->flags & EXT4_INODE_VERITY))) {
+	    (type != EXT4_MODE_REGULAR ||
+		(inode->flags & (EXT4_INODE_VERITY | EXT4_INODE_ENCRYPT)))) {
 		return EXT4_UNSUPPORTED;
 	}
 	switch (type) {

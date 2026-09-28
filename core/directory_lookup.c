@@ -384,6 +384,10 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 	if ((directory->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
 		return EXT4_NOT_DIRECTORY;
 	}
+	/* A plaintext name cannot be matched or hashed against ciphertext names. */
+	if (directory->flags & EXT4_INODE_ENCRYPT) {
+		return EXT4_ENCRYPTED;
+	}
 	if (!(directory->flags & EXT4_INODE_INLINE_DATA) &&
 	    directory->size % fs->info.block_size != 0) {
 		return EXT4_CORRUPT;

@@ -483,7 +483,11 @@ ext4_growth_check(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 		error = (inode.mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY ? EXT4_IS_DIRECTORY
 									     : EXT4_UNSUPPORTED;
 	}
-	/* Growth preparation would zero Merkle metadata stored beyond EOF. */
+	/* Growth preparation would zero Merkle metadata stored beyond EOF, or
+	 * expose zeros that encrypted readers would decrypt as garbage. */
+	if (error == EXT4_OK && (inode.flags & EXT4_INODE_ENCRYPT)) {
+		error = EXT4_ENCRYPTED;
+	}
 	if (error == EXT4_OK && (inode.flags & EXT4_INODE_VERITY)) {
 		error = EXT4_PERMISSION_DENIED;
 	}
@@ -937,6 +941,10 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 									     : EXT4_UNSUPPORTED;
 		goto cancel;
 	}
+	if (inode.flags & EXT4_INODE_ENCRYPT) {
+		error = EXT4_ENCRYPTED;
+		goto cancel;
+	}
 	if ((inode.flags & EXT4_INODE_DATA_PROTECTED) ||
 	    ((inode.flags & EXT4_INODE_APPEND) && offset != inode.size)) {
 		error = EXT4_PERMISSION_DENIED;
@@ -1263,6 +1271,10 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 	if ((inode.mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR) {
 		error = (inode.mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY ? EXT4_IS_DIRECTORY
 									     : EXT4_UNSUPPORTED;
+		goto cancel;
+	}
+	if (inode.flags & EXT4_INODE_ENCRYPT) {
+		error = EXT4_ENCRYPTED;
 		goto cancel;
 	}
 	if (inode.flags & (EXT4_INODE_RESTRICTED_FLAGS | EXT4_INODE_VERITY)) {
@@ -1663,6 +1675,9 @@ ext4_fallocate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_
 	}
 	end = offset + length;
 	error = ext4_growth_check(fs, number, generation, end, update, &inode);
+	if (error == EXT4_OK && (inode.flags & EXT4_INODE_ENCRYPT)) {
+		error = EXT4_ENCRYPTED;
+	}
 	if (error == EXT4_OK &&
 	    ((inode.flags & EXT4_INODE_DATA_PROTECTED) ||
 		((inode.flags & EXT4_INODE_APPEND) && (flags & EXT4_FALLOC_PUNCH_HOLE)))) {

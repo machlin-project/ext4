@@ -284,6 +284,11 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		error = EXT4_PERMISSION_DENIED;
 		goto cancel;
 	}
+	/* New names in an encrypted directory must be encrypted with its key. */
+	if (parent.flags & EXT4_INODE_ENCRYPT) {
+		error = EXT4_ENCRYPTED;
+		goto cancel;
+	}
 	if (!ext4_directory_links_valid(fs, &parent, false)) {
 		error = EXT4_CORRUPT;
 		goto cancel;
@@ -579,6 +584,10 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 	}
 	if (parent.flags & EXT4_INODE_RESTRICTED_FLAGS) {
 		error = EXT4_PERMISSION_DENIED;
+		goto cancel;
+	}
+	if (parent.flags & EXT4_INODE_ENCRYPT) {
+		error = EXT4_ENCRYPTED;
 		goto cancel;
 	}
 	if (!ext4_directory_links_valid(fs, &parent, false)) {
@@ -891,6 +900,10 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 		}
 		if (state->parents[index].links == 0) {
 			error = EXT4_NOT_FOUND;
+			goto cancel;
+		}
+		if (state->parents[index].flags & EXT4_INODE_ENCRYPT) {
+			error = EXT4_ENCRYPTED;
 			goto cancel;
 		}
 		if (!ext4_directory_links_valid(fs, &state->parents[index], false)) {
