@@ -90,8 +90,9 @@ linux_return(struct device *device, const char *output)
 		   &create, &time, &file),
 	    EXT4_OK);
 	memset(bytes, 0xd7, sizeof(bytes));
+	update = attributes(false);
 	EXPECT(ext4_write(
-		   fs, file.number, file.generation, 0, bytes, sizeof(bytes), &create, &completed),
+		   fs, file.number, file.generation, 0, bytes, sizeof(bytes), &update, &completed),
 	    EXT4_OK);
 	CHECK(completed == sizeof(bytes));
 	file = find(fs, &root, "core-inline");
