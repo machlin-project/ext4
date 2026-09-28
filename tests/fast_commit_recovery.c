@@ -46,6 +46,16 @@ struct device {
 	struct event history[EVENT_LIMIT];
 };
 
+enum orphan_damage {
+	ORPHAN_DUPLICATE,
+	ORPHAN_LEGACY_DUPLICATE,
+	ORPHAN_RESERVED,
+	ORPHAN_OUT_OF_RANGE,
+	ORPHAN_BAD_MAGIC,
+	ORPHAN_BAD_CHECKSUM,
+	ORPHAN_DAMAGE_COUNT
+};
+
 static void
 result_is(enum ext4_result actual, enum ext4_result expected, const char *operation, int line)
 {
@@ -308,6 +318,74 @@ compare(struct device *device, struct ext4_fs *reference)
 	CHECK(device->events == events && device->live == 0);
 }
 
+static void
+orphan_guards(struct device *device)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode file;
+	struct ext4_recovery_report report;
+	struct ext4_block_number_disk address;
+	struct ext4_orphan_tail_disk *tail;
+	struct ext4_le32 *entries;
+	const struct ext4_super_disk *super;
+	uint64_t block;
+	uint32_t seed;
+	uint32_t checksum;
+	uint32_t index;
+	unsigned int damage;
+
+	reset(device);
+	EXPECT(ext4_load(&device->environment, true, &fs), EXT4_OK);
+	CHECK(fs->orphan_file_inode != 0 && fs->metadata_checksum);
+	EXPECT(ext4_get_inode(fs, fs->orphan_file_inode, &file), EXT4_OK);
+	EXPECT(ext4_map_block(fs, &file, 0, &block), EXT4_OK);
+	CHECK(block != 0);
+	ext4_encode32(&address.low, (uint32_t)block);
+	ext4_encode32(&address.high, (uint32_t)(block >> 32));
+	seed = ext4_crc32c(ext4_inode_seed(fs, &file), &address, sizeof(address));
+	ext4_unmount(fs);
+	for (damage = 0; damage < ORPHAN_DAMAGE_COUNT; damage++) {
+		reset(device);
+		super = (const struct ext4_super_disk *)(device->cache + EXT4_SUPER_OFFSET);
+		entries = (struct ext4_le32 *)(device->cache + block * device->block_size);
+		tail = (struct ext4_orphan_tail_disk *)((uint8_t *)entries + device->block_size -
+		    sizeof(*tail));
+		CHECK(ext4_le32(&entries[0]) != 0 && ext4_le32(&entries[1]) != 0);
+		switch (damage) {
+		case ORPHAN_DUPLICATE:
+			ext4_encode32(&entries[1], ext4_le32(&entries[0]));
+			break;
+		case ORPHAN_LEGACY_DUPLICATE:
+			CHECK(ext4_le32(&super->last_orphan) != 0);
+			ext4_encode32(&entries[1], ext4_le32(&super->last_orphan));
+			break;
+		case ORPHAN_RESERVED:
+			ext4_encode32(&entries[1], ext4_le32(&super->orphan_file_inode));
+			break;
+		case ORPHAN_OUT_OF_RANGE:
+			ext4_encode32(&entries[1], ext4_le32(&super->inodes_count) + 1U);
+			break;
+		case ORPHAN_BAD_MAGIC:
+			ext4_encode32(&tail->magic, EXT4_ORPHAN_MAGIC ^ 1U);
+			break;
+		case ORPHAN_BAD_CHECKSUM:
+			break;
+		}
+		checksum = ext4_crc32c(seed, entries, device->block_size - sizeof(*tail));
+		ext4_encode32(
+		    &tail->checksum, damage == ORPHAN_BAD_CHECKSUM ? checksum ^ 1U : checksum);
+		memcpy(device->stable, device->cache, device->size);
+		EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_CORRUPT);
+		CHECK(device->live == 0 && report.replayed_blocks == 0 && report.fast_commits == 0);
+		for (index = 0; index < device->events; index++) {
+			CHECK(device->history[index].flush);
+		}
+		CHECK(memcmp(device->cache, device->stable, device->size) == 0);
+	}
+	printf("PASS %u malformed orphan states rejected before fast-commit writes\n",
+	    ORPHAN_DAMAGE_COUNT);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -331,17 +409,20 @@ main(int argc, char **argv)
 	bool damaged_super;
 	bool faults;
 	bool resources;
+	bool orphans;
 	enum ext4_result error;
 
 	if (argc != 3 && argc != 4) {
 		fprintf(stderr,
-		    "usage: %s PENDING_IMAGE VERIFIED_REFERENCE_IMAGE [--faults|--resources]\n",
+		    "usage: %s PENDING_IMAGE VERIFIED_REFERENCE_IMAGE "
+		    "[--faults|--resources|--orphans]\n",
 		    argv[0]);
 		return 2;
 	}
 	faults = argc == 4 && strcmp(argv[3], "--faults") == 0;
 	resources = argc == 4 && strcmp(argv[3], "--resources") == 0;
-	CHECK(argc == 3 || faults || resources);
+	orphans = argc == 4 && strcmp(argv[3], "--orphans") == 0;
+	CHECK(argc == 3 || faults || resources || orphans);
 	EXPECT(ext4_posix_open(&source, argv[1]), EXT4_OK);
 	EXPECT(ext4_posix_open(&oracle, argv[2]), EXT4_OK);
 	EXPECT(ext4_mount(&oracle.environment, &reference), EXT4_OK);
@@ -379,6 +460,9 @@ main(int argc, char **argv)
 	printf("PASS %u fast commits match verified namespace, data and accounting; %u durability "
 	       "events\n",
 	    report.fast_commits, operations);
+	if (orphans) {
+		orphan_guards(device);
+	}
 	if (resources) {
 		for (fault = 0; fault < 2; fault++) {
 			limit = fault == 0 ? allocations : reads;
@@ -416,7 +500,9 @@ main(int argc, char **argv)
 					    EXT4_SUPER_OFFSET);
 					checksum = ext4_crc32c(UINT32_MAX, super,
 					    offsetof(struct ext4_super_disk, checksum));
-					damaged_super = checksum != ext4_le32(&super->checksum);
+					damaged_super = (ext4_le32(&super->feature_ro_compat) &
+							    EXT4_FEATURE_RO_METADATA_CSUM) &&
+					    checksum != ext4_le32(&super->checksum);
 					error = ext4_recover(
 					    &device->environment, &device->writer, &report);
 					if (damaged_super) {

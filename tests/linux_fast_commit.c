@@ -95,6 +95,8 @@ verify_extra(unsigned int block_size)
 	int fd;
 
 	require(access("/mnt/victim", F_OK) < 0 && errno == ENOENT, "verify final unlink");
+	require(access("/mnt/open-unlinked", F_OK) < 0 && errno == ENOENT,
+	    "verify checkpointed orphan has no name");
 	require(stat("/mnt/new-dir", &metadata) == 0 && S_ISDIR(metadata.st_mode) &&
 		metadata.st_nlink == 2,
 	    "verify created directory");
@@ -245,8 +247,9 @@ mutate_extra(unsigned int block_size)
 }
 
 static void
-mutate(unsigned int block_size)
+mutate(unsigned int block_size, unsigned int modern_orphans)
 {
+	struct stat held_metadata;
 	uint8_t *bytes;
 	char path[128];
 	char contents[64];
@@ -256,6 +259,7 @@ mutate(unsigned int block_size)
 	unsigned long commits = 0;
 	unsigned int index;
 	int fd;
+	int held = -1;
 
 	bytes = malloc(block_size + 3U);
 	require(bytes != NULL, "allocate native mutation buffer");
@@ -264,10 +268,25 @@ mutate(unsigned int block_size)
 	require(fd >= 0 && write(fd, bytes, block_size + 3U) == (ssize_t)block_size + 3U &&
 		close(fd) == 0,
 	    "create checkpointed unlink target");
+	if (modern_orphans) {
+		held =
+		    open("/mnt/open-unlinked", O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, CREATED_MODE);
+		require(held >= 0 &&
+			write(held, bytes, block_size + 3U) == (ssize_t)block_size + 3 &&
+			unlink("/mnt/open-unlinked") == 0,
+		    "create checkpointed open-unlinked orphan");
+	}
 	fd = open("/mnt/hello.txt", O_RDWR | O_CLOEXEC);
 	require(fd >= 0, "open initial file");
 	/* Finish one ordinary transaction before asking Linux for fast commits. */
 	require(pwrite(fd, "A", 1, 0) == 1 && syncfs(fd) == 0, "checkpoint initial transaction");
+	if (held >= 0) {
+		require(fstat(held, &held_metadata) == 0 && held_metadata.st_nlink == 0 &&
+			held_metadata.st_blocks != 0,
+		    "retain allocated orphan through checkpoint and crash");
+		printf("LINUX_FAST_COMMIT_HELD_ORPHAN=%llu\n",
+		    (unsigned long long)held_metadata.st_ino);
+	}
 	memset(bytes, 'B', block_size + 3U);
 	require(pwrite(fd, bytes, block_size + 3U, 0) == (ssize_t)block_size + 3,
 	    "overwrite range for fast commit");
@@ -311,7 +330,8 @@ mutate(unsigned int block_size)
 	}
 	require(fclose(stats) == 0 && commits != 0, "require actual native fast commits");
 	puts("LINUX_FAST_COMMIT_STATS_END");
-	/* Keep the mount dirty; the next owner must replay the actual fast log. */
+	/* Keep the mount dirty and held open-unlinked descriptor alive; the next
+	 * owner must replay the fast log and reclaim its checkpointed orphan. */
 	power_off(1);
 }
 
@@ -328,6 +348,7 @@ main(void)
 	FILE *config;
 	char path[128];
 	unsigned int phase = 0;
+	unsigned int modern_orphans = 0;
 	unsigned int index;
 	int fd;
 	int result;
@@ -350,6 +371,10 @@ main(void)
 	config = fopen("/phase", "r");
 	require(config != NULL && fscanf(config, "%u", &phase) == 1, "read fixture phase");
 	require(fclose(config) == 0 && phase <= 1, "validate fixture phase");
+	config = fopen("/modern-orphans", "r");
+	require(config != NULL && fscanf(config, "%u", &modern_orphans) == 1,
+	    "read orphan fixture mode");
+	require(fclose(config) == 0 && modern_orphans <= 1, "validate orphan fixture mode");
 	printf("LINUX_FAST_COMMIT_MOUNT_OPTIONS=%s\n", options);
 	require(mount("/dev/vda", "/mnt", "ext4", MS_NOATIME | MS_NOSUID | MS_NODEV, options) == 0,
 	    "mount fast-commit filesystem");
@@ -357,7 +382,7 @@ main(void)
 		(geometry.f_bsize == 1024 || geometry.f_bsize == 4096),
 	    "require fixture block size");
 	if (phase == 0) {
-		mutate((unsigned int)geometry.f_bsize);
+		mutate((unsigned int)geometry.f_bsize, modern_orphans);
 	}
 	verify((unsigned int)geometry.f_bsize);
 	require(umount("/mnt") == 0, "cleanly unmount recovered filesystem");

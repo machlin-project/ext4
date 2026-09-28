@@ -18,6 +18,7 @@ struct ext4_fc_replay {
 	uint8_t *buffer;
 	uint32_t inode_count;
 	uint32_t inode_capacity;
+	uint32_t orphan_slots_removed;
 };
 
 static bool
@@ -114,8 +115,20 @@ ext4_fc_forget_orphan(struct ext4_fc_replay *replay, uint32_t number)
 	uint32_t previous_number = 0;
 	uint32_t cursor;
 	uint32_t visited = 0;
+	bool removed;
 	enum ext4_result error;
 
+	error = ext4_orphan_file_remove(&replay->allocation, number, &removed);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (removed) {
+		if (replay->orphan_slots_removed == fs->orphan_file->pending) {
+			return EXT4_CORRUPT;
+		}
+		replay->orphan_slots_removed++;
+		return EXT4_OK;
+	}
 	error = ext4_allocation_super(&replay->allocation);
 	if (error != EXT4_OK) {
 		return error;
@@ -263,7 +276,7 @@ ext4_fc_apply_inode(
 			directory_size = inode.size;
 			directory_flags = inode.flags & EXT4_INODE_INDEX;
 		}
-		orphan_next = ext4_le32(&disk->deletion_time);
+		orphan_next = created ? 0 : ext4_le32(&disk->deletion_time);
 	}
 	if (created) {
 		ext4_zero(disk, fs->inode_size);
@@ -620,11 +633,6 @@ ext4_fast_commit_replay(struct ext4_fast_commit *log)
 	if (log->count == 0) {
 		return EXT4_OK;
 	}
-	if (fs->info.feature_ro_compat & EXT4_FEATURE_RO_ORPHAN_PRESENT) {
-		/* Fast replay must coordinate modern orphan slots before it can
-		 * replace generations or enroll final unlinks into the legacy list. */
-		return EXT4_UNSUPPORTED;
-	}
 	/* Linux may leave the primary summaries behind the ordinary committed
 	 * prefix. Derive the baseline in memory; persist it in the same full
 	 * conversion transaction as every fast-commit effect. */
@@ -642,6 +650,9 @@ ext4_fast_commit_replay(struct ext4_fast_commit *log)
 	fs->info.free_blocks = free_blocks;
 	fs->info.free_inodes = (uint32_t)free_inodes;
 	error = ext4_system_ranges_build(fs);
+	if (error == EXT4_OK) {
+		error = ext4_orphan_validate(fs);
+	}
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -736,6 +747,9 @@ ext4_fast_commit_replay(struct ext4_fast_commit *log)
 			fs->info.free_blocks = replay->allocation.free_blocks;
 			fs->info.free_inodes = replay->allocation.free_inodes;
 			fs->last_orphan = orphan_head;
+			if (fs->orphan_file != NULL) {
+				fs->orphan_file->pending -= replay->orphan_slots_removed;
+			}
 		}
 	}
 out:

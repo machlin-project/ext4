@@ -163,7 +163,11 @@ ext4_orphan_file_prepare(struct ext4_fs *fs)
 	    ? EXT4_UNSUPPORTED
 	    : ext4_inode_writable(fs, disk, &file->inode);
 	if (error == EXT4_OK) {
-		error = ext4_transaction_begin(fs->journal, 1, &transaction);
+		/* This context only reads allocation maps and is always cancelled.
+		 * Recovery may have checkpointed the ordinary prefix while keeping
+		 * its journal pointer until fast-commit conversion becomes durable. */
+		error = ext4_transaction_begin_recovery(
+		    fs->journal, fs->journal->sequence, 1, &transaction);
 	}
 	if (error != EXT4_OK) {
 		goto out;
@@ -428,7 +432,7 @@ ext4_orphan_validate_live(struct ext4_fs *fs)
 	return ext4_orphan_chain(fs, NULL, 0, true);
 }
 
-static enum ext4_result
+enum ext4_result
 ext4_orphan_validate(struct ext4_fs *fs)
 {
 	struct ext4_orphan_file *file = fs->orphan_file;
@@ -515,6 +519,59 @@ out:
 		fs->environment.release(fs->environment.context, numbers, bytes);
 	}
 	return error;
+}
+
+enum ext4_result
+ext4_orphan_file_remove(struct ext4_allocation *allocation, uint32_t number, bool *removed)
+{
+	struct ext4_fs *fs = allocation->fs;
+	struct ext4_orphan_file *file = fs->orphan_file;
+	struct ext4_orphan_tail_disk *tail;
+	struct ext4_le32 *entries;
+	void *buffer;
+	uint32_t logical;
+	uint32_t slot;
+	enum ext4_result error;
+
+	*removed = false;
+	if (file == NULL || file->pending == 0) {
+		return EXT4_OK;
+	}
+	/* The complete orphan set was validated before semantic replay. Reads
+	 * include earlier removals in this transaction, including inode reuse
+	 * more than once within the same fast-commit prefix. */
+	for (logical = 0; logical < file->block_count; logical++) {
+		error = ext4_transaction_read(
+		    allocation->transaction, file->blocks[logical], allocation->scratch);
+		if (error == EXT4_OK) {
+			error = ext4_orphan_file_block(fs, logical, allocation->scratch);
+		}
+		if (error != EXT4_OK) {
+			return error;
+		}
+		entries = (struct ext4_le32 *)allocation->scratch;
+		for (slot = 0; slot < ext4_orphan_slots(fs); slot++) {
+			if (ext4_le32(&entries[slot]) != number) {
+				continue;
+			}
+			error = ext4_transaction_buffer(
+			    allocation->transaction, file->blocks[logical], &buffer);
+			if (error != EXT4_OK) {
+				return error;
+			}
+			entries = buffer;
+			ext4_encode32(&entries[slot], 0);
+			tail = (struct ext4_orphan_tail_disk *)((uint8_t *)entries +
+			    fs->info.block_size - sizeof(*tail));
+			if (fs->metadata_checksum) {
+				ext4_encode32(&tail->checksum,
+				    ext4_orphan_file_checksum(fs, logical, entries));
+			}
+			*removed = true;
+			return EXT4_OK;
+		}
+	}
+	return EXT4_OK;
 }
 
 static enum ext4_result

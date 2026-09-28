@@ -49,6 +49,10 @@ struct ext4_allocation {
 enum ext4_result ext4_allocation_init(struct ext4_allocation *allocation, struct ext4_fs *fs,
     struct ext4_transaction *transaction, const struct ext4_inode *inode);
 void ext4_allocation_destroy(struct ext4_allocation *allocation);
+/* Remove a previously validated modern orphan slot in the caller's private
+ * transaction. Publish the pending-count decrement only after commit. */
+enum ext4_result ext4_orphan_file_remove(
+    struct ext4_allocation *allocation, uint32_t number, bool *removed);
 enum ext4_result ext4_allocate_block(struct ext4_allocation *allocation, uint64_t *block);
 enum ext4_result ext4_allocation_valid(struct ext4_allocation *allocation, uint64_t block);
 enum ext4_result ext4_allocation_valid_range(

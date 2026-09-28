@@ -23,6 +23,8 @@ PROFILES = (
     ("4k", 4096, set(), set()),
     ("checksum-seed", 4096, {"metadata_csum_seed"}, set()),
     ("no-checksum", 1024, set(), {"metadata_csum"}),
+    ("orphan-1k", 1024, {"orphan_file"}, set()),
+    ("orphan-4k", 4096, {"orphan_file"}, set()),
 )
 
 
@@ -80,6 +82,11 @@ def main():
         original_data = b"A" * (SOURCE_BLOCKS * block)
         (root / "hello.txt").write_bytes(original_data)
         (root / "hello.txt").chmod(0o640)
+        modern_orphans = "orphan_file" in added
+        if modern_orphans:
+            for filename in ("victim", "final-delete", "orphan-held", "legacy", "orphan-truncate"):
+                (root / filename).write_bytes(b"O" * (SOURCE_BLOCKS * block))
+                (root / filename).chmod(0o640)
         before = directory / "before.img"
         expected = directory / "expected.img"
         pending = directory / "pending.img"
@@ -120,6 +127,19 @@ def main():
             final_files[f"new-dir/{filename}"] = contents
         commands += ["ln /hello.txt /alias", "ln /hello.txt /renamed",
                      "unlink /hello.txt", "sif /renamed links_count 2"]
+        if modern_orphans:
+            # Allocate all other new names before releasing inode numbers: only
+            # victim's old generation may be reused by this fast-commit stream.
+            replacement = directory / "replacement-data"
+            replacement_data = b"R" * (block + 37)
+            replacement.write_bytes(replacement_data)
+            commands += ["rm /victim", f'write "{replacement}" /reused',
+                         "sif /reused mode 0100640", "sif /reused generation 123456789",
+                         "rm /final-delete", "rm /orphan-held", "rm /legacy",
+                         "punch /orphan-truncate 2 4",
+                         f"sif /orphan-truncate size {block + 13}"]
+            final_files.update(reused=replacement_data,
+                               **{"orphan-truncate": b"O" * (block + 13)})
         script = directory / "expected.debugfs"
         script.write_text("\n".join(commands) + "\n")
         run(row, [tools["debugfs"], "-w", "-f", script, expected])

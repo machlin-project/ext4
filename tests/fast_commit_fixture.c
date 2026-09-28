@@ -228,6 +228,98 @@ data_records(struct fixture *fixture, ext2_ino_t number)
 	}
 }
 
+static ext2_ino_t
+pending_lookup(struct fixture *fixture, const char *name)
+{
+	ext2_ino_t number;
+
+	check(
+	    ext2fs_lookup(fixture->pending, EXT2_ROOT_INO, name, (int)strlen(name), NULL, &number),
+	    "lookup checkpointed orphan inode");
+	return number;
+}
+
+static void
+pending_orphan(struct fixture *fixture, const char *name, int unlinked, __u32 size)
+{
+	struct ext2_inode_large inode;
+	ext2_ino_t number = pending_lookup(fixture, name);
+
+	check(ext2fs_read_inode_full(
+		  fixture->pending, number, (struct ext2_inode *)&inode, sizeof(inode)),
+	    "read checkpointed orphan record");
+	if (unlinked) {
+		check(ext2fs_unlink(fixture->pending, EXT2_ROOT_INO, name, number, 0),
+		    "remove orphan name without releasing allocation");
+		inode.i_links_count = 0;
+		inode.i_dtime = 0;
+	}
+	if (size != 0) {
+		inode.i_size = size;
+	}
+	check(ext2fs_write_inode_full(
+		  fixture->pending, number, (struct ext2_inode *)&inode, sizeof(inode)),
+	    "persist checkpointed orphan record");
+}
+
+static void
+prepare_orphans(struct fixture *fixture)
+{
+	ext2_filsys fs = fixture->pending;
+	ext2_ino_t numbers[4];
+	ext2_ino_t orphan_file = fs->super->s_orphan_file_inum;
+	ext2_ino_t legacy;
+	__le32 *entries = (__le32 *)fixture->block;
+	blk64_t physical;
+	unsigned int index;
+	int flags;
+
+	if (!ext2fs_has_feature_orphan_file(fs->super)) {
+		return;
+	}
+	numbers[0] = pending_lookup(fixture, "victim");
+	numbers[1] = pending_lookup(fixture, "final-delete");
+	numbers[2] = pending_lookup(fixture, "orphan-held");
+	numbers[3] = pending_lookup(fixture, "orphan-truncate");
+	legacy = pending_lookup(fixture, "legacy");
+	require(numbers[0] == lookup(fixture, EXT2_ROOT_INO, "reused"),
+	    "require actual inode-number reuse in fixture");
+	pending_orphan(fixture, "orphan-held", 1, 0);
+	pending_orphan(fixture, "legacy", 1, 0);
+	pending_orphan(fixture, "orphan-truncate", 0, fs->blocksize + 13U);
+	physical = mapped_block(fs, orphan_file, 0, &flags);
+	require(physical != 0 && flags == 0, "require mapped orphan slots");
+	check(io_channel_read_blk64(fs->io, physical, 1, entries), "read initial orphan slots");
+	for (index = 0; index < sizeof(numbers) / sizeof(numbers[0]); index++) {
+		require(entries[index] == 0, "require empty initial orphan slot");
+		entries[index] = ext2fs_cpu_to_le32(numbers[index]);
+	}
+	check(ext2fs_orphan_file_block_csum_set(fs, orphan_file, physical, (char *)entries),
+	    "checksum independent orphan slots");
+	check(io_channel_write_blk64(fs->io, physical, 1, entries), "persist pending orphan slots");
+	fs->super->s_last_orphan = legacy;
+	ext2fs_set_feature_orphan_present(fs->super);
+	ext2fs_mark_super_dirty(fs);
+}
+
+static void
+orphan_records(struct fixture *fixture)
+{
+	ext2_ino_t victim;
+	ext2_ino_t final;
+
+	if (!ext2fs_has_feature_orphan_file(fixture->pending->super)) {
+		return;
+	}
+	victim = pending_lookup(fixture, "victim");
+	final = pending_lookup(fixture, "final-delete");
+	name_record(fixture, EXT4_FC_TAG_UNLINK, EXT2_ROOT_INO, victim, "victim");
+	inode_record(fixture, victim, 0);
+	data_records(fixture, victim);
+	name_record(fixture, EXT4_FC_TAG_CREAT, EXT2_ROOT_INO, victim, "reused");
+	name_record(fixture, EXT4_FC_TAG_UNLINK, EXT2_ROOT_INO, final, "final-delete");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -286,6 +378,7 @@ main(int argc, char **argv)
 	block = ext2fs_be32_to_cpu(journal->s_first);
 	memset(fixture.block, 0, fixture.pending->blocksize);
 	journal_write(&fixture, block, fixture.block);
+	prepare_orphans(&fixture);
 
 	head.fc_tid = ext2fs_cpu_to_le32(FIXTURE_SEQUENCE);
 	record(&fixture, EXT4_FC_TAG_HEAD, &head, sizeof(head));
@@ -317,6 +410,7 @@ main(int argc, char **argv)
 	name_record(&fixture, EXT4_FC_TAG_LINK, EXT2_ROOT_INO, hello, "renamed");
 	name_record(&fixture, EXT4_FC_TAG_UNLINK, EXT2_ROOT_INO, hello, "hello.txt");
 	inode_record(&fixture, hello, 0);
+	orphan_records(&fixture);
 	commit(&fixture);
 	for (block = fixture.first; block < fixture.blocks; block++) {
 		journal_write(&fixture, block,

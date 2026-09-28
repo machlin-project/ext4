@@ -110,7 +110,7 @@ Generated evidence is under `artifacts/checks/fast-commit-replay-first/`,
 `fast-commit-core-expanded-4k/`. Inputs and executable identities are recorded in
 those reports; the protected source images remain unchanged.
 
-The reproducible CI fixture generator independently authors four 32 MiB profiles
+The initial CI fixture batch independently authors four 32 MiB profiles
 with e2fsprogs: 1/4 KiB blocks, an explicit checksum seed and absent metadata
 checksums. Three fast commits encode hole removal, allocation, a growing directory
 with long names, hard links and rename. The expected filesystems are authored with
@@ -131,7 +131,36 @@ Evidence is in `artifacts/checks/fast-commit-fixture-final/` and
 `artifacts/fast-commit-independent-first/`. The workflow now generates and runs
 these cases automatically; the expanded full CI regression is still pending.
 
-Open work includes modern orphan slots, indirect/special-inode records, private
+Fast replay now validates the complete modern and legacy orphan sets before its
+conversion transaction. Reusing an inode removes its old modern slot in the same
+durable transaction as the generation change. Pending-slot counters become visible
+only after commit; remaining linked and unlinked orphans are reclaimed by the
+ordinary restartable cleaner after fast replay. Orphan-file mapping validation can
+inspect a checkpointed ordinary prefix without discarding the pending fast log.
+
+Two additional independently authored 1/4 KiB profiles combine modern slot reuse,
+final unlink, an already unlinked allocated inode, an interrupted linked truncate
+and a legacy orphan. All 22 focused cases pass. The modern profiles cover 1,170
+allocation failures, 912 read failures and 1,908 write/barrier interruptions across
+conversion and subsequent cleanup. Twenty-seven deliberate primary-superblock
+tears require offline repair; all other interrupted states converge to the expected
+filesystem. Twelve malformed cases reject duplicate slots, overlap with the legacy
+chain, reserved/out-of-range inode numbers and corrupt tails before any conversion
+write. All six independently checked outputs pass nonrepairing e2fsck, exact
+namespace/file hashes and unchanged second clean recovery. Evidence is under
+`artifacts/checks/fast-commit-orphan-final/` and
+`artifacts/fast-commit-orphan-independent-final/`.
+
+Native Linux captures also pass at both block sizes. Each preserves 53 fast
+commits and an allocated open-unlinked inode across the preceding full checkpoint.
+Core recovery executes one modern-slot transfer and reclaims that inode, then the
+guest verifies all files and cleanly unmounts. Four actual boots and all six
+nonrepairing filesystem checks pass. The raw capture and console evidence is in
+the lab's `artifacts/ext4-journal/fast-commit-orphan-native-first/`. This proves core
+replay followed by Linux verification, not Linux direct replay of the pending
+journal. Full-regression acceptance for this extension remains pending.
+
+Open work includes indirect/special-inode records, private
 attribute reclamation during generation reuse, larger prefixes, additional format
 combinations, broader semantic-corruption coverage and interrupted foreign
 replay. Native-generated fixture capture remains separate from ordinary CI.

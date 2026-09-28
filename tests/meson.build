@@ -13,13 +13,18 @@ foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
 endforeach
 
 if paths['fast_commit_fixtures'] != ''
-  foreach profile : ['1k', '4k', 'checksum-seed', 'no-checksum']
+  foreach profile : ['1k', '4k', 'checksum-seed', 'no-checksum', 'orphan-1k', 'orphan-4k']
     directory = paths['fast_commit_fixtures'] / profile
     test('fast-commit-decoder-' + profile, programs['fast-commit'],
       args: [directory / 'pending.journal', '7', '3'], timeout: 300, suite: 'core')
     test('fast-commit-recovery-' + profile, programs['fast-commit-recovery'],
       args: [directory / 'pending.img', directory / 'expected.img'], timeout: 300, suite: 'core')
-    if profile in ['1k', '4k']
+    if profile in ['orphan-1k', 'orphan-4k']
+      test('fast-commit-orphan-guards-' + profile, programs['fast-commit-recovery'],
+        args: [directory / 'pending.img', directory / 'expected.img', '--orphans'],
+        timeout: 300, suite: 'core')
+    endif
+    if profile in ['1k', '4k', 'orphan-1k', 'orphan-4k']
       test('fast-commit-resources-' + profile, programs['fast-commit-recovery'],
         args: [directory / 'pending.img', directory / 'expected.img', '--resources'],
         timeout: 600, suite: 'core')

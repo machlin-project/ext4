@@ -144,6 +144,7 @@ enum ext4_result ext4_orphan_cleanup(struct ext4_fs *fs, struct ext4_recovery_re
 enum ext4_result ext4_orphan_finish_inode(
     struct ext4_fs *fs, uint32_t number, uint32_t generation, bool retained);
 enum ext4_result ext4_orphan_validate_live(struct ext4_fs *fs);
+enum ext4_result ext4_orphan_validate(struct ext4_fs *fs);
 enum ext4_result ext4_orphan_file_prepare(struct ext4_fs *fs);
 void ext4_orphan_file_close(struct ext4_fs *fs);
 enum ext4_result ext4_data_block_valid(struct ext4_fs *fs, uint64_t block);

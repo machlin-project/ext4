@@ -134,6 +134,9 @@ instead recovers a copy with the portable utility before Linux verifies it; the
 report labels this different path explicitly. `--block-size 1024` or `4096`
 limits a capture. The harness freezes its probe source and binary, retains pending
 images and journal dumps, and checks the recovered image without repairing it.
+`--orphan-file` enables the modern orphan file and keeps an allocated, unlinked
+inode open across the initial full checkpoint and final crash. The capture must
+identify that held inode and retain `orphan_present` in the pending filesystem.
 The expanded native direct-replay failure is documented in ACCEPTANCE.md.
 
 After capture, the focused executables accept the protected inputs directly:
@@ -157,6 +160,10 @@ linking the core into the fixture author. `debugfs` independently creates the ex
 filesystem, including holes, directory creation and growth, long names, hard links
 and rename. The serialized journal contains three fast commits with block padding.
 Profiles cover 1/4 KiB blocks, an explicit checksum seed and absent metadata checksums.
+Two additional orphan-file profiles combine inode-generation reuse, final unlink,
+a checkpointed unlinked inode, an interrupted linked truncate and a legacy orphan
+in the same pending filesystem. Their expected filesystems are independently
+authored before serializing the orphan state and fast-commit records.
 
 ```sh
 python3 tests/generate_fast_commit_fixtures.py --tools-root E2FSPROGS_BUILD \
@@ -177,6 +184,10 @@ inputs remain unchanged. This is independent output verification, not a native
 Linux capture. The generator's optional `--direct-replay` additionally requires
 e2fsck's direct fast replay and currently reproduces its directory-growth failure;
 an unsuccessful oracle replay is never used as the expected filesystem.
+The orphan profiles also run `--orphans` guards: duplicate slots, overlap with the
+legacy chain, reserved/out-of-range inode numbers and damaged tails must be rejected
+before any conversion write. Resource and durability failures cover both the fast
+conversion and the subsequent ordinary orphan-cleanup transactions.
 
 Add `--checksum-v1` before the image to select v1 with 32/64-bit tags. Add
 `--export-only` after that option to retain committed logs without repeating the

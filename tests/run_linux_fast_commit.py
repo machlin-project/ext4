@@ -30,6 +30,8 @@ def main():
                    help='recover a copy with this core utility before native verification')
     p.add_argument('--block-size', type=int, choices=(1024, 4096), action='append',
                    help='limit this capture to selected block sizes; default: both')
+    p.add_argument('--orphan-file', action='store_true',
+                   help='capture fast commits with the modern orphan-file feature enabled')
     a = p.parse_args()
     lab, prepared, runner, output = (v.resolve() for v in (a.lab, a.prepared, a.runner, a.output))
     if Path.cwd() != lab:
@@ -76,6 +78,7 @@ def main():
         (tree / 'proc').mkdir(exist_ok=True)
         shutil.copy2(output / 'init', tree / 'init')
         (tree / 'phase').write_text(f'{phase}\n')
+        (tree / 'modern-orphans').write_text(f'{int(a.orphan_file)}\n')
         archive = output / f'phase-{phase}.cpio'
         listing = '\n'.join(str(x.relative_to(tree)) for x in sorted(tree.rglob('*'))) + '\n'
         with archive.open('wb') as stream:
@@ -99,6 +102,9 @@ def main():
                    recovery='core followed by native verification' if recover else 'native')
         rows.append(row)
         features = EXPECTED_FEATURES | {'fast_commit'}
+        if a.orphan_file:
+            features.add('orphan_file')
+        row['orphan_file'] = a.orphan_file
         run(row, [tools['mke2fs'], '-F', '-t', 'ext4', '-b', block, '-N', 256, '-I', 256,
                   '-m', 0, '-O', 'none,' + ','.join(sorted(features)), '-U', UUID,
                   '-J', 'size=8,fast_commit_size=256', '-E', 'lazy_itable_init=0,nodiscard', '-d', seed,
@@ -125,11 +131,18 @@ def main():
                 if not stats or int(stats[1]) == 0:
                     raise RuntimeError('Missing actual native fast-commit counters')
                 row['native_fast_commits'] = int(stats[1])
+                if a.orphan_file:
+                    orphan = re.search(r'(?m)^LINUX_FAST_COMMIT_HELD_ORPHAN=(\d+)$', text)
+                    if not orphan or int(orphan[1]) == 0:
+                        raise RuntimeError('Missing checkpointed open-unlinked orphan')
+                    row['held_orphan'] = int(orphan[1])
 
         boot(pending, 0)
         header = run(row, [tools['dumpe2fs'], '-h', pending])
         if 'needs_recovery' not in header or 'fast_commit' not in header:
             raise RuntimeError('Native filesystem lacks pending fast-commit features')
+        if a.orphan_file and 'orphan_present' not in header:
+            raise RuntimeError('Native filesystem lacks pending orphan-file state')
         row['pending_header'] = header
         run(row, [tools['debugfs'], '-R', f'dump <8> "{journal}"', pending])
         if not journal.is_file():
