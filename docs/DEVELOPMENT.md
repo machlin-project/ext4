@@ -581,8 +581,10 @@ actual Linux recovery of Linux-authored journals and open-unlinked owners, then
 mutates shared values through the core and checks the returned image in Linux.
 Retain e2fsprogs journal-only orphan failures separately; they are not clean passes.
 
-CI defaults to all eight suites. A manual workflow dispatch can select one suite
-after changes limited to its tests or fixtures. Keep the completed evidence for
+CI defaults to all nine suites. Fast-commit recovery, its fixtures and its
+independent check form their own `fast-commit` suite so the `core` job keeps headroom
+on slower runners. A manual workflow dispatch can select one suite after changes
+limited to its tests or fixtures. Keep the completed evidence for
 unchanged suites, and run every affected suite when the portable core changes.
 
 Large-volume tests use sparse 4–16 TiB images with less than 18 MB initially stored.

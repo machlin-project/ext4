@@ -12,7 +12,8 @@ on:
         description: Suite to run after a change limited to its tests or fixtures
         type: choice
         default: all
-        options: [all, core, orphan-file, namespace, removal, rename, indexed, sustained, format]
+        options: [all, core, fast-commit, orphan-file, namespace, removal, rename, indexed, sustained,
+          format]
 
 permissions:
   contents: read
@@ -31,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ inputs.suite != '' && inputs.suite != 'all' && fromJSON(format('["{0}"]', inputs.suite)) || fromJSON('["core","orphan-file","namespace","removal","rename","indexed","sustained","format"]') }}
+        suite: ${{ inputs.suite != '' && inputs.suite != 'all' && fromJSON(format('["{0}"]', inputs.suite)) || fromJSON('["core","fast-commit","orphan-file","namespace","removal","rename","indexed","sustained","format"]') }}
     env:
       CC: clang
     defaults:
@@ -154,7 +155,7 @@ jobs:
           python3 tests/generate_external_journal_fixtures.py --tools-root vendor/e2fsprogs/build \
             --output artifacts/external-journal-fixtures 2>&1 | tee artifacts/checks/external-journal-fixtures.log
       - name: Generate independent fast-commit inputs and expected filesystems
-        if: matrix.suite == 'core'
+        if: matrix.suite == 'fast-commit'
         run: |
           python3 tests/generate_fast_commit_fixtures.py --tools-root vendor/e2fsprogs/build \
             --output artifacts/fast-commit-fixtures 2>&1 | tee artifacts/checks/fast-commit-fixtures.log
@@ -172,6 +173,7 @@ jobs:
           space_options=()
           xattr_options=()
           group_options=()
+          journal_options=()
           if [[ '${{ matrix.suite }}' == indexed ]]; then
             index_options=(-Dindex_fixtures="$PWD/artifacts/index-fixtures" \
               -Dindex_collisions="$PWD/artifacts/index-collisions/vectors.txt" \
@@ -180,6 +182,9 @@ jobs:
               -Dlarge_directory_edges="$PWD/artifacts/large-directory-edge-fixtures" \
               -Ddirectory_links_fixture="$PWD/artifacts/directory-links-fixture/directory-links.img" \
               -Ddirectory_index_64k_fixture="$PWD/artifacts/directory-large-block-fixture/directory-64k.img")
+          fi
+          if [[ '${{ matrix.suite }}' == fast-commit ]]; then
+            journal_options=(-Dfast_commit_fixtures="$PWD/artifacts/fast-commit-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == namespace ]]; then
             space_options=(-Dspace_fixtures="$PWD/artifacts/space-fixtures")
@@ -200,7 +205,6 @@ jobs:
               -Dlarge_file_fixtures="$PWD/artifacts/large-file-fixtures" \
               -Dlarge_volume_fixtures="$PWD/artifacts/large-volume-fixtures" \
               -Dexternal_journal_fixtures="$PWD/artifacts/external-journal-fixtures" \
-              -Dfast_commit_fixtures="$PWD/artifacts/fast-commit-fixtures" \
               -Dxattr_space_fixtures="$PWD/artifacts/xattr-space-fixtures" \
               -Dxattr_enable_fixtures="$PWD/artifacts/xattr-enable-fixtures")
           fi
@@ -208,7 +212,7 @@ jobs:
             -Dextended_tests=true -Dinode128_test=true -Dunwritten_tests=true \
             -Dorphan_file_tests=true -Dnamespace_tests=true \
             "${index_options[@]}" "${space_options[@]}" "${xattr_options[@]}" "${group_options[@]}" \
-            "${format_options[@]}" \
+            "${format_options[@]}" "${journal_options[@]}" \
             2>&1 | tee artifacts/checks/configure.log
           meson compile -C .build -j 2 2>&1 | tee artifacts/checks/build.log
       - name: Independently verify directory hashes and collision vectors
@@ -221,7 +225,7 @@ jobs:
       - name: Run conformance and fault tests
         run: env -i PATH="$PATH" meson test -C .build --no-rebuild -j 2 --suite '${{ matrix.suite }}' --print-errorlogs
       - name: Independently check fast-commit recovery
-        if: matrix.suite == 'core'
+        if: matrix.suite == 'fast-commit'
         run: |
           python3 tests/check_fast_commit.py --fixtures artifacts/fast-commit-fixtures \
             --tools-root vendor/e2fsprogs/build --recover .build/ext4-recover \

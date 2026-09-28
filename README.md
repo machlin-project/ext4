@@ -158,7 +158,7 @@ Generated disk images and reports are not source artifacts.
 Meson and Ninja build the portable core and its tests. `make build` configures
 the selected toolchain with ASan/UBSan; `make test` runs the configured image
 matrix after its fixtures have been generated. The standalone Meson commands,
-fixture options and six CI suites are documented below.
+fixture options and nine CI suites are documented below.
 
 See [development](docs/DEVELOPMENT.md) and [architecture](docs/ARCHITECTURE.md).
 The [automated test matrix](docs/TESTING.md) separates format, crash recovery,
