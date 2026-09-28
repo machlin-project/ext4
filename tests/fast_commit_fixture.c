@@ -50,7 +50,9 @@ enum fixture_damage {
 	DAMAGE_MISSING_LINK_RANGE,
 	DAMAGE_INDIRECT_UNWRITTEN,
 	DAMAGE_INDIRECT_LOGICAL_LIMIT,
-	DAMAGE_NAME_OWNER
+	DAMAGE_NAME_OWNER,
+	DAMAGE_SYSTEM_RANGE,
+	DAMAGE_FOREIGN_RANGE
 };
 
 struct fixture {
@@ -295,6 +297,16 @@ data_records(struct fixture *fixture, ext2_ino_t number)
 		extent.ee_start_hi = ext2fs_cpu_to_le16(physical >> 32);
 		extent.ee_start = ext2fs_cpu_to_le32(physical);
 		if (number == lookup(fixture, EXT2_ROOT_INO, "renamed") && logical == 0) {
+			/* A logged range may not claim system metadata or a block owned
+			 * by an inode the log never touches. */
+			if (fixture->damage == DAMAGE_SYSTEM_RANGE) {
+				physical = ext2fs_inode_table_loc(fixture->expected, 0);
+			} else if (fixture->damage == DAMAGE_FOREIGN_RANGE) {
+				physical = mapped_block(fixture->expected,
+				    lookup(fixture, EXT2_ROOT_INO, "lost+found"), 0, &flags);
+			}
+			extent.ee_start_hi = ext2fs_cpu_to_le16(physical >> 32);
+			extent.ee_start = ext2fs_cpu_to_le32(physical);
 			if (fixture->damage == DAMAGE_INDIRECT_UNWRITTEN) {
 				extent.ee_len = ext2fs_cpu_to_le16(EXT_INIT_MAX_LEN + 1U);
 			} else if (fixture->damage == DAMAGE_INDIRECT_LOGICAL_LIMIT) {
@@ -736,6 +748,10 @@ main(int argc, char **argv)
 			fixture.damage = DAMAGE_MISSING_LINK_RANGE;
 		} else if (strcmp(argv[3], "--indirect-unwritten") == 0) {
 			fixture.damage = DAMAGE_INDIRECT_UNWRITTEN;
+		} else if (strcmp(argv[3], "--system-range") == 0) {
+			fixture.damage = DAMAGE_SYSTEM_RANGE;
+		} else if (strcmp(argv[3], "--foreign-range") == 0) {
+			fixture.damage = DAMAGE_FOREIGN_RANGE;
 		} else if (strcmp(argv[3], "--indirect-logical-limit") == 0) {
 			fixture.damage = DAMAGE_INDIRECT_LOGICAL_LIMIT;
 		} else {

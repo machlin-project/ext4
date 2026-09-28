@@ -17,13 +17,14 @@ endforeach
 if paths['fast_commit_fixtures'] != ''
   foreach profile : ['1k', '4k', 'checksum-seed', 'no-checksum', 'orphan-1k', 'orphan-4k',
     'special-1k', 'special-4k', 'xattr-reuse-1k', 'xattr-reuse-4k', 'xattr-reuse-legacy-1k',
-    'indirect-1k', 'indirect-4k', 'large-prefix-1k', 'large-prefix-4k', 'huge-prefix-1k']
+    'indirect-1k', 'indirect-4k', 'large-prefix-1k', 'large-prefix-4k', 'huge-prefix-1k',
+    'bigalloc-4k', 'casefold-4k', 'quota-4k', 'large-prefix-casefold-4k']
     directory = paths['fast_commit_fixtures'] / profile
     test('fast-commit-decoder-' + profile, programs['fast-commit'],
       args: [directory / 'pending.journal', '7', '3'], timeout: 300, suite: 'fast-commit')
     test('fast-commit-recovery-' + profile, programs['fast-commit-recovery'],
       args: [directory / 'pending.img', directory / 'expected.img'], timeout: 300, suite: 'fast-commit')
-    if profile in ['large-prefix-1k', 'large-prefix-4k']
+    if profile in ['large-prefix-1k', 'large-prefix-4k', 'large-prefix-casefold-4k']
       test('fast-commit-conflicting-name-owner-' + profile, programs['fast-commit-recovery'],
         args: [directory / 'conflicting-name-owner.img', directory / 'expected.img', '--reject'],
         timeout: 300, suite: 'fast-commit')
@@ -42,7 +43,7 @@ if paths['fast_commit_fixtures'] != ''
     endif
     if profile in ['special-1k', 'special-4k', 'indirect-1k', 'indirect-4k']
       foreach damage : ['bad-link-size', 'bad-link-nul', 'bad-link-terminator',
-        'bad-special-size', 'missing-link-range']
+        'bad-special-size', 'missing-link-range', 'system-range', 'foreign-range']
         test('fast-commit-' + damage + '-' + profile, programs['fast-commit-recovery'],
           args: [directory / (damage + '.img'), directory / 'expected.img', '--reject'],
           timeout: 300, suite: 'fast-commit')
@@ -59,7 +60,8 @@ if paths['fast_commit_fixtures'] != ''
       endforeach
     endif
     if profile in ['1k', '4k', 'orphan-1k', 'orphan-4k', 'special-1k', 'special-4k',
-      'xattr-reuse-1k', 'xattr-reuse-4k', 'xattr-reuse-legacy-1k', 'indirect-1k', 'indirect-4k']
+      'xattr-reuse-1k', 'xattr-reuse-4k', 'xattr-reuse-legacy-1k', 'indirect-1k', 'indirect-4k',
+      'bigalloc-4k', 'casefold-4k', 'quota-4k']
       test('fast-commit-resources-' + profile, programs['fast-commit-recovery'],
         args: [directory / 'pending.img', directory / 'expected.img', '--resources'],
         timeout: 600, suite: 'fast-commit')

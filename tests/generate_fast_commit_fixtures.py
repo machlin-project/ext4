@@ -43,7 +43,13 @@ PROFILES = (
     ("large-prefix-1k", 1024, set(), set()),
     ("large-prefix-4k", 4096, set(), set()),
     ("huge-prefix-1k", 1024, set(), set()),
+    ("bigalloc-4k", 4096, {"bigalloc"}, set()),
+    ("casefold-4k", 4096, {"casefold"}, set()),
+    ("large-prefix-casefold-4k", 4096, {"casefold"}, set()),
+    ("quota-4k", 4096, {"quota", "project"}, set()),
 )
+BIGALLOC_CLUSTER = 16384
+CASEFOLD_DIRECTORY_FLAGS = 0x40080000
 
 SPECIAL_NODES = {
     "character-legacy": ("character", 255, 255),
@@ -54,7 +60,7 @@ SPECIAL_NODES = {
     "socket": ("socket", 0, 0),
 }
 MALFORMED = ("bad-link-size", "bad-link-nul", "bad-link-terminator", "bad-special-size",
-             "missing-link-range")
+             "missing-link-range", "system-range", "foreign-range")
 INDIRECT_MALFORMED = ("indirect-unwritten", "indirect-logical-limit")
 
 
@@ -140,7 +146,8 @@ def main():
         large_prefix = name.startswith("large-prefix-") or huge_prefix
         created_files = (HUGE_PREFIX_FILES if huge_prefix else
                          LARGE_PREFIX_FILES[block] if large_prefix else CREATED_FILES)
-        fast_commit_kib = FAST_COMMIT_KIB[name.rsplit("-", 1)[0]] if large_prefix else 256
+        fast_commit_kib = (FAST_COMMIT_KIB["huge-prefix" if huge_prefix else "large-prefix"]
+                           if large_prefix else 256)
         original_data = indirect_data(block) if indirect else b"A" * (SOURCE_BLOCKS * block)
         (root / "hello.txt").write_bytes(original_data)
         (root / "hello.txt").chmod(0o640)
@@ -166,8 +173,9 @@ def main():
                    commands=[], passed=False)
         rows.append(row)
         features = (EXPECTED_FEATURES | {"fast_commit"} | added) - removed
+        geometry = ["-C", BIGALLOC_CLUSTER] if "bigalloc" in features else []
         run(row, [tools["mke2fs"], "-F", "-t", "ext4", "-b", block,
-                  "-N", max(256, created_files + 64),
+                  "-N", max(256, created_files + 64), *geometry,
                   "-I", 256, "-m", 0, "-O", "none," + ",".join(sorted(features)),
                   "-U", UUID, "-J", f"size=8,fast_commit_size={fast_commit_kib}",
                   "-E", "lazy_itable_init=0,nodiscard", "-d", root, before, IMAGE_BYTES // block])
@@ -182,6 +190,9 @@ def main():
                 shared = run(row, [helper, "--share-xattrs", before, target])
                 if shared.strip() != "shared-body=1 private-body=2 shared-external=5":
                     raise RuntimeError("Unexpected attribute-sharing fixture layout")
+        if "quota" in features:
+            # mke2fs -d does not charge the copied tree; e2fsck computes usage.
+            run(row, [tools["e2fsck"], "-fy", before], allowed=(0, 1))
         run(row, [tools["e2fsck"], "-fn", before])
         shutil.copyfile(before, expected)
         shutil.copyfile(before, pending)
@@ -193,6 +204,9 @@ def main():
             for owner in ("/victim", "/victim-shared"):
                 run(row, [helper, "--detach-shared-xattrs", expected, owner])
         commands = ["punch /hello.txt 1 1", "mkdir /new-dir"]
+        if "casefold" in features:
+            # Logged names enter a casefolded directory and hash through its encoding.
+            commands.append(f"sif /new-dir flags {CASEFOLD_DIRECTORY_FLAGS:#x}")
         # Reserve exactly the blocks needed by the long-name directory.
         entry_bytes = 8 + ((LONG_NAME_BYTES + 3) // 4) * 4
         tail_bytes = 12 if "metadata_csum" in features else 0
@@ -248,6 +262,9 @@ def main():
         run(row, [tools["debugfs"], "-w", "-f", script, expected])
         if special_files and not orphans:
             run(row, [helper, "--create-specials", expected])
+        if "quota" in features:
+            # debugfs does not charge quotas; e2fsck computes the expected usage.
+            run(row, [tools["e2fsck"], "-fy", expected], allowed=(0, 1))
         run(row, [tools["e2fsck"], "-fn", expected])
         row["serialization"] = run(row, [helper, pending, expected] +
                                    (["--specials"] if special_files else

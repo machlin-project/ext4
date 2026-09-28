@@ -149,6 +149,12 @@ Inode lookup and allocation exclusion use binary search. Repeated, nested and
 adjacent logged ranges remain admissible; the union only prevents their data
 from being reused for new metadata. Per-inode mapping validation retains its
 separate overlap checks. The semantic records retain their original committed order.
+A logged range may never claim system metadata, and every cluster of it that the
+committed block bitmap already allocates must have belonged, before the crash, to
+the data, mapping nodes or attribute block of an inode the log names; otherwise the
+log would cross-link an untouched inode and replay returns `EXT4_CORRUPT` before any
+write. Linux inserts logged extents without that check and leaves conflicts to fsck.
+Logs never name quota files.
 Each sequential pass retains one journal block in the existing replay buffer,
 checking each record's saved digest before exposing its payload. The block cache
 is invalidated between preparation and materialization and has no lifetime beyond
@@ -208,9 +214,12 @@ This implementation bounds the fast area to 4,096 blocks, the prefix to 65,536
 records, and the complete conversion to the recovery transaction bound above.
 Capacity exhaustion returns unsupported, including an old generation whose
 complete attribute reclamation cannot fit the private conversion transaction.
-Additional format combinations, partially completed foreign replay and broader
-ownership-corruption cases still require acceptance. The writer continues to
-emit ordinary full transactions; it does not emit fast commits.
+Accepted fast-commit combinations include BIGALLOC, casefolded directories, which
+replay indexes with casefolded hashes, and quota volumes, whose usage the conversion
+accounts. A 64 KiB fast-commit fixture cannot yet be serialized. Linux's own
+fast-commit replay cannot be interrupted under test, and e2fsprogs' fails on these
+fixtures, so interrupted foreign replay is accepted for ordinary JBD2 logs only. The
+writer continues to emit ordinary full transactions; it does not emit fast commits.
 
 External journals require an explicitly supplied `ext4_journal_environment` and
 exclusive ownership of two distinct resources. The filesystem environment still

@@ -1,7 +1,10 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "fast_commit.h"
 #include "directory_write.h"
+#include "quota.h"
 #include "xattr.h"
+
+#define EXT4_FC_OWNED_INITIAL 64U
 
 struct ext4_fc_inode_state {
 	uint32_t number;
@@ -26,7 +29,8 @@ ext4_fc_inode_valid(const struct ext4_fs *fs, uint32_t number)
 {
 	return number != 0 && number <= fs->info.inodes &&
 	    (number >= fs->first_inode || number == EXT4_ROOT_INODE) &&
-	    number != fs->journal_inode && number != fs->orphan_file_inode;
+	    number != fs->journal_inode && number != fs->orphan_file_inode &&
+	    !ext4_quota_system_inode(fs, number);
 }
 
 static struct ext4_fc_inode_state *
@@ -670,6 +674,211 @@ ext4_fc_apply_name(struct ext4_fc_replay *replay, uint16_t type,
 	return error;
 }
 
+/* Blocks that inodes named by the log owned before the crash. */
+struct ext4_fc_owned {
+	struct ext4_block_range *ranges;
+	size_t count;
+	size_t capacity;
+};
+
+static enum ext4_result
+ext4_fc_owned_add(struct ext4_fs *fs, struct ext4_fc_owned *owned, uint64_t first, uint64_t length)
+{
+	struct ext4_block_range *ranges;
+	size_t capacity;
+
+	if (first == 0 || length == 0) {
+		return EXT4_OK;
+	}
+	if (owned->count == owned->capacity) {
+		capacity = owned->capacity == 0 ? EXT4_FC_OWNED_INITIAL : owned->capacity * 2U;
+		if (capacity > SIZE_MAX / sizeof(*ranges)) {
+			return EXT4_NO_MEMORY;
+		}
+		ranges =
+		    fs->environment.allocate(fs->environment.context, capacity * sizeof(*ranges));
+		if (ranges == NULL) {
+			return EXT4_NO_MEMORY;
+		}
+		if (owned->ranges != NULL) {
+			ext4_copy(ranges, owned->ranges, owned->count * sizeof(*ranges));
+			fs->environment.release(fs->environment.context, owned->ranges,
+			    owned->capacity * sizeof(*ranges));
+		}
+		owned->ranges = ranges;
+		owned->capacity = capacity;
+	}
+	owned->ranges[owned->count].first = first;
+	owned->ranges[owned->count].length = length;
+	owned->count++;
+	return EXT4_OK;
+}
+
+/* Collect the committed data runs, mapping nodes and attribute block of one inode.
+ * Inodes the log creates were not allocated before the crash and own nothing. */
+static enum ext4_result
+ext4_fc_inode_owned(struct ext4_fs *fs, uint32_t number, uint8_t *record, uint8_t *scratch,
+    struct ext4_fc_owned *owned)
+{
+	const struct ext4_inode_disk *disk = (const struct ext4_inode_disk *)record;
+	struct ext4_block_path path;
+	struct ext4_group group;
+	struct ext4_inode inode;
+	uint64_t offset;
+	uint64_t physical;
+	uint64_t blocks;
+	uint64_t end = 0;
+	uint64_t attribute;
+	uint32_t logical = 0;
+	uint32_t bit = (number - 1U) % fs->inodes_per_group;
+	uint16_t type;
+	unsigned int level;
+	enum ext4_result error;
+
+	error = ext4_group_get(fs, (number - 1U) / fs->inodes_per_group, &group);
+	if (error != EXT4_OK || (group.flags & EXT4_GROUP_INODE_UNINIT)) {
+		return error;
+	}
+	error = ext4_block_read(fs, group.inode_bitmap, scratch);
+	if (error != EXT4_OK ||
+	    !((scratch[bit / EXT4_BITS_PER_BYTE] >> (bit % EXT4_BITS_PER_BYTE)) & 1U)) {
+		return error;
+	}
+	error = ext4_inode_location(fs, number, &offset);
+	if (error == EXT4_OK) {
+		error = ext4_device_read(fs, offset, record, fs->inode_size);
+	}
+	if (error == EXT4_OK) {
+		error = ext4_inode_decode_orphan(fs, number, record, &inode);
+	}
+	if (error == EXT4_NOT_FOUND) {
+		return EXT4_OK;
+	}
+	if (error != EXT4_OK) {
+		return error;
+	}
+	attribute = ext4_le32(&disk->xattr_block_lo);
+	if (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
+		attribute |= (uint64_t)ext4_le16(&disk->xattr_block_hi) << 32;
+	}
+	error = ext4_fc_owned_add(fs, owned, attribute, 1);
+	type = inode.mode & EXT4_MODE_TYPE;
+	if (error != EXT4_OK || (inode.flags & EXT4_INODE_INLINE_DATA) || inode.fast_symlink ||
+	    (type != EXT4_MODE_REGULAR && type != EXT4_MODE_DIRECTORY &&
+		type != EXT4_MODE_SYMLINK)) {
+		return error;
+	}
+	if (inode.flags & EXT4_INODE_EXTENTS) {
+		error = ext4_extent_last_end(fs, &inode, &end);
+	} else {
+		end = (inode.size + fs->info.block_size - 1U) / fs->info.block_size;
+	}
+	while (error == EXT4_OK && logical < end) {
+		error = ext4_map_blocks_path(fs, &inode, logical, &physical, &blocks, &path);
+		if (error != EXT4_OK) {
+			break;
+		}
+		if (blocks == 0 || blocks > UINT32_MAX - logical) {
+			return EXT4_CORRUPT;
+		}
+		error = ext4_fc_owned_add(fs, owned, physical, blocks);
+		for (level = 0; error == EXT4_OK && level < path.count; level++) {
+			error = ext4_fc_owned_add(fs, owned, path.blocks[level], 1);
+		}
+		logical += (uint32_t)blocks;
+	}
+	return error;
+}
+
+/* Linux replays logged ranges without checking ownership and leaves conflicts to
+ * fsck. A logged range may reuse clusters that inodes named by the log owned before
+ * the crash, but a cluster allocated to any other inode would be cross-linked. */
+static enum ext4_result
+ext4_fc_ranges_owned(struct ext4_fc_replay *replay)
+{
+	struct ext4_fs *fs = replay->allocation.fs;
+	const struct ext4_block_range *range;
+	struct ext4_fc_owned owned = { 0 };
+	struct ext4_group group;
+	uint8_t *bitmap;
+	uint8_t *record;
+	uint8_t *scratch;
+	uint64_t block;
+	uint64_t cluster;
+	uint64_t last;
+	uint32_t loaded = UINT32_MAX;
+	uint32_t index;
+	uint32_t bit;
+	uint32_t group_index;
+	size_t item;
+	bool collected = false;
+	bool allocated;
+	enum ext4_result error = EXT4_OK;
+
+	bitmap = fs->environment.allocate(fs->environment.context, fs->info.block_size);
+	scratch = fs->environment.allocate(fs->environment.context, fs->info.block_size);
+	record = fs->environment.allocate(fs->environment.context, fs->inode_size);
+	if (bitmap == NULL || scratch == NULL || record == NULL) {
+		error = EXT4_NO_MEMORY;
+	}
+	for (item = 0; error == EXT4_OK && item < replay->allocation.excluded_count; item++) {
+		range = &replay->allocation.excluded[item];
+		last = (range->first + range->length - 1U) / fs->cluster_blocks;
+		for (cluster = range->first / fs->cluster_blocks;
+		    error == EXT4_OK && cluster <= last; cluster++) {
+			block = cluster * fs->cluster_blocks;
+			if (block < fs->first_data_block) {
+				continue;
+			}
+			group_index =
+			    (uint32_t)((block - fs->first_data_block) / fs->blocks_per_group);
+			bit = (uint32_t)((block - fs->first_data_block) % fs->blocks_per_group /
+			    fs->cluster_blocks);
+			if (group_index != loaded) {
+				error = ext4_group_get(fs, group_index, &group);
+				if (error == EXT4_OK && !(group.flags & EXT4_GROUP_BLOCK_UNINIT)) {
+					error = ext4_block_read(fs, group.block_bitmap, bitmap);
+				}
+				loaded = group_index;
+			}
+			allocated = error == EXT4_OK && !(group.flags & EXT4_GROUP_BLOCK_UNINIT) &&
+			    ((bitmap[bit / EXT4_BITS_PER_BYTE] >> (bit % EXT4_BITS_PER_BYTE)) & 1U);
+			if (!allocated) {
+				continue;
+			}
+			for (index = 0;
+			    !collected && error == EXT4_OK && index < replay->inode_count;
+			    index++) {
+				error = ext4_fc_inode_owned(
+				    fs, replay->inodes[index].number, record, scratch, &owned);
+			}
+			if (!collected && error == EXT4_OK) {
+				ext4_ranges_union(owned.ranges, &owned.count);
+				collected = true;
+			}
+			if (error == EXT4_OK &&
+			    !ext4_ranges_overlap(
+				owned.ranges, owned.count, block, fs->cluster_blocks)) {
+				error = EXT4_CORRUPT;
+			}
+		}
+	}
+	if (owned.ranges != NULL) {
+		fs->environment.release(
+		    fs->environment.context, owned.ranges, owned.capacity * sizeof(*owned.ranges));
+	}
+	if (record != NULL) {
+		fs->environment.release(fs->environment.context, record, fs->inode_size);
+	}
+	if (scratch != NULL) {
+		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
+	}
+	if (bitmap != NULL) {
+		fs->environment.release(fs->environment.context, bitmap, fs->info.block_size);
+	}
+	return error;
+}
+
 static enum ext4_result
 ext4_fc_prepare(struct ext4_fc_replay *replay)
 {
@@ -731,7 +940,7 @@ ext4_fc_prepare(struct ext4_fc_replay *replay)
 	ext4_fc_inodes_sort(replay);
 	ext4_ranges_union(replay->excluded, &replay->allocation.excluded_count);
 	replay->allocation.excluded = replay->excluded;
-	return EXT4_OK;
+	return ext4_fc_ranges_owned(replay);
 }
 
 static enum ext4_result

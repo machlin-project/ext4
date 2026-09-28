@@ -400,6 +400,15 @@ reused mapping node and a pointer cycle. Each must reject before any write.
 Recovery output also records allocation and read counts before result comparison;
 these are operation counts for the fixture, not a throughput benchmark.
 
+Format-combination profiles repeat the basic scenario on a 4 KiB BIGALLOC volume with
+16 KiB clusters, in a casefolded directory, and on a volume with user, group and
+project quotas; e2fsck computes the quota usage of both reference images. The
+large-prefix-casefold profile adds 1,024 long names to a casefolded directory, so
+replay builds an index with casefolded hashes. The core's conversion accounts quota
+usage, which Linux leaves to fsck after its own fast-commit replay; strict fsck of
+the replayed image checks both. The fixture helper cannot yet serialize a 64 KiB
+profile.
+
 The huge-prefix profile creates 1,024 long-name files at 1 KiB with a 2 MiB fast area.
 Its conversion needs more than the ordinary 256-snapshot transaction bound, so it
 exercises the recovery transaction bound; it has no conflicting-owner variant.
@@ -417,6 +426,9 @@ Duplicate CREATE and LINK records revisit existing names at the beginning, middl
 and end of the created set; identities and link counts must remain unchanged.
 Two valid-CRC malformed logs instead link an existing name to another inode and
 must reject without home or journal writes.
+The special and indirect profiles add two ownership-corruption logs, whose range for
+the renamed file claims an inode-table block or a block owned by `lost+found`, an
+inode the log never names; both must reject without writes.
 
 `ext4-fast-commit-recovery-test PENDING EXPECTED --benchmark` performs one checked
 warmup and 31 measured recoveries. Each recovery starts from the same image in the
