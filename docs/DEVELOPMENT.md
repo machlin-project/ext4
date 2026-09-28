@@ -210,10 +210,12 @@ files whose SHA-256 differs from the pinned release.
 `tests/casefold_oracle.c` against that build's `libext2fs.a`, which implements
 Linux's utf8data semantics, and writes `vectors.txt`: the fold of every code point,
 including surrogates, malformed sequences, 200,000 random combining sequences of up
-to 12 code points and 20,000 casefolded hashes across all six hash versions with
-random and zero seeds. Configure
+to 12 code points, 20,000 casefolded hashes across all six hash versions with random
+and zero seeds, and 4,000 near-maximal names of expanding code points whose folds
+exceed 255 bytes, each folded and hashed. Configure
 `-Dcasefold_vectors=NEW/vectors.txt` to add `casefold-oracle` to the `format` suite;
-`ext4-casefold-test` requires identical folds, opaque classification and hashes.
+`ext4-casefold-test` requires identical folds, opaque classification and hashes,
+and at least one hash of a fold longer than 255 bytes.
 Vectors containing NUL are skipped because libext2fs stops at NUL and no ext4 name
 contains one.
 
@@ -229,13 +231,14 @@ Configure `-Dcasefold_fixtures=NEW` to add `ext4-casefold-fs-test IMAGE MANIFEST
 to the `format` suite. Every manifest lookup must resolve to the stored name's inode,
 or be absent, in both directories. A writable copy then must return `EXT4_EXISTS`
 for folded duplicates in create and link, `EXT4_INVALID_ARGUMENT` for a malformed
-name under the strict encoding and exact-byte matching under the relaxed one. It
-adds 600 names that split indexed leaves, checks a case-only rename, creates an
-inheriting subdirectory, unlinks and renames entries through equivalent names and
-remounts to look up names again. An optional export directory receives the image;
+name under the strict encoding and exact-byte matching under the relaxed one, and
+treat all names of ignorable code points as one empty name. It adds 600 names that
+split indexed leaves, checks a case-only rename, creates an inheriting subdirectory,
+unlinks and renames entries through equivalent names, enables casefolding on a new
+top-level directory only once it is empty and remounts to look up names again. An optional export directory receives the image;
 `tests/check_casefold.py --tools-root E2FSPROGS_BUILD --exports DIRECTORY --output NEW`
 requires strict fsck, which recomputes every casefolded hash in the index, and checks
-the stored names, removals and inherited flags with debugfs. The Linux reference
+the stored names, removals and inherited and enabled flags with debugfs. The Linux reference
 kernel lacks `CONFIG_UNICODE`, so no Linux mount check exists for these images.
 
 ## Metadata fuzzing

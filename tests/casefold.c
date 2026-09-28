@@ -51,6 +51,7 @@ main(int argc, char **argv)
 	uint64_t folds = 0;
 	uint64_t opaque = 0;
 	uint64_t hashes = 0;
+	uint64_t long_hashes = 0;
 	unsigned int version;
 	unsigned int field;
 	enum ext4_result error;
@@ -112,6 +113,7 @@ main(int argc, char **argv)
 			if (ext4_casefold_name(&fold, input, input_length) == EXT4_OK) {
 				CHECK(ext4_directory_hash((uint8_t)version, seed, fold.bytes,
 					  fold.length, &hash) == EXT4_OK);
+				long_hashes += fold.length > EXT4_NAME_MAX;
 			} else {
 				CHECK(ext4_directory_hash((uint8_t)version, seed, input,
 					  input_length, &hash) == EXT4_OK);
@@ -124,9 +126,9 @@ main(int argc, char **argv)
 			hashes++;
 		}
 	}
-	CHECK(fclose(vectors) == 0 && folds > 0x110000U && hashes > 0);
+	CHECK(fclose(vectors) == 0 && folds > 0x110000U && hashes > 0 && long_hashes > 0);
 	printf("PASS %" PRIu64 " casefold vectors (%" PRIu64 " opaque) and %" PRIu64
-	       " casefolded hashes match e2fsprogs\n",
-	    folds, opaque, hashes);
+	       " casefolded hashes (%" PRIu64 " of folds beyond 255 bytes) match e2fsprogs\n",
+	    folds, opaque, hashes, long_hashes);
 	return 0;
 }

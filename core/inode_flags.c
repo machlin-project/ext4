@@ -1,5 +1,30 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
-#include "journal.h"
+#include "directory_write.h"
+
+/* Like Linux, casefolding changes only on an empty directory of a casefold volume,
+ * so no stored name or index hash ever depends on the other comparison rule. */
+static enum ext4_result
+ext4_casefold_change_valid(struct ext4_fs *fs, struct ext4_transaction *transaction,
+    struct ext4_inode *inode, struct ext4_inode_disk *disk)
+{
+	struct ext4_allocation allocation;
+	struct ext4_directory_slot slot;
+	enum ext4_result error;
+
+	if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_CASEFOLD)) {
+		return EXT4_UNSUPPORTED;
+	}
+	if ((inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
+		return EXT4_NOT_DIRECTORY;
+	}
+	error = ext4_allocation_init(&allocation, fs, transaction, inode);
+	if (error == EXT4_OK) {
+		error = ext4_directory_scan(
+		    &allocation, inode, disk, NULL, 0, EXT4_DIRECTORY_EMPTY, 0, &slot);
+	}
+	ext4_allocation_destroy(&allocation);
+	return error;
+}
 
 enum ext4_result
 ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint32_t mask,
@@ -17,7 +42,7 @@ ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 	if (fs == NULL || change_time == NULL || result == NULL || mask == 0 || (flags & ~mask)) {
 		return EXT4_INVALID_ARGUMENT;
 	}
-	if (mask & ~EXT4_INODE_MODIFIABLE_FLAGS) {
+	if (mask & ~(EXT4_INODE_MODIFIABLE_FLAGS | EXT4_INODE_CASEFOLD)) {
 		return EXT4_UNSUPPORTED;
 	}
 	if (fs->aborted) {
@@ -48,6 +73,12 @@ ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 	if (desired & EXT4_INODE_MODIFIABLE_FLAGS & ~allowed) {
 		error = EXT4_INVALID_ARGUMENT;
 		goto cancel;
+	}
+	if ((desired ^ inode.flags) & EXT4_INODE_CASEFOLD) {
+		error = ext4_casefold_change_valid(fs, transaction, &inode, disk);
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
 	}
 	ext4_zero(&update, sizeof(update));
 	update.fields = EXT4_ATTR_CHANGE_TIME;

@@ -179,6 +179,9 @@ operations(struct device *device, const char *exports, const char *path)
 	EXPECT(ext4_set_inode_flags(
 		   fs, file.number, file.generation, EXT4_INODE_EXTENTS, 0, &flag_time, &output),
 	    EXT4_UNSUPPORTED);
+	EXPECT(ext4_set_inode_flags(fs, root.number, root.generation, EXT4_INODE_CASEFOLD,
+		   EXT4_INODE_CASEFOLD, &flag_time, &output),
+	    EXT4_UNSUPPORTED);
 	EXPECT(ext4_set_inode_flags(fs, file.number, file.generation, EXT4_INODE_DIRSYNC,
 		   EXT4_INODE_DIRSYNC, &flag_time, &output),
 	    EXT4_INVALID_ARGUMENT);

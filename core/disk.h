@@ -110,8 +110,6 @@
 /* fscrypt: contents, names and symlink targets are ciphertext. The core holds no
  * keys; it preserves encrypted objects and denies operations that need plaintext. */
 #define EXT4_INODE_ENCRYPT 0x00000800U
-/* Names in this directory compare and hash through the volume's encoding. */
-#define EXT4_INODE_CASEFOLD 0x40000000U
 #define EXT4_XATTR_INDEX_ENCRYPTION 9U
 #define EXT4_INODE_RESTRICTED_FLAGS (EXT4_INODE_IMMUTABLE | EXT4_INODE_APPEND)
 #define EXT4_INODE_WRITABLE_FLAGS                                                                  \

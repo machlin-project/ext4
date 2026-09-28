@@ -140,6 +140,14 @@ passes. Evidence is in `artifacts/checks/casefold-first/` and
 `artifacts/checks/scale-regression-6/`. The Linux reference kernel lacks
 `CONFIG_UNICODE`, so these images have no Linux readback.
 
+The oracle now also folds and hashes 4,000 near-maximal names of expanding code
+points; 1,318,086 folds and 23,994 hashes match e2fsprogs, including 3,995 hashes of
+folds longer than 255 bytes and 41 of names that fold to nothing. The writable test
+additionally enables casefolding on a new directory only once it is empty and treats
+names of ignorable code points as one empty name; strict e2fsck and debugfs accept
+both exported images. The complete 591-test regression passes
+(`artifacts/checks/casefold-toggle/`, `artifacts/checks/scale-regression-7/`).
+
 ## Fast-commit development evidence
 
 Fast-commit recovery is a development checkpoint, not completed journal

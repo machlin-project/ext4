@@ -73,7 +73,9 @@ enum ext4_inode_flag {
 	EXT4_INODE_JOURNAL_DATA = 0x00004000U,
 	EXT4_INODE_NOTAIL = 0x00008000U,
 	EXT4_INODE_DIRSYNC = 0x00010000U,
-	EXT4_INODE_TOPDIR = 0x00020000U
+	EXT4_INODE_TOPDIR = 0x00020000U,
+	/* Names in the directory compare and hash through the volume's encoding. */
+	EXT4_INODE_CASEFOLD = 0x40000000U
 };
 
 #define EXT4_INODE_MODIFIABLE_FLAGS                                                                \
@@ -336,7 +338,10 @@ enum ext4_result ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32
  * IMMUTABLE/APPEND; changing other flags on an immutable inode must also clear
  * IMMUTABLE. Ordinary mutation APIs cannot bypass their restrictions.
  * All core commits are synchronous and journal data. NOATIME governs automatic
- * platform updates, not an explicitly admitted timestamp change. */
+ * platform updates, not an explicitly admitted timestamp change. mask may also
+ * select CASEFOLD, which changes only on empty directories of casefold volumes:
+ * other volumes return UNSUPPORTED, other types NOT_DIRECTORY and directories
+ * with entries NOT_EMPTY. */
 enum ext4_result ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint32_t mask, uint32_t flags, const struct ext4_timestamp *change_time,
     struct ext4_inode *result);

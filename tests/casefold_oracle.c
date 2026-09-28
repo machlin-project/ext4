@@ -13,6 +13,9 @@
 #define SEQUENCE_COUNT 200000U
 #define HASH_COUNT 20000U
 #define SEQUENCE_LIMIT 12U
+#define LONG_COUNT 4000U
+#define LONG_BYTES 255U
+#define UTF8_MAX_BYTES 4U
 #define UNICODE_LIMIT 0x110000U
 
 static const struct ext2fs_nls_table *table;
@@ -102,6 +105,41 @@ sample(void)
 	return next() % 0x3000U;
 }
 
+/* Code points whose folds expand, so near-maximal names fold beyond 255 bytes. */
+static unsigned int
+expanding(void)
+{
+	static const unsigned int points[] = { 0xdf, 0x130, 0x149, 0x390, 0x3b0, 0x587, 0x1e9e,
+		0x1f80, 0x1f82, 0x1fb7, 0x1ff7, 0xfb03, 0xfb17, 0xac01, 0xd7a3 };
+
+	return next() % 4U == 0 ? sample() : points[next() % (sizeof(points) / sizeof(points[0]))];
+}
+
+static int
+hash_vector(const unsigned char *input, size_t length)
+{
+	ext2_dirhash_t hash;
+	ext2_dirhash_t minor;
+	__u32 seed[4];
+	unsigned int part;
+	int version = (int)(next() % 6U);
+
+	for (part = 0; part < 4; part++) {
+		seed[part] = next();
+	}
+	if (next() % 3U == 0) {
+		memset(seed, 0, sizeof(seed));
+	}
+	if (ext2fs_dirhash2(version, (const char *)input, (int)length, table, EXT4_CASEFOLD_FL,
+		seed, &hash, &minor) != 0) {
+		return 1;
+	}
+	printf("H %d %08x %08x %08x %08x ", version, seed[0], seed[1], seed[2], seed[3]);
+	hex(input, length);
+	printf(" %08x %08x\n", hash, minor);
+	return 0;
+}
+
 int
 main(void)
 {
@@ -109,16 +147,12 @@ main(void)
 		{ 0xe0, 0x80, 0x80 }, { 0xed, 0xa0, 0x80 }, { 0xf4, 0x90, 0x80, 0x80 },
 		{ 0xf8, 0x88, 0x80, 0x80 }, { 0xc3 }, { 0xe2, 0x82 }, { 0xff } };
 	static const size_t malformed_lengths[] = { 1, 2, 2, 3, 3, 4, 4, 1, 2, 1 };
-	unsigned char input[64];
+	unsigned char input[LONG_BYTES];
 	unsigned int code;
 	unsigned int index;
 	unsigned int count;
 	unsigned int part;
 	size_t length;
-	ext2_dirhash_t hash;
-	ext2_dirhash_t minor;
-	__u32 seed[4];
-	int version;
 
 	table = ext2fs_load_nls_table(EXT4_ENC_UTF8_12_1);
 	if (table == NULL) {
@@ -145,20 +179,19 @@ main(void)
 		for (part = 0; part < count; part++) {
 			length += encode(sample(), input + length);
 		}
-		version = (int)(next() % 6U);
-		for (part = 0; part < 4; part++) {
-			seed[part] = next();
-		}
-		if (index % 3U == 0) {
-			memset(seed, 0, sizeof(seed));
-		}
-		if (ext2fs_dirhash2(version, (const char *)input, (int)length, table,
-			EXT4_CASEFOLD_FL, seed, &hash, &minor) != 0) {
+		if (hash_vector(input, length) != 0) {
 			return 1;
 		}
-		printf("H %d %08x %08x %08x %08x ", version, seed[0], seed[1], seed[2], seed[3]);
-		hex(input, length);
-		printf(" %08x %08x\n", hash, minor);
+	}
+	for (index = 0; index < LONG_COUNT; index++) {
+		length = 0;
+		while (length + UTF8_MAX_BYTES <= LONG_BYTES) {
+			length += encode(expanding(), input + length);
+		}
+		fold(input, length);
+		if (hash_vector(input, length) != 0) {
+			return 1;
+		}
 	}
 	return 0;
 }

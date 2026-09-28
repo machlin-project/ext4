@@ -600,8 +600,12 @@ bytes, `EXT4_EXISTS` with NOREPLACE, or `EXT4_STALE` when absence was expected.
 
 New subdirectories inherit the flag; other object types do not, as in Linux. Linear,
 inline and indexed directories share these rules, including leaf splits, which
-recompute every folded hash. Enabling or clearing the flag on an existing empty
-directory is not yet admitted by `ext4_set_inode_flags`. Encrypted casefolded
+recompute every folded hash. A name made only of ignorable code points folds to the
+empty string, so all such names are equal. `ext4_set_inode_flags` sets or clears the
+flag, as Linux's `FS_IOC_SETFLAGS` does, only on an empty directory of a casefold
+volume, so no stored name or index hash depends on the previous rule: other volumes
+return `EXT4_UNSUPPORTED`, other types `EXT4_NOT_DIRECTORY` and directories with
+entries `EXT4_NOT_EMPTY`. Encrypted casefolded
 directories store an extra hash in each name record; since every name operation in
 an encrypted directory returns `EXT4_ENCRYPTED`, the core never parses those records.
 
@@ -611,8 +615,9 @@ an encrypted directory returns `EXT4_ENCRYPTED`, the core never parses those rec
 inode transaction. It preserves mapping flags, data, allocation and xattrs.
 The admitted bits are SYNC, IMMUTABLE, APPEND, NODUMP, NOATIME, JOURNAL_DATA,
 NOTAIL, DIRSYNC and TOPDIR. The last two require directories; symlinks and special
-inodes accept only NODUMP and NOATIME. Changing other flags while retaining an
-existing IMMUTABLE bit is rejected. The separate flag operation can clear protection.
+inodes accept only NODUMP and NOATIME. CASEFOLD is also admitted under the rules of
+"Casefolded directories". Changing other flags while retaining an existing
+IMMUTABLE bit is rejected. The separate flag operation can clear protection.
 
 Mutation boundaries resolve the current flags under the exclusive owner.
 Immutable inodes reject data and attribute changes. Append-only regular files

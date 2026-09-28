@@ -18,11 +18,13 @@ from generate_fixtures import resolve_tools
 CASEFOLD_FLAG = 0x40000000
 INDEX_FLAG = 0x00001000
 NEW_NAMES = 600
-PRESENT = ["Neue-Datei-%04d-ÄÖÜ" % index for index in range(NEW_NAMES)] + ["Café-Neu",
-                                                                           "Unterordner"]
+# The zero-width space folds to an empty name.
+PRESENT = ["Neue-Datei-%04d-ÄÖÜ" % index for index in range(NEW_NAMES)] + [
+    "Café-Neu", "Unterordner", "\u200b"]
 REMOVED = ("café", "ﬁle")
 OPAQUE = b"bad\xffx"
 SUBDIRECTORY = "Grüße"
+TOGGLED_NAME = "Datei"
 # dumpe2fs does not print s_encoding_flags, so read it from the primary superblock.
 SUPERBLOCK_OFFSET = 1024
 ENCODING_FLAGS_OFFSET = 0x27E
@@ -83,10 +85,15 @@ def main():
         grandchildren = entries(run(row, [tools["debugfs"], "-R", "ls -p cf/Unterordner", image]))
         if printed(SUBDIRECTORY.encode()) not in grandchildren:
             raise RuntimeError(f"{directory.name}: inherited directory lost its name")
+        toggled = inode_fields(run(row, [tools["debugfs"], "-R", "stat plain", image]))
+        if (not toggled["flags"] & CASEFOLD_FLAG or
+                TOGGLED_NAME not in entries(run(row, [tools["debugfs"], "-R", "ls -p plain",
+                                                      image]))):
+            raise RuntimeError(f"{directory.name}: directory with enabled casefolding is wrong")
         row["passed"] = True
         (output / "report.json").write_text(json.dumps(rows, indent=2) + "\n")
         print(f"PASS casefold export {directory.name}: strict e2fsck hashes, {len(expected)} "
-              "names, removals and inherited flags", flush=True)
+              "names, removals, inherited and enabled flags", flush=True)
 
 
 if __name__ == "__main__":

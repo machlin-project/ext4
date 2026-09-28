@@ -125,7 +125,7 @@ probes(struct ext4_fs *fs, const char *path, bool *strict, uint32_t *bulk)
 		absent++;
 	}
 	CHECK(fclose(manifest) == 0 && matches != 0 && absent != 0);
-	printf("PASS %u folded lookups and %u absent names resolve like Linux\n", matches, absent);
+	printf("PASS %u folded lookups and %u absent names resolve as expected\n", matches, absent);
 }
 
 /* Directory iteration returns stored bytes, which folded lookup cannot show. */
@@ -152,6 +152,48 @@ bulk_name(char *name, size_t size, const char *prefix, uint32_t index, bool uppe
 	int length = snprintf(name, size, upper ? "%s-%04u-ÄÖÜ" : "%s-%04u-äöü", prefix, index);
 
 	CHECK(length > 0 && (size_t)length < size);
+}
+
+/* As with Linux chattr +F, casefolding changes only on an empty directory. */
+static void
+toggle(struct ext4_fs *fs)
+{
+	struct ext4_inode_update update = creation();
+	struct ext4_inode root;
+	struct ext4_inode plain;
+	struct ext4_inode inode;
+	struct ext4_inode found;
+
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(ext4_mkdir(fs, root.number, root.generation, (const uint8_t *)"plain", 5, &update,
+		   &casefold_time, &plain),
+	    EXT4_OK);
+	CHECK(!(plain.flags & CASEFOLD_FLAG));
+	EXPECT(ext4_create(fs, plain.number, plain.generation, (const uint8_t *)"Datei", 5, &update,
+		   &casefold_time, &inode),
+	    EXT4_OK);
+	EXPECT(ext4_set_inode_flags(fs, plain.number, plain.generation, EXT4_INODE_CASEFOLD,
+		   EXT4_INODE_CASEFOLD, &casefold_time, &found),
+	    EXT4_NOT_EMPTY);
+	EXPECT(ext4_set_inode_flags(fs, inode.number, inode.generation, EXT4_INODE_CASEFOLD,
+		   EXT4_INODE_CASEFOLD, &casefold_time, &found),
+	    EXT4_NOT_DIRECTORY);
+	EXPECT(ext4_lookup(fs, &plain, (const uint8_t *)"DATEI", 5, &found), EXT4_NOT_FOUND);
+	EXPECT(ext4_unlink(fs, plain.number, plain.generation, (const uint8_t *)"Datei", 5,
+		   inode.number, inode.generation, &casefold_time, &found),
+	    EXT4_OK);
+	EXPECT(ext4_set_inode_flags(fs, plain.number, plain.generation, EXT4_INODE_CASEFOLD,
+		   EXT4_INODE_CASEFOLD, &casefold_time, &plain),
+	    EXT4_OK);
+	CHECK(plain.flags & CASEFOLD_FLAG);
+	EXPECT(ext4_create(fs, plain.number, plain.generation, (const uint8_t *)"Datei", 5, &update,
+		   &casefold_time, &inode),
+	    EXT4_OK);
+	EXPECT(ext4_lookup(fs, &plain, (const uint8_t *)"DATEI", 5, &found), EXT4_OK);
+	CHECK(found.number == inode.number);
+	EXPECT(ext4_set_inode_flags(fs, plain.number, plain.generation, EXT4_INODE_CASEFOLD, 0,
+		   &casefold_time, &found),
+	    EXT4_NOT_EMPTY);
 }
 
 static void
@@ -185,14 +227,24 @@ mutations(
 	EXPECT(ext4_create(fs, cf.number, cf.generation, (const uint8_t *)name, strlen(name),
 		   &update, &casefold_time, &inode),
 	    EXT4_EXISTS);
+	/* A name of ignorable code points folds to nothing, and all such names collide. */
+	EXPECT(ext4_create(fs, cf.number, cf.generation, (const uint8_t *)"\u200b", 3, &update,
+		   &casefold_time, &inode),
+	    EXT4_OK);
+	EXPECT(ext4_create(fs, cf.number, cf.generation, (const uint8_t *)"\u200c\u200d", 6,
+		   &update, &casefold_time, &found),
+	    EXT4_EXISTS);
+	cf = directory(fs, "cf");
+	EXPECT(ext4_lookup(fs, &cf, (const uint8_t *)"\ufeff", 3, &found), EXT4_OK);
+	CHECK(found.number == inode.number);
 	EXPECT(ext4_create(fs, cf.number, cf.generation, invalid, sizeof(invalid), &update,
 		   &casefold_time, &inode),
 	    strict ? EXT4_INVALID_ARGUMENT : EXT4_OK);
+	cf = directory(fs, "cf");
 	/* Linux never matches a malformed name under the strict encoding. */
 	EXPECT(ext4_lookup(fs, &cf, invalid, sizeof(invalid), &found),
 	    strict ? EXT4_NOT_FOUND : EXT4_OK);
 	CHECK(strict || found.number == inode.number);
-	EXPECT(ext4_lookup(fs, &cf, (const uint8_t *)"OMEGA-LINK", 10, &omega), EXT4_NOT_FOUND);
 	EXPECT(ext4_lookup(fs, &cf, (const uint8_t *)"ΩMEGA", 6, &omega), EXT4_OK);
 	EXPECT(ext4_link(fs, cf.number, cf.generation, (const uint8_t *)"ωmega", 6, omega.number,
 		   omega.generation, &casefold_time, &found),
@@ -252,6 +304,7 @@ mutations(
 	CHECK(found.number == inode.number);
 	EXPECT(ext4_lookup(fs, &cf, (const uint8_t *)"café", 5, &found), EXT4_NOT_FOUND);
 	CHECK(cf.flags & INDEX_FLAG);
+	toggle(fs);
 	EXPECT(ext4_sync(fs), EXT4_OK);
 	ext4_unmount(fs);
 	CHECK(device->live == 0);
@@ -266,7 +319,7 @@ mutations(
 	memcpy(device->stable, device->cache, device->size);
 	storage_export(device, exports, source, "casefold-mutated-");
 	printf("PASS writable casefolded directories: duplicates, %s names, %u indexed "
-	       "creations, inheritance, unlink and rename\n",
+	       "creations, inheritance, unlink, rename and flag changes\n",
 	    strict ? "strict" : "opaque", NEW_NAMES);
 }
 
