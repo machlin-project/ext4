@@ -87,10 +87,12 @@ if get_option('fuzzer')
   if cc.get_id() not in ['clang', 'apple-clang']
     error('The image fuzzer requires Clang with a libFuzzer runtime.')
   endif
-  executable('ext4-image-fuzzer', 'tests/fuzz_image.c', core_sources,
-    include_directories: [internal_headers, public_headers],
-    c_args: ['-fsanitize=fuzzer'], link_args: ['-fsanitize=fuzzer'],
-    override_options: ['b_sanitize=address,undefined'])
+  foreach name, source : {'image': 'fuzz_image', 'operations': 'fuzz_operations'}
+    executable('ext4-' + name + '-fuzzer', 'tests/' + source + '.c', core_sources,
+      include_directories: [internal_headers, public_headers],
+      c_args: ['-fsanitize=fuzzer'], link_args: ['-fsanitize=fuzzer'],
+      override_options: ['b_sanitize=address,undefined'])
+  endforeach
 endif
 
 subdir('tests')
