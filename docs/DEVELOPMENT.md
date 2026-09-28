@@ -331,6 +331,22 @@ and allocations. Start with a single worker, `-max_total_time=60 -timeout=5
 -max_len=512 -rss_limit_mb=512`, and preserve findings under ignored artifacts.
 This is a bounded mutation test, not complete disk-format or concurrency coverage.
 
+The same option builds `ext4-operations-fuzzer`. Each input is a list of mutations
+applied to nonzero blocks of the `--image` through a copy-on-write overlay, followed
+by offline recovery, a bounded read-only namespace walk and a fixed sequence of
+writable operations; results are admissible, while memory errors, unbounded work
+and unreleased allocations are findings. A mutation may instead select a nonzero
+block of the internal journal and may request checksum repair. Repair follows the
+ordinary log from its start as the recovery scanner does, recomputing each
+descriptor's data-tag and tail checksums, revoke tails and commit checksums, and
+recomputes every fast-commit tail CRC over the preceding records, so malformed
+records reach replay validation instead of stopping at a checksum. Repair stops
+where a mutated header, sequence or record length ends the scan and does not repair
+metadata checksums. Run one worker per image and corpus, for example
+`ext4-operations-fuzzer --image=ABSOLUTE_IMAGE corpus -max_total_time=1500
+-timeout=20 -max_len=1024 -rss_limit_mb=3072 -artifact_prefix=crashes/`, and keep
+corpora, logs and findings under ignored `artifacts/fuzz-operations/` directories.
+
 ## Journal tests and offline recovery
 
 `make test` also runs the journal durability suites for the selected 1 KiB and

@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
+#include "fast_commit.h"
 #include "internal.h"
+#include "journal.h"
 
 #include <fcntl.h>
 #include <stdio.h>
@@ -13,7 +15,11 @@
  * then run offline recovery, a read-only namespace walk and a fixed sequence of
  * writable operations. Every result is admissible; memory safety, bounded work,
  * and balanced allocations are not. Images without metadata checksums let every
- * mutated byte reach structure validation instead of stopping at a checksum. */
+ * mutated byte reach structure validation instead of stopping at a checksum.
+ * A mutation can instead select a nonzero journal block and request checksum
+ * repair: the log's descriptor, data-tag, revoke and commit checksums and the
+ * fast-commit tail CRCs are then recomputed over the mutated bytes, so malformed
+ * but authentic-looking records reach replay validation. */
 
 #define FUZZ_READ_BUDGET 8192U
 #define FUZZ_WRITE_BUDGET 8192U
@@ -24,6 +30,8 @@
 #define FUZZ_WALK_DEPTH 3U
 #define FUZZ_READ_BYTES 8192U
 #define FUZZ_MUTATION_SET 1U
+#define FUZZ_MUTATION_JOURNAL 2U
+#define FUZZ_MUTATION_REPAIR 4U
 #define FUZZ_EMPTY UINT64_MAX
 #define FUZZ_SECONDS 1700003000
 
@@ -45,6 +53,8 @@ struct fuzz_device {
 	uint32_t block_size;
 	uint64_t *interesting;
 	uint32_t interesting_count;
+	uint64_t *journal;
+	uint32_t journal_count;
 	struct fuzz_slot slots[FUZZ_OVERLAY_SLOTS];
 	uint8_t *pool;
 	uint32_t pool_used;
@@ -64,6 +74,8 @@ static struct fuzz_device device;
 static struct ext4_environment environment;
 static struct ext4_write_environment writer;
 static uint8_t scratch[FUZZ_READ_BYTES];
+static uint8_t repair_block[EXT4_MAX_BLOCK_SIZE];
+static uint8_t repair_data[EXT4_MAX_BLOCK_SIZE];
 
 static void *
 fuzz_allocate(void *context, size_t size)
@@ -207,23 +219,32 @@ fuzz_reset(struct fuzz_device *state)
 	state->writes = 0;
 }
 
-static void
+/* Returns whether any mutation requested journal checksum repair. */
+static bool
 fuzz_mutate(struct fuzz_device *state, const uint8_t *data, size_t length)
 {
 	const struct fuzz_mutation *mutation;
 	struct fuzz_slot *slot;
 	size_t position;
 	size_t index;
+	uint32_t selector;
 	uint32_t offset;
+	bool repair = false;
 
 	for (position = 0; length - position >= sizeof(*mutation);) {
 		mutation = (const struct fuzz_mutation *)(data + position);
 		position += sizeof(*mutation);
-		slot = fuzz_slot(state,
-		    state->interesting[ext4_le32(&mutation->selector) % state->interesting_count],
-		    true);
+		selector = ext4_le32(&mutation->selector);
+		repair |= (mutation->flags & FUZZ_MUTATION_REPAIR) != 0;
+		if ((mutation->flags & FUZZ_MUTATION_JOURNAL) && state->journal_count != 0) {
+			slot =
+			    fuzz_slot(state, state->journal[selector % state->journal_count], true);
+		} else {
+			slot = fuzz_slot(
+			    state, state->interesting[selector % state->interesting_count], true);
+		}
 		if (slot == NULL) {
-			return;
+			return repair;
 		}
 		offset = ext4_le16(&mutation->offset) % state->block_size;
 		for (index = 0; index < mutation->length && position < length; index++) {
@@ -236,6 +257,210 @@ fuzz_mutate(struct fuzz_device *state, const uint8_t *data, size_t length)
 			offset = (offset + 1U) % state->block_size;
 		}
 	}
+	return repair;
+}
+
+static bool
+fuzz_journal_store(struct fuzz_device *state, const struct ext4_journal *journal, uint32_t logical,
+    const uint8_t *buffer)
+{
+	const struct ext4_journal_run *run;
+	struct fuzz_slot *slot;
+	uint32_t index;
+
+	for (index = 0; index < journal->run_count; index++) {
+		run = &journal->runs[index];
+		if (logical >= run->logical && logical - run->logical < run->length) {
+			slot = fuzz_slot(state, run->physical + (logical - run->logical), true);
+			if (slot == NULL) {
+				return false;
+			}
+			memcpy(slot->data, buffer, state->block_size);
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Follow the scanner through the ordinary log from its start, recomputing each
+ * descriptor's data-tag and tail checksums, revoke tails and commit checksums.
+ * The walk ends where a mutated header, sequence or tag layout ends the scan. */
+static void
+fuzz_repair_log(struct fuzz_device *state, struct ext4_journal *journal)
+{
+	const struct ext4_jbd_header *header = (const struct ext4_jbd_header *)repair_block;
+	struct ext4_jbd_tag3 *tag3;
+	struct ext4_jbd_tag *tag;
+	size_t tag_size = ext4_journal_tag_size(journal);
+	size_t tail = state->block_size - sizeof(struct ext4_be32);
+	size_t offset;
+	uint32_t cursor = journal->start;
+	uint32_t record;
+	uint32_t sequence = journal->sequence;
+	uint32_t visited;
+	uint32_t flags;
+	uint32_t type;
+
+	if (!journal->checksum) {
+		return;
+	}
+	for (visited = 0; cursor != 0 && visited < journal->blocks; visited++) {
+		if (ext4_journal_read(journal, cursor, repair_block) != EXT4_OK ||
+		    ext4_be32(&header->magic) != EXT4_JBD_MAGIC ||
+		    ext4_be32(&header->sequence) != sequence) {
+			return;
+		}
+		record = cursor;
+		type = ext4_be32(&header->type);
+		if (type == EXT4_JBD_DESCRIPTOR) {
+			for (offset = sizeof(*header);
+			    offset <= tail && tag_size <= tail - offset;) {
+				tag = (struct ext4_jbd_tag *)(repair_block + offset);
+				tag3 = (struct ext4_jbd_tag3 *)(repair_block + offset);
+				flags = (journal->features & EXT4_JBD_CSUM_V3)
+				    ? ext4_be32(&tag3->flags)
+				    : ext4_be16(&tag->flags);
+				offset += tag_size;
+				if (!(flags & EXT4_JBD_SAME_UUID)) {
+					if (EXT4_UUID_SIZE > tail - offset) {
+						break;
+					}
+					offset += EXT4_UUID_SIZE;
+				}
+				cursor = ext4_journal_next(journal, cursor);
+				visited++;
+				if (ext4_journal_read(journal, cursor, repair_data) != EXT4_OK) {
+					return;
+				}
+				if (journal->features & EXT4_JBD_CSUM_V3) {
+					ext4_encode_be32(&tag3->checksum,
+					    ext4_journal_data_checksum(
+						journal, sequence, repair_data));
+				} else {
+					ext4_encode_be16(&tag->checksum,
+					    (uint16_t)ext4_journal_data_checksum(
+						journal, sequence, repair_data));
+				}
+				if (flags & EXT4_JBD_LAST_TAG) {
+					break;
+				}
+			}
+			ext4_journal_checksum_set(journal, repair_block, tail);
+		} else if (type == EXT4_JBD_REVOKE) {
+			ext4_journal_checksum_set(journal, repair_block, tail);
+		} else if (type == EXT4_JBD_COMMIT) {
+			ext4_journal_checksum_set(
+			    journal, repair_block, offsetof(struct ext4_jbd_commit, checksum));
+			sequence++;
+		} else {
+			return;
+		}
+		if (!fuzz_journal_store(state, journal, record, repair_block)) {
+			return;
+		}
+		cursor = ext4_journal_next(journal, cursor);
+	}
+}
+
+/* Recompute every fast-commit tail CRC over the records preceding it, as the
+ * decoder accumulates them, until a record length leaves its block. */
+static void
+fuzz_repair_fast(struct fuzz_device *state, struct ext4_journal *journal)
+{
+	const struct ext4_fc_header_disk *header;
+	struct ext4_fc_tail_disk *tail;
+	uint32_t block;
+	uint32_t offset;
+	uint32_t checksum = 0;
+	uint16_t length = 0;
+	bool changed;
+
+	for (block = journal->last + 1U; block < journal->blocks; block++) {
+		if (ext4_journal_read(journal, block, repair_block) != EXT4_OK) {
+			return;
+		}
+		changed = false;
+		for (offset = 0; offset <= state->block_size - sizeof(*header);
+		    offset += (uint32_t)sizeof(*header) + length) {
+			header = (const struct ext4_fc_header_disk *)(repair_block + offset);
+			length = ext4_le16(&header->length);
+			if (length > state->block_size - offset - sizeof(*header)) {
+				if (changed) {
+					(void)fuzz_journal_store(
+					    state, journal, block, repair_block);
+				}
+				return;
+			}
+			if (ext4_le16(&header->type) == EXT4_FC_TAIL && length >= sizeof(*tail)) {
+				tail = (struct ext4_fc_tail_disk *)(repair_block + offset +
+				    sizeof(*header));
+				checksum = ext4_crc32c(checksum, header,
+				    sizeof(*header) + offsetof(struct ext4_fc_tail_disk, checksum));
+				changed |= ext4_le32(&tail->checksum) != checksum;
+				ext4_encode32(&tail->checksum, checksum);
+				checksum = 0;
+			} else {
+				checksum = ext4_crc32c(checksum, header, sizeof(*header) + length);
+			}
+		}
+		if (changed && !fuzz_journal_store(state, journal, block, repair_block)) {
+			return;
+		}
+	}
+}
+
+static void
+fuzz_repair(struct fuzz_device *state)
+{
+	struct ext4_fs *fs = NULL;
+	struct ext4_journal *journal = NULL;
+
+	if (ext4_load(&environment, true, &fs) != EXT4_OK) {
+		return;
+	}
+	if (ext4_journal_load_external(fs, &writer, NULL, &journal) == EXT4_OK) {
+		fuzz_repair_log(state, journal);
+		if (journal->features & EXT4_JBD_FAST_COMMIT) {
+			fuzz_repair_fast(state, journal);
+		}
+		ext4_journal_close(journal);
+	}
+	ext4_unmount(fs);
+}
+
+/* Record the journal's nonzero blocks as a separate mutation target. */
+static void
+fuzz_journal_blocks(struct fuzz_device *state)
+{
+	const struct ext4_journal_run *run;
+	struct ext4_fs *fs = NULL;
+	struct ext4_journal *journal = NULL;
+	uint64_t physical;
+	uint32_t index;
+	uint32_t offset;
+	size_t byte;
+
+	if (ext4_load(&environment, true, &fs) != EXT4_OK) {
+		return;
+	}
+	if (ext4_journal_load_external(fs, &writer, NULL, &journal) == EXT4_OK) {
+		state->journal = malloc((size_t)journal->blocks * sizeof(*state->journal));
+		for (index = 0; state->journal != NULL && index < journal->run_count; index++) {
+			run = &journal->runs[index];
+			for (offset = 0; offset < run->length; offset++) {
+				physical = run->physical + offset;
+				for (byte = 0; byte < state->block_size; byte++) {
+					if (state->image[physical * state->block_size + byte] !=
+					    0) {
+						state->journal[state->journal_count++] = physical;
+						break;
+					}
+				}
+			}
+		}
+		ext4_journal_close(journal);
+	}
+	ext4_unmount(fs);
 }
 
 static enum ext4_dir_action
@@ -484,8 +709,12 @@ LLVMFuzzerInitialize(int *argc, char ***argv)
 	if (device.interesting_count == 0) {
 		exit(2);
 	}
-	fprintf(stderr, "fuzzing %u nonzero %u-byte blocks\n", device.interesting_count,
-	    device.block_size);
+	fuzz_journal_blocks(&device);
+	if (device.live_bytes != 0) {
+		exit(2);
+	}
+	fprintf(stderr, "fuzzing %u nonzero %u-byte blocks, %u in the journal\n",
+	    device.interesting_count, device.block_size, device.journal_count);
 	return 0;
 }
 
@@ -497,7 +726,13 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t length)
 	struct fuzz_walk walk;
 
 	fuzz_reset(&device);
-	fuzz_mutate(&device, data, length);
+	if (fuzz_mutate(&device, data, length)) {
+		fuzz_repair(&device);
+		if (device.live_bytes != 0) {
+			abort();
+		}
+		device.reads = 0;
+	}
 	(void)ext4_recover(&environment, &writer, &report);
 	if (device.live_bytes != 0) {
 		abort();
