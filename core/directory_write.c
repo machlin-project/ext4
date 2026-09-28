@@ -2,6 +2,7 @@
 #include "directory_write.h"
 #include "directory_index.h"
 #include "inline.h"
+#include "unicode.h"
 
 static uint32_t
 ext4_directory_minimum(size_t length)
@@ -60,7 +61,7 @@ static enum ext4_result
 ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4_inode *parent,
     struct ext4_inode_disk *disk, const uint8_t *name, size_t name_length,
     enum ext4_directory_action action, uint32_t expected_parent, struct ext4_directory_slot *slot,
-    struct ext4_directory_index *tree)
+    struct ext4_directory_index *tree, struct ext4_directory_name *key)
 {
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_map_run run;
@@ -103,8 +104,8 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 		blocks = 1;
 	}
 	if (tree != NULL && action != EXT4_DIRECTORY_EMPTY) {
-		error =
-		    ext4_directory_hash(tree->version, tree->seed, name, name_length, &requested);
+		error = ext4_directory_name_hash(
+		    key, tree->version, tree->seed, name, name_length, &requested);
 		if (error != EXT4_OK) {
 			return error;
 		}
@@ -207,16 +208,16 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 					}
 				}
 				if (tree != NULL && logical != 0) {
-					error = ext4_directory_hash(
-					    tree->version, tree->seed, entry_name, names, &hash);
+					error = ext4_directory_name_hash(key, tree->version,
+					    tree->seed, entry_name, names, &hash);
 					if (error != EXT4_OK ||
 					    !ext4_index_contains(
 						&tree->ranges[logical], hash.major)) {
 						return EXT4_CORRUPT;
 					}
 				}
-				if (names == name_length &&
-				    ext4_equal(entry_name, name, name_length)) {
+				if (name != NULL &&
+				    ext4_directory_name_match(key, entry_name, names)) {
 					if (exists) {
 						return EXT4_CORRUPT;
 					}
@@ -282,10 +283,11 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 	return EXT4_OK;
 }
 
-enum ext4_result
-ext4_directory_scan(struct ext4_allocation *allocation, struct ext4_inode *parent,
+static enum ext4_result
+ext4_directory_scan_named(struct ext4_allocation *allocation, struct ext4_inode *parent,
     struct ext4_inode_disk *disk, const uint8_t *name, size_t name_length,
-    enum ext4_directory_action action, uint32_t expected_parent, struct ext4_directory_slot *slot)
+    enum ext4_directory_action action, uint32_t expected_parent, struct ext4_directory_slot *slot,
+    struct ext4_directory_name *key)
 {
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_directory_index tree;
@@ -299,7 +301,7 @@ ext4_directory_scan(struct ext4_allocation *allocation, struct ext4_inode *paren
 			return error;
 		}
 		error = ext4_directory_scan_blocks(allocation, parent, disk, name, name_length,
-		    action, expected_parent, slot, NULL);
+		    action, expected_parent, slot, NULL, key);
 		if (error != EXT4_OK || action != EXT4_DIRECTORY_INSERT || slot->logical == 0) {
 			return error;
 		}
@@ -309,7 +311,7 @@ ext4_directory_scan(struct ext4_allocation *allocation, struct ext4_inode *paren
 		}
 		if (grown) {
 			error = ext4_directory_scan_blocks(allocation, parent, disk, name,
-			    name_length, action, expected_parent, slot, NULL);
+			    name_length, action, expected_parent, slot, NULL, key);
 			if (error != EXT4_OK || slot->logical == 0) {
 				return error;
 			}
@@ -331,10 +333,34 @@ ext4_directory_scan(struct ext4_allocation *allocation, struct ext4_inode *paren
 		return error;
 	}
 	error = ext4_directory_scan_blocks(allocation, parent, disk, name, name_length, action,
-	    expected_parent, slot, indexed ? &tree : NULL);
+	    expected_parent, slot, indexed ? &tree : NULL, key);
 	if (indexed) {
 		ext4_index_close(&tree);
 	}
+	return error;
+}
+
+enum ext4_result
+ext4_directory_scan(struct ext4_allocation *allocation, struct ext4_inode *parent,
+    struct ext4_inode_disk *disk, const uint8_t *name, size_t name_length,
+    enum ext4_directory_action action, uint32_t expected_parent, struct ext4_directory_slot *slot)
+{
+	struct ext4_fs *fs = allocation->fs;
+	struct ext4_directory_name key;
+	enum ext4_result error;
+
+	/* A strict encoding admits only names the directory can fold. */
+	if (action == EXT4_DIRECTORY_INSERT && ext4_directory_casefolded(fs, parent) &&
+	    fs->casefold_strict && !ext4_utf8_name_valid(name, name_length)) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	error = ext4_directory_name_open(fs, parent, name, name_length, &key);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	error = ext4_directory_scan_named(
+	    allocation, parent, disk, name, name_length, action, expected_parent, slot, &key);
+	ext4_directory_name_close(fs, &key);
 	return error;
 }
 
@@ -492,6 +518,7 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 	struct ext4_directory_index tree;
 	struct ext4_directory_sort_entry *entries = NULL;
 	struct ext4_dir_header_disk *entry;
+	struct ext4_directory_name key = { 0 };
 	struct ext4_name_hash hash;
 	uint8_t *original = NULL;
 	uint8_t *right_buffer = NULL;
@@ -521,6 +548,10 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 			: ext4_index_open(allocation, parent, disk, &tree);
 	if (error != EXT4_OK) {
 		return error;
+	}
+	error = ext4_directory_name_open(fs, parent, name, name_length, &key);
+	if (error != EXT4_OK) {
+		goto out;
 	}
 	next = tree.blocks;
 	if (!convert &&
@@ -596,8 +627,8 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 		if ((entry->name_length == 1 && original[offset + sizeof(*entry)] == '.') ||
 		    (entry->name_length == 2 && original[offset + sizeof(*entry)] == '.' &&
 			original[offset + sizeof(*entry) + 1] == '.') ||
-		    (entry->name_length == name_length &&
-			ext4_equal(original + offset + sizeof(*entry), name, name_length))) {
+		    ext4_directory_name_match(
+			&key, original + offset + sizeof(*entry), entry->name_length)) {
 			error = EXT4_CORRUPT;
 			goto out;
 		}
@@ -608,8 +639,8 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 				goto out;
 			}
 		}
-		error = ext4_directory_hash(tree.version, tree.seed, (const uint8_t *)(entry + 1),
-		    entry->name_length, &hash);
+		error = ext4_directory_name_hash(&key, tree.version, tree.seed,
+		    (const uint8_t *)(entry + 1), entry->name_length, &hash);
 		if (error != EXT4_OK || count + 1U >= capacity ||
 		    (!convert && !ext4_index_contains(&tree.ranges[slot->logical], hash.major))) {
 			error = EXT4_CORRUPT;
@@ -620,7 +651,7 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 		entries[count].used = ext4_directory_minimum(entry->name_length);
 		total += entries[count++].used;
 	}
-	error = ext4_directory_hash(tree.version, tree.seed, name, name_length, &hash);
+	error = ext4_directory_name_hash(&key, tree.version, tree.seed, name, name_length, &hash);
 	if (error != EXT4_OK) {
 		goto out;
 	}
@@ -693,6 +724,7 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 		}
 	}
 out:
+	ext4_directory_name_close(fs, &key);
 	if (entries != NULL) {
 		fs->environment.release(
 		    fs->environment.context, entries, (size_t)capacity * sizeof(*entries));

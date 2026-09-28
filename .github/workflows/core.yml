@@ -166,6 +166,13 @@ jobs:
             2>&1 | tee artifacts/checks/mmp-fixtures.log
           python3 tests/generate_verity_fixtures.py --output artifacts/verity-fixtures \
             2>&1 | tee artifacts/checks/verity-fixtures.log
+      - name: Generate casefold vectors and casefolded directories
+        if: matrix.suite == 'format'
+        run: |
+          python3 tests/generate_casefold_vectors.py --tools-root vendor/e2fsprogs/build \
+            --output artifacts/casefold-vectors 2>&1 | tee artifacts/checks/casefold-vectors.log
+          python3 tests/generate_casefold_fixtures.py --tools-root vendor/e2fsprogs/build \
+            --output artifacts/casefold-fixtures 2>&1 | tee artifacts/checks/casefold-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
@@ -191,7 +198,9 @@ jobs:
           fi
           if [[ '${{ matrix.suite }}' == format ]]; then
             format_options=(-Dmmp_fixtures="$PWD/artifacts/mmp-fixtures" \
-              -Dverity_fixtures="$PWD/artifacts/verity-fixtures")
+              -Dverity_fixtures="$PWD/artifacts/verity-fixtures" \
+              -Dcasefold_vectors="$PWD/artifacts/casefold-vectors/vectors.txt" \
+              -Dcasefold_fixtures="$PWD/artifacts/casefold-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == core ]]; then
             group_options=(-Dgroup_checksum_fixtures="$PWD/artifacts/group-checksum-fixtures" \
@@ -1041,6 +1050,22 @@ jobs:
             --output artifacts/verity-independent 2>&1 | tee artifacts/checks/verity-independent.log
           find artifacts/verity-exports artifacts/verity-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' ! -name '*.manifest' -delete
+      - name: Independently verify casefolded directories after writable changes
+        if: matrix.suite == 'format'
+        run: |
+          exports=()
+          for profile in 4k-strict 1k-relaxed; do
+            directory="artifacts/casefold-exports/$profile"
+            mkdir -p "$directory"
+            .build/ext4-casefold-fs-test "artifacts/casefold-fixtures/casefold-$profile.img" \
+              "artifacts/casefold-fixtures/casefold-$profile.manifest" "$directory" \
+              2>&1 | tee "artifacts/checks/casefold-export-$profile.log"
+            exports+=(--exports "$directory")
+          done
+          python3 tests/check_casefold.py --tools-root vendor/e2fsprogs/build "${exports[@]}" \
+            --output artifacts/casefold-independent 2>&1 | tee artifacts/checks/casefold-independent.log
+          find artifacts/casefold-exports artifacts/casefold-independent artifacts/casefold-vectors \
+            -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Remove fixture-host symlinks before artifact discovery
         if: always()
         run: |

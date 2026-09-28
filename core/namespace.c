@@ -167,7 +167,8 @@ ext4_namespace_new(struct ext4_allocation *allocation, const struct ext4_inode *
 	}
 	flags = parent->flags & EXT4_INHERITED_FILE_FLAGS;
 	if (mode == EXT4_MODE_DIRECTORY) {
-		flags |= parent->flags & EXT4_INODE_DIRSYNC;
+		/* Like Linux, only directories inherit casefolding. */
+		flags |= parent->flags & (EXT4_INODE_DIRSYNC | EXT4_INODE_CASEFOLD);
 	} else if (mode != EXT4_MODE_REGULAR) {
 		flags &= EXT4_INODE_NODUMP | EXT4_INODE_NOATIME;
 	}

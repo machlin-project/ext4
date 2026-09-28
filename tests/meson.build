@@ -8,7 +8,8 @@ foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures', 'geometry_fixtures',
   'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
   'directory_index_64k_fixture', 'large_file_fixtures', 'large_volume_fixtures', 'external_journal_fixtures',
-  'fast_commit_fixtures', 'mmp_fixtures', 'verity_fixtures']
+  'fast_commit_fixtures', 'mmp_fixtures', 'verity_fixtures', 'casefold_vectors',
+  'casefold_fixtures']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
 endforeach
@@ -80,6 +81,19 @@ foreach name : ['ext4-4k.img', 'ext4-1k.img']
   test('encrypt-no-key-' + name, programs['encrypt'],
     args: ['--synthetic', paths['fixtures'] / name], timeout: 300, suite: 'format')
 endforeach
+
+if paths['casefold_vectors'] != ''
+  test('casefold-oracle', programs['casefold'], args: [paths['casefold_vectors']],
+    timeout: 300, suite: 'format')
+endif
+
+if paths['casefold_fixtures'] != ''
+  foreach profile : ['4k-strict', '1k-relaxed']
+    stem = paths['casefold_fixtures'] / ('casefold-' + profile)
+    test('casefold-' + profile, programs['casefold-fs'], args: [stem + '.img', stem + '.manifest'],
+      timeout: 300, suite: 'format')
+  endforeach
+endif
 
 if paths['verity_fixtures'] != ''
   foreach profile : ['4k', '1k-salted', 'sha512']

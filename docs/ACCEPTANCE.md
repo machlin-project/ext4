@@ -41,13 +41,14 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Wider geometry and format coverage; quota/project accounting and casefold; key-based encryption awaits a product decision; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity and keyless encryption are implemented with their own evidence below, pending the complete CI regressions that include them. BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
+| Format compatibility | Wider geometry and format coverage; quota/project accounting; key-based encryption awaits a product decision; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity, keyless encryption and casefolded directories are implemented with their own evidence below, pending the complete CI regressions that include them. BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | Fast commit format combinations, broader ownership corruption and interrupted foreign replay | Open; fast-commit conversions may now exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; larger live transactions; broader fuzz targets | Open; indexed namespace operations now validate only hash-eligible leaves, and the sustained suite plus operations fuzzing are in place (see "Sustained operation and fuzzing evidence") |
 
-Quota/project accounting and casefold remain unsupported compatibility requirements
-awaiting implementation or an explicit product scope decision. MMP, fs-verity reading
-with protected writable metadata and encrypted volumes without keys are implemented.
+Quota/project accounting remains an unsupported compatibility requirement awaiting
+implementation or an explicit product scope decision. MMP, fs-verity reading with
+protected writable metadata, encrypted volumes without keys and casefolded
+directories are implemented.
 Enabling verity, measurement, built-in signatures and any key-based decryption need
 product decisions: the core has no key source and performs no cryptography. They are not accepted merely because mounting rejects
 them safely. They must not disappear from a future readiness claim. The core
@@ -118,6 +119,26 @@ trees on the 4 KiB and 1 KiB base images exercise the same core rules in the `fo
 suite. Evidence is in `artifacts/checks/encrypt-first/` and the lab's
 `artifacts/ext4-encrypt/created/` and `artifacts/ext4-encrypt/verified/`. Keys and
 decryption remain outside the core.
+
+## Casefolded directories evidence
+
+The core's utf8-12.1 casefold matches e2fsprogs 1.47.3, which follows Linux's
+utf8data, for every code point, ten malformed forms and 200,000 random combining
+sequences: 1,314,091 vectors, 2,058 of them opaque, plus 19,998 casefolded hashes
+across all six hash versions. On a 4 KiB strict and a 1 KiB relaxed volume authored
+and indexed by e2fsprogs, every equivalent lookup resolves to the stored inode in the
+indexed and the linear directory, and absent names stay absent. A writable owner
+then rejects folded duplicates, applies the strict and relaxed malformed-name rules,
+adds 600 names through indexed leaf splits, treats a case-only rename as an alias,
+creates an inheriting subdirectory and unlinks and renames through equivalent names.
+The changed images pass strict e2fsck, which recomputes every casefolded hash in the
+index, and debugfs finds the expected names and flags. The local ASan/UBSan
+regression with casefold passed 590 of 591 tests. The failure was the hash guard
+test, which still required empty input to be rejected although a name of ignorable
+code points folds to nothing and Linux hashes that empty form; the corrected test
+passes. Evidence is in `artifacts/checks/casefold-first/` and
+`artifacts/checks/scale-regression-6/`. The Linux reference kernel lacks
+`CONFIG_UNICODE`, so these images have no Linux readback.
 
 ## Fast-commit development evidence
 

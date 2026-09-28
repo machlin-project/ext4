@@ -73,13 +73,16 @@
 #define EXT4_FEATURE_INCOMPAT_LARGEDIR 0x4000U
 #define EXT4_FEATURE_INCOMPAT_INLINE_DATA 0x8000U
 #define EXT4_FEATURE_INCOMPAT_ENCRYPT 0x10000U
+#define EXT4_FEATURE_INCOMPAT_CASEFOLD 0x20000U
+#define EXT4_ENCODING_UTF8_12_1 1U
+#define EXT4_ENCODING_STRICT 0x0001U
 #define EXT4_SUPPORTED_INCOMPAT                                                                    \
 	(EXT4_FEATURE_INCOMPAT_FILETYPE | EXT4_FEATURE_INCOMPAT_EXTENTS |                          \
 	    EXT4_FEATURE_INCOMPAT_64BIT | EXT4_FEATURE_INCOMPAT_FLEX_BG |                          \
 	    EXT4_FEATURE_INCOMPAT_CSUM_SEED | EXT4_FEATURE_INCOMPAT_LARGEDIR |                     \
 	    EXT4_FEATURE_INCOMPAT_META_BG | EXT4_FEATURE_INCOMPAT_EA_INODE |                       \
 	    EXT4_FEATURE_INCOMPAT_INLINE_DATA | EXT4_FEATURE_INCOMPAT_MMP |                        \
-	    EXT4_FEATURE_INCOMPAT_ENCRYPT)
+	    EXT4_FEATURE_INCOMPAT_ENCRYPT | EXT4_FEATURE_INCOMPAT_CASEFOLD)
 
 #define EXT4_FEATURE_RO_HUGE_FILE 0x0008U
 #define EXT4_FEATURE_RO_SPARSE_SUPER 0x0001U
@@ -107,12 +110,14 @@
 /* fscrypt: contents, names and symlink targets are ciphertext. The core holds no
  * keys; it preserves encrypted objects and denies operations that need plaintext. */
 #define EXT4_INODE_ENCRYPT 0x00000800U
+/* Names in this directory compare and hash through the volume's encoding. */
+#define EXT4_INODE_CASEFOLD 0x40000000U
 #define EXT4_XATTR_INDEX_ENCRYPTION 9U
 #define EXT4_INODE_RESTRICTED_FLAGS (EXT4_INODE_IMMUTABLE | EXT4_INODE_APPEND)
 #define EXT4_INODE_WRITABLE_FLAGS                                                                  \
 	(EXT4_INODE_MODIFIABLE_FLAGS | EXT4_INODE_INDEX | EXT4_INODE_HUGE_FILE |                   \
 	    EXT4_INODE_EXTENTS | EXT4_INODE_EOFBLOCKS | EXT4_INODE_INLINE_DATA |                   \
-	    EXT4_INODE_VERITY | EXT4_INODE_ENCRYPT)
+	    EXT4_INODE_VERITY | EXT4_INODE_ENCRYPT | EXT4_INODE_CASEFOLD)
 /* Verity data and the Merkle metadata beyond EOF are immutable while metadata,
  * attributes and names can still change. */
 #define EXT4_INODE_DATA_PROTECTED (EXT4_INODE_IMMUTABLE | EXT4_INODE_VERITY)

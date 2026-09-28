@@ -118,10 +118,11 @@ ext4_directory_hash(uint8_t version, const uint32_t seed[4], const uint8_t *name
 	unsigned int count;
 	bool unsigned_bytes = version >= EXT4_HASH_LEGACY_UNSIGNED;
 
-	if (name == NULL || length == 0 || result == NULL) {
+	/* Casefolded names can be empty or longer than a stored name. */
+	if ((name == NULL && length != 0) || result == NULL) {
 		return EXT4_INVALID_ARGUMENT;
 	}
-	if (length > EXT4_NAME_MAX) {
+	if (length > EXT4_DIRECTORY_HASH_MAX) {
 		return EXT4_NAME_TOO_LONG;
 	}
 	if (version > EXT4_HASH_TEA_UNSIGNED) {

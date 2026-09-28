@@ -199,6 +199,45 @@ files; the image must pass strict fsck. After the core test changes a copy,
 `--verify IMAGE` adds the same key and requires every encrypted byte, the symlink
 target, the removed directory and the renamed plain file, followed by strict fsck.
 
+## Casefold tests
+
+`scripts/generate_unicode_data.py --ucd DIRECTORY --output core/unicode_data.h`
+regenerates the casefold tables from the Unicode 12.1.0 `UnicodeData.txt`,
+`CaseFolding.txt`, `DerivedCoreProperties.txt` and `DerivedAge.txt`; it refuses
+files whose SHA-256 differs from the pinned release.
+
+`tests/generate_casefold_vectors.py --tools-root E2FSPROGS_BUILD --output NEW` builds
+`tests/casefold_oracle.c` against that build's `libext2fs.a`, which implements
+Linux's utf8data semantics, and writes `vectors.txt`: the fold of every code point,
+including surrogates, malformed sequences, 200,000 random combining sequences of up
+to 12 code points and 20,000 casefolded hashes across all six hash versions with
+random and zero seeds. Configure
+`-Dcasefold_vectors=NEW/vectors.txt` to add `casefold-oracle` to the `format` suite;
+`ext4-casefold-test` requires identical folds, opaque classification and hashes.
+Vectors containing NUL are skipped because libext2fs stops at NUL and no ext4 name
+contains one.
+
+`tests/generate_casefold_fixtures.py --tools-root E2FSPROGS_BUILD --output NEW` makes a
+4 KiB strict and a 1 KiB relaxed volume. debugfs writes six names with case, NFD,
+ignorable and expansion variants and 400 bulk names into `cf`, and the six names into
+the linear `small` directory; the relaxed profile adds an opaque non-UTF-8 name to
+`small`, because e2fsck cannot rebuild an index holding one. `e2fsck -fyD` then
+indexes `cf` with e2fsprogs' casefolded hashes, and strict fsck must pass. The
+manifest lists equivalent lookups, absent names and the strict flag.
+
+Configure `-Dcasefold_fixtures=NEW` to add `ext4-casefold-fs-test IMAGE MANIFEST` cases
+to the `format` suite. Every manifest lookup must resolve to the stored name's inode,
+or be absent, in both directories. A writable copy then must return `EXT4_EXISTS`
+for folded duplicates in create and link, `EXT4_INVALID_ARGUMENT` for a malformed
+name under the strict encoding and exact-byte matching under the relaxed one. It
+adds 600 names that split indexed leaves, checks a case-only rename, creates an
+inheriting subdirectory, unlinks and renames entries through equivalent names and
+remounts to look up names again. An optional export directory receives the image;
+`tests/check_casefold.py --tools-root E2FSPROGS_BUILD --exports DIRECTORY --output NEW`
+requires strict fsck, which recomputes every casefolded hash in the index, and checks
+the stored names, removals and inherited flags with debugfs. The Linux reference
+kernel lacks `CONFIG_UNICODE`, so no Linux mount check exists for these images.
+
 ## Metadata fuzzing
 
 `-Dfuzzer=true` builds `ext4-image-fuzzer` using Clang's libFuzzer runtime,

@@ -53,6 +53,14 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	if (incompat & ~(EXT4_SUPPORTED_INCOMPAT | EXT4_FEATURE_INCOMPAT_RECOVER)) {
 		return EXT4_UNSUPPORTED;
 	}
+	if (incompat & EXT4_FEATURE_INCOMPAT_CASEFOLD) {
+		if (ext4_le16(&super->encoding) != EXT4_ENCODING_UTF8_12_1 ||
+		    (ext4_le16(&super->encoding_flags) & ~EXT4_ENCODING_STRICT)) {
+			return EXT4_UNSUPPORTED;
+		}
+		fs->casefold_strict =
+		    (ext4_le16(&super->encoding_flags) & EXT4_ENCODING_STRICT) != 0;
+	}
 	/* Distributed descriptors replace the reserved-GDT resize inode layout. */
 	if ((incompat & EXT4_FEATURE_INCOMPAT_META_BG) &&
 	    (fs->info.feature_compat & EXT4_FEATURE_COMPAT_RESIZE_INODE)) {

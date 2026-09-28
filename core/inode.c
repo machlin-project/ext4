@@ -153,6 +153,10 @@ ext4_inode_decode_record(
 			: (uint64_t)fs->cluster_blocks * (fs->info.block_size / EXT4_SECTOR_SIZE));
 	if (decoded.mode == 0 || (!orphan && decoded.links == 0)) {
 		error = EXT4_NOT_FOUND;
+	} else if ((decoded.flags & EXT4_INODE_CASEFOLD) &&
+	    !(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_CASEFOLD)) {
+		/* Linux rejects a casefold flag without the volume encoding. */
+		error = EXT4_CORRUPT;
 	} else if ((decoded.flags & EXT4_INODE_INLINE_DATA) &&
 	    (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_INLINE_DATA) ||
 		(decoded.flags & (EXT4_INODE_EXTENTS | EXT4_INODE_INDEX | EXT4_INODE_EA_INODE)) ||

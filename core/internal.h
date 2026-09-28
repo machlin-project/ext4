@@ -17,6 +17,9 @@ struct ext4_block_path {
 	uint16_t count;
 };
 
+/* Longest hash input: the bounded casefolded form of a 255-byte name. */
+#define EXT4_DIRECTORY_HASH_MAX 4096U
+
 struct ext4_name_hash {
 	uint32_t major;
 	uint32_t minor;
@@ -79,6 +82,8 @@ struct ext4_fs {
 	uint8_t mmp_node_name[EXT4_MMP_NODE_NAME_SIZE];
 	bool mmp_active;
 	bool mmp_released;
+	/* The utf8-12.1 encoding rejects names that are not well-formed UTF-8. */
+	bool casefold_strict;
 	struct ext4_journal *journal;
 	struct ext4_orphan_file *orphan_file;
 	struct ext4_inode_hold *holds;

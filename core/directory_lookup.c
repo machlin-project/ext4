@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "directory_index.h"
 #include "inline.h"
+#include "unicode.h"
 
 struct ext4_lookup_node {
 	uint8_t *buffer;
@@ -22,6 +23,7 @@ struct ext4_lookup_state {
 	uint8_t levels;
 	struct ext4_lookup_node nodes[EXT4_DX_MAX_INDIRECT_LEVELS + 1U];
 	uint8_t *leaf;
+	struct ext4_directory_name key;
 };
 
 static const struct ext4_dx_entry_disk *
@@ -167,8 +169,8 @@ ext4_lookup_scan(struct ext4_lookup_state *state, uint32_t logical,
 				entry.name[1] == '.')) {
 				return EXT4_CORRUPT;
 			}
-			error = ext4_directory_hash(state->version, state->fs->directory_hash_seed,
-			    entry.name, entry.name_length, &hash);
+			error = ext4_directory_name_hash(&state->key, state->version,
+			    state->fs->directory_hash_seed, entry.name, entry.name_length, &hash);
 			if (error != EXT4_OK) {
 				return error;
 			}
@@ -176,8 +178,7 @@ ext4_lookup_scan(struct ext4_lookup_state *state, uint32_t logical,
 				return EXT4_CORRUPT;
 			}
 		}
-		if (entry.name_length == state->name_length &&
-		    ext4_equal(entry.name, state->name, state->name_length)) {
+		if (ext4_directory_name_match(&state->key, entry.name, entry.name_length)) {
 			if (found != 0) {
 				return EXT4_CORRUPT;
 			}
@@ -295,8 +296,8 @@ ext4_lookup_indexed(struct ext4_lookup_state *state, uint32_t *number)
 			state->version += EXT4_HASH_LEGACY_UNSIGNED;
 		}
 	}
-	error = ext4_directory_hash(
-	    state->version, state->fs->directory_hash_seed, state->name, state->name_length, &hash);
+	error = ext4_directory_name_hash(&state->key, state->version,
+	    state->fs->directory_hash_seed, state->name, state->name_length, &hash);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -409,6 +410,11 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 	state.name = name;
 	state.name_length = name_length;
 	state.leaf = buffer;
+	error = ext4_directory_name_open(fs, directory, name, name_length, &state.key);
+	if (error != EXT4_OK) {
+		fs->environment.release(fs->environment.context, buffer, capacity);
+		return error;
+	}
 	if (indexed) {
 		for (index = 0; index <= levels; index++) {
 			state.nodes[index].buffer = buffer + index * fs->info.block_size;
@@ -423,6 +429,7 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 			*inode = found;
 		}
 	}
+	ext4_directory_name_close(fs, &state.key);
 	fs->environment.release(fs->environment.context, buffer, capacity);
 	return error;
 }

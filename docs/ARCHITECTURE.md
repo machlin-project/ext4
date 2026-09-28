@@ -572,6 +572,39 @@ its partial-block zeroing would corrupt ciphertext; unlinked encrypted orphans a
 released. Supplying keys, deriving per-file keys and presenting Linux-style no-key
 names are product decisions and are not implemented.
 
+## Casefolded directories
+
+Volumes with the CASEFOLD incompatibility are admitted when the superblock names
+encoding 1, utf8-12.1, and its encoding flags contain at most STRICT; any other
+encoding or flag is unsupported. A CASEFOLD inode flag on a volume without the
+feature is corruption, as in Linux. Directories with the flag compare and hash names
+through ext4's utf8-12.1 casefold: full (C and F) case folding, canonical
+decomposition without compatibility mappings, canonical ordering and removal of
+default ignorable code points, which still end a reordering run. Hangul syllables
+decompose algorithmically, and code points without Unicode 12.1 data map to
+themselves. `scripts/generate_unicode_data.py` produces `core/unicode_data.h` from
+the pinned Unicode 12.1.0 database files; the tables are read-only data and the
+transform works on bounded caller-allocated storage without recomposition.
+
+Malformed UTF-8 or an encoded surrogate makes a name opaque. Folded names hash their
+folded UTF-8 bytes, which may be empty or longer than 255 bytes; opaque names hash
+their raw bytes. Two well-formed names are equal when their bytes or folded forms are
+equal. As in Linux, a relaxed encoding matches an opaque name only by its exact
+bytes, and a strict encoding never matches one and rejects its creation with
+`EXT4_INVALID_ARGUMENT`. Stored names keep the bytes they were created with, and
+iteration returns those bytes. Lookup, link, unlink, rmdir and rename find entries
+through any equivalent name, and adding a name that folds to an existing one
+returns `EXT4_EXISTS`. Renaming between two equivalent names addresses the same
+inode, so it follows the rename contract for aliases: a no-op that keeps the stored
+bytes, `EXT4_EXISTS` with NOREPLACE, or `EXT4_STALE` when absence was expected.
+
+New subdirectories inherit the flag; other object types do not, as in Linux. Linear,
+inline and indexed directories share these rules, including leaf splits, which
+recompute every folded hash. Enabling or clearing the flag on an existing empty
+directory is not yet admitted by `ext4_set_inode_flags`. Encrypted casefolded
+directories store an extra hash in each name record; since every name operation in
+an encrypted directory returns `EXT4_ENCRYPTED`, the core never parses those records.
+
 ## Persistent inode flags
 
 `ext4_set_inode_flags` changes selected policy bits and captured ctime in one

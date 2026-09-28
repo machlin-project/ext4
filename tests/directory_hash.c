@@ -72,6 +72,8 @@ main(int argc, char **argv)
 	const uint8_t name[] = "hello";
 	const uint32_t zero_seed[4] = { 0, 0, 0, 0 };
 	struct ext4_name_hash result;
+	struct ext4_name_hash empty;
+	struct ext4_name_hash empty_name;
 	struct ext4_name_hash untouched = { 0x12345678U, 0x87654321U };
 	unsigned int version;
 
@@ -93,8 +95,10 @@ main(int argc, char **argv)
 	result = untouched;
 	CHECK(ext4_directory_hash(EXT4_HASH_HALF_MD4, NULL, NULL, 1, &result) ==
 	    EXT4_INVALID_ARGUMENT);
-	CHECK(ext4_directory_hash(EXT4_HASH_HALF_MD4, NULL, name, 0, &result) ==
-	    EXT4_INVALID_ARGUMENT);
+	/* A casefolded name may fold to nothing, and ext4 hashes that empty input. */
+	CHECK(ext4_directory_hash(EXT4_HASH_HALF_MD4, NULL, NULL, 0, &empty) == EXT4_OK);
+	CHECK(ext4_directory_hash(EXT4_HASH_HALF_MD4, NULL, name, 0, &empty_name) == EXT4_OK);
+	CHECK(empty.major == empty_name.major && empty.minor == empty_name.minor);
 	CHECK(ext4_directory_hash(EXT4_HASH_HALF_MD4, NULL, name, SIZE_MAX, &result) ==
 	    EXT4_NAME_TOO_LONG);
 	CHECK(
