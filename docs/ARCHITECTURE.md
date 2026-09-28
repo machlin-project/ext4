@@ -61,6 +61,14 @@ address independently of the first data block. See the
 
 ## I/O and cache contract
 
+Regular-file growth validates the destination mapping's logical-address ceiling.
+An inline file that will expand into extents uses the extent limit before any
+conversion writes. Without HUGE_FILE, the 32-bit sector counter also bounds size;
+legacy indirect mapping reserves its metadata overhead within that budget, matching
+Linux's dense-map ceiling. Logical file size is independent of image/device size:
+sparse holes do not require allocated backing or an iteration per missing block.
+
+
 Implementation and acceptance proceed through the portable core first, FSKit on
 stock macOS second, and LXNU-specific policy third. Adapter development is deferred
 until the required core format, mutation, metadata and recovery contracts pass.

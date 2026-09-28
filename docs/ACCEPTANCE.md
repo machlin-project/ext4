@@ -60,6 +60,36 @@ internal-journal recovery and both orphan representations; HTree creation, looku
 and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
 the remaining blocks have equal size or that the full core is accepted.
 
+## Large logical files
+
+Nine independently authored profiles cover 1/4/64 KiB blocks, indirect mapping,
+INLINE_DATA, BIGALLOC, their combination and volumes without HUGE_FILE. A small
+fixture helper uses libext2fs's public 64-bit seek/write API: e2fsprogs 1.47.3's
+host-file importer narrows offsets through a signed 32-bit parameter. Images
+remain 32 MiB (128 MiB at 64 KiB blocks), with logical files reaching the applicable
+format ceiling. This tests logical addressing, not large-device capacity.
+
+The sanitized core reads independent sparse extents and indirect trees, writes
+across 2/4 GiB byte boundaries and the signed 32-bit block boundary, expands inline
+files directly to the extent ceiling, reserves/converts unwritten blocks, punches
+partial blocks, truncates across high mappings, regrows zero-filled holes and
+reclaims all allocation. Over-limit growth rejects before device writes and keeps
+output snapshots unchanged. The optimized freestanding build retains the 2 KiB
+stack-frame limit.
+
+All nine focused profiles and 36 exported states pass. Independent checks read
+every mapped block, including zero padding, and compare exact logical mappings,
+inode/cluster charges, untouched seed files and free counts. All 279 verification
+commands and 45 strict nonrepairing fsck checks pass. Reports are
+`artifacts/large-file-fixtures-api-retry1/report.json` and
+`artifacts/large-file-independent/report.json`; main review is
+`artifacts/checks/large-file-focused-accepted.json`. Native Linux mutation/recovery
+roundtrips and the expanded full regression remain pending.
+
+Reproduce with `generate_large_file_fixtures.py`, `ext4-large-file-test --export`
+and `check_large_files.py`. Meson registers these profiles through
+`-Dlarge_file_fixtures=PATH`; the core CI job runs focused and independent checks.
+
 ## Clustered allocation
 
 BIGALLOC reads and mutations use cluster bitmap geometry with block-based extent

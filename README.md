@@ -70,6 +70,13 @@ completely allocated images and private attribute values pass four further
 independent states. Eight native Linux/core/Linux roundtrips pass, including orphan
 recovery and pending core journals. The expanded full regression remains pending.
 
+Large logical-file tests cover 2/4 GiB byte boundaries, the signed 32-bit block
+boundary and format size ceilings on nine profiles up to 64 KiB blocks. Inline
+expansion now uses its destination mapping's limit; legacy sector accounting
+also bounds growth when HUGE_FILE is absent. All nine focused tests and 36
+independent mutation/reclamation states pass. Native Linux roundtrips and the
+expanded regression remain pending; this does not establish large-volume scale.
+
 Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.
 Both native adapters remain read-only. The FSKit adapter builds for macOS 26.4,
 but installation/mount tests await a signing profile with FSKit Module capability.

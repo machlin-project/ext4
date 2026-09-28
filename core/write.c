@@ -290,18 +290,57 @@ struct ext4_growth {
 	bool mapping_no_space;
 };
 
+static uint64_t
+ext4_indirect_overhead(uint64_t blocks, uint64_t pointers)
+{
+	uint64_t metadata;
+	uint64_t span = pointers * pointers;
+	uint64_t covered;
+
+	if (blocks <= EXT4_DIRECT_BLOCKS) {
+		return 0;
+	}
+	blocks -= EXT4_DIRECT_BLOCKS;
+	metadata = 1;
+	if (blocks <= pointers) {
+		return metadata;
+	}
+	blocks -= pointers;
+	covered = blocks < span ? blocks : span;
+	metadata += 1U + (covered + pointers - 1U) / pointers;
+	if (blocks <= span) {
+		return metadata;
+	}
+	blocks -= span;
+	return metadata + 1U + (blocks + span - 1U) / span + (blocks + pointers - 1U) / pointers;
+}
+
 static enum ext4_result
 ext4_file_size_valid(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t size)
 {
-	uint64_t per_block;
+	uint64_t per_block = fs->info.block_size / sizeof(struct ext4_le32);
 	uint64_t limit = UINT32_MAX;
+	uint64_t capacity;
+	bool extents = (inode->flags & EXT4_INODE_EXTENTS) ||
+	    ((inode->flags & EXT4_INODE_INLINE_DATA) &&
+		(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS));
 
-	if (!(inode->flags & EXT4_INODE_EXTENTS)) {
-		per_block = fs->info.block_size / sizeof(struct ext4_le32);
+	if (!extents) {
 		limit = EXT4_DIRECT_BLOCKS + per_block + per_block * per_block +
 		    per_block * per_block * per_block;
 		if (limit > UINT32_MAX) {
 			limit = UINT32_MAX;
+		}
+	}
+	if (!(fs->info.feature_ro_compat & EXT4_FEATURE_RO_HUGE_FILE)) {
+		capacity = UINT32_MAX / (fs->info.block_size / EXT4_SECTOR_SIZE);
+		if (limit > capacity) {
+			limit = capacity;
+		}
+		if (!extents && limit + ext4_indirect_overhead(limit, per_block) > capacity) {
+			/* Match Linux's dense-map ceiling: reserve the indirect
+			 * nodes for the full legacy block budget before data. */
+			limit = capacity - ext4_indirect_overhead(capacity, per_block);
 		}
 	}
 	if (size > limit * fs->info.block_size) {

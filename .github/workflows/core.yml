@@ -136,6 +136,11 @@ jobs:
           python3 tests/generate_cluster_space.py --tools-root vendor/e2fsprogs/build \
             --fixtures artifacts/cluster-fixtures/report.json --output artifacts/cluster-space-fixtures \
             2>&1 | tee artifacts/checks/cluster-space-fixtures.log
+      - name: Generate sparse files at logical-address limits
+        if: matrix.suite == 'core'
+        run: |
+          python3 tests/generate_large_file_fixtures.py --tools-root vendor/e2fsprogs/build \
+            --output artifacts/large-file-fixtures 2>&1 | tee artifacts/checks/large-file-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
@@ -163,6 +168,7 @@ jobs:
               -Dinline_space_fixtures="$PWD/artifacts/inline-space-fixtures" \
               -Dcluster_fixtures="$PWD/artifacts/cluster-fixtures" \
               -Dcluster_space_fixtures="$PWD/artifacts/cluster-space-fixtures" \
+              -Dlarge_file_fixtures="$PWD/artifacts/large-file-fixtures" \
               -Dxattr_space_fixtures="$PWD/artifacts/xattr-space-fixtures" \
               -Dxattr_enable_fixtures="$PWD/artifacts/xattr-enable-fixtures")
           fi
@@ -266,6 +272,17 @@ jobs:
           find artifacts/cluster-fixtures artifacts/cluster-exports artifacts/cluster-fault-exports \
             artifacts/cluster-independent artifacts/cluster-fault-independent artifacts/cluster-space-fixtures \
             artifacts/cluster-space-independent artifacts/cluster-values-independent \
+            -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Independently verify large sparse file mutation and reclamation
+        if: matrix.suite == 'core'
+        run: |
+          mkdir artifacts/large-file-exports
+          .build/ext4-large-file-test --export artifacts/large-file-exports artifacts/large-file-fixtures/*.img \
+            2>&1 | tee artifacts/checks/large-file-exports.log
+          python3 tests/check_large_files.py --tools-root vendor/e2fsprogs/build \
+            --fixtures artifacts/large-file-fixtures/report.json --exports artifacts/large-file-exports \
+            --output artifacts/large-file-independent 2>&1 | tee artifacts/checks/large-file-independent.log
+          find artifacts/large-file-fixtures artifacts/large-file-exports artifacts/large-file-independent \
             -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Independently verify persistent inode flags and recovery
         if: matrix.suite == 'core'
