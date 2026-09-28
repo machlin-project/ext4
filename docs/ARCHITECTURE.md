@@ -68,6 +68,12 @@ legacy indirect mapping reserves its metadata overhead within that budget, match
 Linux's dense-map ceiling. Logical file size is independent of image/device size:
 sparse holes do not require allocated backing or an iteration per missing block.
 
+Large writable volumes may arrive with a clean 32-bit-tag journal. The writer
+selects 64-bit tags in memory when the volume exceeds the 32-bit block count and
+persists the feature in the existing start/sequence publication barrier, before
+any new descriptor. Mounting, reading and canceled private transactions do not
+write the upgrade. A pending journal always retains its recorded interpretation
+during recovery; selecting a new writer format requires an empty journal.
 
 Implementation and acceptance proceed through the portable core first, FSKit on
 stock macOS second, and LXNU-specific policy third. Adapter development is deferred

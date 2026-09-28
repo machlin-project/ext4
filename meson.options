@@ -62,3 +62,6 @@ option('cluster_space_fixtures', type: 'string', value: '',
 
 option('large_file_fixtures', type: 'string', value: '',
   description: 'Path to independently generated sparse files at logical-address limits')
+
+option('large_volume_fixtures', type: 'string', value: '',
+  description: 'Path to sparse multi-terabyte images with high-address metadata and data')

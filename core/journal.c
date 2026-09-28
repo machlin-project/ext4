@@ -472,6 +472,12 @@ ext4_journal_open(
 	}
 	/* A clean journal's sequence describes its previous use. Skip that ID. */
 	journal->sequence++;
+	if (fs->info.blocks > UINT32_MAX) {
+		/* mke2fs can leave a large filesystem's empty journal with 32-bit
+		 * tags. Select the wider writer format now without changing disk.
+		 * Log publication persists it before any new descriptor is sent. */
+		journal->features |= EXT4_JBD_64BIT;
+	}
 	*result = journal;
 	return EXT4_OK;
 }
@@ -519,6 +525,9 @@ ext4_journal_publish(struct ext4_journal *journal, uint32_t start, uint32_t sequ
 	ext4_encode_be32(&super->start, start);
 	ext4_encode_be32(&super->sequence, sequence);
 	ext4_encode_be32(&super->head, journal->first);
+	/* Persist a clean-journal address-width upgrade in the same barrier as
+	 * its new start/sequence. No descriptor may precede this publication. */
+	ext4_encode_be32(&super->feature_incompat, journal->features);
 	if (journal->checksum) {
 		ext4_encode_be32(&super->checksum, 0);
 		checksum = ext4_crc32c(UINT32_MAX, super, sizeof(*super));

@@ -327,6 +327,26 @@ CI defaults to all six suites. A manual workflow dispatch can select one suite
 after changes limited to its tests or fixtures. Keep the completed evidence for
 unchanged suites, and run every affected suite when the portable core changes.
 
+Large-volume tests use sparse 4–16 TiB images with less than 18 MB initially stored.
+The host must support both the logical file size and SEEK_DATA/SEEK_HOLE. Do not
+copy, hash or archive these images by reading their entire logical contents; use
+the bounded helpers in `tests/sparse_image.py`.
+
+```sh
+python3 tests/generate_large_volume_fixtures.py --tools-root /path/to/e2fsprogs/build \
+  --output artifacts/large-volume-fixtures
+meson setup --reconfigure .build -Dlarge_volume_fixtures="$PWD/artifacts/large-volume-fixtures"
+meson compile -C .build ext4-large-volume-test ext4-recover
+python3 tests/check_large_volumes.py --tools-root /path/to/e2fsprogs/build \
+  --fixtures artifacts/large-volume-fixtures/report.json \
+  --test .build/ext4-large-volume-test --recover .build/ext4-recover \
+  --output artifacts/large-volume-independent
+```
+
+The checker preserves pending images and compares core recovery with independent
+raw journal replay followed by strict nonrepairing fsck. Its output directory must
+be new so a failed attempt cannot be overwritten.
+
 ## Extended-attribute mutation tests
 
 The same ten fixtures drive `xattr-mutation-*` and `xattr-packing-*`. The first

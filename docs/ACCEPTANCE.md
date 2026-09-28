@@ -41,7 +41,7 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Finish BIGALLOC regression acceptance; large logical/physical addresses and volume geometry beyond the current bounded images | Open; BIGALLOC focused faults, capacity, private attributes, independent states/replay and eight native Linux roundtrips pass; INLINE_DATA and EA_INODE retain full acceptance |
+| Format compatibility | Finish large-volume native/regression acceptance and wider geometry coverage; retain the Linux delayed-allocation maximum-offset exception | Open; BIGALLOC and large logical files pass the 466-test regression; high physical addresses pass three focused profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | Fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; v1 and async compatibility pass focused faults, independent replay, eight Linux roundtrips and their combined full regression |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
@@ -59,6 +59,42 @@ create/link/symlink/mkdir/mknod/unlink/rmdir/rename and atomic whiteout; raw xat
 internal-journal recovery and both orphan representations; HTree creation, lookup
 and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
 the remaining blocks have equal size or that the full core is accepted.
+
+## Large physical addresses and volume geometry
+
+Three independently authored sparse volumes cover 1 KiB blocks above the 32-bit
+physical-block boundary, distributed descriptors with an explicit checksum seed,
+and 4 KiB blocks near that boundary. The logical image sizes are approximately
+4 TiB and 16 TiB, but each original occupies less than 18 MB on the test host.
+Their last group contains real inode tables, a directory, data extents, an external
+mapping node and an external xattr block. Independent debugfs inspection verifies
+the physical addresses; merely placing an inode in the last group is insufficient.
+
+mke2fs leaves these empty journals using 32-bit tags. On a large writable volume,
+the core selects wide tags in memory and persists that feature together with the
+new log start/sequence before writing any descriptor. Read-only access and canceled
+private transactions do not change the format. The existing publication barrier
+orders the change; no additional per-transaction flush is introduced. Recovery
+continues to decode the actual recorded format before opening a new writer.
+
+The sanitized program and optimized freestanding core compile successfully. All
+three profiles pass seven independently checked states each: original reads,
+high-address creation/write/preallocation/punch/xattr mutation, complete held-unlink
+reclamation, and core/oracle recovery of both uncommitted and committed journals.
+All 258 commands and 21 strict nonrepairing fsck checks pass. Exact mappings, data
+and zero padding, inode/cluster charges, free totals, unchanged seeds and replay
+idempotence agree. This is selected large-volume geometry evidence, not a sustained
+throughput result or coverage of every group layout. Native Linux and the expanded
+full regression remain pending for the journal-width change.
+
+Reports: `artifacts/large-volume-fixtures-high/report.json`,
+`artifacts/large-volume-independent/report.json` and
+`artifacts/checks/large-volume-focused-accepted.json`. `generate_large_volume_fixtures.py`
+authors the images and `check_large_volumes.py` runs the operation/recovery batch.
+The `large_volume_fixtures` Meson option registers the read profiles. CI additionally
+runs the independent mutation and replay batch. Sparse copying and content identities
+enumerate stored ranges with SEEK_DATA/SEEK_HOLE; they reject unsupported enumeration
+or more than 2 GiB of stored ranges instead of scanning a multi-terabyte hole.
 
 ## Large logical files
 
@@ -83,8 +119,14 @@ inode/cluster charges, untouched seed files and free counts. All 279 verificatio
 commands and 45 strict nonrepairing fsck checks pass. Reports are
 `artifacts/large-file-fixtures-api-retry1/report.json` and
 `artifacts/large-file-independent/report.json`; main review is
-`artifacts/checks/large-file-focused-accepted.json`. The expanded full regression
-remains pending.
+`artifacts/checks/large-file-focused-accepted.json`. The expanded regression passes
+all six jobs and 466 registered tests, with no Meson failures or skips. The new
+clustered, inline and large-file independent reports contain only zero-status
+commands. The ten existing shared-value reader-only fsck failures and ten fixture
+refcount normalization commands retain their explicit classifications below.
+Main review is `artifacts/checks/large-file-ci-accepted.json`; raw CI evidence is
+under `artifacts/checks/large-file-ci-36386048148/`. This does not cover the later
+large-volume journal-width change.
 
 Six Linux/core/Linux roundtrips pass with ordinary ordered mounts: 1/4 KiB,
 indirect, inline and the two profiles without HUGE_FILE. The two BIGALLOC profiles
@@ -182,8 +224,9 @@ state. All 2,032 commands and 32 strict fsck checks return zero. Main review:
 `artifacts/ext4-journal/cluster-pending/report.json`. The first attempt stopped at
 guest-probe compilation because geometry scan variables lacked initialization;
 no VM boot occurred until that harness fix. No core fix was needed for native
-acceptance. The expanded full regression remains pending. This does not establish
-adapter support.
+acceptance. The expanded 466-test regression passes all six jobs; the ten known
+shared-value reader-only fsck exceptions remain separate from clean exports.
+This does not establish adapter support.
 
 The first expanded regression ran all 454 cases: 452 passed and two hand-built
 filesystem models failed because they omitted the new cluster geometry fields.

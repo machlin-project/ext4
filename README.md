@@ -17,7 +17,7 @@ rename exchange and whiteout, HTree mutation, automatic indexing, LARGEDIR and
 DIR_NLINK. Raw inode-body and external xattrs follow metadata, data and namespace
 transactions. Internal journal recovery handles legacy and modern orphan records.
 
-The completed 444-test CI regression passes all six jobs, alongside independent
+The completed 466-test CI regression passes all six jobs, alongside independent
 image checks and Linux mutation/recovery roundtrips. Tests cover malformed media,
 allocation/read failures and interrupted writes under ASan/UBSan; freestanding
 compilation enforces a 2 KiB stack-frame budget. Read profiles span 1–64 KiB blocks,
@@ -68,7 +68,7 @@ mutation/lifetime states and 72 transaction/replay states; 1,536 power cuts cove
 allocation, reuse, partial release, reservation and attribute reclamation. Two
 completely allocated images and private attribute values pass four further
 independent states. Eight native Linux/core/Linux roundtrips pass, including orphan
-recovery and pending core journals. The expanded full regression remains pending.
+recovery and pending core journals. The expanded 466-test regression passes.
 
 Large logical-file tests cover 2/4 GiB byte boundaries, the signed 32-bit block
 boundary and format size ceilings on nine profiles up to 64 KiB blocks. Inline
@@ -78,8 +78,14 @@ independent mutation/reclamation states pass. Six native Linux roundtrips pass
 with ordinary ordered mounts; the two BIGALLOC profiles pass with explicit
 `nodelalloc`. The pinned Linux reference writes inconsistent allocation counters
 with delayed allocation at the maximum clustered-file offset; that failure remains
-recorded and the core rejects the corrupt orphan. The expanded regression remains
-pending; this does not establish large-volume scale.
+recorded and the core rejects the corrupt orphan. The expanded regression passes;
+this does not establish large-volume scale.
+
+Sparse multi-terabyte volumes now exercise last-group inode tables, directories,
+data, extent nodes and xattrs, including physical block numbers above 32 bits.
+The writer promotes an empty 32-bit journal to wide tags at its first transaction.
+Three profiles pass 21 independent read/mutation/reclamation/recovery states;
+native Linux acceptance and the expanded regression for this change remain pending.
 
 Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.
 Both native adapters remain read-only. The FSKit adapter builds for macOS 26.4,

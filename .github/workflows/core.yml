@@ -141,6 +141,11 @@ jobs:
         run: |
           python3 tests/generate_large_file_fixtures.py --tools-root vendor/e2fsprogs/build \
             --output artifacts/large-file-fixtures 2>&1 | tee artifacts/checks/large-file-fixtures.log
+      - name: Generate sparse volumes with high physical addresses
+        if: matrix.suite == 'core'
+        run: |
+          python3 tests/generate_large_volume_fixtures.py --tools-root vendor/e2fsprogs/build \
+            --output artifacts/large-volume-fixtures 2>&1 | tee artifacts/checks/large-volume-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
@@ -169,6 +174,7 @@ jobs:
               -Dcluster_fixtures="$PWD/artifacts/cluster-fixtures" \
               -Dcluster_space_fixtures="$PWD/artifacts/cluster-space-fixtures" \
               -Dlarge_file_fixtures="$PWD/artifacts/large-file-fixtures" \
+              -Dlarge_volume_fixtures="$PWD/artifacts/large-volume-fixtures" \
               -Dxattr_space_fixtures="$PWD/artifacts/xattr-space-fixtures" \
               -Dxattr_enable_fixtures="$PWD/artifacts/xattr-enable-fixtures")
           fi
@@ -283,6 +289,15 @@ jobs:
             --fixtures artifacts/large-file-fixtures/report.json --exports artifacts/large-file-exports \
             --output artifacts/large-file-independent 2>&1 | tee artifacts/checks/large-file-independent.log
           find artifacts/large-file-fixtures artifacts/large-file-exports artifacts/large-file-independent \
+            -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Independently verify large-volume mutation and recovery
+        if: matrix.suite == 'core'
+        run: |
+          python3 tests/check_large_volumes.py --tools-root vendor/e2fsprogs/build \
+            --fixtures artifacts/large-volume-fixtures/report.json \
+            --test .build/ext4-large-volume-test --recover .build/ext4-recover \
+            --output artifacts/large-volume-independent 2>&1 | tee artifacts/checks/large-volume-independent.log
+          find artifacts/large-volume-fixtures artifacts/large-volume-independent \
             -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Independently verify persistent inode flags and recovery
         if: matrix.suite == 'core'
