@@ -12,7 +12,7 @@ on:
         description: Suite to run after a change limited to its tests or fixtures
         type: choice
         default: all
-        options: [all, core, orphan-file, namespace, removal, rename, indexed, sustained]
+        options: [all, core, orphan-file, namespace, removal, rename, indexed, sustained, format]
 
 permissions:
   contents: read
@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ inputs.suite != '' && inputs.suite != 'all' && fromJSON(format('["{0}"]', inputs.suite)) || fromJSON('["core","orphan-file","namespace","removal","rename","indexed","sustained"]') }}
+        suite: ${{ inputs.suite != '' && inputs.suite != 'all' && fromJSON(format('["{0}"]', inputs.suite)) || fromJSON('["core","orphan-file","namespace","removal","rename","indexed","sustained","format"]') }}
     env:
       CC: clang
     defaults:
@@ -158,9 +158,15 @@ jobs:
         run: |
           python3 tests/generate_fast_commit_fixtures.py --tools-root vendor/e2fsprogs/build \
             --output artifacts/fast-commit-fixtures 2>&1 | tee artifacts/checks/fast-commit-fixtures.log
+      - name: Generate multi-mount-protection images
+        if: matrix.suite == 'format'
+        run: |
+          python3 tests/generate_mmp_fixtures.py --output artifacts/mmp-fixtures \
+            2>&1 | tee artifacts/checks/mmp-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
+          format_options=()
           space_options=()
           xattr_options=()
           group_options=()
@@ -175,6 +181,9 @@ jobs:
           fi
           if [[ '${{ matrix.suite }}' == namespace ]]; then
             space_options=(-Dspace_fixtures="$PWD/artifacts/space-fixtures")
+          fi
+          if [[ '${{ matrix.suite }}' == format ]]; then
+            format_options=(-Dmmp_fixtures="$PWD/artifacts/mmp-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == core ]]; then
             group_options=(-Dgroup_checksum_fixtures="$PWD/artifacts/group-checksum-fixtures" \
@@ -196,6 +205,7 @@ jobs:
             -Dextended_tests=true -Dinode128_test=true -Dunwritten_tests=true \
             -Dorphan_file_tests=true -Dnamespace_tests=true \
             "${index_options[@]}" "${space_options[@]}" "${xattr_options[@]}" "${group_options[@]}" \
+            "${format_options[@]}" \
             2>&1 | tee artifacts/checks/configure.log
           meson compile -C .build -j 2 2>&1 | tee artifacts/checks/build.log
       - name: Independently verify directory hashes and collision vectors
@@ -994,6 +1004,20 @@ jobs:
             --output artifacts/sustained-independent 2>&1 | tee artifacts/checks/sustained-independent.log
           find artifacts/sustained-exports artifacts/sustained-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' ! -name 'manifest.txt' -delete
+      - name: Independently verify multi-mount protection
+        if: matrix.suite == 'format'
+        run: |
+          exports=artifacts/mmp-exports
+          mkdir -p "$exports"
+          for profile in 4k 1k no-checksum; do
+            .build/ext4-mmp-test "artifacts/mmp-fixtures/mmp-$profile.img" "$exports" \
+              2>&1 | tee "artifacts/checks/mmp-export-$profile.log"
+          done
+          python3 tests/check_mmp.py --tools-root vendor/e2fsprogs/build --exports "$exports" \
+            --recover .build/ext4-recover --e2fsck-write 4k --output artifacts/mmp-independent \
+            2>&1 | tee artifacts/checks/mmp-independent.log
+          find "$exports" artifacts/mmp-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Remove fixture-host symlinks before artifact discovery
         if: always()
         run: |

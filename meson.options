@@ -71,3 +71,6 @@ option('external_journal_fixtures', type: 'string', value: '',
 
 option('fast_commit_fixtures', type: 'string', value: '',
   description: 'Path to independent fast-commit journals and expected filesystems')
+
+option('mmp_fixtures', type: 'string', value: '',
+  description: 'Path to independently generated multi-mount-protection images')

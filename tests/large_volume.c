@@ -290,7 +290,7 @@ main(int argc, char **argv)
 	struct ext4_inode root;
 	struct ext4_inode directory;
 	struct cut_writer cut = { 0 };
-	struct ext4_write_environment writer = { &cut, cut_write, cut_flush };
+	struct ext4_write_environment writer = { &cut, cut_write, cut_flush, NULL };
 	bool read_only;
 	bool interrupted;
 

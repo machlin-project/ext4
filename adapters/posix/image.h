@@ -4,10 +4,16 @@
 
 #include <ext4/ext4.h>
 
+#define EXT4_POSIX_NODE_NAME_SIZE 65U
+
 struct ext4_posix_image {
 	int fd;
 	struct ext4_environment environment;
 	struct ext4_write_environment writer;
+	/* Wall-clock sleeps, system entropy and this host's name for MMP volumes. */
+	struct ext4_mmp_environment mmp;
+	char node_name[EXT4_POSIX_NODE_NAME_SIZE];
+	char device_name[EXT4_POSIX_NODE_NAME_SIZE];
 	uint64_t read_calls;
 	uint64_t write_calls;
 	uint64_t flush_calls;

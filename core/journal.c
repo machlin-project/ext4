@@ -849,6 +849,7 @@ ext4_transaction_create(struct ext4_journal *journal, uint32_t credits, bool rec
 	uint32_t slots;
 	uint32_t slot;
 	size_t size;
+	enum ext4_result error;
 
 	if (result == NULL) {
 		return EXT4_INVALID_ARGUMENT;
@@ -861,6 +862,12 @@ ext4_transaction_create(struct ext4_journal *journal, uint32_t credits, bool rec
 	}
 	if (journal->aborted || (!recovery && journal->start != 0)) {
 		return EXT4_RECOVERY_REQUIRED;
+	}
+	if (!recovery) {
+		error = ext4_mmp_guard(journal->fs);
+		if (error != EXT4_OK) {
+			return error;
+		}
 	}
 	/* Reserve conservatively: at worst one descriptor for every data block. */
 	if (credits * 2U + 1U >= journal->last - journal->first) {

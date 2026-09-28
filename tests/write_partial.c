@@ -334,7 +334,8 @@ attach_trace(struct write_trace *trace, struct device *device, struct ext4_fs *f
 	EXPECT(ext4_get_inode(fs, fs->journal_inode, &journal), EXT4_OK);
 	EXPECT(ext4_map_block(fs, &journal, 0, &physical), EXT4_OK);
 	trace->journal_offset = physical * device->block_size;
-	fs->journal->writer = (struct ext4_write_environment){ trace, trace_write, trace_flush };
+	fs->journal->writer =
+	    (struct ext4_write_environment){ trace, trace_write, trace_flush, NULL };
 }
 
 static void

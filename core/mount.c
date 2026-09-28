@@ -122,6 +122,20 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	if (fs->info.blocks <= fs->first_data_block || fs->info.blocks > device_blocks) {
 		return EXT4_CORRUPT;
 	}
+	if (incompat & EXT4_FEATURE_INCOMPAT_MMP) {
+		fs->mmp_block = (uint64_t)ext4_le32(&super->mmp_block_lo) |
+		    (uint64_t)ext4_le32(&super->mmp_block_hi) << 32;
+		fs->mmp_interval = ext4_le16(&super->mmp_interval);
+		if (fs->mmp_block <= fs->first_data_block || fs->mmp_block >= fs->info.blocks ||
+		    fs->mmp_interval > EXT4_MMP_MAX_UPDATE_INTERVAL) {
+			return EXT4_CORRUPT;
+		}
+		/* Linux and e2fsprogs substitute their default for an unset interval. */
+		if (fs->mmp_interval == 0) {
+			fs->mmp_interval = EXT4_MMP_MIN_CHECK_INTERVAL;
+		}
+		fs->info.mmp_interval = fs->mmp_interval;
+	}
 	if (fs->clusters_per_group == 0 || fs->clusters_per_group > bitmap_capacity) {
 		return EXT4_CORRUPT;
 	}

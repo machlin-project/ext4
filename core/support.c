@@ -505,6 +505,8 @@ ext4_result_string(enum ext4_result result)
 		return "too many hard links";
 	case EXT4_NOT_EMPTY:
 		return "directory not empty";
+	case EXT4_BUSY:
+		return "device is in use by another host";
 	case EXT4_PERMISSION_DENIED:
 		return "inode policy forbids this operation";
 	}

@@ -99,8 +99,8 @@ reservation_faults(struct device *device, const char *exports, const char *path)
 	value = 0xe3;
 	fs = mount_file(device, &inode);
 	trace = (struct capacity_trace){ .device = device };
-	fs->journal->writer =
-	    (struct ext4_write_environment){ &trace, capacity_trace_write, capacity_trace_flush };
+	fs->journal->writer = (struct ext4_write_environment){ &trace, capacity_trace_write,
+		capacity_trace_flush, NULL };
 	device->allocations = device->reads = 0;
 	EXPECT(ext4_write_partial(
 		   fs, inode.number, inode.generation, offset, &value, 1, &update, &written),
@@ -122,7 +122,7 @@ reservation_faults(struct device *device, const char *exports, const char *path)
 			fs = mount_file(device, &inode);
 			trace = (struct capacity_trace){ .device = device };
 			fs->journal->writer = (struct ext4_write_environment){ &trace,
-				capacity_trace_write, capacity_trace_flush };
+				capacity_trace_write, capacity_trace_flush, NULL };
 			device->allocations = device->reads = 0;
 			device->fail_allocation = phase == 0 ? position : 0;
 			device->fail_read = phase == 1 ? position : 0;
@@ -144,7 +144,7 @@ reservation_faults(struct device *device, const char *exports, const char *path)
 				fs = mount_file(device, &inode);
 				trace = (struct capacity_trace){ .device = device };
 				fs->journal->writer = (struct ext4_write_environment){ &trace,
-					capacity_trace_write, capacity_trace_flush };
+					capacity_trace_write, capacity_trace_flush, NULL };
 				device->stop_at = position;
 				device->partial = partial != 0;
 				device->survival = survival;

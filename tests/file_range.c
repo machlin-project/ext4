@@ -369,7 +369,8 @@ partial_progress(struct device *device, bool punch)
 	trace.size = inode.size;
 	disk = (struct ext4_inode_disk *)(device->cache + trace.inode_offset);
 	trace.blocks = ext4_le32(&disk->blocks_lo);
-	fs->journal->writer = (struct ext4_write_environment){ &trace, trace_write, trace_flush };
+	fs->journal->writer =
+	    (struct ext4_write_environment){ &trace, trace_write, trace_flush, NULL };
 	EXPECT(ext4_fallocate(
 		   fs, inode.number, inode.generation, 0, length, flags, &update, &completed),
 	    EXT4_NO_MEMORY);
@@ -964,8 +965,8 @@ capacity_faults(struct device *device, bool keep_size, const char *exports, cons
 	update.change_time.seconds += 9;
 	fs = mount_file(device, &inode);
 	trace = (struct capacity_trace){ .device = device };
-	fs->journal->writer =
-	    (struct ext4_write_environment){ &trace, capacity_trace_write, capacity_trace_flush };
+	fs->journal->writer = (struct ext4_write_environment){ &trace, capacity_trace_write,
+		capacity_trace_flush, NULL };
 	device->allocations = device->reads = 0;
 	EXPECT(ext4_write_partial(
 		   fs, inode.number, inode.generation, offset, &value, 1, &update, &completed),
@@ -987,7 +988,7 @@ capacity_faults(struct device *device, bool keep_size, const char *exports, cons
 			fs = mount_file(device, &inode);
 			trace = (struct capacity_trace){ .device = device };
 			fs->journal->writer = (struct ext4_write_environment){ &trace,
-				capacity_trace_write, capacity_trace_flush };
+				capacity_trace_write, capacity_trace_flush, NULL };
 			device->allocations = device->reads = 0;
 			device->fail_allocation = phase == 0 ? position : 0;
 			device->fail_read = phase == 1 ? position : 0;
@@ -1010,7 +1011,7 @@ capacity_faults(struct device *device, bool keep_size, const char *exports, cons
 				fs = mount_file(device, &inode);
 				trace = (struct capacity_trace){ .device = device };
 				fs->journal->writer = (struct ext4_write_environment){ &trace,
-					capacity_trace_write, capacity_trace_flush };
+					capacity_trace_write, capacity_trace_flush, NULL };
 				device->stop_at = position;
 				device->partial = partial != 0;
 				device->survival = survival;

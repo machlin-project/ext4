@@ -451,7 +451,7 @@ LLVMFuzzerInitialize(int *argc, char ***argv)
 	}
 	environment = (struct ext4_environment){ &device, device.image_size, fuzz_read,
 		fuzz_allocate, fuzz_release };
-	writer = (struct ext4_write_environment){ &device, fuzz_write, fuzz_flush };
+	writer = (struct ext4_write_environment){ &device, fuzz_write, fuzz_flush, NULL };
 	device.block_size = EXT4_MIN_BLOCK_SIZE;
 	fuzz_reset(&device);
 	if (ext4_mount(&environment, &fs) == EXT4_OK) {

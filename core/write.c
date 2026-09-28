@@ -40,6 +40,10 @@ ext4_mount_writable_with_journal(const struct ext4_environment *environment,
 	    fs->inodes_per_group % EXT4_BITS_PER_BYTE != 0) {
 		error = EXT4_CORRUPT;
 	} else {
+		/* Multi-mount protection precedes every other write. */
+		error = ext4_mmp_start(fs, writer, false);
+	}
+	if (error == EXT4_OK) {
 		error = ext4_journal_open_external(fs, writer, journal, &fs->journal);
 	}
 	if (error == EXT4_OK) {
@@ -66,6 +70,10 @@ ext4_sync(struct ext4_fs *fs)
 	}
 	if (fs->journal == NULL) {
 		return EXT4_OK;
+	}
+	error = ext4_mmp_guard(fs);
+	if (error != EXT4_OK) {
+		return error;
 	}
 	if (fs->last_orphan != 0) {
 		error = ext4_orphan_validate_live(fs);

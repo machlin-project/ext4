@@ -8,7 +8,7 @@ foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures', 'geometry_fixtures',
   'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
   'directory_index_64k_fixture', 'large_file_fixtures', 'large_volume_fixtures', 'external_journal_fixtures',
-  'fast_commit_fixtures']
+  'fast_commit_fixtures', 'mmp_fixtures']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
 endforeach
@@ -66,6 +66,13 @@ if paths['fast_commit_fixtures'] != ''
         args: [directory / 'pending.img', directory / 'expected.img', '--faults'],
         timeout: 600, suite: 'core')
     endif
+  endforeach
+endif
+
+if paths['mmp_fixtures'] != ''
+  foreach profile : ['4k', '1k', 'no-checksum', 'slow']
+    test('mmp-' + profile, programs['mmp'],
+      args: [paths['mmp_fixtures'] / ('mmp-' + profile + '.img')], timeout: 300, suite: 'format')
   endforeach
 endif
 

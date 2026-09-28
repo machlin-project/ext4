@@ -689,9 +689,10 @@ ext4_recover_with_journal(const struct ext4_environment *environment,
 	struct ext4_recovery_scan scan;
 	struct ext4_recovery_scan replay;
 	struct ext4_fs *fs;
-	struct ext4_journal *journal;
+	struct ext4_journal *journal = NULL;
 	struct ext4_fast_commit *fast = NULL;
 	size_t bytes = 0;
+	enum ext4_result stopped;
 	enum ext4_result error;
 
 	ext4_zero(&completed, sizeof(completed));
@@ -721,8 +722,13 @@ ext4_recover_with_journal(const struct ext4_environment *environment,
 		ext4_unmount(fs);
 		return error;
 	}
-	error = ext4_journal_load_external(fs, writer, external, &journal);
+	/* Hold the checker sequence, as e2fsck does, throughout offline recovery. */
+	error = ext4_mmp_start(fs, writer, true);
+	if (error == EXT4_OK) {
+		error = ext4_journal_load_external(fs, writer, external, &journal);
+	}
 	if (error != EXT4_OK) {
+		(void)ext4_mmp_stop(fs);
 		ext4_unmount(fs);
 		return error;
 	}
@@ -799,6 +805,12 @@ out:
 	ext4_fast_commit_close(fast);
 	if (replay.records != NULL) {
 		fs->environment.release(fs->environment.context, replay.records, bytes);
+	}
+	if (fs->mmp_active) {
+		stopped = ext4_mmp_stop(fs);
+		if (error == EXT4_OK) {
+			error = stopped;
+		}
 	}
 	if (report != NULL) {
 		*report = completed;

@@ -751,7 +751,8 @@ main(int argc, char **argv)
 	device_load(&pair.log, &pair, argv[first + 1], true);
 	pair.environment =
 	    (struct ext4_environment){ &pair, pair.home.size, read_home, allocate, release };
-	pair.writer = (struct ext4_write_environment){ &pair.home, write_device, flush_device };
+	pair.writer =
+	    (struct ext4_write_environment){ &pair.home, write_device, flush_device, NULL };
 	pair.external = (struct ext4_journal_environment){ &pair.log, pair.log.size, read_device,
 		write_device, flush_device };
 	if (linux_return) {

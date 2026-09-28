@@ -35,7 +35,8 @@ enum ext4_result {
 	EXT4_EXISTS,
 	EXT4_TOO_MANY_LINKS,
 	EXT4_NOT_EMPTY,
-	EXT4_PERMISSION_DENIED
+	EXT4_PERMISSION_DENIED,
+	EXT4_BUSY
 };
 
 enum ext4_file_type {
@@ -93,6 +94,21 @@ struct ext4_environment {
 	void (*release)(void *context, void *allocation, size_t size);
 };
 
+/* Multi-mount protection services supplied by a writable owner of an MMP volume.
+ * sleep waits at least the requested seconds, or fails when interrupted. random
+ * returns unpredictable values. now returns seconds since the Unix epoch. The
+ * names identify this host and device in the MMP block and are truncated to its
+ * fields. Environment reads of the MMP block must observe other hosts' writes:
+ * the owner may not satisfy them from a cache. */
+struct ext4_mmp_environment {
+	void *context;
+	enum ext4_result (*sleep)(void *context, uint32_t seconds);
+	uint32_t (*random)(void *context);
+	int64_t (*now)(void *context);
+	const char *node_name;
+	const char *device_name;
+};
+
 /* A separate capability: supplying read callbacks never authorizes writes.
  * write completes exactly length bytes; errors may have changed any part of the
  * requested range. flush must persist every preceding successful write through
@@ -105,6 +121,8 @@ struct ext4_write_environment {
 	enum ext4_result (*write)(
 	    void *context, uint64_t offset, const void *buffer, size_t length);
 	enum ext4_result (*flush)(void *context);
+	/* Required to write a volume with the MMP feature; otherwise unused. */
+	const struct ext4_mmp_environment *mmp;
 };
 
 /* Optional external journal device, supplied explicitly by the resource owner.
@@ -144,6 +162,8 @@ struct ext4_info {
 	uint32_t feature_compat;
 	uint32_t feature_incompat;
 	uint32_t feature_ro_compat;
+	/* Seconds between required ext4_mmp_update calls; zero without MMP. */
+	uint32_t mmp_interval;
 	uint8_t uuid[EXT4_UUID_SIZE];
 	char volume_name[EXT4_VOLUME_NAME_SIZE + 1];
 };
@@ -477,6 +497,15 @@ enum ext4_result ext4_rename_whiteout(struct ext4_fs *fs, const struct ext4_rena
     const struct ext4_rename_entry *destination, uint32_t flags,
     const struct ext4_inode_update *whiteout_attributes, const struct ext4_timestamp *time,
     struct ext4_inode *result);
+
+/* A writable owner of an MMP volume refreshes its sequence at least once per
+ * info.mmp_interval seconds. Mutations also refresh a stale sequence before their
+ * first write. A sequence or node written by another host poisons the instance and
+ * returns BUSY. Volumes without MMP return OK without I/O. */
+enum ext4_result ext4_mmp_update(struct ext4_fs *fs);
+/* After a successful ext4_sync, publish the clean MMP sequence. The instance then
+ * rejects further mutation; unmount it. Volumes without MMP return OK. */
+enum ext4_result ext4_mmp_release(struct ext4_fs *fs);
 
 /* Offline recovery replays the journal, reconstructs allocation summaries and
  * completes legacy-list and modern orphan-file cleanup in bounded transactions.

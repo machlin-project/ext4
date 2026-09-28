@@ -486,6 +486,39 @@ changes. Explicit recovery reconstructs those totals from the validated, replaye
 group descriptors in a journal transaction before cleanup. This is restricted to
 recovery; ordinary clean writable mounts still reject inconsistent summaries.
 
+## Multi-mount protection
+
+Volumes with the MMP incompatibility are admitted by read-only mounts without
+reading the MMP block, as Linux does. Writable mounts and offline recovery require
+the owner's `ext4_mmp_environment`: interruptible sleeps, unpredictable values, wall
+time and host/device names. Without it they return unsupported before any write.
+Mount validation bounds the MMP block and update interval, substitutes the usual
+five-second default for zero, and adds the block to the protected metadata ranges.
+
+Acquisition follows Linux and e2fsprogs. The check interval is the larger of twice
+the update interval, five seconds and the interval recorded in the block, capped at
+the Linux updater's 300 seconds; each wait is `min(2 * check + 1, check + 60)`. The
+checker sequence rejects immediately. Any other non-clean sequence must survive one
+wait unchanged. The owner then publishes a random sequence, waits again and requires
+that value to remain. A writable owner immediately publishes the next value, as the
+Linux updater's first pass does; offline recovery publishes the checker sequence
+instead and holds it until recovery ends. Magic and, with metadata checksums, the
+seeded CRC32C are verified on every read. MMP writes cover the whole block and are
+followed by a device flush.
+
+A writable owner calls `ext4_mmp_update` at least once per `info.mmp_interval`. The
+core also refreshes a sequence at least one interval old before a transaction or
+sync writes. A refresh first requires the current block to carry this owner's
+sequence and node name; otherwise it poisons the instance and returns BUSY without
+writing. The sequence wraps from its largest active value to one. After a
+successful sync, `ext4_mmp_release` publishes the clean value, again only while the
+block remains this owner's, and the instance then rejects mutation. Offline recovery
+releases the checker value the same way. Unmounting without release leaves the
+active sequence, so the next owner waits as after a crash.
+The owner must deliver MMP reads from the device rather than a cache, because
+another host's writes are the subject of the check. This protocol assumes the
+other hosts implement it; it does not arbitrate concurrent access by itself.
+
 ## Persistent inode flags
 
 `ext4_set_inode_flags` changes selected policy bits and captured ctime in one

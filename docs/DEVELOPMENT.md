@@ -31,9 +31,9 @@ directory for the independent checkers and VM harnesses.
 After adding a new Meson option, first regenerate an existing build with
 `meson setup --reconfigure .build`, then set the new option with `-D`.
 
-`meson test -C .build --list` lists the configured cases. The seven disjoint suites
-are `core`, `orphan-file`, `namespace`, `removal`, `rename`, `indexed` and `sustained`;
-select one with `--suite NAME`, or use quoted test-name patterns. Complete output, per-test
+`meson test -C .build --list` lists the configured cases. The eight disjoint suites
+are `core`, `orphan-file`, `namespace`, `removal`, `rename`, `indexed`, `sustained` and
+`format`; select one with `--suite NAME`, or use quoted test-name patterns. Complete output, per-test
 JSON records and JUnit results are in `.build/meson-logs/testlog.txt`,
 `testlog.json` and `testlog.junit.xml`. CI retains all three, including successful
 fault-test output and explicit applicability skips.
@@ -122,6 +122,29 @@ compares every directory, inode identity, type, link count, permission, file byt
 symlink target and attribute value with debugfs. The `sustained` suite runs every
 writable base profile and two wide profiles; CI additionally exports five runs for
 independent verification. Seeds make each failing sequence reproducible.
+
+## Multi-mount protection tests
+
+`tests/generate_mmp_fixtures.py --output artifacts/mmp-fixtures` authors four MMP
+images with e2fsprogs: 4 KiB and 1 KiB with metadata checksums, 1 KiB without them,
+and a 40-second update interval. Each passes strict fsck and starts with the clean
+sequence. Configure `-Dmmp_fixtures=artifacts/mmp-fixtures` to add the `format` suite's
+`ext4-mmp-test` cases. A modeled second host runs on a virtual clock and changes the
+MMP block during selected waits; every MMP write is recorded.
+
+The test covers clean acquisition and its exact wait, the immediate post-acquisition
+update, stale-sequence refresh before a mutation, explicit heartbeat, release and
+subsequent read-only rejection; sequence wrap; the checker value, stale and active
+owners, a contested confirmation, interrupted waits and ownership stolen before a
+heartbeat or mutation; missing services and malformed blocks; and offline recovery
+holding the checker value before releasing it. Passing an export directory writes a
+released image and a pending committed journal. `tests/check_mmp.py --tools-root
+E2FSPROGS_BUILD --exports DIRECTORY --recover .build/ext4-recover --output NEW` requires
+strict fsck, the clean sequence and the core's node and check interval through
+debugfs, lets e2fsck acquire a selected released image read-write, and recovers each
+pending image with the POSIX utility. These steps use real waits of about 21 to 58
+seconds per acquisition. The POSIX adapter supplies wall-clock sleeps, `/dev/urandom`
+values and the host name.
 
 ## Metadata fuzzing
 
@@ -505,7 +528,7 @@ actual Linux recovery of Linux-authored journals and open-unlinked owners, then
 mutates shared values through the core and checks the returned image in Linux.
 Retain e2fsprogs journal-only orphan failures separately; they are not clean passes.
 
-CI defaults to all seven suites. A manual workflow dispatch can select one suite
+CI defaults to all eight suites. A manual workflow dispatch can select one suite
 after changes limited to its tests or fixtures. Keep the completed evidence for
 unchanged suites, and run every affected suite when the portable core changes.
 

@@ -69,6 +69,16 @@ struct ext4_fs {
 	bool metadata_checksum;
 	bool writer_attached;
 	bool aborted;
+	/* Multi-mount protection owned by this writable instance. */
+	struct ext4_mmp_environment mmp_environment;
+	struct ext4_write_environment mmp_writer;
+	uint64_t mmp_block;
+	int64_t mmp_written;
+	uint32_t mmp_sequence;
+	uint16_t mmp_interval;
+	uint8_t mmp_node_name[EXT4_MMP_NODE_NAME_SIZE];
+	bool mmp_active;
+	bool mmp_released;
 	struct ext4_journal *journal;
 	struct ext4_orphan_file *orphan_file;
 	struct ext4_inode_hold *holds;
@@ -110,6 +120,13 @@ enum ext4_result ext4_group_decode(
     struct ext4_fs *fs, uint32_t group, struct ext4_group_disk *disk, struct ext4_group *result);
 void ext4_group_checksum_set(struct ext4_fs *fs, uint32_t group, struct ext4_group_disk *disk);
 enum ext4_result ext4_system_ranges_build(struct ext4_fs *fs);
+/* Acquire multi-mount protection before the first write. Offline recovery uses
+ * the checker sequence; stop publishes CLEAN. guard refreshes a stale sequence
+ * and rejects mutation after release or when another host owns the volume. */
+enum ext4_result ext4_mmp_start(
+    struct ext4_fs *fs, const struct ext4_write_environment *writer, bool checker);
+enum ext4_result ext4_mmp_stop(struct ext4_fs *fs);
+enum ext4_result ext4_mmp_guard(struct ext4_fs *fs);
 bool ext4_system_block(const struct ext4_fs *fs, uint64_t block);
 bool ext4_system_overlaps(const struct ext4_fs *fs, uint64_t block, uint64_t length);
 enum ext4_result ext4_inode_location(struct ext4_fs *fs, uint32_t number, uint64_t *offset);

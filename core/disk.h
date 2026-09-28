@@ -65,6 +65,7 @@
 #define EXT4_FEATURE_INCOMPAT_META_BG 0x0010U
 #define EXT4_FEATURE_INCOMPAT_EXTENTS 0x0040U
 #define EXT4_FEATURE_INCOMPAT_64BIT 0x0080U
+#define EXT4_FEATURE_INCOMPAT_MMP 0x0100U
 #define EXT4_FEATURE_INCOMPAT_FLEX_BG 0x0200U
 #define EXT4_FEATURE_INCOMPAT_EA_INODE 0x0400U
 #define EXT4_FEATURE_INCOMPAT_CSUM_SEED 0x2000U
@@ -75,7 +76,7 @@
 	    EXT4_FEATURE_INCOMPAT_64BIT | EXT4_FEATURE_INCOMPAT_FLEX_BG |                          \
 	    EXT4_FEATURE_INCOMPAT_CSUM_SEED | EXT4_FEATURE_INCOMPAT_LARGEDIR |                     \
 	    EXT4_FEATURE_INCOMPAT_META_BG | EXT4_FEATURE_INCOMPAT_EA_INODE |                       \
-	    EXT4_FEATURE_INCOMPAT_INLINE_DATA)
+	    EXT4_FEATURE_INCOMPAT_INLINE_DATA | EXT4_FEATURE_INCOMPAT_MMP)
 
 #define EXT4_FEATURE_RO_HUGE_FILE 0x0008U
 #define EXT4_FEATURE_RO_SPARSE_SUPER 0x0001U
@@ -399,6 +400,34 @@ struct ext4_dx_tail_disk {
 	struct ext4_le32 checksum;
 };
 
+/* Multi-mount protection block. Sequence values above SEQ_MAX are reserved:
+ * CLEAN marks no active owner and FSCK an offline checker. The checksum covers
+ * the structure before it, seeded like other metadata checksums. */
+#define EXT4_MMP_MAGIC 0x004d4d50U
+#define EXT4_MMP_SEQ_CLEAN 0xff4d4d50U
+#define EXT4_MMP_SEQ_FSCK 0xe24d4d50U
+#define EXT4_MMP_SEQ_MAX 0xe24d4d4fU
+#define EXT4_MMP_NODE_NAME_SIZE 64U
+#define EXT4_MMP_DEVICE_NAME_SIZE 32U
+#define EXT4_MMP_MIN_CHECK_INTERVAL 5U
+#define EXT4_MMP_MAX_CHECK_INTERVAL 300U
+#define EXT4_MMP_MAX_UPDATE_INTERVAL 300U
+#define EXT4_MMP_CHECK_MULTIPLIER 2U
+#define EXT4_MMP_WAIT_LIMIT 60U
+
+struct ext4_mmp_disk {
+	struct ext4_le32 magic;
+	struct ext4_le32 sequence;
+	struct ext4_le32 time_lo;
+	struct ext4_le32 time_hi;
+	char node_name[EXT4_MMP_NODE_NAME_SIZE];
+	char device_name[EXT4_MMP_DEVICE_NAME_SIZE];
+	struct ext4_le16 check_interval;
+	struct ext4_le16 padding;
+	struct ext4_le32 reserved[226];
+	struct ext4_le32 checksum;
+};
+
 _Static_assert(sizeof(struct ext4_super_disk) == EXT4_SUPER_SIZE, "superblock wire size");
 _Static_assert(sizeof(struct ext4_group_disk) == EXT4_GROUP_64_SIZE, "group descriptor wire size");
 _Static_assert(sizeof(struct ext4_inode_disk) == EXT4_INODE_BASE_SIZE + 32, "inode wire prefix");
@@ -408,5 +437,7 @@ _Static_assert(sizeof(struct ext4_orphan_tail_disk) == 8, "orphan tail wire size
 _Static_assert(sizeof(struct ext4_block_number_disk) == 8, "block number wire size");
 _Static_assert(sizeof(struct ext4_xattr_header_disk) == 32, "xattr block header wire size");
 _Static_assert(sizeof(struct ext4_xattr_entry_disk) == 16, "xattr entry wire size");
+_Static_assert(sizeof(struct ext4_mmp_disk) == 1024, "MMP block wire size");
+_Static_assert(offsetof(struct ext4_mmp_disk, checksum) == 0x3fc, "MMP checksum position");
 
 #endif

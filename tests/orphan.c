@@ -1367,7 +1367,8 @@ test_image(const char *path, bool pending, bool smoke, const char *exports, bool
 	memcpy(device.cache, device.base, device.size);
 	device.environment = (struct ext4_environment){ &device, device.size, device_read,
 		device_allocate, device_release };
-	device.writer = (struct ext4_write_environment){ &device, device_write, device_flush };
+	device.writer =
+	    (struct ext4_write_environment){ &device, device_write, device_flush, NULL };
 	EXPECT(ext4_load(&device.environment, true, &fs), EXT4_OK);
 	device.block_size = fs->info.block_size;
 	device.blocks = (uint32_t)(device.size / device.block_size);

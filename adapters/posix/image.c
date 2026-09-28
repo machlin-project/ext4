@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <time.h>
 #include <unistd.h>
 
 static enum ext4_result
@@ -119,6 +120,47 @@ ext4_posix_release(void *context, void *allocation, size_t size)
 }
 
 static enum ext4_result
+ext4_posix_sleep(void *context, uint32_t seconds)
+{
+	struct timespec remaining = { (time_t)seconds, 0 };
+
+	(void)context;
+	while (nanosleep(&remaining, &remaining) != 0) {
+		if (errno != EINTR) {
+			return EXT4_IO;
+		}
+	}
+	return EXT4_OK;
+}
+
+static uint32_t
+ext4_posix_random(void *context)
+{
+	uint32_t value = 0;
+	ssize_t count = -1;
+	int fd;
+
+	(void)context;
+	fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		count = read(fd, &value, sizeof(value));
+		close(fd);
+	}
+	if (count != (ssize_t)sizeof(value)) {
+		/* The core bounds a sequence value; time still varies between hosts. */
+		value = (uint32_t)time(NULL) ^ (uint32_t)getpid();
+	}
+	return value;
+}
+
+static int64_t
+ext4_posix_now(void *context)
+{
+	(void)context;
+	return (int64_t)time(NULL);
+}
+
+static enum ext4_result
 ext4_posix_open_mode(struct ext4_posix_image *image, const char *path, bool writable)
 {
 	struct stat status;
@@ -145,6 +187,19 @@ ext4_posix_open_mode(struct ext4_posix_image *image, const char *path, bool writ
 		image->writer.context = image;
 		image->writer.write = ext4_posix_write;
 		image->writer.flush = ext4_posix_flush;
+		if (gethostname(image->node_name, sizeof(image->node_name) - 1U) != 0) {
+			image->node_name[0] = 0;
+		}
+		image->mmp.context = image;
+		image->mmp.sleep = ext4_posix_sleep;
+		image->mmp.random = ext4_posix_random;
+		image->mmp.now = ext4_posix_now;
+		image->mmp.node_name = image->node_name;
+		strncpy(image->device_name,
+		    strrchr(path, '/') != NULL ? strrchr(path, '/') + 1 : path,
+		    sizeof(image->device_name) - 1U);
+		image->mmp.device_name = image->device_name;
+		image->writer.mmp = &image->mmp;
 	}
 	return EXT4_OK;
 }

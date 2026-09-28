@@ -122,7 +122,7 @@ ext4_system_ranges_build(struct ext4_fs *fs)
 	if (journal == NULL || fs->system_ranges != NULL) {
 		return EXT4_INVALID_ARGUMENT;
 	}
-	capacity = (uint64_t)fs->info.groups * 4 + journal->run_count + journal->mapping_count;
+	capacity = (uint64_t)fs->info.groups * 4 + journal->run_count + journal->mapping_count + 1U;
 	if (fs->orphan_file_inode != 0) {
 		capacity += EXT4_ORPHAN_FILE_MAX_BLOCKS * (EXT4_EXTENT_MAX_DEPTH + 1U);
 	}
@@ -172,6 +172,12 @@ ext4_system_ranges_build(struct ext4_fs *fs)
 	}
 	for (index = 0; index < journal->mapping_count; index++) {
 		error = ext4_system_add(fs, journal->mapping_blocks[index], 1);
+		if (error != EXT4_OK) {
+			return error;
+		}
+	}
+	if (fs->mmp_block != 0) {
+		error = ext4_system_add(fs, fs->mmp_block, 1);
 		if (error != EXT4_OK) {
 			return error;
 		}
