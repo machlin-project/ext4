@@ -42,7 +42,7 @@ counted as portable-core implementation.
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
 | Format compatibility | Wider geometry and format coverage; quota limit enforcement and key-based encryption await product decisions; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, pending the complete CI regressions that include them. BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
-| Journal compatibility | Fast commit format combinations, broader ownership corruption and interrupted foreign replay | Open; fast-commit conversions may now exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
+| Journal compatibility | A 64 KiB fast-commit fixture; interrupted fast-commit replay by a foreign implementation | Open; BIGALLOC, casefold and quota fast-commit profiles, ownership-corruption rejection and interrupted e2fsck replay of ordinary logs are accepted (see "Fast-commit combinations and interrupted foreign replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; larger live transactions; broader fuzz targets | Open; indexed namespace operations now validate only hash-eligible leaves, and the sustained suite plus operations fuzzing are in place (see "Sustained operation and fuzzing evidence") |
 
 MMP, fs-verity reading with protected writable metadata, encrypted volumes without
@@ -173,6 +173,30 @@ strict fsck and e2fsprogs agree with Linux; the core then reuses those entries a
 blocks, and Linux and strict fsck agree again. The complete 600-test regression
 passes. Evidence is in `artifacts/checks/quota-first/`,
 `artifacts/checks/scale-regression-8/` and the lab's `artifacts/ext4-quota/exchange/`.
+
+## Fast-commit combinations and interrupted foreign replay evidence
+
+Independent fast-commit fixtures now cover a 4 KiB BIGALLOC volume with 16 KiB
+clusters, a casefolded directory, a quota volume and 1,024 long names in a casefolded
+directory. The core replays each exactly, including exhaustive allocation and read
+failures and 168 to 204 interrupted recoveries per small profile; strict e2fsck
+accepts every replayed image, including the replay-time quota usage and the
+casefolded index. Two ownership-corruption logs per special and indirect profile, a
+range claiming an inode-table block and one claiming a block of `lost+found`, reject
+without writes; before this change the second replayed and would have cross-linked
+the block. The fast-commit suite passes all 113 cases.
+
+e2fsck, whose jbd2 recovery code is a copy of the kernel's, replayed six
+debugfs-authored logs and fifteen logs Linux left pending in the lab's cluster,
+inline and attribute runs while a preload library recorded its 1,094 writes and
+93 flushes. Under page-cache crash semantics, all 828 distinct states in which the log
+still held transactions recover under the core to exactly the contents of its own
+recovery of the untouched log, and strict fsck passes. Of 192 states after e2fsck
+had emptied the log, during its unjournaled orphan release and superblock updates,
+56 recover cleanly, the core refuses 119 and 17 remain for fsck, as mount-time
+recovery does not audit every bitmap; every complete state recovers cleanly. Evidence
+is in `artifacts/checks/interrupted-replay-first/` and
+`artifacts/checks/scale-regression-9/`.
 
 ## Fast-commit development evidence
 

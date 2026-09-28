@@ -547,6 +547,26 @@ The filesystem adapters do not enable writes or invoke offline recovery yet.
 In particular, FSKit metadata-flush completion has not been established as a
 durable device-cache barrier; it cannot satisfy the write capability by assumption.
 
+## Interrupted foreign replay
+
+`tests/check_interrupted_replay.py --fixtures DIRECTORY --image PENDING... --tools-root
+E2FSPROGS_BUILD --recover EXT4_RECOVER --output NEW` takes the manifest of
+`generate_journal_fixtures.py` and any other pending images, such as those Linux left
+in the lab's journal runs. It builds `tests/write_trace.c` as a preload library, with
+DYLD interposition on macOS and `LD_PRELOAD` on Linux, and runs `e2fsck -E
+journal_only`, which uses e2fsprogs' copy of the kernel's jbd2 recovery code. The
+library records every write and flush e2fsck issues to the image. Crash states follow
+page-cache semantics: between flushes, writes coalesce per filesystem block and may
+reach the device in any order, so each state keeps any subset of the current epoch's
+dirty blocks on top of all earlier epochs; epochs of more than ten blocks contribute
+their prefixes and single omissions. While the log still holds transactions, the
+core must recover each state to exactly the non-journal contents of its own recovery
+of the untouched image, and strict fsck must pass. After e2fsck has emptied the log
+it continues with unjournaled orphan release and superblock updates; those states
+are counted as clean, refused by the core, or left for fsck, since neither the core's
+nor Linux's mount-time recovery audits every bitmap. The state after all of e2fsck's
+writes must recover and pass strict fsck.
+
 ## Orphan recovery tests
 
 `ext4-orphan-test IMAGE...` constructs linked-truncate intents in RAM copies and

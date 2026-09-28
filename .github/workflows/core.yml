@@ -561,6 +561,9 @@ jobs:
           python3 tests/check_journal_recovery.py --fixtures artifacts/journal-fixtures \
             --recover .build/ext4-recover --e2fsck "$(command -v e2fsck)" \
             --output artifacts/journal-independent 2>&1 | tee artifacts/checks/journal-independent.log
+          python3 tests/check_interrupted_replay.py --fixtures artifacts/journal-fixtures \
+            --tools-root vendor/e2fsprogs/build --recover .build/ext4-recover \
+            --output artifacts/interrupted-replay 2>&1 | tee artifacts/checks/interrupted-replay.log
           python3 tests/generate_journal_fixtures.py --checksum-v1 \
             --source artifacts/fixtures/ext4-no-checksum.img --output artifacts/journal-v1-fixtures
           python3 tests/check_journal_recovery.py --fixtures artifacts/journal-v1-fixtures \
