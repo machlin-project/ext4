@@ -110,10 +110,32 @@ Generated evidence is under `artifacts/checks/fast-commit-replay-first/`,
 `fast-commit-core-expanded-4k/`. Inputs and executable identities are recorded in
 those reports; the protected source images remain unchanged.
 
+The reproducible CI fixture generator independently authors four 32 MiB profiles
+with e2fsprogs: 1/4 KiB blocks, an explicit checksum seed and absent metadata
+checksums. Three fast commits encode hole removal, allocation, a growing directory
+with long names, hard links and rename. The expected filesystems are authored with
+debugfs and checked without repair; they are not outputs of this core. The optional
+direct-e2fsck replay reproduces the directory-growth oracle failure described above
+and does not supply an accepted reference.
+
+All twelve focused sanitized cases pass. The two checksummed block sizes cover
+874 allocation failures, 476 read failures and 432 write/barrier interruptions;
+six deliberately torn primary superblocks require offline repair. Every resource
+failure releases allocations, and restarting from durable bytes completes replay.
+Comparisons require exact file contents, inode metadata and free-inode counts.
+Any free-block difference must be charged exactly to reconstructed directories:
+the 1 KiB indexed directory uses two more blocks than debugfs's linear directory.
+All four core-recovered images pass nonrepairing e2fsck and independent namespace
+and file-hash checks, and a second clean recovery leaves their bytes unchanged.
+Evidence is in `artifacts/checks/fast-commit-fixture-final/` and
+`artifacts/fast-commit-independent-first/`. The workflow now generates and runs
+these cases automatically; the expanded full CI regression is still pending.
+
 Open work includes modern orphan slots, indirect/special-inode records, private
 attribute reclamation during generation reuse, larger prefixes, additional format
-combinations, semantic-corruption/resource-failure coverage, interrupted foreign
-replay and automatic CI fixture integration. The previously accepted 476-test CI
+combinations, broader semantic-corruption coverage and interrupted foreign
+replay. Native-generated fixture capture remains separate from ordinary CI.
+The previously accepted 476-test CI
 run does not establish regression acceptance for this new implementation.
 
 ## External journals

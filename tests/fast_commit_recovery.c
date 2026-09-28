@@ -36,6 +36,10 @@ struct device {
 	uint32_t events;
 	uint32_t stop_at;
 	uint32_t live;
+	uint32_t allocations;
+	uint32_t reads;
+	uint32_t fail_allocation;
+	uint32_t fail_read;
 	unsigned int survival;
 	bool partial;
 	bool off;
@@ -56,8 +60,12 @@ static void *
 allocate(void *context, size_t bytes)
 {
 	struct device *device = context;
-	void *result = malloc(bytes);
+	void *result;
 
+	if (++device->allocations == device->fail_allocation) {
+		return NULL;
+	}
+	result = malloc(bytes);
 	if (result != NULL) {
 		device->live++;
 	}
@@ -81,7 +89,7 @@ read_device(void *context, uint64_t offset, void *buffer, size_t length)
 	struct device *device = context;
 
 	CHECK(offset <= device->size && length <= device->size - offset);
-	if (device->off) {
+	if (++device->reads == device->fail_read || device->off) {
 		return EXT4_IO;
 	}
 	memcpy(buffer, device->cache + offset, length);
@@ -164,6 +172,10 @@ reset(struct device *device)
 	memset(device->dirty, 0, device->blocks);
 	device->events = 0;
 	device->stop_at = 0;
+	device->allocations = 0;
+	device->reads = 0;
+	device->fail_allocation = 0;
+	device->fail_read = 0;
 	device->off = false;
 	device->partial = false;
 }
@@ -176,6 +188,10 @@ reboot_device(struct device *device)
 	memset(device->dirty, 0, device->blocks);
 	device->events = 0;
 	device->stop_at = 0;
+	device->allocations = 0;
+	device->reads = 0;
+	device->fail_allocation = 0;
+	device->fail_read = 0;
 	device->off = false;
 	device->partial = false;
 }
@@ -188,7 +204,8 @@ same_time(struct ext4_timestamp a, struct ext4_timestamp b)
 
 static void
 compare_inode(struct ext4_fs *fs, struct ext4_fs *reference, const struct ext4_inode *inode,
-    const struct ext4_inode *expected, unsigned int depth)
+    const struct ext4_inode *expected, unsigned int depth, uint64_t *directory_blocks,
+    uint64_t *expected_directory_blocks)
 {
 	struct ext4_inode child;
 	struct ext4_inode expected_child;
@@ -202,6 +219,7 @@ compare_inode(struct ext4_fs *fs, struct ext4_fs *reference, const struct ext4_i
 	size_t length;
 	uint32_t actual_entries = 0;
 	uint32_t expected_entries = 0;
+	uint32_t sectors_per_block = fs->info.block_size / EXT4_SECTOR_SIZE;
 	enum ext4_result error;
 
 	CHECK(depth <= DIRECTORY_DEPTH);
@@ -209,6 +227,10 @@ compare_inode(struct ext4_fs *fs, struct ext4_fs *reference, const struct ext4_i
 	CHECK(inode->mode == expected->mode && inode->links == expected->links);
 	CHECK(inode->uid == expected->uid && inode->gid == expected->gid);
 	if ((inode->mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY) {
+		CHECK(inode->blocks_512 % sectors_per_block == 0 &&
+		    expected->blocks_512 % sectors_per_block == 0);
+		*directory_blocks += inode->blocks_512 / sectors_per_block;
+		*expected_directory_blocks += expected->blocks_512 / sectors_per_block;
 		for (;;) {
 			error = ext4_next_dir(reference, expected, &cookie, &entry);
 			if (error == EXT4_NOT_FOUND) {
@@ -223,7 +245,8 @@ compare_inode(struct ext4_fs *fs, struct ext4_fs *reference, const struct ext4_i
 			if (entry.name[0] != '.' ||
 			    (entry.name_length != 1 &&
 				!(entry.name_length == 2 && entry.name[1] == '.'))) {
-				compare_inode(fs, reference, &child, &expected_child, depth + 1U);
+				compare_inode(fs, reference, &child, &expected_child, depth + 1U,
+				    directory_blocks, expected_directory_blocks);
 			}
 		}
 		cookie = 0;
@@ -263,14 +286,23 @@ compare(struct device *device, struct ext4_fs *reference)
 	struct ext4_inode expected_root;
 	struct ext4_recovery_report report;
 	uint32_t events = device->events;
+	uint64_t directory_blocks = 0;
+	uint64_t expected_directory_blocks = 0;
 
 	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
 	ext4_get_info(fs, &info);
 	ext4_get_info(reference, &expected);
-	CHECK(info.free_blocks == expected.free_blocks && info.free_inodes == expected.free_inodes);
+	CHECK(info.block_size == expected.block_size && info.blocks == expected.blocks &&
+	    info.free_inodes == expected.free_inodes);
 	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
 	EXPECT(ext4_get_inode(reference, EXT4_ROOT_INODE, &expected_root), EXT4_OK);
-	compare_inode(fs, reference, &root, &expected_root, 0);
+	compare_inode(
+	    fs, reference, &root, &expected_root, 0, &directory_blocks, &expected_directory_blocks);
+	/* Reconstructed directories can use a different index/tree layout. Every
+	 * difference in free blocks must be charged to those directories; regular
+	 * file allocation, metadata and bytes remain exact comparisons above. */
+	CHECK(info.free_blocks + directory_blocks ==
+	    expected.free_blocks + expected_directory_blocks);
 	ext4_unmount(fs);
 	EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_OK);
 	CHECK(device->events == events && device->live == 0);
@@ -286,6 +318,10 @@ main(int argc, char **argv)
 	struct device *device;
 	const struct ext4_super_disk *super;
 	uint32_t operations;
+	uint32_t allocations;
+	uint32_t reads;
+	uint32_t limit;
+	uint32_t fault;
 	uint32_t stop;
 	uint32_t cuts = 0;
 	uint32_t torn = 0;
@@ -293,14 +329,19 @@ main(int argc, char **argv)
 	unsigned int partial;
 	uint32_t checksum;
 	bool damaged_super;
+	bool faults;
+	bool resources;
 	enum ext4_result error;
 
 	if (argc != 3 && argc != 4) {
-		fprintf(stderr, "usage: %s PENDING_IMAGE VERIFIED_REFERENCE_IMAGE [--faults]\n",
+		fprintf(stderr,
+		    "usage: %s PENDING_IMAGE VERIFIED_REFERENCE_IMAGE [--faults|--resources]\n",
 		    argv[0]);
 		return 2;
 	}
-	CHECK(argc == 3 || strcmp(argv[3], "--faults") == 0);
+	faults = argc == 4 && strcmp(argv[3], "--faults") == 0;
+	resources = argc == 4 && strcmp(argv[3], "--resources") == 0;
+	CHECK(argc == 3 || faults || resources);
 	EXPECT(ext4_posix_open(&source, argv[1]), EXT4_OK);
 	EXPECT(ext4_posix_open(&oracle, argv[2]), EXT4_OK);
 	EXPECT(ext4_mount(&oracle.environment, &reference), EXT4_OK);
@@ -332,11 +373,33 @@ main(int argc, char **argv)
 	EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_OK);
 	CHECK(report.fast_commits != 0 && device->live == 0);
 	operations = device->events;
+	allocations = device->allocations;
+	reads = device->reads;
 	compare(device, reference);
 	printf("PASS %u fast commits match verified namespace, data and accounting; %u durability "
 	       "events\n",
 	    report.fast_commits, operations);
-	if (argc == 4) {
+	if (resources) {
+		for (fault = 0; fault < 2; fault++) {
+			limit = fault == 0 ? allocations : reads;
+			for (stop = 1; stop <= limit; stop++) {
+				reset(device);
+				device->fail_allocation = fault == 0 ? stop : 0;
+				device->fail_read = fault == 0 ? 0 : stop;
+				EXPECT(ext4_recover(&device->environment, &device->writer, &report),
+				    fault == 0 ? EXT4_NO_MEMORY : EXT4_IO);
+				CHECK(device->live == 0);
+				reboot_device(device);
+				EXPECT(ext4_recover(&device->environment, &device->writer, &report),
+				    EXT4_OK);
+				compare(device, reference);
+			}
+		}
+		printf(
+		    "PASS %u allocation and %u read failures; restart completes semantic replay\n",
+		    allocations, reads);
+	}
+	if (faults) {
 		for (survival = 0; survival < 3; survival++) {
 			for (partial = 0; partial < 2; partial++) {
 				for (stop = 1; stop <= operations; stop++) {

@@ -102,7 +102,10 @@ Fast-commit recovery is under development. The decoder validates bounded committ
 records and semantic replay converts them into one ordinary durable transaction.
 Linux-generated 1 and 4 KiB images pass basic replay comparisons and expanded
 core/Linux roundtrips with inode reuse, new directories, long names, sparse maps
-and unwritten extents. Modern orphan slots, wider format combinations and broader
+and unwritten extents. Twelve automated cases on four independently authored
+profiles cover decode/replay, resource failures and interrupted recovery; independent
+output checks pass, with the expanded CI regression pending. Modern orphan slots,
+wider format combinations and broader
 semantic-corruption acceptance remain open. See the fast-commit development
 evidence and the recorded native-reference failure in the acceptance matrix;
 these checks do not close the journal-compatibility requirement.

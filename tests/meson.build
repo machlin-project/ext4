@@ -6,10 +6,29 @@ foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'namespace_fixtures', 'xattr_fixtures', 'ea_inode_fixtures', 'inline_fixtures', 'inline_space_fixtures', 'cluster_fixtures', 'cluster_space_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
   'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures', 'geometry_fixtures',
   'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
-  'directory_index_64k_fixture', 'large_file_fixtures', 'large_volume_fixtures', 'external_journal_fixtures']
+  'directory_index_64k_fixture', 'large_file_fixtures', 'large_volume_fixtures', 'external_journal_fixtures',
+  'fast_commit_fixtures']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
 endforeach
+
+if paths['fast_commit_fixtures'] != ''
+  foreach profile : ['1k', '4k', 'checksum-seed', 'no-checksum']
+    directory = paths['fast_commit_fixtures'] / profile
+    test('fast-commit-decoder-' + profile, programs['fast-commit'],
+      args: [directory / 'pending.journal', '7', '3'], timeout: 300, suite: 'core')
+    test('fast-commit-recovery-' + profile, programs['fast-commit-recovery'],
+      args: [directory / 'pending.img', directory / 'expected.img'], timeout: 300, suite: 'core')
+    if profile in ['1k', '4k']
+      test('fast-commit-resources-' + profile, programs['fast-commit-recovery'],
+        args: [directory / 'pending.img', directory / 'expected.img', '--resources'],
+        timeout: 600, suite: 'core')
+      test('fast-commit-faults-' + profile, programs['fast-commit-recovery'],
+        args: [directory / 'pending.img', directory / 'expected.img', '--faults'],
+        timeout: 600, suite: 'core')
+    endif
+  endforeach
+endif
 
 if paths['external_journal_fixtures'] != ''
   foreach profile : ['legacy-1k', 'v1-4k', 'v2-1k', 'v3-4k', 'v3-64k']

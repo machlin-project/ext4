@@ -68,3 +68,6 @@ option('large_volume_fixtures', type: 'string', value: '',
 
 option('external_journal_fixtures', type: 'string', value: '',
   description: 'Path to independent filesystem/external-journal device pairs')
+
+option('fast_commit_fixtures', type: 'string', value: '',
+  description: 'Path to independent fast-commit journals and expected filesystems')

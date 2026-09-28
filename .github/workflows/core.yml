@@ -152,6 +152,11 @@ jobs:
         run: |
           python3 tests/generate_external_journal_fixtures.py --tools-root vendor/e2fsprogs/build \
             --output artifacts/external-journal-fixtures 2>&1 | tee artifacts/checks/external-journal-fixtures.log
+      - name: Generate independent fast-commit inputs and expected filesystems
+        if: matrix.suite == 'core'
+        run: |
+          python3 tests/generate_fast_commit_fixtures.py --tools-root vendor/e2fsprogs/build \
+            --output artifacts/fast-commit-fixtures 2>&1 | tee artifacts/checks/fast-commit-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
@@ -182,6 +187,7 @@ jobs:
               -Dlarge_file_fixtures="$PWD/artifacts/large-file-fixtures" \
               -Dlarge_volume_fixtures="$PWD/artifacts/large-volume-fixtures" \
               -Dexternal_journal_fixtures="$PWD/artifacts/external-journal-fixtures" \
+              -Dfast_commit_fixtures="$PWD/artifacts/fast-commit-fixtures" \
               -Dxattr_space_fixtures="$PWD/artifacts/xattr-space-fixtures" \
               -Dxattr_enable_fixtures="$PWD/artifacts/xattr-enable-fixtures")
           fi
@@ -200,6 +206,12 @@ jobs:
             --output artifacts/index-collisions 2>&1 | tee artifacts/checks/index-collisions.log
       - name: Run conformance and fault tests
         run: env -i PATH="$PATH" meson test -C .build --no-rebuild -j 2 --suite '${{ matrix.suite }}' --print-errorlogs
+      - name: Independently check fast-commit recovery
+        if: matrix.suite == 'core'
+        run: |
+          python3 tests/check_fast_commit.py --fixtures artifacts/fast-commit-fixtures \
+            --tools-root vendor/e2fsprogs/build --recover .build/ext4-recover \
+            --output artifacts/fast-commit-independent 2>&1 | tee artifacts/checks/fast-commit-independent.log
       - name: Independently inspect extended attribute representations
         if: matrix.suite == 'core'
         run: |
