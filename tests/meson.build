@@ -60,11 +60,27 @@ if paths['space_fixtures'] != ''
       test('preallocation-keep-size-' + profile, programs['file-range'],
         args: ['--capacity-keep', paths['space_fixtures'] / ('space-' + profile + '.img')],
         timeout: 300, suite: 'namespace')
+      test('preallocation-reservation-' + profile, programs['file-range'],
+        args: ['--reservation', paths['space_fixtures'] / ('space-' + profile + '.img')],
+        timeout: 300, suite: 'namespace')
     endif
   endforeach
 endif
 
 if paths['space_fixtures'] != ''
+  foreach profile : ['1k', '4k']
+    test('preallocation-reservation-tree-' + profile, programs['file-range'],
+      args: ['--reservation-tree', paths['space_fixtures'] / ('space-' + profile + '.img')],
+      timeout: 300, suite: 'namespace')
+  endforeach
+  foreach profile : ['1k', 'inode128']
+    test('preallocation-reservation-faults-' + profile, programs['file-range'],
+      args: ['--reservation-faults', paths['space_fixtures'] / ('space-' + profile + '.img')],
+      timeout: 600, suite: 'namespace')
+  endforeach
+  test('preallocation-reservation-controls', programs['file-range'],
+    args: ['--reservation-controls', paths['space_fixtures'] / 'space-1k.img'],
+    timeout: 300, suite: 'namespace')
   test('preallocation-full-space-large', programs['file-range'],
     args: ['--capacity', paths['space_fixtures'] / 'space-1k.img'], timeout: 300, suite: 'namespace')
   test('preallocation-full-space-faults', programs['file-range'],

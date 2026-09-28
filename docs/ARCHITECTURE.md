@@ -209,24 +209,42 @@ runs already satisfying the request. Cancelled steps can reduce their work budge
 on allocation or credit exhaustion. Attributes accompany each checkpoint, while
 the xattr batch applies only to the first successful prefix. Uncertain commits
 poison the owner. The exclusive owner and orphan holds remain in force throughout.
+Reservation retains one spare record in each leaf containing a multi-block
+unwritten extent beyond EOF. An existing contiguous initialized/unwritten pair
+can already own that capacity: zeroing and merging its suffix releases the record.
+Leaf insertion, splitting and collapse preserve this invariant. Reserving an
+already backed range checks it too and can require a mapping allocation. A
+reservation can expand a reduced imported leaf maximum to its physical capacity
+before splitting; a singleton leaf must never produce an empty child. Growing
+reservation steps use their actual committed prefix as projected EOF; a requested
+final size cannot spend capacity that a later failed step would still need.
+
 If conversion of an existing unwritten extent cannot allocate a mapping node,
 `ext4_write_partial` validates its complete ownership map and admitted attributes,
-then zeros the entire backing extent in bounded transactions. For a range inside
-current EOF, the final zeroing transaction initializes the existing record without
-new mapping space. For growth reaching the extent's last block, all preparation
-keeps the range unwritten; the subsequent transaction initializes the record and
-publishes data, new EOF and attributes together. A retry stops at this prepared
-extent so a later allocation failure cannot discard that checkpoint's conversion.
-Recovery never exposes initialized
-whole blocks beyond the committed size.
+then zeros the required prefix in bounded transactions. The prefix stops within
+committed or requested EOF; the remaining tail stays unwritten. When moving EOF
+into another extent in a full leaf, preparation can also zero the old boundary's
+suffix so its merge releases the record needed by the new boundary. Size-only
+growth may leave that reclaimable pair behind EOF, so lookup searches the target
+leaf rather than relying on the old size alone.
+
+For a single range entirely inside current EOF, the final zeroing transaction
+can initialize it. Other conversions remain deferred: the final data transaction
+publishes their mappings, bytes, new EOF and attributes together. A retry stops
+at the prepared target extent so a later allocation failure cannot discard that
+checkpoint's conversion. Recovery never exposes initialized whole blocks beyond
+the committed size. No new mapping block, relocation or persistent private
+reservation format is needed by this fallback.
 
 Interrupted preparation preserves visible zeros, EOF, attributes and allocation
 counts. Inside current EOF, recovery may retain an initialized zero extent even
 with no reported data prefix. Growth preparation may retain only hidden zeroing
 until the data/EOF transaction commits. The atomic write API retains its
-unchanged-media rejection on exhaustion. Growth ending before the extent's last
-block still needs a split and rejects without writes when no mapping space remains.
-Reserving sufficient metadata for that future-growth contract remains open.
+unchanged-media rejection on exhaustion. An imported full leaf without spare
+capacity or a reclaimable pair can still require a mapping block; reservation
+must obtain that capacity before promising it. Short growth of such a tree can
+reject without writes when space is exhausted. The fallback can zero a large
+prefix under pressure; its sustained cost remains part of scale acceptance.
 
 `ext4_truncate_atomic` performs the size, tail-zeroing, data/mapping removal, bitmap,
 group/superblock accounting and admitted attribute transition in one journal

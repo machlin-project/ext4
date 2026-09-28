@@ -416,7 +416,7 @@ nonzero inaccessible backing. KEEP_SIZE variants `--capacity-keep`,
 `--capacity-keep-large` and `--capacity-keep-tree` test growth reaching the extent's
 last block; add `--keep-size` to the independent checker with the corresponding
 geometry options above. They also retain unchanged-media rejection when growth
-ends earlier and still needs a split. `--capacity-keep-faults` covers interrupted
+ends earlier in an imported full tree and still needs a split. `--capacity-keep-faults` covers interrupted
 preparation/data/EOF transitions; its `--export DIRECTORY` mode emits before/after
 and two journal cuts. Check those using `--keep-size --faults --recover
 .build/ext4-recover`, then use its checked after records with the Linux harness's
@@ -425,6 +425,24 @@ hole that cannot be allocated. No new capacity fixtures need to be generated.
 Linux capacity checks change a byte while free blocks
 remain zero and require that exact change after independent and core journal replay;
 a same-byte write cannot establish that the write survived.
+
+`ext4-file-range-test --reservation` exercises public KEEP_SIZE reservations and
+repeated partial EOF growth across three separated extents on a full filesystem.
+`--reservation-tree` fills an external leaf while retaining the required mapping
+capacity; `--reservation-controls` covers size-only growth, re-reservation, hole
+punching, final release and a failed growing reservation's retained capacity.
+`--reservation-faults` covers resource failures and every storage cut while moving
+the initialized/unwritten boundary between extents. The first, tree and fault
+modes accept `--export DIRECTORY`; fault export mode avoids rerunning its matrix.
+
+Check these exports with `tests/check_reservation.py --fixtures SPACE_FIXTURES
+--exports EXPORTS --output NEW_DIRECTORY`, adding `--tree` or
+`--faults --recover .build/ext4-recover` as appropriate. `--tools-root` selects
+e2fsprogs. Each image's extent map is decoded in one independent debugfs command,
+with exact data, map flags and physical locations compared across states. The
+checked written/after records feed `run_linux_journal.py --namespace`, including
+`--pending` for fault exports, and the returned images use `--linux-read` above.
+CI runs all twelve registered reservation tests and thirty independent states.
 
 Persistent flag tests reuse the xattr fixtures: `ext4-inode-flags-test IMAGE...`
 runs operations/protection/inheritance, `--faults` injects set/clear failures, and

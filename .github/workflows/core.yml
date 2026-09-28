@@ -636,6 +636,39 @@ jobs:
               2>&1 | tee "artifacts/checks/preallocation-growth-$mode-independent.log"
             find "$exports" "$checked" -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           done
+      - name: Independently verify reserved mapping capacity on full filesystems
+        if: matrix.suite == 'namespace'
+        run: |
+          for mode in root tree fault; do
+            exports="artifacts/reservation-$mode-exports"
+            checked="artifacts/reservation-$mode-independent"
+            mkdir "$exports"
+            options=()
+            case "$mode" in
+              root)
+                flag=--reservation
+                profiles=(1k 4k no-checksum no-filetype inode128 checksum-seed orphan-file)
+                ;;
+              tree)
+                flag=--reservation-tree
+                profiles=(1k 4k)
+                options=(--tree)
+                ;;
+              fault)
+                flag=--reservation-faults
+                profiles=(1k inode128)
+                options=(--faults --recover .build/ext4-recover)
+                ;;
+            esac
+            for profile in "${profiles[@]}"; do
+              .build/ext4-file-range-test "$flag" --export "$exports" \
+                "artifacts/space-fixtures/space-$profile.img"
+            done 2>&1 | tee "artifacts/checks/reservation-$mode-exports.log"
+            python3 tests/check_reservation.py "${options[@]}" \
+              --fixtures artifacts/space-fixtures --exports "$exports" --output "$checked" \
+              2>&1 | tee "artifacts/checks/reservation-$mode-independent.log"
+            find "$exports" "$checked" -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          done
       - name: Independently verify unlink and rmdir transactions
         if: matrix.suite == 'removal'
         run: |

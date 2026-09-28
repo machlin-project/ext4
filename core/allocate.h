@@ -24,6 +24,8 @@ struct ext4_allocation {
 	uint64_t free_blocks;
 	uint64_t reserved_blocks;
 	uint64_t maximum_block;
+	/* Size published by this transaction, when it extends the inode. */
+	uint64_t mapping_size;
 	uint32_t group_index;
 	uint32_t next_bit;
 	uint32_t allocated;
@@ -64,14 +66,19 @@ struct ext4_unwritten_extent {
 };
 
 /* A missing unwritten extent returns length zero. Initialization requires that
- * every backing byte has been durably zeroed under the same exclusive owner;
- * it changes one existing record without allocating or splitting the tree. */
+ * the selected prefix has been durably zeroed under the same exclusive owner.
+ * It uses existing leaf capacity and never allocates a mapping block. */
 enum ext4_result ext4_write_map_unwritten(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t logical,
     struct ext4_unwritten_extent *range);
 enum ext4_result ext4_write_map_initialize(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, struct ext4_inode_disk *disk,
-    const struct ext4_unwritten_extent *range);
+    const struct ext4_unwritten_extent *range, uint32_t length);
+/* Find a zeroable suffix in the target leaf whose initialization merges with
+ * its predecessor and releases an existing record. */
+enum ext4_result ext4_write_map_mergeable(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t logical, uint64_t end,
+    struct ext4_unwritten_extent *range);
 
 /* These mapping operations read the private transaction view. Lookup returns
  * runs so sparse gaps can be skipped without visiting each logical block. */
@@ -84,6 +91,9 @@ enum ext4_result ext4_write_map_allocate(struct ext4_allocation *allocation,
 /* Reserve an extent-mapped hole without changing existing data. New allocations
  * remain unwritten; indirect records cannot encode this reservation. */
 enum ext4_result ext4_write_map_reserve(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t logical);
+/* Retain room for a later EOF boundary inside an existing reservation. */
+enum ext4_result ext4_write_map_reserve_capacity(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t logical);
 /* Remove an allocated run within one extent or one indirect data block. The
  * complete map must have passed ownership validation before the first removal. */

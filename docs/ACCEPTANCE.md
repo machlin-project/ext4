@@ -40,8 +40,8 @@ counted as portable-core implementation.
 
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
-| Ordinary filesystem operations | Metadata-space guarantee for future KEEP_SIZE growth under allocator exhaustion | Open; persistent inode flags pass full regression, focused, independent and Linux checks; bounded preallocation/hole punching, special files, atomic whiteout, automatic index creation and DIR_NLINK pass focused, independent and Linux acceptance; full-disk writes within existing EOF also pass Linux roundtrips |
-| Format compatibility | Full META_BG/SPARSE_SUPER2 regression; EA_INODE and INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; distributed geometry passes focused faults, independent checks and eight Linux roundtrips |
+| Ordinary filesystem operations | Full regression for reserved mapping capacity and partial KEEP_SIZE growth under allocator exhaustion | Pending full regression; root/external-leaf reservations, repeated partial growth and EOF-boundary transfers pass focused faults, 30 independent states and six Linux roundtrips; earlier ordinary operations retain their accepted evidence below |
+| Format compatibility | EA_INODE and INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; distributed geometry passes focused faults, independent checks, eight Linux roundtrips and the full regression |
 | Journal compatibility | Combined checksum-v1/async regression; fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; v1 and async compatibility pass focused faults, independent replay and eight Linux roundtrips |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
@@ -193,7 +193,10 @@ and all eight portable reads pass, with no guest warnings. Evidence is in
 The later invalid META_BG/RESIZE_INODE admission guard passes four final focused
 checks in `artifacts/checks/geometry-final-evidence/`; it does not change the valid
 images accepted using the frozen Linux-test binaries. The expanded 394-test full
-regression remains pending.
+regression passes all six jobs, with exact inventory and no skipped/failed cases.
+Its 27 independently checked transitions also pass. Main-reviewed evidence is in
+`artifacts/checks/geometry-ci-36365266842/summary.json`; see the
+[accepted CI run](https://github.com/machlin-project/ext4/actions/runs/36365266842).
 
 ## Preallocation and hole punching
 
@@ -227,7 +230,7 @@ replays return zero, and the portable reader verifies all five returned images.
 Reports are in `artifacts/checks/file-range-linux-summary.json` and the lab's
 `artifacts/ext4-journal/linux-reference/file-range-{pending,functional}-linux/`.
 The combined 361-test CI regression passes. This accepts bounded range behavior;
-the future-write space guarantee under exhaustion remains open above.
+the reserved mapping-capacity extension is documented below.
 
 ## Preallocated writes without free mapping space
 
@@ -272,8 +275,9 @@ diagnostics. The initial evidence remains in
 A write reaching the last block of a reserved extent can zero its backing in
 bounded transactions, retain the unwritten mapping through preparation, then
 commit initialization, bytes, EOF and attributes together. It requires no new
-block or relocation. Growth ending earlier in the extent still requires splitting
-space and rejects unchanged when exhausted; that metadata guarantee remains open.
+block or relocation. Imported full leaves without spare capacity still require
+splitting space for shorter growth and reject unchanged when exhausted. New
+reservations retain that capacity as described below.
 
 Eleven focused cases pass: seven full-root profiles, a large extent, a full external
 leaf, interrupted growth and a durable prefix preceding an unallocated hole.
@@ -302,6 +306,47 @@ coverage and no skipped tests. All 22 growth records and their 4,862 commands pa
 The previously documented ten reader-only shared-value e2fsck exit-4 cases and ten
 fixture repair exit-1 statuses remain separate from writable acceptance. Evidence
 is in `artifacts/checks/preallocation-growth-ci-36363055799/summary.json`.
+
+## Reserved mapping capacity and partial EOF growth
+
+KEEP_SIZE reservation now retains room for one initialized/unwritten boundary in
+each affected leaf, obtaining mapping blocks before promising the backing. The
+same check applies to already allocated ranges. A contiguous old boundary can
+release its record when preparation zeros and merges its suffix. Growth can then
+publish a new partial prefix in another extent with no free blocks. Insertion,
+hole punching and tree collapse preserve this capacity; no private disk format
+or hidden allocation pool is introduced.
+
+Sixteen focused checks pass across seven root profiles and two external-leaf
+geometries, including earlier full-tree and durable-prefix controls. Preparation
+handles nonzero inaccessible backing and transfers EOF between separate reserved
+extents. Two fault profiles cover 214 allocation failures, 174 read failures and
+1,440 write/barrier cuts: 1,436 recover exact allowed old/new states, while four
+torn primary superblocks reject explicitly. The final checkpoint review also
+corrected growing fallocate to use each checkpoint's actual EOF rather than the
+requested final size. Its regression preserves an earlier reservation after
+failed growth and another file's consumption of the last free block. That case
+and twelve affected range controls pass. Sanitized/freestanding builds pass.
+
+Thirty independently checked states pass: fourteen root, four external-leaf and
+twelve clean/replayed fault states. Exact data, initialized/unwritten boundaries,
+unchanged physical mappings, inode attributes, neighboring objects and zero free
+blocks agree. All 594 oracle commands succeed, including thirty nonrepairing
+e2fsck checks, four journal-only replays and eight core recoveries. Six actual
+Linux roundtrips pass, including two pending boundary-transfer transactions.
+Linux reads the exact data and changes a distinct byte while the disk is full,
+then commits new range operations. Core/oracle replay, eighteen fsck invocations
+and six portable reads pass without guest warnings.
+
+Evidence is in `artifacts/checks/reservation-{development,independent,linux}-summary.json`
+and `artifacts/checks/reservation-{checkpoint,final}-summary.json`. Independent/Linux
+acceptance used frozen binaries before the final non-KEEP_SIZE checkpoint fix;
+that fix has separate focused evidence. Final review also covers imported leaves
+whose advertised capacity is below their physical room, expanding that bound
+before a reservation-driven split. Root/external controls verify reuse of that
+room without new allocation. The full 412-test regression remains pending.
+Imported full leaves without a spare or reclaimable boundary can still
+require new metadata, and the fallback's sustained zeroing cost is unaccepted.
 
 ## Legacy group checksum evidence
 

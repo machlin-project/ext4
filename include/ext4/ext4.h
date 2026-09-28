@@ -320,12 +320,14 @@ enum ext4_result ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t genera
  * replay that already applied xattr batch. Whole-request overflow rejects before
  * writes. Zero length follows ext4_write. Written preallocation in an EOF gap
  * can be zeroed in preparatory transactions without changing size or attributes.
- * If unwritten conversion needs unavailable mapping space, the complete existing
- * extent can first be zeroed without allocation. Inside current EOF it can also
- * be initialized during preparation. Growth reaching its last block keeps the
- * extent unwritten until initialization, data, EOF and attributes commit together.
- * Growth ending earlier still needs splitting space. Visible bytes, size and
- * attributes remain unchanged until the data transaction commits.
+ * If unwritten conversion needs unavailable mapping space, a required existing
+ * prefix can first be zeroed without allocation. Inside current EOF it can also
+ * be initialized during preparation. Growth keeps its prepared prefix unwritten
+ * until initialization, data, EOF and attributes commit together. Reservation
+ * retains leaf capacity for a partial prefix; an older full tree may still need
+ * mapping allocation. Moving EOF can also prepare the old boundary's suffix to
+ * recover that capacity. Visible bytes, size and attributes remain unchanged
+ * until the data transaction commits.
  * An error may retain either preparation even when completed is zero. */
 enum ext4_result ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint64_t offset, const void *buffer, size_t length, const struct ext4_inode_update *update,
@@ -356,7 +358,10 @@ enum ext4_result ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t gen
 enum ext4_fallocate_flags { EXT4_FALLOC_KEEP_SIZE = 1U << 0, EXT4_FALLOC_PUNCH_HOLE = 1U << 1 };
 
 /* Reserve a nonempty byte range, preserving existing data and allocating holes.
- * Reservation requires extent mapping and leaves new extents unwritten. Without KEEP_SIZE,
+ * Reservation requires extent mapping and leaves new extents unwritten. It also
+ * retains leaf capacity for later partial EOF growth through write_partial;
+ * checking an already backed range can therefore need a mapping allocation.
+ * Without KEEP_SIZE,
  * each committed prefix can grow EOF. PUNCH_HOLE requires KEEP_SIZE: whole blocks
  * are freed, partial written blocks are zeroed, and size remains unchanged.
  * Punching supports extent and indirect mappings.

@@ -17,7 +17,7 @@ rename exchange and whiteout, HTree mutation, automatic indexing, LARGEDIR and
 DIR_NLINK. Raw inode-body and external xattrs follow metadata, data and namespace
 transactions. Internal journal recovery handles legacy and modern orphan records.
 
-The combined 383-test CI regression passes all six jobs, alongside independent
+The combined 394-test CI regression passes all six jobs, alongside independent
 image checks and Linux mutation/recovery roundtrips. Tests cover malformed media,
 allocation/read failures and interrupted writes under ASan/UBSan; freestanding
 compilation enforces a 2 KiB stack-frame budget. Read profiles span 1–64 KiB blocks,
@@ -30,13 +30,17 @@ Preallocation and hole punching pass independent and Linux acceptance. Full-disk
 writes within existing EOF also pass. KEEP_SIZE growth reaching a reserved extent's
 last block passes focused faults, independent checks, six Linux roundtrips and
 the full regression. META_BG and SPARSE_SUPER2 pass focused
-fault tests, independent mutation/recovery checks and eight Linux roundtrips;
-their expanded full regression is running. JBD2 checksum v1 and async commit
+fault tests, independent mutation/recovery checks, eight Linux roundtrips and
+their expanded full regression. JBD2 checksum v1 and async commit
 compatibility pass focused faults, independent replay in both directions and
 eight Linux roundtrips. Their combined full regression is pending; the writer
 retains its existing durability barriers on async-format journals.
-Growth ending earlier in a full extent still needs mapping space. Wider format and
-journal compatibility, sustained scale and performance remain open core work.
+Reservation now retains mapping capacity for partial KEEP_SIZE growth, including
+moving EOF between extents at zero free blocks. Focused faults, 30 independent
+image states and six Linux roundtrips pass; its expanded regression is pending.
+Imported full trees without spare capacity can still reject a reservation or
+short growth safely. Wider format and journal compatibility, sustained scale and
+performance remain open core work.
 
 Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.
 Both native adapters remain read-only. The FSKit adapter builds for macOS 26.4,

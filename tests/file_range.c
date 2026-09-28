@@ -558,6 +558,8 @@ capacity(struct device *device, bool full, bool external, bool seed_only, bool k
 	uint8_t *expected = calloc(length, 1);
 	uint8_t *before = malloc(device->size);
 	uint64_t completed;
+	uint64_t inode_offset;
+	struct ext4_inode_disk *disk;
 	size_t written;
 	size_t offset;
 	uint32_t index;
@@ -596,10 +598,20 @@ capacity(struct device *device, bool full, bool external, bool seed_only, bool k
 	for (index = 0; index < runs; index++) {
 		EXPECT(ext4_fallocate(fs, inode.number, inode.generation,
 			   (uint64_t)index * (blocks + 1U) * device->block_size,
-			   (uint64_t)blocks * device->block_size,
-			   keep_size ? EXT4_FALLOC_KEEP_SIZE : 0, &update, &completed),
+			   (uint64_t)blocks * device->block_size, 0, &update, &completed),
 		    EXT4_OK);
 		CHECK(completed == (uint64_t)blocks * device->block_size);
+	}
+	if (keep_size) {
+		/* Model an imported full leaf without the core's spare-slot policy.
+		 * Unwritten allocations past a zero EOF are a valid ext4 layout. */
+		EXPECT(ext4_sync(fs), EXT4_OK);
+		EXPECT(ext4_inode_location(fs, inode.number, &inode_offset), EXT4_OK);
+		disk = (struct ext4_inode_disk *)(device->cache + inode_offset);
+		ext4_encode32(&disk->size_lo, 0);
+		ext4_encode32(&disk->size_hi, 0);
+		ext4_inode_checksum_set(fs, inode.number, disk);
+		memcpy(device->stable, device->cache, device->size);
 	}
 	contents(fs, &inode, expected, keep_size ? 0 : length);
 	header = (struct ext4_extent_header_disk *)inode.block_data;
@@ -1027,6 +1039,9 @@ capacity_faults(struct device *device, bool keep_size, const char *exports, cons
 	    cuts - recovered);
 }
 
+#include "range_reservation.h"
+#include "reservation_faults.h"
+
 int
 main(int argc, char **argv)
 {
@@ -1040,10 +1055,23 @@ main(int argc, char **argv)
 	bool capacity_tree = false;
 	bool capacity_keep = false;
 	bool capacity_prefix = false;
+	bool reservation = false;
+	bool reservation_tree = false;
+	bool reservation_fault_mode = false;
+	bool reservation_controls = false;
 	int index = 1;
 
 	while (index < argc && argv[index][0] == '-') {
-		if (strcmp(argv[index], "--faults") == 0) {
+		if (strcmp(argv[index], "--reservation") == 0 ||
+		    strcmp(argv[index], "--reservation-tree") == 0 ||
+		    strcmp(argv[index], "--reservation-faults") == 0 ||
+		    strcmp(argv[index], "--reservation-controls") == 0) {
+			reservation = true;
+			reservation_tree = strcmp(argv[index], "--reservation-tree") == 0;
+			reservation_fault_mode = strcmp(argv[index], "--reservation-faults") == 0;
+			reservation_controls = strcmp(argv[index], "--reservation-controls") == 0;
+			index++;
+		} else if (strcmp(argv[index], "--faults") == 0) {
 			fault_mode = true;
 			index++;
 		} else if (strcmp(argv[index], "--linux-read") == 0) {
@@ -1084,6 +1112,24 @@ main(int argc, char **argv)
 	    (!capacity_mode && !fault_mode && !read_mode && (capacity_keep || exports == NULL)));
 	for (; index < argc; index++) {
 		storage_open(&device, argv[index]);
+		if (reservation) {
+			if (reservation_controls) {
+				CHECK(exports == NULL);
+				reservation_contract(&device);
+				device_reset(&device, device.base);
+				reservation_partial_growth(&device);
+				device_reset(&device, device.base);
+				reservation_reduced_capacity(&device, false);
+				device_reset(&device, device.base);
+				reservation_reduced_capacity(&device, true);
+			} else if (reservation_fault_mode) {
+				reservation_faults(&device, exports, argv[index]);
+			} else {
+				reservation_writes(&device, reservation_tree, exports, argv[index]);
+			}
+			storage_close(&device);
+			continue;
+		}
 		if (capacity_prefix) {
 			CHECK(exports == NULL);
 			capacity_keep_prefix(&device, argv[index]);

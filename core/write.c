@@ -278,7 +278,11 @@ struct ext4_write_target {
  * No position or validation result survives the public call. */
 struct ext4_growth {
 	uint64_t zeroed;
-	struct ext4_unwritten_extent deferred;
+	/* The old EOF's unwritten suffix can release the slot needed by the
+	 * new EOF's prefix. Both conversions publish in the data transaction. */
+	struct ext4_unwritten_extent deferred[2];
+	uint32_t initialized[2];
+	uint32_t deferred_count;
 	uint32_t allocation_logical;
 	bool capacity_failed;
 	bool zeroing;
@@ -619,8 +623,8 @@ ext4_write_validate(struct ext4_fs *fs, uint64_t offset, const void *buffer, siz
 
 static enum ext4_result
 ext4_unwritten_zero(struct ext4_fs *fs, uint32_t number, uint32_t generation,
-    const struct ext4_unwritten_extent *range, uint32_t position, uint32_t budget, bool initialize,
-    uint32_t *next, bool *capacity_failed)
+    const struct ext4_unwritten_extent *range, uint32_t length, uint32_t position, uint32_t budget,
+    bool initialize, uint32_t *next, bool *capacity_failed)
 {
 	struct ext4_transaction *transaction;
 	struct ext4_inode_disk *disk;
@@ -628,7 +632,7 @@ ext4_unwritten_zero(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	struct ext4_allocation allocation;
 	struct ext4_unwritten_extent observed;
 	void *buffer;
-	uint32_t end = range->length - position < budget ? range->length : position + budget;
+	uint32_t end = length - position < budget ? length : position + budget;
 	uint32_t index;
 	bool allocation_ready = false;
 	enum ext4_result error;
@@ -659,8 +663,8 @@ ext4_unwritten_zero(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 			ext4_zero(buffer, fs->info.block_size);
 		}
 	}
-	if (error == EXT4_OK && initialize && end == range->length) {
-		error = ext4_write_map_initialize(&allocation, &inode, disk, range);
+	if (error == EXT4_OK && initialize && end == length) {
+		error = ext4_write_map_initialize(&allocation, &inode, disk, range, length);
 		if (error == EXT4_OK) {
 			ext4_inode_checksum_set(fs, number, disk);
 		}
@@ -684,23 +688,28 @@ ext4_unwritten_zero(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 
 static enum ext4_result
 ext4_unwritten_prepare(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint32_t logical,
-    uint64_t end, const struct ext4_inode_update *update, struct ext4_unwritten_extent *deferred,
+    uint64_t end, const struct ext4_inode_update *update, struct ext4_growth *growth,
     bool *prepared)
 {
 	struct ext4_transaction *transaction;
 	struct ext4_inode_disk *disk;
 	struct ext4_inode inode;
 	struct ext4_allocation allocation;
-	struct ext4_unwritten_extent range;
+	struct ext4_unwritten_extent ranges[2];
 	uint64_t last;
-	uint32_t position = 0;
+	uint64_t blocks;
+	uint32_t lengths[2] = { 0 };
+	uint32_t count = 0;
+	uint32_t index;
+	uint32_t position;
 	uint32_t budget = EXT4_ORPHAN_BATCH_BLOCKS;
 	bool allocation_ready = false;
 	bool capacity_failed;
-	bool initialize;
+	bool initialize = false;
 	enum ext4_result error;
 
 	*prepared = false;
+	growth->deferred_count = 0;
 	error =
 	    ext4_transaction_begin(fs->journal, ext4_journal_credits(fs->journal), &transaction);
 	if (error != EXT4_OK) {
@@ -712,21 +721,52 @@ ext4_unwritten_prepare(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 		allocation_ready = error == EXT4_OK;
 	}
 	if (error == EXT4_OK) {
-		error = ext4_write_map_unwritten(&allocation, &inode, disk, logical, &range);
+		error = ext4_write_map_unwritten(&allocation, &inode, disk, logical, &ranges[0]);
+	}
+	if (error == EXT4_OK && ranges[0].length != 0) {
+		count = 1;
+		blocks = ((end > inode.size ? end : inode.size) + fs->info.block_size - 1U) /
+			fs->info.block_size -
+		    ranges[0].logical;
+		lengths[0] = blocks < ranges[0].length ? (uint32_t)blocks : ranges[0].length;
+		last = (uint64_t)ranges[0].logical + lengths[0] - 1U;
+		initialize = last * fs->info.block_size < inode.size;
+		/* Check existing leaf room before even hidden zeroing. A full imported
+		 * tree without a spare record may still need a new mapping block. */
+		error =
+		    ext4_write_map_initialize(&allocation, &inode, disk, &ranges[0], lengths[0]);
+		if (error == EXT4_NO_SPACE) {
+			/* Advancing EOF into another extent must first merge away the old
+			 * initialized/unwritten boundary, which may own the spare slot. */
+			ranges[1] = ranges[0];
+			lengths[1] = lengths[0];
+			error = ext4_write_map_mergeable(&allocation, &inode, disk, logical,
+			    end > inode.size ? end : inode.size, &ranges[0]);
+			if (error == EXT4_OK && ranges[0].length == 0) {
+				error = EXT4_NO_SPACE;
+			}
+			if (error == EXT4_OK) {
+				lengths[0] = ranges[0].length;
+				error = ext4_write_map_initialize(
+				    &allocation, &inode, disk, &ranges[0], lengths[0]);
+			}
+			if (error == EXT4_OK) {
+				error = ext4_write_map_initialize(
+				    &allocation, &inode, disk, &ranges[1], lengths[1]);
+			}
+			count = 2;
+			initialize = false;
+		}
 	}
 	if (allocation_ready) {
 		ext4_allocation_destroy(&allocation);
 	}
 	ext4_transaction_cancel(transaction);
-	if (error != EXT4_OK || range.length == 0) {
-		return error;
-	}
-	last = (uint64_t)range.logical + range.length - 1U;
-	initialize = last * fs->info.block_size < inode.size;
-	/* Growth may initialize the whole extent only when this data transaction
-	 * reaches its last block. A shorter request would still need a split. */
-	if (!initialize && last * fs->info.block_size >= end) {
+	if (error == EXT4_NO_SPACE) {
 		return EXT4_OK;
+	}
+	if (error != EXT4_OK || count == 0) {
+		return error;
 	}
 	/* Validate all physical ownership and the admitted attribute transition
 	 * before writing even inaccessible backing bytes. No other owner can change
@@ -735,19 +775,27 @@ ext4_unwritten_prepare(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	if (error != EXT4_OK) {
 		return error;
 	}
-	while (position < range.length) {
-		error = ext4_unwritten_zero(fs, number, generation, &range, position, budget,
-		    initialize, &position, &capacity_failed);
-		if (error == EXT4_RANGE && capacity_failed && !fs->aborted && budget > 1) {
-			budget /= 2;
-			continue;
-		}
-		if (error != EXT4_OK) {
-			return error;
+	for (index = 0; index < count; index++) {
+		position = 0;
+		while (position < lengths[index]) {
+			error = ext4_unwritten_zero(fs, number, generation, &ranges[index],
+			    lengths[index], position, budget, initialize, &position,
+			    &capacity_failed);
+			if (error == EXT4_RANGE && capacity_failed && !fs->aborted && budget > 1) {
+				budget /= 2;
+				continue;
+			}
+			if (error != EXT4_OK) {
+				return error;
+			}
 		}
 	}
 	if (!initialize) {
-		*deferred = range;
+		growth->deferred_count = count;
+		for (index = 0; index < count; index++) {
+			growth->deferred[index] = ranges[index];
+			growth->initialized[index] = lengths[index];
+		}
 	}
 	*prepared = true;
 	return EXT4_OK;
@@ -767,6 +815,7 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 	void *snapshot;
 	uint64_t logical;
 	uint64_t block_count;
+	uint64_t initialized;
 	uint64_t physical;
 	uint64_t free_blocks;
 	uint32_t feature_compat;
@@ -849,6 +898,7 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 		goto cancel;
 	}
 	allocation_ready = true;
+	allocation.mapping_size = offset + length;
 	if ((update->fields & EXT4_ATTR_XATTRS) || ext4_inode_has_xattrs(fs, disk)) {
 		error = ext4_write_map_validate(&allocation, &inode, disk);
 		if (error != EXT4_OK) {
@@ -869,14 +919,22 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 			goto cancel;
 		}
 	}
-	if (growth != NULL && growth->deferred.length != 0 &&
-	    ((uint64_t)growth->deferred.logical + growth->deferred.length - 1U) *
-		    fs->info.block_size <
-		(offset + length > inode.size ? offset + length : inode.size)) {
+	for (index = 0; growth != NULL && index < growth->deferred_count; index++) {
 		/* Zeroing was durable while the map still returned zeros. Initialize the
-		 * unchanged extent privately, after gap handling and before copying data;
+		 * prepared prefix privately, after gap handling and before copying data;
 		 * its new EOF and admitted attributes must commit in this transaction. */
-		error = ext4_write_map_initialize(&allocation, &inode, disk, &growth->deferred);
+		initialized = ((offset + length > inode.size ? offset + length : inode.size) +
+				  fs->info.block_size - 1U) /
+		    fs->info.block_size;
+		if (initialized <= growth->deferred[index].logical) {
+			break;
+		}
+		initialized -= growth->deferred[index].logical;
+		if (initialized > growth->initialized[index]) {
+			initialized = growth->initialized[index];
+		}
+		error = ext4_write_map_initialize(
+		    &allocation, &inode, disk, &growth->deferred[index], (uint32_t)initialized);
 		if (error != EXT4_OK) {
 			goto cancel;
 		}
@@ -965,6 +1023,8 @@ ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation, uin
 {
 	struct ext4_inode_update remaining;
 	struct ext4_growth growth = { 0 };
+	const struct ext4_unwritten_extent *last;
+	uint64_t available;
 	uint32_t credits;
 	uint32_t blocks;
 	size_t limit;
@@ -1004,7 +1064,7 @@ ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation, uin
 		    (const uint8_t *)buffer + *completed, chunk, &remaining, &written, &growth);
 		if (error == EXT4_OK) {
 			*completed += written;
-			growth.deferred.length = 0;
+			growth.deferred_count = 0;
 			/* The first durable data prefix owns the admitted attribute change.
 			 * Later transactions preserve that result, including non-idempotent
 			 * CREATE/REMOVE operations and security attribute removal. */
@@ -1027,17 +1087,22 @@ ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation, uin
 		if (error == EXT4_NO_SPACE && growth.mapping_no_space) {
 			error = ext4_unwritten_prepare(fs, number, generation,
 			    growth.allocation_logical, offset + *completed + chunk, &remaining,
-			    &growth.deferred, &prepared);
+			    &growth, &prepared);
 			if (error != EXT4_OK) {
 				return error;
 			}
 			if (prepared) {
-				if (growth.deferred.length != 0) {
+				if (growth.deferred_count != 0) {
 					/* Stop at the prepared extent so a later allocation
 					 * shortage cannot discard this checkpoint's conversion. */
-					blocks = growth.deferred.logical + growth.deferred.length -
-					    (uint32_t)((offset + *completed) / fs->info.block_size);
-					limit = (size_t)blocks * fs->info.block_size;
+					last = &growth.deferred[growth.deferred_count - 1U];
+					available =
+					    ((uint64_t)last->logical + last->length -
+						(offset + *completed) / fs->info.block_size) *
+					    fs->info.block_size;
+					if (available < limit) {
+						limit = (size_t)available;
+					}
 				}
 				continue;
 			}
@@ -1374,6 +1439,17 @@ ext4_file_range_step(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 		}
 		if ((punch && run.physical == 0) || (!punch && run.physical != 0)) {
 			run_end = ((uint64_t)logical + run.length) * fs->info.block_size;
+			if (!(flags & EXT4_FALLOC_KEEP_SIZE)) {
+				allocation.mapping_size = run_end < end ? run_end : end;
+			}
+			if (!punch && (inode.flags & EXT4_INODE_EXTENTS)) {
+				error = ext4_write_map_reserve_capacity(
+				    &allocation, &inode, disk, logical);
+				if (error != EXT4_OK) {
+					goto cancel;
+				}
+				work++;
+			}
 			position = run_end < end ? run_end : end;
 			continue;
 		}
@@ -1398,6 +1474,11 @@ ext4_file_range_step(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 				work++;
 			}
 		} else {
+			/* Only this checkpoint's durable prefix may release reserved
+			 * mapping capacity; later work can still run out of space. */
+			if (!(flags & EXT4_FALLOC_KEEP_SIZE)) {
+				allocation.mapping_size = position + amount;
+			}
 			error = ext4_write_map_reserve(&allocation, &inode, disk, logical);
 			work++;
 		}
