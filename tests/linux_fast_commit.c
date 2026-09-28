@@ -35,8 +35,7 @@
 #define PHASE_PROTOCOL_READBACK 2U
 #define PHASE_INDIRECT_READBACK 3U
 #define PHASE_LARGE_PREFIX_READBACK 4U
-#define LARGE_PREFIX_FILES_1K 256U
-#define LARGE_PREFIX_FILES_4K 1024U
+#define LARGE_PREFIX_FILES_LIMIT 4096U
 #define PROTOCOL_SOURCE_BLOCKS 5U
 #define DIRECT_BLOCKS 12U
 #define INDIRECT_POINTER_BYTES 4U
@@ -524,14 +523,13 @@ verify_indirect(unsigned int block_size)
 }
 
 static void
-verify_large_prefix(unsigned int block_size)
+verify_large_prefix(unsigned int block_size, unsigned int files)
 {
 	struct stat metadata;
 	struct stat alias;
 	uint8_t bytes[4096];
 	uint8_t expected;
 	char path[512];
-	unsigned int files = block_size == 1024 ? LARGE_PREFIX_FILES_1K : LARGE_PREFIX_FILES_4K;
 	unsigned int index;
 	unsigned int logical;
 	size_t position;
@@ -645,6 +643,7 @@ main(void)
 	unsigned int phase = 0;
 	unsigned int modern_orphans = 0;
 	unsigned int special_files = 0;
+	unsigned int prefix_files = 0;
 	unsigned int index;
 	int fd;
 	int result;
@@ -676,6 +675,12 @@ main(void)
 	require(config != NULL && fscanf(config, "%u", &special_files) == 1,
 	    "read special-file fixture mode");
 	require(fclose(config) == 0 && special_files <= 1, "validate special-file fixture mode");
+	config = fopen("/prefix-files", "r");
+	require(config != NULL && fscanf(config, "%u", &prefix_files) == 1,
+	    "read large-prefix file count");
+	require(fclose(config) == 0 && prefix_files <= LARGE_PREFIX_FILES_LIMIT &&
+		(prefix_files != 0) == (phase == PHASE_LARGE_PREFIX_READBACK),
+	    "validate large-prefix file count");
 	printf("LINUX_FAST_COMMIT_MOUNT_OPTIONS=%s\n", options);
 	require(mount("/dev/vda", "/mnt", "ext4", MS_NOATIME | MS_NOSUID | MS_NODEV, options) == 0,
 	    "mount fast-commit filesystem");
@@ -690,7 +695,7 @@ main(void)
 	} else if (phase == PHASE_INDIRECT_READBACK) {
 		verify_indirect((unsigned int)geometry.f_bsize);
 	} else if (phase == PHASE_LARGE_PREFIX_READBACK) {
-		verify_large_prefix((unsigned int)geometry.f_bsize);
+		verify_large_prefix((unsigned int)geometry.f_bsize, prefix_files);
 	} else {
 		verify((unsigned int)geometry.f_bsize);
 		if (special_files) {

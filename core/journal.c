@@ -6,8 +6,12 @@ struct ext4_transaction_entry {
 	void *buffer;
 };
 
+/* Snapshots keep insertion order for logging. An open-addressed index of entry
+ * positions, at least twice the credit bound, finds a block in constant time. */
 struct ext4_transaction {
 	struct ext4_journal *journal;
+	uint32_t *slots;
+	uint32_t slot_mask;
 	uint32_t credits;
 	uint32_t count;
 	uint32_t sequence;
@@ -782,11 +786,68 @@ ext4_journal_finish(struct ext4_journal *journal)
 	return ext4_journal_set_recovery(journal, false);
 }
 
+static uint32_t
+ext4_transaction_slot_count(uint32_t credits)
+{
+	uint32_t slots = 1;
+
+	while (slots < credits * 2U) {
+		slots <<= 1;
+	}
+	return slots;
+}
+
+static size_t
+ext4_transaction_size(uint32_t credits)
+{
+	return sizeof(struct ext4_transaction) +
+	    (size_t)credits * sizeof(struct ext4_transaction_entry) +
+	    (size_t)ext4_transaction_slot_count(credits) * sizeof(uint32_t);
+}
+
+static uint32_t
+ext4_transaction_slot(const struct ext4_transaction *transaction, uint64_t block)
+{
+	return (uint32_t)((block * UINT64_C(0x9e3779b97f4a7c15)) >> 32) & transaction->slot_mask;
+}
+
+/* Return the entry position holding block, or the transaction's count. */
+static uint32_t
+ext4_transaction_find(const struct ext4_transaction *transaction, uint64_t block)
+{
+	uint32_t slot = ext4_transaction_slot(transaction, block);
+	uint32_t entry;
+
+	for (;;) {
+		entry = transaction->slots[slot];
+		if (entry == UINT32_MAX) {
+			return transaction->count;
+		}
+		if (transaction->entries[entry].block == block) {
+			return entry;
+		}
+		slot = (slot + 1U) & transaction->slot_mask;
+	}
+}
+
+static void
+ext4_transaction_index(struct ext4_transaction *transaction, uint32_t entry)
+{
+	uint32_t slot = ext4_transaction_slot(transaction, transaction->entries[entry].block);
+
+	while (transaction->slots[slot] != UINT32_MAX) {
+		slot = (slot + 1U) & transaction->slot_mask;
+	}
+	transaction->slots[slot] = entry;
+}
+
 static enum ext4_result
 ext4_transaction_create(struct ext4_journal *journal, uint32_t credits, bool recovery,
     uint32_t sequence, struct ext4_transaction **result)
 {
 	struct ext4_transaction *transaction;
+	uint32_t slots;
+	uint32_t slot;
 	size_t size;
 
 	if (result == NULL) {
@@ -794,7 +855,8 @@ ext4_transaction_create(struct ext4_journal *journal, uint32_t credits, bool rec
 	}
 	*result = NULL;
 	if (journal == NULL || journal->transaction_active || credits == 0 ||
-	    credits > EXT4_TRANSACTION_MAX_BLOCKS) {
+	    credits >
+		(recovery ? ext4_journal_recovery_credits(journal) : EXT4_TRANSACTION_MAX_BLOCKS)) {
 		return EXT4_INVALID_ARGUMENT;
 	}
 	if (journal->aborted || (!recovery && journal->start != 0)) {
@@ -804,12 +866,18 @@ ext4_transaction_create(struct ext4_journal *journal, uint32_t credits, bool rec
 	if (credits * 2U + 1U >= journal->last - journal->first) {
 		return EXT4_RANGE;
 	}
-	size = sizeof(*transaction) + credits * sizeof(*transaction->entries);
+	size = ext4_transaction_size(credits);
 	transaction = journal->fs->environment.allocate(journal->fs->environment.context, size);
 	if (transaction == NULL) {
 		return EXT4_NO_MEMORY;
 	}
 	ext4_zero(transaction, size);
+	slots = ext4_transaction_slot_count(credits);
+	transaction->slots = (uint32_t *)(transaction->entries + credits);
+	transaction->slot_mask = slots - 1U;
+	for (slot = 0; slot < slots; slot++) {
+		transaction->slots[slot] = UINT32_MAX;
+	}
 	transaction->journal = journal;
 	transaction->credits = credits;
 	transaction->sequence = recovery ? sequence : journal->sequence;
@@ -856,11 +924,10 @@ ext4_transaction_snapshot(
 	    (!(journal->features & EXT4_JBD_64BIT) && block > UINT32_MAX)) {
 		return EXT4_INVALID_ARGUMENT;
 	}
-	for (index = 0; index < transaction->count; index++) {
-		if (transaction->entries[index].block == block) {
-			*result = transaction->entries[index].buffer;
-			return EXT4_OK;
-		}
+	index = ext4_transaction_find(transaction, block);
+	if (index != transaction->count) {
+		*result = transaction->entries[index].buffer;
+		return EXT4_OK;
 	}
 	if (transaction->count == transaction->credits) {
 		transaction->capacity_failed = true;
@@ -876,7 +943,8 @@ ext4_transaction_snapshot(
 		return error;
 	}
 	transaction->entries[transaction->count].block = block;
-	transaction->entries[transaction->count++].buffer = buffer;
+	transaction->entries[transaction->count].buffer = buffer;
+	ext4_transaction_index(transaction, transaction->count++);
 	*result = buffer;
 	return EXT4_OK;
 }
@@ -935,12 +1003,11 @@ ext4_transaction_read(struct ext4_transaction *transaction, uint64_t block, void
 	if (transaction == NULL || buffer == NULL) {
 		return EXT4_INVALID_ARGUMENT;
 	}
-	for (index = 0; index < transaction->count; index++) {
-		if (transaction->entries[index].block == block) {
-			ext4_copy(buffer, transaction->entries[index].buffer,
-			    transaction->journal->fs->info.block_size);
-			return EXT4_OK;
-		}
+	index = ext4_transaction_find(transaction, block);
+	if (index != transaction->count) {
+		ext4_copy(buffer, transaction->entries[index].buffer,
+		    transaction->journal->fs->info.block_size);
+		return EXT4_OK;
 	}
 	return ext4_block_read(transaction->journal->fs, block, buffer);
 }
@@ -951,6 +1018,18 @@ ext4_journal_credits(const struct ext4_journal *journal)
 	uint32_t credits = (journal->last - journal->first - 2U) / 2U;
 
 	return credits > EXT4_TRANSACTION_MAX_BLOCKS ? EXT4_TRANSACTION_MAX_BLOCKS : credits;
+}
+
+uint32_t
+ext4_journal_recovery_credits(const struct ext4_journal *journal)
+{
+	uint32_t credits = (journal->last - journal->first - 2U) / 2U;
+	uint32_t memory = EXT4_RECOVERY_TRANSACTION_BYTES / journal->fs->info.block_size;
+
+	if (credits > memory) {
+		credits = memory;
+	}
+	return credits < EXT4_TRANSACTION_MAX_BLOCKS ? ext4_journal_credits(journal) : credits;
 }
 
 static void
@@ -996,7 +1075,7 @@ ext4_transaction_cancel(struct ext4_transaction *transaction)
 		    fs->info.block_size);
 	}
 	transaction->journal->transaction_active = false;
-	size = sizeof(*transaction) + transaction->credits * sizeof(*transaction->entries);
+	size = ext4_transaction_size(transaction->credits);
 	fs->environment.release(fs->environment.context, transaction, size);
 }
 

@@ -19,6 +19,10 @@ DIRECT_BLOCKS = 12
 POINTER_BYTES = 4
 CREATED_FILES = 12
 LARGE_PREFIX_FILES = {1024: 256, 4096: 1024}
+# Enough long-name entries and 1 KiB inode-table blocks that one conversion
+# transaction exceeds the ordinary 256-snapshot bound.
+HUGE_PREFIX_FILES = 1024
+FAST_COMMIT_KIB = {"large-prefix": 1024, "huge-prefix": 2048}
 LONG_NAME_BYTES = 230
 SEQUENCE = 7
 COMMITS = 3
@@ -38,6 +42,7 @@ PROFILES = (
     ("indirect-4k", 4096, set(), {"extent", "64bit"}),
     ("large-prefix-1k", 1024, set(), set()),
     ("large-prefix-4k", 4096, set(), set()),
+    ("huge-prefix-1k", 1024, set(), set()),
 )
 
 SPECIAL_NODES = {
@@ -84,6 +89,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--direct-replay", action="store_true",
                         help="also require e2fsck's direct fast replay; reproduces its directory-growth defect")
+    parser.add_argument("--profile", action="append", choices=[name for name, *_ in PROFILES],
+                        help="generate only the selected profiles; default: all")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -122,13 +129,18 @@ def main():
     ])
     row.update(passed=True, helper_sha256=digest(helper))
     for name, block, added, removed in PROFILES:
+        if args.profile and name not in args.profile:
+            continue
         directory = output / name
         directory.mkdir()
         root = directory / "root"
         root.mkdir()
         indirect = "extent" in removed
-        large_prefix = name.startswith("large-prefix-")
-        created_files = LARGE_PREFIX_FILES[block] if large_prefix else CREATED_FILES
+        huge_prefix = name.startswith("huge-prefix-")
+        large_prefix = name.startswith("large-prefix-") or huge_prefix
+        created_files = (HUGE_PREFIX_FILES if huge_prefix else
+                         LARGE_PREFIX_FILES[block] if large_prefix else CREATED_FILES)
+        fast_commit_kib = FAST_COMMIT_KIB[name.rsplit("-", 1)[0]] if large_prefix else 256
         original_data = indirect_data(block) if indirect else b"A" * (SOURCE_BLOCKS * block)
         (root / "hello.txt").write_bytes(original_data)
         (root / "hello.txt").chmod(0o640)
@@ -157,7 +169,7 @@ def main():
         run(row, [tools["mke2fs"], "-F", "-t", "ext4", "-b", block,
                   "-N", max(256, created_files + 64),
                   "-I", 256, "-m", 0, "-O", "none," + ",".join(sorted(features)),
-                  "-U", UUID, "-J", f"size=8,fast_commit_size={1024 if large_prefix else 256}",
+                  "-U", UUID, "-J", f"size=8,fast_commit_size={fast_commit_kib}",
                   "-E", "lazy_itable_init=0,nodiscard", "-d", root, before, IMAGE_BYTES // block])
         if indirect:
             row["old_mapping"] = run(row, [helper, "--prepare-indirect", before])
@@ -239,6 +251,7 @@ def main():
         run(row, [tools["e2fsck"], "-fn", expected])
         row["serialization"] = run(row, [helper, pending, expected] +
                                    (["--specials"] if special_files else
+                                    ["--huge-prefix"] if huge_prefix else
                                     ["--large-prefix"] if large_prefix else []))
         if f"sequence={SEQUENCE} commits={COMMITS} " not in row["serialization"]:
             raise RuntimeError("Unexpected serialized fast-commit inventory")
@@ -277,7 +290,7 @@ def main():
                 shutil.copyfile(before, candidate)
                 run(row, [helper, candidate, expected, "--" + damage])
                 row["malformed"][damage] = digest(candidate)
-        if large_prefix:
+        if large_prefix and not huge_prefix:
             candidate = directory / "conflicting-name-owner.img"
             shutil.copyfile(before, candidate)
             run(row, [helper, candidate, expected, "--large-prefix-conflict"])

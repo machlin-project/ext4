@@ -16,7 +16,7 @@ endforeach
 if paths['fast_commit_fixtures'] != ''
   foreach profile : ['1k', '4k', 'checksum-seed', 'no-checksum', 'orphan-1k', 'orphan-4k',
     'special-1k', 'special-4k', 'xattr-reuse-1k', 'xattr-reuse-4k', 'xattr-reuse-legacy-1k',
-    'indirect-1k', 'indirect-4k', 'large-prefix-1k', 'large-prefix-4k']
+    'indirect-1k', 'indirect-4k', 'large-prefix-1k', 'large-prefix-4k', 'huge-prefix-1k']
     directory = paths['fast_commit_fixtures'] / profile
     test('fast-commit-decoder-' + profile, programs['fast-commit'],
       args: [directory / 'pending.journal', '7', '3'], timeout: 300, suite: 'core')
@@ -26,6 +26,8 @@ if paths['fast_commit_fixtures'] != ''
       test('fast-commit-conflicting-name-owner-' + profile, programs['fast-commit-recovery'],
         args: [directory / 'conflicting-name-owner.img', directory / 'expected.img', '--reject'],
         timeout: 300, suite: 'core')
+    endif
+    if profile in ['large-prefix-1k', 'large-prefix-4k', 'huge-prefix-1k']
       foreach mode : ['faults', 'resources']
         test('fast-commit-sampled-' + mode + '-' + profile, programs['fast-commit-recovery'],
           args: [directory / 'pending.img', directory / 'expected.img', '--sampled-' + mode],

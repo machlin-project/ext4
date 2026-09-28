@@ -867,7 +867,7 @@ ext4_fast_commit_replay(struct ext4_fast_commit *log)
 	}
 	ext4_zero(replay->inodes, (size_t)replay->inode_capacity * sizeof(*replay->inodes));
 	error = ext4_transaction_begin_recovery(
-	    log->journal, log->sequence, ext4_journal_credits(log->journal), &transaction);
+	    log->journal, log->sequence, ext4_journal_recovery_credits(log->journal), &transaction);
 	if (error == EXT4_OK) {
 		error = ext4_transaction_super(transaction, &super);
 	}

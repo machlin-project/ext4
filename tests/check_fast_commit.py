@@ -18,7 +18,10 @@ def main():
     parser.add_argument("--tools-root", required=True, type=Path)
     parser.add_argument("--recover", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--profile", action="append", choices=[name for name, *_ in PROFILES],
+                        help="check exactly the selected generated profiles; default: all")
     args = parser.parse_args()
+    selected = set(args.profile or (name for name, *_ in PROFILES))
     fixtures = args.fixtures.resolve()
     recover = args.recover.resolve()
     identity = digest(recover)
@@ -29,7 +32,7 @@ def main():
     if not source_rows or not all(row.get("passed") for row in source_rows):
         raise RuntimeError("Fixture generation is not accepted")
     cases = {row["profile"]: row for row in source_rows if "profile" in row}
-    if set(cases) != {profile[0] for profile in PROFILES}:
+    if set(cases) != selected:
         raise RuntimeError("Incomplete fast-commit fixture profile inventory")
     rows = []
 
@@ -44,6 +47,8 @@ def main():
         return done.stdout
 
     for profile, _, _, _ in PROFILES:
+        if profile not in selected:
+            continue
         expected = cases[profile]
         source = fixtures / profile / "pending.img"
         if digest(source) != expected["pending_sha256"] or digest(recover) != identity:

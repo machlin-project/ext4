@@ -25,7 +25,8 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def readback_fixtures(args, output, tools, recover, prep, runner, kernel, archive, rows, run):
+def readback_fixtures(args, output, tools, recover, prep, runner, kernel, archive, rows, run,
+                      build_archive):
     fixtures = (args.xattr_fixtures or args.indirect_fixtures or args.large_prefix_fixtures).resolve()
     if args.xattr_fixtures:
         profiles = ('xattr-reuse-1k', 'xattr-reuse-4k', 'xattr-reuse-legacy-1k')
@@ -34,12 +35,17 @@ def readback_fixtures(args, output, tools, recover, prep, runner, kernel, archiv
         profiles = ('indirect-1k', 'indirect-4k')
         marker = 'LINUX_FAST_COMMIT_INDIRECT_PASS'
     else:
-        profiles = ('large-prefix-1k', 'large-prefix-4k')
+        profiles = ('large-prefix-1k', 'large-prefix-4k', 'huge-prefix-1k')
         marker = 'LINUX_FAST_COMMIT_LARGE_PREFIX_PASS'
     source_rows = json.loads((fixtures / 'report.json').read_text())
     if not source_rows or not all(row.get('passed') for row in source_rows):
         raise RuntimeError('Protocol fixture generation is not accepted')
     cases = {row['profile']: row for row in source_rows if 'profile' in row}
+    if args.large_prefix_fixtures:
+        # A fixture set may contain the large prefixes, the huge prefix, or both.
+        profiles = tuple(profile for profile in profiles if profile in cases)
+        if not profiles:
+            raise RuntimeError('No large-prefix protocol fixtures were generated')
     for profile in profiles:
         expected = cases[profile]
         if args.block_size and expected['block_size'] not in args.block_size:
@@ -64,6 +70,8 @@ def readback_fixtures(args, output, tools, recover, prep, runner, kernel, archiv
         row['core_fast_commits'] = int(fast[1])
         run(row, [tools['e2fsck'], '-fn', image])
         row['core_recovered_sha256'] = digest(image)
+        if args.large_prefix_fixtures:
+            archive = build_archive(LARGE_PREFIX_READBACK_PHASE, expected['created_files'])
         console = run(row, [runner, kernel, archive, 2, 512,
                            'console=hvc0 rdinit=/init panic=-1 loglevel=4', image])
         (directory / 'readback.console.log').write_text(console)
@@ -158,26 +166,32 @@ def main():
     compile_command[source_index] = str(source)
     compile_command[-1] = str(output / 'init')
     run(prep, compile_command)
-    archives = {}
-    phases = (fixture_phase,) if fixture_phase is not None else range(2)
-    for phase in phases:
-        tree = output / f'root-{phase}'
+    def build_archive(phase, prefix_files=0):
+        label = f'{phase}-{prefix_files}' if prefix_files else f'{phase}'
+        tree = output / f'root-{label}'
         shutil.copytree(prepared / 'root-0', tree)
         (tree / 'proc').mkdir(exist_ok=True)
         shutil.copy2(output / 'init', tree / 'init')
         (tree / 'phase').write_text(f'{phase}\n')
         (tree / 'modern-orphans').write_text(f'{int(a.orphan_file)}\n')
         (tree / 'special-files').write_text(f'{int(a.special_files)}\n')
-        archive = output / f'phase-{phase}.cpio'
+        (tree / 'prefix-files').write_text(f'{prefix_files}\n')
+        archive = output / f'phase-{label}.cpio'
         listing = '\n'.join(str(x.relative_to(tree)) for x in sorted(tree.rglob('*'))) + '\n'
         with archive.open('wb') as stream:
             subprocess.run(['/usr/bin/cpio', '-o', '-H', 'newc'], cwd=tree,
                            input=listing.encode(), stdout=stream, check=True)
-        archives[phase] = archive
+        return archive
+
+    archives = {}
+    phases = (fixture_phase,) if fixture_phase is not None else range(2)
+    for phase in phases:
+        if phase != LARGE_PREFIX_READBACK_PHASE:
+            archives[phase] = build_archive(phase)
     prep.update(passed=True, probe_sha256=digest(output / 'init'))
     if fixture_phase is not None:
         readback_fixtures(a, output, tools, recover, prep, runner, kernel,
-                          archives[fixture_phase], rows, run)
+                          archives.get(fixture_phase), rows, run, build_archive)
         return
     for block in a.block_size or (1024, 4096):
         name = f'fast-commit-{block // 1024}k'

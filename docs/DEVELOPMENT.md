@@ -229,6 +229,11 @@ reused mapping node and a pointer cycle. Each must reject before any write.
 Recovery output also records allocation and read counts before result comparison;
 these are operation counts for the fixture, not a throughput benchmark.
 
+The huge-prefix profile creates 1,024 long-name files at 1 KiB with a 2 MiB fast area.
+Its conversion needs more than the ordinary 256-snapshot transaction bound, so it
+exercises the recovery transaction bound; it has no conflicting-owner variant.
+`generate_fast_commit_fixtures.py --profile NAME` and `check_fast_commit.py --profile
+NAME` restrict generation and checking to explicitly selected profiles.
 The large-prefix profiles create 256 files at 1 KiB and 1,024 at 4 KiB, then revisit
 their inode and range records in reverse order. Repeated single-block ranges and
 containing two-block ranges exercise exclusion-union semantics. They retain three
@@ -266,9 +271,11 @@ two indirect profiles. Linux reads the complete sparse file, checks its hardlink
 identity, reads created files, the replacement inode, truncated orphan and symlink
 targets, and checks the special-device identities before clean unmount and
 independent verification.
-The `--large-prefix-fixtures` option checks every created file in both large-prefix
-profiles, including its full contents, permissions and size, plus the sparse source
-and hardlink identity. It is mutually exclusive with the other protocol profiles.
+The `--large-prefix-fixtures` option checks every created file in each large- or
+huge-prefix profile present in the fixture report, including its full contents,
+permissions and size, plus the sparse source and hardlink identity. Each boot
+receives that profile's exact file count. It is mutually exclusive with the other
+protocol profiles.
 
 ```sh
 python3 tests/generate_fast_commit_fixtures.py --tools-root E2FSPROGS_BUILD \

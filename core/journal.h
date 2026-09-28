@@ -30,6 +30,9 @@
 #define EXT4_JOURNAL_MAX_BLOCKS (1U << 20)
 #define EXT4_JOURNAL_MAX_MAPPING_BLOCKS 8192U
 #define EXT4_TRANSACTION_MAX_BLOCKS 256U
+/* Recovery conversions may snapshot more blocks, bounded by the ordinary ring
+ * and this budget for private snapshot buffers. */
+#define EXT4_RECOVERY_TRANSACTION_BYTES (32U * 1024U * 1024U)
 #define EXT4_RECOVERY_MAX_RECORDS (1U << 20)
 
 struct ext4_be16 {
@@ -172,6 +175,8 @@ enum ext4_result ext4_transaction_super(
 enum ext4_result ext4_transaction_read(
     struct ext4_transaction *transaction, uint64_t block, void *buffer);
 uint32_t ext4_journal_credits(const struct ext4_journal *journal);
+/* Credit bound for begin_recovery conversions; never below the ordinary bound. */
+uint32_t ext4_journal_recovery_credits(const struct ext4_journal *journal);
 /* Both commit and cancel consume the transaction and release all snapshots. */
 enum ext4_result ext4_transaction_commit(struct ext4_transaction *transaction);
 void ext4_transaction_cancel(struct ext4_transaction *transaction);

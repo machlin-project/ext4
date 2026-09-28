@@ -119,13 +119,15 @@ on generation reuse, and handles legacy orphans and mapped symlinks. Journal fre
 now consumes validated mapping runs, removing repeated reads of the same indirect
 nodes. All 94 affected recovery, mapping and journal tests pass, as do thirteen
 independent output checks and native Linux readback of both indirect profiles.
-The next recovery-scaling checkpoint passes 129 affected sanitized tests, including
-86 fast-commit cases on fifteen profiles, allocator and clustered/group-layout
-regressions. It adds sorted replay indexes, journal-block reuse, one directory scan
-per name operation and range-based bitmap validation. Large protocol prefixes
-exercise 256 and 1,024 created files. Independent output verification of this
-checkpoint, release benchmarks, large-prefix Linux readback and its expanded full
-CI remain pending. See [the continuation prompt](docs/CORE-HANDOFF.md).
+The recovery-scaling checkpoint adds sorted replay indexes, journal-block reuse,
+one directory scan per name operation and range-based bitmap validation. Large
+protocol prefixes exercise 256 and 1,024 created files. All fifteen recovered
+outputs pass independent verification, and two actual Linux boots read both large
+prefixes. Its hosted CI timed out on the sampled 4 KiB fault case. Indexed namespace
+operations now validate the index graph and only hash-eligible leaves; inode bitmaps
+are checked byte-wise and ARMv8 targets use CRC32C instructions. Release recovery of
+the 1,024-file prefix drops from 765 to 45 ms with byte-identical output, and the
+complete local 563-test sanitized regression passes.
 Wider format combinations and broader semantic-corruption acceptance remain open.
 See the fast-commit development
 evidence and the recorded native-reference failure in the acceptance matrix;

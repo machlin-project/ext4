@@ -126,6 +126,12 @@ journals with legacy, v1, v2 or v3 checksums/tags (legacy means no journal check
 1,024 data runs and 8,192
 mapping blocks, a writing transaction to 256 snapshots, and recovery to 1,048,576
 records. Exceeding a bound is an explicit unsupported result.
+Recovery conversions, such as the fast-commit replacement transaction, may snapshot
+more blocks: half of the ordinary ring, conservatively allowing one descriptor per
+logged block, and at most 32 MiB of private snapshot buffers. That is 8,192 blocks
+at 4 KiB and 512 at 64 KiB, never fewer than the ordinary bound. Each transaction
+indexes its snapshots by block number in an open-addressed table sized to twice its
+credit bound, so lookups stay constant-time while commit retains insertion order.
 
 Fast-commit recovery retains only the CRC-validated prefix for the transaction ID
 following the ordinary journal prefix. A digest binds each subsequently reread
@@ -199,8 +205,8 @@ range, so sparse deletion does not allocate scratch and reread that block for ev
 missing logical block. Coalescing stops at an allocated slot or the node boundary.
 
 This implementation bounds the fast area to 4,096 blocks, the prefix to 65,536
-records, and the complete conversion to the ordinary 256-snapshot transaction
-limit. Capacity exhaustion returns unsupported, including an old generation whose
+records, and the complete conversion to the recovery transaction bound above.
+Capacity exhaustion returns unsupported, including an old generation whose
 complete attribute reclamation cannot fit the private conversion transaction.
 Additional format combinations, partially completed foreign replay and broader
 ownership-corruption cases still require acceptance. The writer continues to

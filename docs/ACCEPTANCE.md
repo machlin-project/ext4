@@ -215,13 +215,43 @@ duration, not a throughput benchmark. The accepted local evidence is
 `artifacts/checks/fast-commit-large-prefix-accepted/` and
 `artifacts/checks/fast-commit-large-prefix-fixed/`.
 
-Independent verification of all fifteen outputs from the latest core, equivalent
-release benchmarks, the two large-prefix native readback boots and the expanded
-563-test CI are pending at handoff. The preceding full 552-test regression,
-thirteen-profile independent verification and earlier native results do not replace
-those checks.
-The exact continuation commands and remaining scope are in
-`docs/CORE-HANDOFF.md`.
+The frozen checkpoint executable then passed independent verification of all
+fifteen recovered outputs: 4,710 commands, strict nonrepairing e2fsck, exact
+namespace/data/attribute reads and an unchanged second clean recovery. Evidence is
+in `artifacts/fast-commit-large-prefix-independent/`. Two actual Linux 6.12 boots
+read every created file of both large-prefix profiles, the sparse source and the
+hardlink identity; all 3,876 commands and four strict fsck checks pass. Evidence is
+in `artifacts/checks/fast-commit-large-prefix-native-prep/readiness-recheck.json` and
+the lab's `artifacts/ext4-journal/fast-commit-large-prefix-readback/`. This is Linux
+consumption of core output, not native generation or direct Linux replay.
+
+Release builds without sanitizers compare the checkpoint with its parent using the
+same current driver and final fixtures: one checked warmup and 31 measured recoveries
+from the memory-backed device, alternating version order by profile. Medians fall
+from 2.12 to 0.94 ms at 1 KiB, 3.97 to 1.85 ms for indirect 1 KiB, 113.6 to 51.7 ms
+for large-prefix 1 KiB and 1,413.5 to 704.7 ms for large-prefix 4 KiB. Reads drop,
+for example from 24,461 to 11,352 at 4 KiB; peak core allocation and durability
+events are unchanged. Recovered images from separate copies are byte-identical.
+Evidence is in `artifacts/checks/fast-commit-release-benchmark/`.
+
+The push-triggered CI for that checkpoint (run 36439569809) passed five jobs and 288
+of 289 core tests. `fast-commit-sampled-faults-large-prefix-4k` timed out at its
+unchanged 600-second limit on the hosted runner; its reports are preserved under
+`artifacts/checks/fast-commit-ci-36439569809/`. A release profile showed name replay
+dominated by full validation of every indexed leaf for each record, then bitmap
+checksums and a bit-serial inode-bitmap scan. Indexed namespace operations now
+validate the map, the complete index graph, the root and only the leaves eligible
+for the name's hash. Inode bitmaps use byte-wise checks, and targets guaranteeing
+ARMv8 CRC32 use its CRC32C instructions. With the same fixtures and driver, release
+medians fall from 1.03 to 0.19 ms at 1 KiB, 2.00 to 0.50 ms for indirect 1 KiB, 56.5 to
+3.6 ms for large-prefix 1 KiB and 765.2 to 44.6 ms for large-prefix 4 KiB. Reads, peak
+core allocation and durability events are unchanged, and every recovered image is
+byte-identical to the checkpoint's. This host was not idle during that comparison
+(load average 3.8–7.6), so the medians carry more noise than the ratios suggest;
+evidence is in `artifacts/checks/fast-commit-release-benchmark-scaled/`. The sanitized
+sampled 4 KiB fault case takes 99 seconds locally, and the complete sanitized 563-test
+local regression passes (`artifacts/checks/scale-regression-1/`). These are memory-backed
+recovery measurements, not mounted or device throughput.
 
 Open work includes larger transaction/prefix capacity, additional format combinations,
 broader ownership-corruption coverage and interrupted foreign replay. Native fixture

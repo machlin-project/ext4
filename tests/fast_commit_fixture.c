@@ -16,6 +16,7 @@
 #define CREATED_FILES 12U
 #define LARGE_PREFIX_FILES_1K 256U
 #define LARGE_PREFIX_FILES_4K 1024U
+#define HUGE_PREFIX_FILES 1024U
 #define LONG_NAME_BYTES 230U
 #define DEVICE_LEGACY_MASK 0xffU
 #define DEVICE_MAJOR_SHIFT 8U
@@ -64,6 +65,7 @@ struct fixture {
 	__u32 blocks;
 	unsigned int commits;
 	bool large_prefix;
+	bool huge_prefix;
 	enum fixture_damage damage;
 };
 
@@ -711,12 +713,13 @@ main(int argc, char **argv)
 	if (argc != 3 && argc != 4) {
 		fprintf(stderr,
 		    "usage: fast-commit-fixture PENDING_COPY EXPECTED_IMAGE "
-		    "[--specials|--large-prefix]\n");
+		    "[--specials|--large-prefix|--huge-prefix]\n");
 		return 2;
 	}
+	fixture.huge_prefix = argc == 4 && strcmp(argv[3], "--huge-prefix") == 0;
 	fixture.large_prefix = argc == 4 &&
 	    (strcmp(argv[3], "--large-prefix") == 0 ||
-		strcmp(argv[3], "--large-prefix-conflict") == 0);
+		strcmp(argv[3], "--large-prefix-conflict") == 0 || fixture.huge_prefix);
 	if (fixture.large_prefix && strcmp(argv[3], "--large-prefix-conflict") == 0) {
 		fixture.damage = DAMAGE_NAME_OWNER;
 	}
@@ -794,7 +797,8 @@ main(int argc, char **argv)
 	directory = lookup(&fixture, EXT2_ROOT_INO, "new-dir");
 	inode_record(&fixture, directory, 0);
 	name_record(&fixture, EXT4_FC_TAG_CREAT, EXT2_ROOT_INO, directory, "new-dir");
-	created_files = fixture.large_prefix
+	created_files = fixture.huge_prefix ? HUGE_PREFIX_FILES
+	    : fixture.large_prefix
 	    ? (fixture.pending->blocksize == 1024 ? LARGE_PREFIX_FILES_1K : LARGE_PREFIX_FILES_4K)
 	    : CREATED_FILES;
 	for (index = 0; index < created_files; index++) {
