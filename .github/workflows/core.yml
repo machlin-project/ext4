@@ -158,11 +158,13 @@ jobs:
         run: |
           python3 tests/generate_fast_commit_fixtures.py --tools-root vendor/e2fsprogs/build \
             --output artifacts/fast-commit-fixtures 2>&1 | tee artifacts/checks/fast-commit-fixtures.log
-      - name: Generate multi-mount-protection images
+      - name: Generate multi-mount-protection and fs-verity images
         if: matrix.suite == 'format'
         run: |
           python3 tests/generate_mmp_fixtures.py --output artifacts/mmp-fixtures \
             2>&1 | tee artifacts/checks/mmp-fixtures.log
+          python3 tests/generate_verity_fixtures.py --output artifacts/verity-fixtures \
+            2>&1 | tee artifacts/checks/verity-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
@@ -183,7 +185,8 @@ jobs:
             space_options=(-Dspace_fixtures="$PWD/artifacts/space-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == format ]]; then
-            format_options=(-Dmmp_fixtures="$PWD/artifacts/mmp-fixtures")
+            format_options=(-Dmmp_fixtures="$PWD/artifacts/mmp-fixtures" \
+              -Dverity_fixtures="$PWD/artifacts/verity-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == core ]]; then
             group_options=(-Dgroup_checksum_fixtures="$PWD/artifacts/group-checksum-fixtures" \
@@ -1018,6 +1021,22 @@ jobs:
             2>&1 | tee artifacts/checks/mmp-independent.log
           find "$exports" artifacts/mmp-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Independently verify fs-verity files after writable changes
+        if: matrix.suite == 'format'
+        run: |
+          exports=()
+          for profile in 4k 1k-salted sha512; do
+            directory="artifacts/verity-exports/$profile"
+            mkdir -p "$directory"
+            .build/ext4-verity-test "artifacts/verity-fixtures/verity-$profile.img" \
+              "artifacts/verity-fixtures/verity-$profile.manifest" "$directory" \
+              2>&1 | tee "artifacts/checks/verity-export-$profile.log"
+            exports+=(--exports "$directory")
+          done
+          python3 tests/check_verity.py --tools-root vendor/e2fsprogs/build "${exports[@]}" \
+            --output artifacts/verity-independent 2>&1 | tee artifacts/checks/verity-independent.log
+          find artifacts/verity-exports artifacts/verity-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' ! -name '*.manifest' -delete
       - name: Remove fixture-host symlinks before artifact discovery
         if: always()
         run: |

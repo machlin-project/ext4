@@ -18,6 +18,7 @@ core_sources = files(
   'core/inode_allocate.c', 'core/inode_flags.c', 'core/namespace.c', 'core/lifetime.c',
   'core/directory_hash.c', 'core/directory_index.c', 'core/directory_write.c',
   'core/xattr.c', 'core/xattr_write.c', 'core/xattr_inode.c', 'core/mmp.c',
+  'core/sha.c', 'core/verity.c',
 )
 core_arguments = ['-Wpedantic', '-ffreestanding', '-fno-builtin']
 public_headers = include_directories('include')
@@ -59,6 +60,7 @@ foreach name, source : {
   'write': 'write', 'write-partial': 'write_partial', 'write-growth': 'write_growth',
   'file-range': 'file_range', 'large-file': 'large_file', 'large-volume': 'large_volume', 'inode-flags': 'inode_flags',
   'namespace': 'namespace', 'removal': 'removal', 'sustained': 'sustained', 'mmp': 'mmp',
+  'verity': 'verity',
   'rename': 'rename', 'orphan': 'orphan',
 }
   programs += {name: executable('ext4-' + name + '-test', 'tests/' + source + '.c',

@@ -519,6 +519,36 @@ The owner must deliver MMP reads from the device rather than a cache, because
 another host's writes are the subject of the check. This protocol assumes the
 other hosts implement it; it does not arbitrate concurrent access by itself.
 
+## fs-verity
+
+Files with the VERITY inode flag require the read-only-compatible VERITY feature,
+extent mapping and a regular type. The descriptor size occupies the last four bytes
+of the last extent; the descriptor starts at the preceding filesystem-block
+boundary and must lie after the first 64 KiB boundary at or beyond EOF, where the
+Merkle tree begins. Version 1, SHA-256 or SHA-512, 1–64 KiB Merkle blocks, salts up
+to 32 bytes, zero reserved bytes, a signature inside the stored descriptor and a data
+size equal to i_size are required; unsupported algorithms or block sizes are
+reported as unsupported, other violations as corruption. Tree levels are stored from
+the root toward the data, as fs-verity defines them.
+
+`ext4_read` verifies every Merkle data block it returns: the zero-padded data block
+is hashed after the salt, which is zero-padded to the hash input block, and each
+tree block on the path must contain the child's digest until the root hash matches
+the descriptor. A read stops before the first unverifiable block and reports the
+verified prefix. The level-zero hash block last verified through the root is reused
+within one call; nothing is cached across calls or mutations, so each call parses
+the descriptor again. `ext4_map_read` refuses verity files because a native mapping
+would bypass verification; adapters must read them through the core. Built-in
+signatures are not checked: like Linux without a keyring policy, the core establishes
+consistency with the descriptor, whose digest is the file's trust anchor.
+
+Writable owners may rename, link, unlink and change attributes and permissions of
+verity files. Writes, both truncate forms, preallocation, hole punching and growth
+preparation return permission denied before any write, because Merkle metadata lives
+beyond EOF. Final deletion releases the complete map, including that metadata.
+Offline cleanup refuses a linked orphan with the flag instead of truncating its tree.
+Enabling verity on a file, measurement and signature policy are not implemented.
+
 ## Persistent inode flags
 
 `ext4_set_inode_flags` changes selected policy bits and captured ctime in one

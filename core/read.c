@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
 #include "inline.h"
+#include "verity.h"
 
 static enum ext4_result ext4_map_blocks(struct ext4_fs *fs, const struct ext4_inode *inode,
     uint32_t logical, uint8_t **scratch, uint64_t *physical, uint64_t *blocks,
@@ -38,6 +39,10 @@ ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offse
 	if (fs->aborted) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
+	/* Native mappings would bypass Merkle verification; use ext4_read. */
+	if (inode->flags & EXT4_INODE_VERITY) {
+		return EXT4_UNSUPPORTED;
+	}
 	if (offset >= inode->size) {
 		return EXT4_NOT_FOUND;
 	}
@@ -68,9 +73,11 @@ ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offse
 	return EXT4_OK;
 }
 
+/* leaf_end, when requested, receives the end of the selected leaf's last extent. */
 static enum ext4_result
 ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
-    uint8_t **scratch, uint64_t *physical, uint64_t *blocks, struct ext4_block_path *path)
+    uint8_t **scratch, uint64_t *physical, uint64_t *blocks, struct ext4_block_path *path,
+    uint64_t *leaf_end)
 {
 	const uint8_t *node = inode->block_data;
 	const struct ext4_extent_header_disk *header;
@@ -172,6 +179,9 @@ ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t log
 		if (depth == 0 || child == 0) {
 			if (blocks != NULL) {
 				*blocks = boundary - logical;
+			}
+			if (leaf_end != NULL) {
+				*leaf_end = depth == 0 ? end : 0;
 			}
 			return EXT4_OK;
 		}
@@ -280,9 +290,31 @@ ext4_map_blocks(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t log
 		return EXT4_UNSUPPORTED;
 	}
 	if (inode->flags & EXT4_INODE_EXTENTS) {
-		return ext4_extent_map(fs, inode, logical, scratch, physical, blocks, path);
+		return ext4_extent_map(fs, inode, logical, scratch, physical, blocks, path, NULL);
 	}
 	return ext4_indirect_map(fs, inode, logical, scratch, physical, blocks, path);
+}
+
+enum ext4_result
+ext4_extent_last_end(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t *end)
+{
+	uint8_t *scratch = NULL;
+	uint64_t physical;
+	enum ext4_result error;
+
+	*end = 0;
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
+	if ((inode->flags & (EXT4_INODE_EXTENTS | EXT4_INODE_INLINE_DATA)) != EXT4_INODE_EXTENTS) {
+		return EXT4_UNSUPPORTED;
+	}
+	/* The largest logical address descends the rightmost path to the last leaf. */
+	error = ext4_extent_map(fs, inode, UINT32_MAX, &scratch, &physical, NULL, NULL, end);
+	if (scratch != NULL) {
+		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
+	}
+	return error;
 }
 
 enum ext4_result
@@ -314,8 +346,8 @@ ext4_map_blocks_path(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_
 }
 
 enum ext4_result
-ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, void *buffer,
-    size_t length, size_t *completed)
+ext4_read_mapped(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, void *buffer,
+    size_t length, bool require_data, size_t *completed)
 {
 	uint8_t *output = buffer;
 	uint8_t *scratch = NULL;
@@ -326,6 +358,53 @@ ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, v
 	size_t chunk;
 	size_t in_block;
 	enum ext4_result error = EXT4_OK;
+
+	*completed = 0;
+	while (*completed < length) {
+		logical = offset / fs->info.block_size;
+		if (logical > UINT32_MAX) {
+			error = EXT4_RANGE;
+			goto out;
+		}
+		in_block = (size_t)(offset % fs->info.block_size);
+		error = ext4_map_blocks(
+		    fs, inode, (uint32_t)logical, &scratch, &physical, &blocks, NULL);
+		if (error != EXT4_OK) {
+			goto out;
+		}
+		bytes = blocks * fs->info.block_size - in_block;
+		chunk = length - *completed;
+		if (bytes < chunk) {
+			chunk = (size_t)bytes;
+		}
+		if (physical == 0) {
+			if (require_data) {
+				error = EXT4_CORRUPT;
+				goto out;
+			}
+			ext4_zero(output + *completed, chunk);
+		} else {
+			error = ext4_device_read(fs, physical * fs->info.block_size + in_block,
+			    output + *completed, chunk);
+			if (error != EXT4_OK) {
+				goto out;
+			}
+		}
+		*completed += chunk;
+		offset += chunk;
+	}
+out:
+	if (scratch != NULL) {
+		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
+	}
+	return error;
+}
+
+enum ext4_result
+ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, void *buffer,
+    size_t length, size_t *completed)
+{
+	enum ext4_result error;
 
 	if (completed == NULL) {
 		return EXT4_INVALID_ARGUMENT;
@@ -341,6 +420,9 @@ ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, v
 	    (inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY &&
 	    (inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_SYMLINK) {
 		return EXT4_UNSUPPORTED;
+	}
+	if (inode->flags & EXT4_INODE_VERITY) {
+		return ext4_verity_read(fs, inode, offset, buffer, length, completed);
 	}
 	if (offset >= inode->size) {
 		return EXT4_OK;
@@ -363,38 +445,5 @@ ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, v
 		*completed = length;
 		return EXT4_OK;
 	}
-	while (*completed < length) {
-		logical = offset / fs->info.block_size;
-		if (logical > UINT32_MAX) {
-			error = EXT4_RANGE;
-			goto out;
-		}
-		in_block = (size_t)(offset % fs->info.block_size);
-		error = ext4_map_blocks(
-		    fs, inode, (uint32_t)logical, &scratch, &physical, &blocks, NULL);
-		if (error != EXT4_OK) {
-			goto out;
-		}
-		bytes = blocks * fs->info.block_size - in_block;
-		chunk = length - *completed;
-		if (bytes < chunk) {
-			chunk = (size_t)bytes;
-		}
-		if (physical == 0) {
-			ext4_zero(output + *completed, chunk);
-		} else {
-			error = ext4_device_read(fs, physical * fs->info.block_size + in_block,
-			    output + *completed, chunk);
-			if (error != EXT4_OK) {
-				goto out;
-			}
-		}
-		*completed += chunk;
-		offset += chunk;
-	}
-out:
-	if (scratch != NULL) {
-		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
-	}
-	return error;
+	return ext4_read_mapped(fs, inode, offset, buffer, length, false, completed);
 }

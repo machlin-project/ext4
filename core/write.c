@@ -483,6 +483,10 @@ ext4_growth_check(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 		error = (inode.mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY ? EXT4_IS_DIRECTORY
 									     : EXT4_UNSUPPORTED;
 	}
+	/* Growth preparation would zero Merkle metadata stored beyond EOF. */
+	if (error == EXT4_OK && (inode.flags & EXT4_INODE_VERITY)) {
+		error = EXT4_PERMISSION_DENIED;
+	}
 	if (error == EXT4_OK) {
 		error = ext4_file_size_valid(fs, &inode, end);
 	}
@@ -933,7 +937,7 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 									     : EXT4_UNSUPPORTED;
 		goto cancel;
 	}
-	if ((inode.flags & EXT4_INODE_IMMUTABLE) ||
+	if ((inode.flags & EXT4_INODE_DATA_PROTECTED) ||
 	    ((inode.flags & EXT4_INODE_APPEND) && offset != inode.size)) {
 		error = EXT4_PERMISSION_DENIED;
 		goto cancel;
@@ -1261,7 +1265,7 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 									     : EXT4_UNSUPPORTED;
 		goto cancel;
 	}
-	if (inode.flags & EXT4_INODE_RESTRICTED_FLAGS) {
+	if (inode.flags & (EXT4_INODE_RESTRICTED_FLAGS | EXT4_INODE_VERITY)) {
 		error = EXT4_PERMISSION_DENIED;
 		goto cancel;
 	}
@@ -1660,7 +1664,7 @@ ext4_fallocate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_
 	end = offset + length;
 	error = ext4_growth_check(fs, number, generation, end, update, &inode);
 	if (error == EXT4_OK &&
-	    ((inode.flags & EXT4_INODE_IMMUTABLE) ||
+	    ((inode.flags & EXT4_INODE_DATA_PROTECTED) ||
 		((inode.flags & EXT4_INODE_APPEND) && (flags & EXT4_FALLOC_PUNCH_HOLE)))) {
 		error = EXT4_PERMISSION_DENIED;
 	}

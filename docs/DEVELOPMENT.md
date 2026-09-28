@@ -146,6 +146,38 @@ pending image with the POSIX utility. These steps use real waits of about 21 to 
 seconds per acquisition. The POSIX adapter supplies wall-clock sleeps, `/dev/urandom`
 values and the host name.
 
+## fs-verity tests
+
+`tests/generate_verity_fixtures.py --output artifacts/verity-fixtures` authors fs-verity
+files independently of the core: Python computes the Merkle tree, root hash,
+descriptor and file digest from the documented format, and debugfs stores the data,
+tree, descriptor and size field before setting i_size and the EXTENTS|VERITY flags.
+Three images cover 4 KiB SHA-256, salted 1 KiB SHA-256 and salted 4 KiB SHA-512, with
+empty, single-block, partial, sparse and multi-level files. Each image also contains
+damaged data, a damaged level-zero hash, a wrong root hash, an unsupported descriptor
+version and an impossible descriptor size. Every image passes strict fsck; the
+manifest records sizes, SHA-256 contents, file digests and the block that must fail.
+
+Configure `-Dverity_fixtures=artifacts/verity-fixtures` to add `ext4-verity-test IMAGE
+MANIFEST` cases to the `format` suite. They check SHA-256/SHA-512 known answers and
+split updates, complete and offset reads against the manifest, every allocation and
+read failure of the largest valid file, native-mapping refusal and exact rejection of
+each damaged file. A writable copy then must refuse writes, truncation, growth,
+preallocation and hole punching without device writes, while permission, attribute,
+link, rename and unlink changes succeed and deletion frees all metadata blocks. An
+optional export directory receives that image and an updated manifest;
+`tests/check_verity.py --tools-root E2FSPROGS_BUILD --exports DIRECTORY --output NEW`
+requires strict fsck and checks names, flags, permissions and the new attribute.
+
+`tests/run_linux_verity.py` runs from the lab with `--lab`, `--prepared`, `--runner`,
+`--fixtures DIRECTORY` and a fresh `--output`. The directory needs a `report.json`
+naming each image and manifest, as written by the generator or `check_verity.py`.
+Each image boots once: Linux mounts it read-only, requires FS_IOC_MEASURE_VERITY to
+match the manifest digest, reads every valid file and requires EIO or open failure
+for each damaged one. Linux records the invalid descriptor location in the superblock
+error fields even on a read-only mount; that primary-superblock record is the only
+permitted image change.
+
 ## Metadata fuzzing
 
 `-Dfuzzer=true` builds `ext4-image-fuzzer` using Clang's libFuzzer runtime,

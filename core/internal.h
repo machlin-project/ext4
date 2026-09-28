@@ -190,6 +190,13 @@ enum ext4_result ext4_device_read(struct ext4_fs *fs, uint64_t offset, void *buf
 enum ext4_result ext4_block_read(struct ext4_fs *fs, uint64_t block, void *buffer);
 enum ext4_result ext4_map_block(
     struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical, uint64_t *physical);
+/* Read mapped bytes regardless of EOF. Holes read as zero unless data is
+ * required; completed reports the prefix read before any error. */
+enum ext4_result ext4_read_mapped(struct ext4_fs *fs, const struct ext4_inode *inode,
+    uint64_t offset, void *buffer, size_t length, bool require_data, size_t *completed);
+/* End of the last extent in an extent-mapped inode, in filesystem blocks. */
+enum ext4_result ext4_extent_last_end(
+    struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t *end);
 enum ext4_result ext4_map_block_path(struct ext4_fs *fs, const struct ext4_inode *inode,
     uint32_t logical, uint64_t *physical, struct ext4_block_path *path);
 /* Return a contiguous data or hole run confined to the reported mapping path. */

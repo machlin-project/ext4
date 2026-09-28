@@ -1,0 +1,271 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
+#include "sha.h"
+
+/* FIPS 180-4 SHA-256 and SHA-512 with immutable round constants, byte-wise
+ * big-endian message decoding and no allocation or mutable global state. */
+
+static const uint32_t ext4_sha256_rounds[64] = { 0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U,
+	0x3956c25bU, 0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U, 0xd807aa98U, 0x12835b01U, 0x243185beU,
+	0x550c7dc3U, 0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U, 0xc19bf174U, 0xe49b69c1U, 0xefbe4786U,
+	0x0fc19dc6U, 0x240ca1ccU, 0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU, 0x983e5152U,
+	0xa831c66dU, 0xb00327c8U, 0xbf597fc7U, 0xc6e00bf3U, 0xd5a79147U, 0x06ca6351U, 0x14292967U,
+	0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU, 0x53380d13U, 0x650a7354U, 0x766a0abbU, 0x81c2c92eU,
+	0x92722c85U, 0xa2bfe8a1U, 0xa81a664bU, 0xc24b8b70U, 0xc76c51a3U, 0xd192e819U, 0xd6990624U,
+	0xf40e3585U, 0x106aa070U, 0x19a4c116U, 0x1e376c08U, 0x2748774cU, 0x34b0bcb5U, 0x391c0cb3U,
+	0x4ed8aa4aU, 0x5b9cca4fU, 0x682e6ff3U, 0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U,
+	0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U };
+
+static const uint64_t ext4_sha512_rounds[80] = { UINT64_C(0x428a2f98d728ae22),
+	UINT64_C(0x7137449123ef65cd), UINT64_C(0xb5c0fbcfec4d3b2f), UINT64_C(0xe9b5dba58189dbbc),
+	UINT64_C(0x3956c25bf348b538), UINT64_C(0x59f111f1b605d019), UINT64_C(0x923f82a4af194f9b),
+	UINT64_C(0xab1c5ed5da6d8118), UINT64_C(0xd807aa98a3030242), UINT64_C(0x12835b0145706fbe),
+	UINT64_C(0x243185be4ee4b28c), UINT64_C(0x550c7dc3d5ffb4e2), UINT64_C(0x72be5d74f27b896f),
+	UINT64_C(0x80deb1fe3b1696b1), UINT64_C(0x9bdc06a725c71235), UINT64_C(0xc19bf174cf692694),
+	UINT64_C(0xe49b69c19ef14ad2), UINT64_C(0xefbe4786384f25e3), UINT64_C(0x0fc19dc68b8cd5b5),
+	UINT64_C(0x240ca1cc77ac9c65), UINT64_C(0x2de92c6f592b0275), UINT64_C(0x4a7484aa6ea6e483),
+	UINT64_C(0x5cb0a9dcbd41fbd4), UINT64_C(0x76f988da831153b5), UINT64_C(0x983e5152ee66dfab),
+	UINT64_C(0xa831c66d2db43210), UINT64_C(0xb00327c898fb213f), UINT64_C(0xbf597fc7beef0ee4),
+	UINT64_C(0xc6e00bf33da88fc2), UINT64_C(0xd5a79147930aa725), UINT64_C(0x06ca6351e003826f),
+	UINT64_C(0x142929670a0e6e70), UINT64_C(0x27b70a8546d22ffc), UINT64_C(0x2e1b21385c26c926),
+	UINT64_C(0x4d2c6dfc5ac42aed), UINT64_C(0x53380d139d95b3df), UINT64_C(0x650a73548baf63de),
+	UINT64_C(0x766a0abb3c77b2a8), UINT64_C(0x81c2c92e47edaee6), UINT64_C(0x92722c851482353b),
+	UINT64_C(0xa2bfe8a14cf10364), UINT64_C(0xa81a664bbc423001), UINT64_C(0xc24b8b70d0f89791),
+	UINT64_C(0xc76c51a30654be30), UINT64_C(0xd192e819d6ef5218), UINT64_C(0xd69906245565a910),
+	UINT64_C(0xf40e35855771202a), UINT64_C(0x106aa07032bbd1b8), UINT64_C(0x19a4c116b8d2d0c8),
+	UINT64_C(0x1e376c085141ab53), UINT64_C(0x2748774cdf8eeb99), UINT64_C(0x34b0bcb5e19b48a8),
+	UINT64_C(0x391c0cb3c5c95a63), UINT64_C(0x4ed8aa4ae3418acb), UINT64_C(0x5b9cca4f7763e373),
+	UINT64_C(0x682e6ff3d6b2b8a3), UINT64_C(0x748f82ee5defb2fc), UINT64_C(0x78a5636f43172f60),
+	UINT64_C(0x84c87814a1f0ab72), UINT64_C(0x8cc702081a6439ec), UINT64_C(0x90befffa23631e28),
+	UINT64_C(0xa4506cebde82bde9), UINT64_C(0xbef9a3f7b2c67915), UINT64_C(0xc67178f2e372532b),
+	UINT64_C(0xca273eceea26619c), UINT64_C(0xd186b8c721c0c207), UINT64_C(0xeada7dd6cde0eb1e),
+	UINT64_C(0xf57d4f7fee6ed178), UINT64_C(0x06f067aa72176fba), UINT64_C(0x0a637dc5a2c898a6),
+	UINT64_C(0x113f9804bef90dae), UINT64_C(0x1b710b35131c471b), UINT64_C(0x28db77f523047d84),
+	UINT64_C(0x32caab7b40c72493), UINT64_C(0x3c9ebe0a15c9bebc), UINT64_C(0x431d67c49c100d4c),
+	UINT64_C(0x4cc5d4becb3e42b6), UINT64_C(0x597f299cfc657e2a), UINT64_C(0x5fcb6fab3ad6faec),
+	UINT64_C(0x6c44198c4a475817) };
+
+static uint32_t
+ext4_rotate32(uint32_t value, unsigned int count)
+{
+	return (value >> count) | (value << (32U - count));
+}
+
+static uint64_t
+ext4_rotate64(uint64_t value, unsigned int count)
+{
+	return (value >> count) | (value << (64U - count));
+}
+
+static void
+ext4_sha256_block(struct ext4_sha256 *context, const uint8_t *block)
+{
+	uint32_t schedule[64];
+	uint32_t work[8];
+	uint32_t first;
+	uint32_t second;
+	unsigned int index;
+
+	for (index = 0; index < 16U; index++) {
+		schedule[index] = (uint32_t)block[index * 4U] << 24 |
+		    (uint32_t)block[index * 4U + 1U] << 16 | (uint32_t)block[index * 4U + 2U] << 8 |
+		    block[index * 4U + 3U];
+	}
+	for (; index < 64U; index++) {
+		first = ext4_rotate32(schedule[index - 15U], 7) ^
+		    ext4_rotate32(schedule[index - 15U], 18) ^ (schedule[index - 15U] >> 3);
+		second = ext4_rotate32(schedule[index - 2U], 17) ^
+		    ext4_rotate32(schedule[index - 2U], 19) ^ (schedule[index - 2U] >> 10);
+		schedule[index] = schedule[index - 16U] + first + schedule[index - 7U] + second;
+	}
+	for (index = 0; index < 8U; index++) {
+		work[index] = context->state[index];
+	}
+	for (index = 0; index < 64U; index++) {
+		first = work[7] +
+		    (ext4_rotate32(work[4], 6) ^ ext4_rotate32(work[4], 11) ^
+			ext4_rotate32(work[4], 25)) +
+		    ((work[4] & work[5]) ^ (~work[4] & work[6])) + ext4_sha256_rounds[index] +
+		    schedule[index];
+		second = (ext4_rotate32(work[0], 2) ^ ext4_rotate32(work[0], 13) ^
+			     ext4_rotate32(work[0], 22)) +
+		    ((work[0] & work[1]) ^ (work[0] & work[2]) ^ (work[1] & work[2]));
+		work[7] = work[6];
+		work[6] = work[5];
+		work[5] = work[4];
+		work[4] = work[3] + first;
+		work[3] = work[2];
+		work[2] = work[1];
+		work[1] = work[0];
+		work[0] = first + second;
+	}
+	for (index = 0; index < 8U; index++) {
+		context->state[index] += work[index];
+	}
+}
+
+static void
+ext4_sha512_block(struct ext4_sha512 *context, const uint8_t *block)
+{
+	uint64_t schedule[80];
+	uint64_t work[8];
+	uint64_t first;
+	uint64_t second;
+	unsigned int index;
+	unsigned int byte;
+
+	for (index = 0; index < 16U; index++) {
+		schedule[index] = 0;
+		for (byte = 0; byte < 8U; byte++) {
+			schedule[index] = schedule[index] << 8 | block[index * 8U + byte];
+		}
+	}
+	for (; index < 80U; index++) {
+		first = ext4_rotate64(schedule[index - 15U], 1) ^
+		    ext4_rotate64(schedule[index - 15U], 8) ^ (schedule[index - 15U] >> 7);
+		second = ext4_rotate64(schedule[index - 2U], 19) ^
+		    ext4_rotate64(schedule[index - 2U], 61) ^ (schedule[index - 2U] >> 6);
+		schedule[index] = schedule[index - 16U] + first + schedule[index - 7U] + second;
+	}
+	for (index = 0; index < 8U; index++) {
+		work[index] = context->state[index];
+	}
+	for (index = 0; index < 80U; index++) {
+		first = work[7] +
+		    (ext4_rotate64(work[4], 14) ^ ext4_rotate64(work[4], 18) ^
+			ext4_rotate64(work[4], 41)) +
+		    ((work[4] & work[5]) ^ (~work[4] & work[6])) + ext4_sha512_rounds[index] +
+		    schedule[index];
+		second = (ext4_rotate64(work[0], 28) ^ ext4_rotate64(work[0], 34) ^
+			     ext4_rotate64(work[0], 39)) +
+		    ((work[0] & work[1]) ^ (work[0] & work[2]) ^ (work[1] & work[2]));
+		work[7] = work[6];
+		work[6] = work[5];
+		work[5] = work[4];
+		work[4] = work[3] + first;
+		work[3] = work[2];
+		work[2] = work[1];
+		work[1] = work[0];
+		work[0] = first + second;
+	}
+	for (index = 0; index < 8U; index++) {
+		context->state[index] += work[index];
+	}
+}
+
+void
+ext4_sha256_init(struct ext4_sha256 *context)
+{
+	static const uint32_t initial[8] = { 0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
+		0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U };
+
+	ext4_copy(context->state, initial, sizeof(initial));
+	context->length = 0;
+	context->used = 0;
+}
+
+void
+ext4_sha256_update(struct ext4_sha256 *context, const void *buffer, size_t length)
+{
+	const uint8_t *bytes = buffer;
+	size_t part;
+
+	context->length += (uint64_t)length;
+	while (length != 0) {
+		part = EXT4_SHA256_BLOCK_SIZE - context->used;
+		if (part > length) {
+			part = length;
+		}
+		ext4_copy(context->block + context->used, bytes, part);
+		context->used += (uint32_t)part;
+		bytes += part;
+		length -= part;
+		if (context->used == EXT4_SHA256_BLOCK_SIZE) {
+			ext4_sha256_block(context, context->block);
+			context->used = 0;
+		}
+	}
+}
+
+void
+ext4_sha256_final(struct ext4_sha256 *context, uint8_t *digest)
+{
+	uint64_t bits = context->length * 8U;
+	unsigned int index;
+
+	context->block[context->used++] = 0x80U;
+	if (context->used > EXT4_SHA256_BLOCK_SIZE - 8U) {
+		ext4_zero(context->block + context->used, EXT4_SHA256_BLOCK_SIZE - context->used);
+		ext4_sha256_block(context, context->block);
+		context->used = 0;
+	}
+	ext4_zero(context->block + context->used, EXT4_SHA256_BLOCK_SIZE - 8U - context->used);
+	for (index = 0; index < 8U; index++) {
+		context->block[EXT4_SHA256_BLOCK_SIZE - 1U - index] =
+		    (uint8_t)(bits >> (8U * index));
+	}
+	ext4_sha256_block(context, context->block);
+	for (index = 0; index < EXT4_SHA256_DIGEST_SIZE; index++) {
+		digest[index] = (uint8_t)(context->state[index / 4U] >> (24U - 8U * (index % 4U)));
+	}
+}
+
+void
+ext4_sha512_init(struct ext4_sha512 *context)
+{
+	static const uint64_t initial[8] = { UINT64_C(0x6a09e667f3bcc908),
+		UINT64_C(0xbb67ae8584caa73b), UINT64_C(0x3c6ef372fe94f82b),
+		UINT64_C(0xa54ff53a5f1d36f1), UINT64_C(0x510e527fade682d1),
+		UINT64_C(0x9b05688c2b3e6c1f), UINT64_C(0x1f83d9abfb41bd6b),
+		UINT64_C(0x5be0cd19137e2179) };
+
+	ext4_copy(context->state, initial, sizeof(initial));
+	context->length = 0;
+	context->used = 0;
+}
+
+void
+ext4_sha512_update(struct ext4_sha512 *context, const void *buffer, size_t length)
+{
+	const uint8_t *bytes = buffer;
+	size_t part;
+
+	context->length += (uint64_t)length;
+	while (length != 0) {
+		part = EXT4_SHA512_BLOCK_SIZE - context->used;
+		if (part > length) {
+			part = length;
+		}
+		ext4_copy(context->block + context->used, bytes, part);
+		context->used += (uint32_t)part;
+		bytes += part;
+		length -= part;
+		if (context->used == EXT4_SHA512_BLOCK_SIZE) {
+			ext4_sha512_block(context, context->block);
+			context->used = 0;
+		}
+	}
+}
+
+void
+ext4_sha512_final(struct ext4_sha512 *context, uint8_t *digest)
+{
+	uint64_t bits = context->length * 8U;
+	unsigned int index;
+
+	context->block[context->used++] = 0x80U;
+	if (context->used > EXT4_SHA512_BLOCK_SIZE - 16U) {
+		ext4_zero(context->block + context->used, EXT4_SHA512_BLOCK_SIZE - context->used);
+		ext4_sha512_block(context, context->block);
+		context->used = 0;
+	}
+	/* Messages here stay below 2^61 bytes, so the upper length word is zero. */
+	ext4_zero(context->block + context->used, EXT4_SHA512_BLOCK_SIZE - 8U - context->used);
+	for (index = 0; index < 8U; index++) {
+		context->block[EXT4_SHA512_BLOCK_SIZE - 1U - index] =
+		    (uint8_t)(bits >> (8U * index));
+	}
+	ext4_sha512_block(context, context->block);
+	for (index = 0; index < EXT4_SHA512_DIGEST_SIZE; index++) {
+		digest[index] = (uint8_t)(context->state[index / 8U] >> (56U - 8U * (index % 8U)));
+	}
+}

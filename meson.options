@@ -74,3 +74,6 @@ option('fast_commit_fixtures', type: 'string', value: '',
 
 option('mmp_fixtures', type: 'string', value: '',
   description: 'Path to independently generated multi-mount-protection images')
+
+option('verity_fixtures', type: 'string', value: '',
+  description: 'Path to independently authored fs-verity images and manifests')
