@@ -2,6 +2,7 @@
 /* Fixture-only e2fsprogs client. No filesystem implementation links this tool. */
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/types.h>
 #include <ext2fs/ext2fs.h>
 
 #define ATTRIBUTE_VALUE_MAX 65536L
