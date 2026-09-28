@@ -540,9 +540,12 @@ create/link/unlink/rename, orphan cleanup, open-but-unlinked files, truncate ver
 mmap/pageout, failed writeback, metadata locking and forced unmount. Exercise
 large physical addresses and fragmented journals as real images, not only flag
 variations. ACL/xattr/security and LXNU operation-policy tests must include native
-controls and mixed-ABI races. Checksum v1 and async commits have focused,
-independent and Linux recovery cases; their combined full regression is pending.
-Fast commits and external journals still require implementation and acceptance.
+controls and mixed-ABI races. Checksum v1, async commits and single-user external
+journals have focused, independent, Linux and full-regression acceptance. Fast
+commit has bounded semantic replay, interrupted-recovery tests and independent
+protocol fixtures, with wider compatibility acceptance still open. Native special
+inode changes force ordinary-commit fallback in the pinned Linux reference;
+their successful recovery must not be reported as native fast-record replay.
 
 Keep CPU sanitizers, freestanding stack checks, unsigned FSKit builds, kext builds,
 stock FSKit mounts, custom-kernel execution and LXNU acceptance as distinct rows.

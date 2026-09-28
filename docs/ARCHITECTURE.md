@@ -137,11 +137,22 @@ cleanup; replacing an inode generation requires a preceding last unlink and
 reclaims its previous backing within the same transaction. New directories retain
 their reconstructed size and index representation rather than the logged layout.
 
+The complete modern and legacy orphan sets are validated before conversion.
+Generation reuse removes any old modern slot within the conversion transaction;
+the in-memory pending count changes only after commit. Remaining orphans use the
+ordinary restartable cleaner after fast replay.
+
+Embedded short-symlink targets and special-device identities are copied from the
+logged inode payload. Mapped symlinks retain their logged block count while their
+new, private extent root awaits its range records, so that intermediate state is
+not decoded as a short symlink. Range replay and final validation derive block
+charges from actual ownership; a missing required range cannot be committed.
+
 This implementation bounds the fast area to 4,096 blocks, the prefix to 65,536
 records, and the complete conversion to the ordinary 256-snapshot transaction
-limit. Capacity exhaustion returns unsupported. Active modern orphan slots and
-generation reuse requiring staged private-value reclamation are not yet supported.
-Indirect/special-inode records, partially completed foreign replay and broader
+limit. Capacity exhaustion returns unsupported. Generation reuse requiring staged
+private-value reclamation is not yet supported.
+Indirect records, partially completed foreign replay and broader
 ownership-corruption cases still require acceptance. The writer continues to
 emit ordinary full transactions; it does not emit fast commits.
 

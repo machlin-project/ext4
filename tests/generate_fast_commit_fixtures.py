@@ -11,6 +11,7 @@ import shutil
 import subprocess
 
 from generate_fixtures import EXPECTED_FEATURES, UUID, resolve_tools
+from fast_commit_reference import read_namespace
 
 IMAGE_BYTES = 32 * 1024 * 1024
 SOURCE_BLOCKS = 5
@@ -25,7 +26,20 @@ PROFILES = (
     ("no-checksum", 1024, set(), {"metadata_csum"}),
     ("orphan-1k", 1024, {"orphan_file"}, set()),
     ("orphan-4k", 4096, {"orphan_file"}, set()),
+    ("special-1k", 1024, set(), set()),
+    ("special-4k", 4096, set(), set()),
 )
+
+SPECIAL_NODES = {
+    "character-legacy": ("character", 255, 255),
+    "character-wide": ("character", 256, 256),
+    "character-zero": ("character", 0, 0),
+    "block-wide": ("block", 4095, 1048575),
+    "fifo": ("FIFO", 0, 0),
+    "socket": ("socket", 0, 0),
+}
+MALFORMED = ("bad-link-size", "bad-link-nul", "bad-link-terminator", "bad-special-size",
+             "missing-link-range")
 
 
 def digest(path):
@@ -83,6 +97,7 @@ def main():
         (root / "hello.txt").write_bytes(original_data)
         (root / "hello.txt").chmod(0o640)
         modern_orphans = "orphan_file" in added
+        special_files = name.startswith("special-")
         if modern_orphans:
             for filename in ("victim", "final-delete", "orphan-held", "legacy", "orphan-truncate"):
                 (root / filename).write_bytes(b"O" * (SOURCE_BLOCKS * block))
@@ -127,6 +142,9 @@ def main():
             final_files[f"new-dir/{filename}"] = contents
         commands += ["ln /hello.txt /alias", "ln /hello.txt /renamed",
                      "unlink /hello.txt", "sif /renamed links_count 2"]
+        symlinks = ({"link-short": "renamed", "link-59": "a" * 59, "link-60": "b" * 60}
+                    if special_files else {})
+        commands += [f"symlink /{path} {target}" for path, target in symlinks.items()]
         if modern_orphans:
             # Allocate all other new names before releasing inode numbers: only
             # victim's old generation may be reused by this fast-commit stream.
@@ -143,8 +161,11 @@ def main():
         script = directory / "expected.debugfs"
         script.write_text("\n".join(commands) + "\n")
         run(row, [tools["debugfs"], "-w", "-f", script, expected])
+        if special_files:
+            run(row, [helper, "--create-specials", expected])
         run(row, [tools["e2fsck"], "-fn", expected])
-        row["serialization"] = run(row, [helper, pending, expected])
+        row["serialization"] = run(row, [helper, pending, expected] +
+                                   (["--specials"] if special_files else []))
         if f"sequence={SEQUENCE} commits={COMMITS} " not in row["serialization"]:
             raise RuntimeError("Unexpected serialized fast-commit inventory")
         run(row, [tools["debugfs"], "-R", f'dump <8> "{journal}"', pending])
@@ -155,22 +176,32 @@ def main():
             run(row, [tools["e2fsck"], "-fy", "-E", "journal_only", oracle])
             run(row, [tools["e2fsck"], "-fn", oracle])
             references.append(("e2fsck", oracle))
+        wanted = dict(files={path: hashlib.sha256(contents).hexdigest()
+                             for path, contents in final_files.items()},
+                      directories=["lost+found", "new-dir"],
+                      symlinks={path: value.encode().hex() for path, value in symlinks.items()},
+                      special={path: dict(type=kind, mode=0o640, uid=0, gid=0, links=1,
+                                          device_major=major, device_minor=minor)
+                               for path, (kind, major, minor) in SPECIAL_NODES.items()}
+                      if special_files else {})
         for label, image in references:
             exported = directory / (label + "-files")
             exported.mkdir()
-            run(row, [tools["debugfs"], "-R", f'rdump / "{exported}"', image])
-            actual_files = {str(path.relative_to(exported)): path.read_bytes()
-                            for path in exported.rglob("*") if path.is_file()}
-            actual_dirs = {str(path.relative_to(exported))
-                           for path in exported.rglob("*") if path.is_dir()}
-            if actual_files != final_files or actual_dirs != {"lost+found", "new-dir"}:
+            actual = read_namespace(image, exported, block, tools["debugfs"],
+                                    lambda command: run(row, command))
+            if actual != wanted:
                 raise RuntimeError(f"{name}: {label} namespace or data differs from expected")
         if digest(pending) != row["pending_sha256"]:
             raise RuntimeError("Protected pending input changed")
+        if special_files:
+            row["malformed"] = {}
+            for damage in MALFORMED:
+                candidate = directory / (damage + ".img")
+                shutil.copyfile(before, candidate)
+                run(row, [helper, candidate, expected, "--" + damage])
+                row["malformed"][damage] = digest(candidate)
         row.update(passed=True, expected_sha256=digest(expected), journal_sha256=digest(journal),
-                   files={path: hashlib.sha256(contents).hexdigest()
-                          for path, contents in final_files.items()},
-                   directories=["lost+found", "new-dir"], direct_replay=args.direct_replay)
+                   **wanted, direct_replay=args.direct_replay)
         if args.direct_replay:
             row["oracle_sha256"] = digest(oracle)
         save()

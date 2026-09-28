@@ -160,7 +160,45 @@ the lab's `artifacts/ext4-journal/fast-commit-orphan-native-first/`. This proves
 replay followed by Linux verification, not Linux direct replay of the pending
 journal. Full-regression acceptance for this extension remains pending.
 
-Open work includes indirect/special-inode records, private
+Special-inode protocol fixtures now preserve short symlink bytes and device
+identities rather than interpreting those fields as allocation pointers. Mapped
+symlinks keep their logged block count through the private INODE-before-ADD_RANGE
+state; final recount and decoding reject a missing range before conversion commits.
+Two independently authored 1/4 KiB profiles contain 7/59/60-byte targets, legacy,
+extended and zero device identities, a FIFO and a socket. The independent walker
+reads their metadata inside the image without materializing host special files.
+
+All 40 focused cases and eight independent profiles pass. The special profiles
+cover 1,120 allocation failures, 603 read failures and 480 interrupted recoveries;
+six deliberate primary-superblock tears require offline repair. Ten valid-CRC
+malformed logs reject bad short-link size, embedded NUL, missing terminator,
+nonzero special-inode size and missing mapped-link data without home or journal
+writes. Independent checks require exact file hashes, link targets, device
+identities, strict nonrepairing e2fsck and unchanged second clean recovery.
+Evidence is under `artifacts/checks/fast-commit-special-final/` and
+`artifacts/fast-commit-special-independent-final/`.
+
+The first native special-file capture passed recovery and Linux verification but
+reported zero replayed fast commits. Its final special-inode changes caused one
+full-commit fallback with the `Data journalling` reason, superseding the previous
+53 fast commits. This is ordinary-journal interoperability evidence, not native
+special-inode fast replay. The original report remains in the lab's
+`artifacts/ext4-journal/fast-commit-special-native-first/`; its aggregate success
+does not establish which journal path ran. The harness now requires and records
+the actual replay path, including a positive replay count for normal fast captures.
+
+The revised native batch passes eight actual Linux boots and twelve strict fsck
+checks across both block sizes and both paths. Normal captures report 53 replayed
+fast commits and zero ineligible commits. Special-file captures report one
+ineligible commit and recover two ordinary transactions with zero fast commits;
+Linux verifies all three symlinks and six special nodes before clean unmount.
+Every profile also reclaims the checkpointed open-unlinked inode through one
+modern-slot transfer. The frozen core executable is unchanged from the focused
+batch. Evidence is in `artifacts/checks/fast-commit-special-native-path-final/` and
+the lab's `artifacts/ext4-journal/fast-commit-native-path-final/` and
+`artifacts/ext4-journal/fast-commit-special-fallback-final/`.
+
+Open work includes indirect records, private
 attribute reclamation during generation reuse, larger prefixes, additional format
 combinations, broader semantic-corruption coverage and interrupted foreign
 replay. Native-generated fixture capture remains separate from ordinary CI.

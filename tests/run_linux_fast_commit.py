@@ -32,6 +32,8 @@ def main():
                    help='limit this capture to selected block sizes; default: both')
     p.add_argument('--orphan-file', action='store_true',
                    help='capture fast commits with the modern orphan-file feature enabled')
+    p.add_argument('--special-files', action='store_true',
+                   help='verify Linux full-commit fallback after symlinks and special inodes')
     a = p.parse_args()
     lab, prepared, runner, output = (v.resolve() for v in (a.lab, a.prepared, a.runner, a.output))
     if Path.cwd() != lab:
@@ -79,6 +81,7 @@ def main():
         shutil.copy2(output / 'init', tree / 'init')
         (tree / 'phase').write_text(f'{phase}\n')
         (tree / 'modern-orphans').write_text(f'{int(a.orphan_file)}\n')
+        (tree / 'special-files').write_text(f'{int(a.special_files)}\n')
         archive = output / f'phase-{phase}.cpio'
         listing = '\n'.join(str(x.relative_to(tree)) for x in sorted(tree.rglob('*'))) + '\n'
         with archive.open('wb') as stream:
@@ -105,6 +108,8 @@ def main():
         if a.orphan_file:
             features.add('orphan_file')
         row['orphan_file'] = a.orphan_file
+        row['special_files'] = a.special_files
+        row['expected_commit_path'] = 'ordinary fallback' if a.special_files else 'fast commit'
         run(row, [tools['mke2fs'], '-F', '-t', 'ext4', '-b', block, '-N', 256, '-I', 256,
                   '-m', 0, '-O', 'none,' + ','.join(sorted(features)), '-U', UUID,
                   '-J', 'size=8,fast_commit_size=256', '-E', 'lazy_itable_init=0,nodiscard', '-d', seed,
@@ -123,6 +128,8 @@ def main():
                     raise RuntimeError(f'Missing native evidence: {required}')
             if phase == 1 and 'LINUX_FAST_COMMIT_REPLAY_PASS' not in text:
                 raise RuntimeError('Missing native replay check')
+            if a.special_files and 'LINUX_FAST_COMMIT_SPECIALS_PASS' not in text:
+                raise RuntimeError('Missing native special-file verification')
             for forbidden in ('EXT4-fs error', 'Aborting journal', 'Data will be lost'):
                 if forbidden in text:
                     raise RuntimeError(f'Guest filesystem error: {forbidden}')
@@ -131,6 +138,17 @@ def main():
                 if not stats or int(stats[1]) == 0:
                     raise RuntimeError('Missing actual native fast-commit counters')
                 row['native_fast_commits'] = int(stats[1])
+                ineligible = re.search(r'(?m)^(\d+) ineligible$', text)
+                journal_data = re.search(r'(?m)^"Data journalling":\s*(\d+)$', text)
+                if not ineligible or not journal_data:
+                    raise RuntimeError('Missing native full-commit fallback counters')
+                row['native_ineligible_commits'] = int(ineligible[1])
+                row['native_data_journalling_reasons'] = int(journal_data[1])
+                if a.special_files:
+                    if int(ineligible[1]) != 1 or int(journal_data[1]) == 0:
+                        raise RuntimeError('Missing expected special-inode full-commit fallback')
+                elif int(ineligible[1]) != 0:
+                    raise RuntimeError('Unexpected full-commit fallback in fast-commit capture')
                 if a.orphan_file:
                     orphan = re.search(r'(?m)^LINUX_FAST_COMMIT_HELD_ORPHAN=(\d+)$', text)
                     if not orphan or int(orphan[1]) == 0:
@@ -153,6 +171,17 @@ def main():
             if digest(recover) != prep['recover_sha256']:
                 raise RuntimeError('Recovery executable changed during capture')
             row['core_recovery'] = run(row, [recover, '--write', native])
+            fast = re.search(r'\bfast_commits=(\d+)\b', row['core_recovery'])
+            ordinary = re.search(r'\btransactions=(\d+)\b', row['core_recovery'])
+            if not fast or not ordinary:
+                raise RuntimeError('Missing core replay transaction counters')
+            row['core_fast_commits'] = int(fast[1])
+            row['core_ordinary_transactions'] = int(ordinary[1])
+            if a.special_files:
+                if int(fast[1]) != 0 or int(ordinary[1]) == 0:
+                    raise RuntimeError('Special-inode fallback did not use ordinary replay')
+            elif int(fast[1]) == 0:
+                raise RuntimeError('Core did not replay the expected fast-commit prefix')
             run(row, [tools['e2fsck'], '-fn', native])
             row['core_recovered_sha256'] = digest(native)
         boot(native, 1)
@@ -162,7 +191,7 @@ def main():
             raise RuntimeError('Protected pending inputs changed')
         row.update(passed=True, native_sha256=digest(native))
         (output / 'report.json').write_text(json.dumps(rows, indent=2) + '\n')
-        print(f'PASS {name}: native creation, {row["recovery"]}', flush=True)
+        print(f'PASS {name}: {row["expected_commit_path"]}, {row["recovery"]}', flush=True)
 
 
 if __name__ == '__main__':

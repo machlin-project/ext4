@@ -9,6 +9,7 @@ import subprocess
 
 from generate_fast_commit_fixtures import COMMITS, PROFILES, digest
 from generate_fixtures import resolve_tools
+from fast_commit_reference import read_namespace
 
 
 def main():
@@ -60,18 +61,17 @@ def main():
         run(row, [tools["e2fsck"], "-fn", image])
         exported = directory / "files"
         exported.mkdir()
-        run(row, [tools["debugfs"], "-R", f'rdump / "{exported}"', image])
-        actual = {str(path.relative_to(exported)): digest(path)
-                  for path in exported.rglob("*") if path.is_file()}
-        directories = {str(path.relative_to(exported))
-                       for path in exported.rglob("*") if path.is_dir()}
-        if actual != expected["files"] or directories != set(expected["directories"]):
+        actual = read_namespace(image, exported, expected["block_size"], tools["debugfs"],
+                                lambda command: run(row, command))
+        if any(actual[key] != expected[key]
+               for key in ("files", "directories", "symlinks", "special")):
             raise RuntimeError(f"{profile}: independently read namespace or data differs")
         recovered_digest = digest(image)
         run(row, [recover, "--write", image])
         if digest(image) != recovered_digest or digest(source) != expected["pending_sha256"]:
             raise RuntimeError("Clean recovery changed the image or protected input changed")
-        row.update(passed=True, recovered_sha256=recovered_digest, files=len(actual),
+        row.update(passed=True, recovered_sha256=recovered_digest, files=len(actual["files"]),
+                   symlinks=len(actual["symlinks"]), special=len(actual["special"]),
                    clean_recovery_unchanged=True)
         (output / "report.json").write_text(json.dumps(rows, indent=2) + "\n")
         print(f"PASS fast commit {profile}: core replay, strict e2fsck, independent namespace/data",

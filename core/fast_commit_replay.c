@@ -225,9 +225,11 @@ ext4_fc_apply_inode(
 	uint32_t flags = ext4_le32(&logged->flags);
 	uint32_t orphan_next = 0;
 	uint32_t directory_flags = 0;
+	uint32_t index;
 	uint64_t directory_size = 0;
 	uint16_t extra = 0;
 	uint16_t mode = ext4_le16(&logged->mode);
+	uint16_t type = mode & EXT4_MODE_TYPE;
 	bool created;
 	bool extent_root;
 	size_t after_map = offsetof(struct ext4_inode_disk, generation);
@@ -310,12 +312,52 @@ ext4_fc_apply_inode(
 	} else if (flags & EXT4_INODE_INLINE_DATA) {
 		ext4_copy(disk->block_data, logged->block_data, sizeof(disk->block_data));
 	} else {
-		return EXT4_UNSUPPORTED;
+		switch (type) {
+		case EXT4_MODE_SYMLINK:
+		case EXT4_MODE_CHARACTER:
+		case EXT4_MODE_BLOCK:
+		case EXT4_MODE_FIFO:
+		case EXT4_MODE_SOCKET:
+			/* These bytes hold a short link target or device identity, not
+			 * allocation pointers belonging to the pre-crash mapping tree. */
+			ext4_copy(disk->block_data, logged->block_data, sizeof(disk->block_data));
+			break;
+		default:
+			return EXT4_UNSUPPORTED;
+		}
 	}
 	ext4_inode_checksum_set(fs, number, disk);
 	error = ext4_inode_decode_orphan(fs, number, disk, &inode);
-	if (error == EXT4_OK) {
-		error = ext4_inode_writable(fs, disk, &inode);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (type == EXT4_MODE_SYMLINK) {
+		if (inode.size == 0 || inode.size >= fs->info.block_size) {
+			return EXT4_CORRUPT;
+		}
+		if (!(flags & EXT4_INODE_EXTENTS) && !inode.fast_symlink) {
+			return EXT4_UNSUPPORTED;
+		}
+		if (inode.fast_symlink) {
+			if (disk->block_data[inode.size] != 0) {
+				return EXT4_CORRUPT;
+			}
+			for (index = 0; index < inode.size; index++) {
+				if (disk->block_data[index] == 0) {
+					return EXT4_CORRUPT;
+				}
+			}
+		}
+	} else if (type != EXT4_MODE_REGULAR && type != EXT4_MODE_DIRECTORY && inode.size != 0) {
+		return EXT4_CORRUPT;
+	}
+	error = ext4_inode_writable(fs, disk, &inode);
+	/* A newly logged long symlink has no local range until ADD_RANGE follows.
+	 * Keep its logged block count through that private intermediate state;
+	 * zero would misclassify it as a short symlink before its data is claimed.
+	 * Range replay and the final inode pass still recount actual ownership. */
+	if (error == EXT4_OK && type == EXT4_MODE_SYMLINK && !inode.fast_symlink) {
+		return EXT4_OK;
 	}
 	return error == EXT4_OK ? ext4_fc_inode_finish(replay, disk, &inode) : error;
 }
@@ -732,11 +774,11 @@ ext4_fast_commit_replay(struct ext4_fast_commit *log)
 		if (error == EXT4_OK) {
 			error = ext4_fc_inode_finish(replay, disk, &inode);
 		}
-		if (error == EXT4_OK && inode.links == 0) {
+		if (error == EXT4_OK) {
 			error = ext4_inode_decode_orphan(fs, inode.number, disk, &inode);
-			if (error == EXT4_OK) {
-				error = ext4_fc_orphan_enroll(replay, &inode, disk);
-			}
+		}
+		if (error == EXT4_OK && inode.links == 0) {
+			error = ext4_fc_orphan_enroll(replay, &inode, disk);
 		}
 	}
 	if (error == EXT4_OK) {

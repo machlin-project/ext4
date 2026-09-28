@@ -137,6 +137,13 @@ images and journal dumps, and checks the recovered image without repairing it.
 `--orphan-file` enables the modern orphan file and keeps an allocated, unlinked
 inode open across the initial full checkpoint and final crash. The capture must
 identify that held inode and retain `orphan_present` in the pending filesystem.
+The normal capture rejects unexpected full-commit fallback, and core recovery
+must report a positive fast-commit replay count. `--special-files` adds three
+symlinks, character/block devices, a FIFO and a socket after the fast prefix.
+The pinned Linux writer makes these operations ineligible for fast commit. This
+mode explicitly requires the data-journalling fallback and ordinary core replay
+with zero fast commits; it tests supersession of the old prefix, not native
+generation of special-inode fast records.
 The expanded native direct-replay failure is documented in ACCEPTANCE.md.
 
 After capture, the focused executables accept the protected inputs directly:
@@ -164,6 +171,10 @@ Two additional orphan-file profiles combine inode-generation reuse, final unlink
 a checkpointed unlinked inode, an interrupted linked truncate and a legacy orphan
 in the same pending filesystem. Their expected filesystems are independently
 authored before serializing the orphan state and fast-commit records.
+Two special-inode profiles add 7/59/60-byte symlink targets, legacy and extended
+device encodings, a FIFO and a socket. Their journals are protocol fixtures;
+the pinned native Linux writer instead uses its full-commit fallback for these
+inode changes.
 
 ```sh
 python3 tests/generate_fast_commit_fixtures.py --tools-root E2FSPROGS_BUILD \
@@ -176,8 +187,10 @@ python3 tests/check_fast_commit.py --tools-root E2FSPROGS_BUILD \
   --output artifacts/fast-commit-independent
 ```
 
-The checker requires nonrepairing e2fsck, independently exported namespace and file
-hashes, and an unchanged image after a second clean recovery. In-memory comparisons
+The checker requires nonrepairing e2fsck, independently read namespace, file
+hashes, symlink bytes and device identities, and an unchanged image after a second
+clean recovery. It exports regular file data only; special nodes are inspected
+inside the image and never created or opened on the host. In-memory comparisons
 also check inode metadata and free-inode counts; any free-block difference must be
 charged exactly to a different reconstructed directory/index layout. Generated
 inputs remain unchanged. This is independent output verification, not a native
@@ -188,6 +201,10 @@ The orphan profiles also run `--orphans` guards: duplicate slots, overlap with t
 legacy chain, reserved/out-of-range inode numbers and damaged tails must be rejected
 before any conversion write. Resource and durability failures cover both the fast
 conversion and the subsequent ordinary orphan-cleanup transactions.
+Each special-inode profile also supplies five valid-CRC malformed journals:
+invalid short-link size, embedded NUL, missing terminator, nonzero special-inode
+size and a missing mapped-link range. `--reject` requires corruption with no home
+or journal writes and no leaked allocations.
 
 Add `--checksum-v1` before the image to select v1 with 32/64-bit tags. Add
 `--export-only` after that option to retain committed logs without repeating the

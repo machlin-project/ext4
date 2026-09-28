@@ -14,6 +14,35 @@
 #define SOURCE_BLOCKS 5U
 #define CREATED_FILES 12U
 #define LONG_NAME_BYTES 230U
+#define DEVICE_LEGACY_MASK 0xffU
+#define DEVICE_MAJOR_SHIFT 8U
+#define DEVICE_MINOR_HIGH_SHIFT 12U
+
+static const struct {
+	const char *name;
+	__u16 mode;
+	unsigned int type;
+	__u32 major;
+	__u32 minor;
+} special_nodes[] = {
+	{ "character-legacy", LINUX_S_IFCHR, EXT2_FT_CHRDEV, 255, 255 },
+	{ "character-wide", LINUX_S_IFCHR, EXT2_FT_CHRDEV, 256, 256 },
+	{ "character-zero", LINUX_S_IFCHR, EXT2_FT_CHRDEV, 0, 0 },
+	{ "block-wide", LINUX_S_IFBLK, EXT2_FT_BLKDEV, 4095, 1048575 },
+	{ "fifo", LINUX_S_IFIFO, EXT2_FT_FIFO, 0, 0 },
+	{ "socket", LINUX_S_IFSOCK, EXT2_FT_SOCK, 0, 0 },
+};
+
+static const char *link_names[] = { "link-short", "link-59", "link-60" };
+
+enum fixture_damage {
+	DAMAGE_NONE,
+	DAMAGE_LINK_SIZE,
+	DAMAGE_LINK_NUL,
+	DAMAGE_LINK_TERMINATOR,
+	DAMAGE_SPECIAL_SIZE,
+	DAMAGE_MISSING_LINK_RANGE
+};
 
 struct fixture {
 	ext2_filsys pending;
@@ -26,6 +55,7 @@ struct fixture {
 	__u32 first;
 	__u32 blocks;
 	unsigned int commits;
+	enum fixture_damage damage;
 };
 
 static void
@@ -165,9 +195,22 @@ inode_record(struct fixture *fixture, ext2_ino_t number, unsigned int links)
 	    "read expected inode");
 	if (links != 0) {
 		inode->i_links_count = links;
-		check(ext2fs_inode_csum_set(fixture->expected, number, inode),
-		    "checksum logged links");
 	}
+	if (fixture->damage != DAMAGE_NONE &&
+	    number == lookup(fixture, EXT2_ROOT_INO, "link-short")) {
+		if (fixture->damage == DAMAGE_LINK_SIZE) {
+			inode->i_size = sizeof(inode->i_block);
+		} else if (fixture->damage == DAMAGE_LINK_NUL) {
+			((unsigned char *)inode->i_block)[0] = 0;
+		} else if (fixture->damage == DAMAGE_LINK_TERMINATOR) {
+			((unsigned char *)inode->i_block)[inode->i_size] = 'X';
+		}
+	}
+	if (fixture->damage == DAMAGE_SPECIAL_SIZE &&
+	    number == lookup(fixture, EXT2_ROOT_INO, "character-wide")) {
+		inode->i_size = 1;
+	}
+	check(ext2fs_inode_csum_set(fixture->expected, number, inode), "checksum logged inode");
 #ifdef WORDS_BIGENDIAN
 	ext2fs_swap_inode_full(
 	    fixture->expected, inode, inode, 1, EXT2_INODE_SIZE(fixture->expected->super));
@@ -205,6 +248,13 @@ data_records(struct fixture *fixture, ext2_ino_t number)
 	int flags;
 
 	check(ext2fs_read_inode(fixture->expected, number, &inode), "read expected file size");
+	if (fixture->damage == DAMAGE_MISSING_LINK_RANGE &&
+	    number == lookup(fixture, EXT2_ROOT_INO, "link-60")) {
+		return;
+	}
+	if (ext2fs_is_fast_symlink(&inode)) {
+		return;
+	}
 	require(inode.i_size_high == 0, "bound fixture file size");
 	blocks = (inode.i_size + fixture->expected->blocksize - 1U) / fixture->expected->blocksize;
 	for (logical = 0; logical < blocks; logical++) {
@@ -320,6 +370,64 @@ orphan_records(struct fixture *fixture)
 	name_record(fixture, EXT4_FC_TAG_UNLINK, EXT2_ROOT_INO, final, "final-delete");
 }
 
+static void
+create_specials(const char *path)
+{
+	ext2_filsys fs;
+	struct ext2_inode inode;
+	ext2_ino_t number;
+	unsigned int index;
+	__u32 major;
+	__u32 minor;
+
+	check(ext2fs_open(path, EXT2_FLAG_RW | EXT2_FLAG_64BITS, 0, 0, unix_io_manager, &fs),
+	    "open expected filesystem for special nodes");
+	check(ext2fs_read_bitmaps(fs), "read independent allocator bitmaps");
+	for (index = 0; index < sizeof(special_nodes) / sizeof(special_nodes[0]); index++) {
+		memset(&inode, 0, sizeof(inode));
+		inode.i_mode = special_nodes[index].mode | 0640;
+		inode.i_links_count = 1;
+		major = special_nodes[index].major;
+		minor = special_nodes[index].minor;
+		if (major <= DEVICE_LEGACY_MASK && minor <= DEVICE_LEGACY_MASK) {
+			inode.i_block[0] = (major << DEVICE_MAJOR_SHIFT) | minor;
+		} else {
+			inode.i_block[1] = (major << DEVICE_MAJOR_SHIFT) |
+			    (minor & DEVICE_LEGACY_MASK) |
+			    ((minor & ~DEVICE_LEGACY_MASK) << DEVICE_MINOR_HIGH_SHIFT);
+		}
+		check(ext2fs_new_inode(fs, EXT2_ROOT_INO, inode.i_mode, NULL, &number),
+		    "allocate independent special inode");
+		check(
+		    ext2fs_write_new_inode(fs, number, &inode), "write independent special inode");
+		ext2fs_inode_alloc_stats2(fs, number, 1, 0);
+		check(ext2fs_link(fs, EXT2_ROOT_INO, special_nodes[index].name, number,
+			  special_nodes[index].type),
+		    "link independent special inode");
+	}
+	check(ext2fs_close(fs), "close independent special-node filesystem");
+}
+
+static void
+special_records(struct fixture *fixture)
+{
+	ext2_ino_t number;
+	unsigned int index;
+
+	for (index = 0; index < sizeof(link_names) / sizeof(link_names[0]); index++) {
+		number = lookup(fixture, EXT2_ROOT_INO, link_names[index]);
+		inode_record(fixture, number, 0);
+		data_records(fixture, number);
+		name_record(fixture, EXT4_FC_TAG_CREAT, EXT2_ROOT_INO, number, link_names[index]);
+	}
+	for (index = 0; index < sizeof(special_nodes) / sizeof(special_nodes[0]); index++) {
+		number = lookup(fixture, EXT2_ROOT_INO, special_nodes[index].name);
+		inode_record(fixture, number, 0);
+		name_record(
+		    fixture, EXT4_FC_TAG_CREAT, EXT2_ROOT_INO, number, special_nodes[index].name);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -338,9 +446,29 @@ main(int argc, char **argv)
 	int prefix;
 	int flags;
 
-	if (argc != 3) {
-		fprintf(stderr, "usage: fast-commit-fixture PENDING_COPY EXPECTED_IMAGE\n");
+	if (argc == 3 && strcmp(argv[1], "--create-specials") == 0) {
+		create_specials(argv[2]);
+		return 0;
+	}
+	if (argc != 3 && argc != 4) {
+		fprintf(stderr,
+		    "usage: fast-commit-fixture PENDING_COPY EXPECTED_IMAGE [--specials]\n");
 		return 2;
+	}
+	if (argc == 4 && strcmp(argv[3], "--specials") != 0) {
+		if (strcmp(argv[3], "--bad-link-size") == 0) {
+			fixture.damage = DAMAGE_LINK_SIZE;
+		} else if (strcmp(argv[3], "--bad-link-nul") == 0) {
+			fixture.damage = DAMAGE_LINK_NUL;
+		} else if (strcmp(argv[3], "--bad-link-terminator") == 0) {
+			fixture.damage = DAMAGE_LINK_TERMINATOR;
+		} else if (strcmp(argv[3], "--bad-special-size") == 0) {
+			fixture.damage = DAMAGE_SPECIAL_SIZE;
+		} else if (strcmp(argv[3], "--missing-link-range") == 0) {
+			fixture.damage = DAMAGE_MISSING_LINK_RANGE;
+		} else {
+			require(0, "unknown fixture damage mode");
+		}
 	}
 	check(ext2fs_open(argv[1], EXT2_FLAG_RW | EXT2_FLAG_64BITS, 0, 0, unix_io_manager,
 		  &fixture.pending),
@@ -411,6 +539,9 @@ main(int argc, char **argv)
 	name_record(&fixture, EXT4_FC_TAG_UNLINK, EXT2_ROOT_INO, hello, "hello.txt");
 	inode_record(&fixture, hello, 0);
 	orphan_records(&fixture);
+	if (argc == 4) {
+		special_records(&fixture);
+	}
 	commit(&fixture);
 	for (block = fixture.first; block < fixture.blocks; block++) {
 		journal_write(&fixture, block,

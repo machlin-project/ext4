@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 
@@ -26,6 +27,23 @@
 #define RESERVED_BLOCKS 8U
 #define INITIALIZED_BLOCK 102U
 #define INITIALIZED_OFFSET 7U
+#define SYMLINK_INLINE_BYTES 60U
+
+static const struct {
+	const char *path;
+	mode_t mode;
+	unsigned int major;
+	unsigned int minor;
+} special_nodes[] = {
+	{ "/mnt/character-legacy", S_IFCHR, 255, 255 },
+	{ "/mnt/character-wide", S_IFCHR, 256, 256 },
+	{ "/mnt/character-zero", S_IFCHR, 0, 0 },
+	{ "/mnt/block-wide", S_IFBLK, 4095, 1048575 },
+	{ "/mnt/fifo", S_IFIFO, 0, 0 },
+	{ "/mnt/socket", S_IFSOCK, 0, 0 },
+};
+
+static const char *link_names[] = { "/mnt/link-short", "/mnt/link-59", "/mnt/link-60" };
 
 static void
 power_off(int passed)
@@ -198,6 +216,74 @@ verify(unsigned int block_size)
 }
 
 static void
+special_target(char *target, unsigned int index)
+{
+	size_t length;
+
+	if (index == 0) {
+		strcpy(target, "hello.txt");
+		return;
+	}
+	length = index == 1 ? SYMLINK_INLINE_BYTES - 1U : SYMLINK_INLINE_BYTES;
+	memset(target, index == 1 ? 'a' : 'b', length);
+	target[length] = 0;
+}
+
+static void
+verify_specials(void)
+{
+	struct stat metadata;
+	char target[SYMLINK_INLINE_BYTES + 1U];
+	char actual[sizeof(target)];
+	size_t length;
+	unsigned int index;
+
+	for (index = 0; index < sizeof(link_names) / sizeof(link_names[0]); index++) {
+		special_target(target, index);
+		length = strlen(target);
+		require(lstat(link_names[index], &metadata) == 0 && S_ISLNK(metadata.st_mode) &&
+			metadata.st_size == (off_t)length &&
+			readlink(link_names[index], actual, sizeof(actual)) == (ssize_t)length &&
+			memcmp(actual, target, length) == 0,
+		    "verify exact symlink target");
+	}
+	for (index = 0; index < sizeof(special_nodes) / sizeof(special_nodes[0]); index++) {
+		require(lstat(special_nodes[index].path, &metadata) == 0 &&
+			metadata.st_mode == (special_nodes[index].mode | 0640) &&
+			metadata.st_nlink == 1 && metadata.st_size == 0 &&
+			metadata.st_blocks == 0 &&
+			major(metadata.st_rdev) == special_nodes[index].major &&
+			minor(metadata.st_rdev) == special_nodes[index].minor,
+		    "verify special inode and device identity");
+	}
+	puts("LINUX_FAST_COMMIT_SPECIALS_PASS");
+}
+
+static void
+mutate_specials(void)
+{
+	char target[SYMLINK_INLINE_BYTES + 1U];
+	unsigned int index;
+	int fd;
+
+	for (index = 0; index < sizeof(link_names) / sizeof(link_names[0]); index++) {
+		special_target(target, index);
+		require(symlink(target, link_names[index]) == 0, "create symlink");
+	}
+	for (index = 0; index < sizeof(special_nodes) / sizeof(special_nodes[0]); index++) {
+		require(mknod(special_nodes[index].path, special_nodes[index].mode | 0640,
+			    makedev(special_nodes[index].major, special_nodes[index].minor)) == 0,
+		    "create special inode");
+	}
+	/* The pinned Linux reference forces a full commit for these inode types.
+	 * Its fsync must supersede the earlier fast prefix before the crash. */
+	fd = open("/mnt/hello.txt", O_RDWR | O_CLOEXEC);
+	require(fd >= 0 && pwrite(fd, "B", 1, 0) == 1 && fsync(fd) == 0 && close(fd) == 0,
+	    "commit queued symlinks and special inodes");
+	verify_specials();
+}
+
+static void
 mutate_extra(unsigned int block_size)
 {
 	char path[512];
@@ -247,7 +333,7 @@ mutate_extra(unsigned int block_size)
 }
 
 static void
-mutate(unsigned int block_size, unsigned int modern_orphans)
+mutate(unsigned int block_size, unsigned int modern_orphans, unsigned int special_files)
 {
 	struct stat held_metadata;
 	uint8_t *bytes;
@@ -257,6 +343,7 @@ mutate(unsigned int block_size, unsigned int modern_orphans)
 	FILE *stats;
 	size_t length;
 	unsigned long commits = 0;
+	unsigned long ineligible = 0;
 	unsigned int index;
 	int fd;
 	int held = -1;
@@ -317,6 +404,9 @@ mutate(unsigned int block_size, unsigned int modern_orphans)
 	}
 	free(bytes);
 	mutate_extra(block_size);
+	if (special_files) {
+		mutate_specials();
+	}
 	verify(block_size);
 	stats = fopen("/proc/fs/ext4/vda/fc_info", "r");
 	require(stats != NULL, "open native fast-commit statistics");
@@ -326,12 +416,16 @@ mutate(unsigned int block_size, unsigned int modern_orphans)
 		if (strstr(line, " commits\n") != NULL) {
 			require(sscanf(line, "%lu commits", &commits) == 1,
 			    "decode native fast-commit count");
+		} else if (strstr(line, " ineligible\n") != NULL) {
+			require(sscanf(line, "%lu ineligible", &ineligible) == 1,
+			    "decode native full-commit fallback count");
 		}
 	}
 	require(fclose(stats) == 0 && commits != 0, "require actual native fast commits");
+	require(ineligible == (special_files ? 1UL : 0UL), "verify expected full-commit fallback");
 	puts("LINUX_FAST_COMMIT_STATS_END");
 	/* Keep the mount dirty and held open-unlinked descriptor alive; the next
-	 * owner must replay the fast log and reclaim its checkpointed orphan. */
+	 * owner must recover the journal and reclaim its checkpointed orphan. */
 	power_off(1);
 }
 
@@ -349,6 +443,7 @@ main(void)
 	char path[128];
 	unsigned int phase = 0;
 	unsigned int modern_orphans = 0;
+	unsigned int special_files = 0;
 	unsigned int index;
 	int fd;
 	int result;
@@ -375,6 +470,10 @@ main(void)
 	require(config != NULL && fscanf(config, "%u", &modern_orphans) == 1,
 	    "read orphan fixture mode");
 	require(fclose(config) == 0 && modern_orphans <= 1, "validate orphan fixture mode");
+	config = fopen("/special-files", "r");
+	require(config != NULL && fscanf(config, "%u", &special_files) == 1,
+	    "read special-file fixture mode");
+	require(fclose(config) == 0 && special_files <= 1, "validate special-file fixture mode");
 	printf("LINUX_FAST_COMMIT_MOUNT_OPTIONS=%s\n", options);
 	require(mount("/dev/vda", "/mnt", "ext4", MS_NOATIME | MS_NOSUID | MS_NODEV, options) == 0,
 	    "mount fast-commit filesystem");
@@ -382,9 +481,12 @@ main(void)
 		(geometry.f_bsize == 1024 || geometry.f_bsize == 4096),
 	    "require fixture block size");
 	if (phase == 0) {
-		mutate((unsigned int)geometry.f_bsize, modern_orphans);
+		mutate((unsigned int)geometry.f_bsize, modern_orphans, special_files);
 	}
 	verify((unsigned int)geometry.f_bsize);
+	if (special_files) {
+		verify_specials();
+	}
 	require(umount("/mnt") == 0, "cleanly unmount recovered filesystem");
 	puts("LINUX_FAST_COMMIT_REPLAY_PASS");
 	power_off(1);

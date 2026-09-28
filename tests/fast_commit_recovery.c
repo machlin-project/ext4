@@ -271,6 +271,8 @@ compare_inode(struct ext4_fs *fs, struct ext4_fs *reference, const struct ext4_i
 	}
 	CHECK(inode->size == expected->size && inode->blocks_512 == expected->blocks_512);
 	CHECK(inode->flags == expected->flags);
+	CHECK(inode->device_major == expected->device_major &&
+	    inode->device_minor == expected->device_minor);
 	CHECK(same_time(inode->change_time, expected->change_time));
 	CHECK(same_time(inode->modify_time, expected->modify_time));
 	CHECK(same_time(inode->birth_time, expected->birth_time));
@@ -410,19 +412,21 @@ main(int argc, char **argv)
 	bool faults;
 	bool resources;
 	bool orphans;
+	bool reject;
 	enum ext4_result error;
 
 	if (argc != 3 && argc != 4) {
 		fprintf(stderr,
 		    "usage: %s PENDING_IMAGE VERIFIED_REFERENCE_IMAGE "
-		    "[--faults|--resources|--orphans]\n",
+		    "[--faults|--resources|--orphans|--reject]\n",
 		    argv[0]);
 		return 2;
 	}
 	faults = argc == 4 && strcmp(argv[3], "--faults") == 0;
 	resources = argc == 4 && strcmp(argv[3], "--resources") == 0;
 	orphans = argc == 4 && strcmp(argv[3], "--orphans") == 0;
-	CHECK(argc == 3 || faults || resources || orphans);
+	reject = argc == 4 && strcmp(argv[3], "--reject") == 0;
+	CHECK(argc == 3 || faults || resources || orphans || reject);
 	EXPECT(ext4_posix_open(&source, argv[1]), EXT4_OK);
 	EXPECT(ext4_posix_open(&oracle, argv[2]), EXT4_OK);
 	EXPECT(ext4_mount(&oracle.environment, &reference), EXT4_OK);
@@ -451,6 +455,16 @@ main(int argc, char **argv)
 	device->writer.write = write_device;
 	device->writer.flush = flush_device;
 	reset(device);
+	if (reject) {
+		EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_CORRUPT);
+		CHECK(device->live == 0 && report.fast_commits == 0 && report.replayed_blocks == 0);
+		for (stop = 0; stop < device->events; stop++) {
+			CHECK(device->history[stop].flush);
+		}
+		CHECK(memcmp(device->base, device->cache, device->size) == 0);
+		printf("PASS malformed inode payload rejected without home or journal writes\n");
+		goto out;
+	}
 	EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_OK);
 	CHECK(report.fast_commits != 0 && device->live == 0);
 	operations = device->events;
@@ -528,6 +542,7 @@ main(int argc, char **argv)
 		printf("PASS %u interrupted recoveries; %u torn primary superblocks rejected\n",
 		    cuts, torn);
 	}
+out:
 	free(device->dirty);
 	free(device->stable);
 	free(device->cache);
