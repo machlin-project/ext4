@@ -28,6 +28,8 @@ def main():
     parser.add_argument("--module-report", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--no-delalloc", action="store_true",
+                        help="explicit Linux allocation control; disable delayed allocation")
     parser.add_argument("--file-writes", action="store_true",
                         help="verify clean file-write exports listed by check_writes.py")
     parser.add_argument("--allocation", action="store_true",
@@ -188,6 +190,8 @@ def main():
         shutil.copyfile(probe, tree / "init")
         (tree / "init").chmod(0o755)
         (tree / "block-size").write_text(f"{block_size}\n")
+        if args.no_delalloc:
+            (tree / "no-delalloc").touch()
         if case.get("checksum_v1"):
             (tree / "journal-checksum-v1").touch()
         if case.get("async_commit"):
@@ -218,7 +222,8 @@ def main():
             raise RuntimeError(f"file-write export changed: {source}")
         scratch = output / source.name
         shutil.copyfile(source, scratch)
-        record = {"case": source.name, "input_sha256": digest(source), "commands": []}
+        record = {"case": source.name, "input_sha256": digest(source), "commands": [],
+                  "linux_no_delalloc": args.no_delalloc}
         if not args.orphans:
             record.update(recover=str(recover), recover_sha256=recover_sha)
         if args.xattrs:
@@ -242,6 +247,8 @@ def main():
         console = run([runner, kernel, archives[key], "2", "512",
                        "console=hvc0 rdinit=/init panic=-1 loglevel=4", scratch])
         (output / f"{source.stem}.console.log").write_text(console)
+        if args.no_delalloc and not re.search(r"LINUX_EXT4_MOUNT_OPTIONS=[^\n]*,nodelalloc(?:\r?\n)", console):
+            raise RuntimeError("Linux did not identify the requested nodelalloc control")
         if any(message in console for message in (
                 "Delayed block allocation failed", "Data will be lost", "EXT4-fs error",
                 "JBD2: Detected IO errors", "Aborting journal")):
@@ -295,6 +302,11 @@ def main():
             raise RuntimeError("Missing Linux inline mutation evidence")
         if case.get("clustered") and "LINUX_EXT4_CLUSTER_PASS" not in console:
             raise RuntimeError("Missing Linux clustered allocation evidence")
+        if case.get("large_files") and "LINUX_EXT4_LARGE_FILE_PASS" not in console:
+            raise RuntimeError("Missing Linux high-offset mutation evidence")
+        if case.get("large_files", {}).get("profile") in ("inline", "cluster-inline"):
+            if "LINUX_EXT4_INLINE_HIGH_OFFSET_REJECTED_BEFORE_CONVERSION" not in console:
+                raise RuntimeError("Missing pinned Linux inline-conversion boundary evidence")
         header = run([tools / "misc/dumpe2fs", "-h", scratch])
         if "needs_recovery" not in header:
             raise RuntimeError("Linux did not leave a pending journal for the reverse roundtrip")
@@ -334,12 +346,17 @@ def main():
                 shutil.copytree(original_tree, tree)
                 shutil.rmtree(tree / "expected")
                 expected_case = dict(image=str(expected), input_sha256=digest(expected))
+                if case.get("large_files"):
+                    expected_case.update(large_files=case["large_files"],
+                                         large_phase="linux" if label == "replay" else "returned")
                 linux_xattrs.prepare(expected_case, tree, tools, verify_only=True)
                 archive = output / f"initramfs-{tree.name}.cpio"
                 archive_tree(tree, archive)
                 text = run([runner, kernel, archive, "2", "512",
                             "console=hvc0 rdinit=/init panic=-1 loglevel=4", candidate])
                 (output / f"{source.stem}-{label}.console.log").write_text(text)
+                if args.no_delalloc and not re.search(r"LINUX_EXT4_MOUNT_OPTIONS=[^\n]*,nodelalloc(?:\r?\n)", text):
+                    raise RuntimeError(f"Linux {label} did not identify the requested nodelalloc control")
                 for marker in ("LINUX_EXT4_XATTR_RETURN_PASS", "LINUX_EXT4_PROBE_RESULT=PASS",
                                f"Linux {module_report['kernel_release']} aarch64"):
                     if marker not in text:
@@ -352,7 +369,8 @@ def main():
                                          native_replay=verify_native_attributes)
             returned = Path(checked["returned_image"])
             verify_native_attributes(returned, returned, "returned")
-            final = linux_xattrs.snapshot(returned, output / f"final-{source.stem}-checked", tools, run)
+            final = linux_xattrs.snapshot(returned, output / f"final-{source.stem}-checked", tools, run,
+                                         large_file_case=dict(case, large_phase="returned") if case.get("large_files") else None)
             if final != checked["returned_state"]:
                 raise RuntimeError("Linux verification changed the returned inode/attribute state")
             if digest(source) != expected_sha or digest(reader) != reader_sha or digest(recover) != recover_sha:

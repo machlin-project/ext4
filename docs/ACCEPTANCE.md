@@ -83,12 +83,46 @@ inode/cluster charges, untouched seed files and free counts. All 279 verificatio
 commands and 45 strict nonrepairing fsck checks pass. Reports are
 `artifacts/large-file-fixtures-api-retry1/report.json` and
 `artifacts/large-file-independent/report.json`; main review is
-`artifacts/checks/large-file-focused-accepted.json`. Native Linux mutation/recovery
-roundtrips and the expanded full regression remain pending.
+`artifacts/checks/large-file-focused-accepted.json`. The expanded full regression
+remains pending.
+
+Six Linux/core/Linux roundtrips pass with ordinary ordered mounts: 1/4 KiB,
+indirect, inline and the two profiles without HUGE_FILE. The two BIGALLOC profiles
+pass the same maximum-offset operations with explicit `nodelalloc`. Together these
+runs contain 24 actual boots identifying Linux 6.12.94-0-virt aarch64, 41 recovered
+transactions and eight reclaimed orphans. All 352 recorded commands and 32 strict
+nonrepairing fsck checks pass. Exact inode identities, modes, ownership, data,
+holes, allocation and native replay agree. Returned core mutations survive another
+Linux mount unchanged. Main review is `artifacts/checks/large-file-linux-reviewed.json`;
+raw lab reports are under `artifacts/ext4-journal/large-file-clean/`,
+`large-file-remaining-retry2/`, `large-file-sector-limits/` and `large-file-nodelalloc/`.
+
+The default delayed-allocation BIGALLOC case remains a failed conformance case.
+Linux accepts the core-authored image and its maximum-offset data, then commits
+an inode charging 64 sectors for 72 sectors of cluster ownership and an unlinked
+inode charging 16 sectors for 24. Independent `debugfs journal_run` on the original
+Linux journal reproduces both counts without repairing them; evidence is in
+`artifacts/checks/large-file-raw-journal/`. The core replays the validated journal
+but rejects the inconsistent orphan before reclamation. An earlier diagnostic
+`e2fsck -fy -E journal_only` also performed repairs, so its subsequent clean check
+is not acceptance evidence. Disabling Linux delayed allocation removes the
+failure in this control, but does not establish default-mount compatibility.
+The combined inline/BIGALLOC default-mount case was not run after that failure.
+
+The pinned Linux reference also applies its indirect-write limit before converting
+new inline files into extents. The probe retains the expected EFBIG check and proves
+size/allocation remain unchanged, then completes conversion at a small offset and
+exercises the full extent range. Core-authored files expanded directly to that
+range are read and mutated successfully by Linux. This native restriction does not
+reduce the portable core's tested extent ceiling.
 
 Reproduce with `generate_large_file_fixtures.py`, `ext4-large-file-test --export`
 and `check_large_files.py`. Meson registers these profiles through
 `-Dlarge_file_fixtures=PATH`; the core CI job runs focused and independent checks.
+`prepare_large_file_linux.py` selects the eight profiles supported by the pinned
+guest's 4 KiB pages. Run them through `run_linux_journal.py --xattrs` with the exact
+`ext4-large-file-test` binary as `--xattr-reader`. `--no-delalloc` selects and records
+the separate native allocation control; it is never an automatic fallback.
 
 ## Clustered allocation
 

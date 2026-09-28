@@ -74,8 +74,12 @@ Large logical-file tests cover 2/4 GiB byte boundaries, the signed 32-bit block
 boundary and format size ceilings on nine profiles up to 64 KiB blocks. Inline
 expansion now uses its destination mapping's limit; legacy sector accounting
 also bounds growth when HUGE_FILE is absent. All nine focused tests and 36
-independent mutation/reclamation states pass. Native Linux roundtrips and the
-expanded regression remain pending; this does not establish large-volume scale.
+independent mutation/reclamation states pass. Six native Linux roundtrips pass
+with ordinary ordered mounts; the two BIGALLOC profiles pass with explicit
+`nodelalloc`. The pinned Linux reference writes inconsistent allocation counters
+with delayed allocation at the maximum clustered-file offset; that failure remains
+recorded and the core rejects the corrupt orphan. The expanded regression remains
+pending; this does not establish large-volume scale.
 
 Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.
 Both native adapters remain read-only. The FSKit adapter builds for macOS 26.4,

@@ -278,6 +278,8 @@ mutations(struct device *device, const char *exports, const char *path)
 	    "PASS large-file reads, mutation and reclamation: limit=%" PRIu64 " %s\n", limit, path);
 }
 
+#include "large_file_linux.h"
+
 int
 main(int argc, char **argv)
 {
@@ -286,6 +288,13 @@ main(int argc, char **argv)
 	int argument = 1;
 
 	CHECK(argc > 1);
+	if (strcmp(argv[argument], "--linux-return") == 0) {
+		CHECK(argc == 4);
+		storage_open(&device, argv[3]);
+		linux_return(&device, argv[2]);
+		storage_close(&device);
+		return 0;
+	}
 	if (strcmp(argv[argument], "--export") == 0) {
 		CHECK(argc >= 4);
 		exports = argv[++argument];

@@ -93,7 +93,10 @@ def tool(root, name):
     return root / ("misc" if name == "dumpe2fs" else name) / name
 
 
-def snapshot(image, output, tools, run, *, allow_summary_lag=False):
+def snapshot(image, output, tools, run, *, allow_summary_lag=False, large_file_case=None):
+    if large_file_case is not None:
+        from linux_large_file import snapshot as large_snapshot
+        return large_snapshot(large_file_case, image, output, tools, run)
     output.mkdir(parents=True, exist_ok=False)
     check = run([tool(tools, "e2fsck"), "-fn", image],
                 allowed=(0, 4) if allow_summary_lag else (0,))
@@ -197,6 +200,9 @@ def snapshot(image, output, tools, run, *, allow_summary_lag=False):
 
 
 def prepare(case, tree, tools, *, verify_only=False):
+    if case.get("large_files"):
+        from linux_large_file import prepare as large_prepare
+        return large_prepare(case, tree, tools, verify_only)
     image = Path(case["image"])
     if digest(image) != case["input_sha256"]:
         raise RuntimeError("Attribute source changed before Linux preparation")
@@ -332,6 +338,9 @@ def write_core_expectations(state, output):
 
 
 def verify(case, image, output, tools, recover, reader, run, *, native_replay=None):
+    if case.get("large_files"):
+        from linux_large_file import verify as large_verify
+        return large_verify(case, image, output, tools, recover, reader, run, native_replay)
     if case.get("clustered"):
         from linux_cluster import verify as verify_cluster
         return verify_cluster(case, image, output, tools, recover, reader, run, native_replay)
