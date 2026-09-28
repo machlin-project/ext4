@@ -86,7 +86,9 @@ main(int argc, char **argv)
 	fs.environment = image.environment;
 	fs.info.block_size = ext4_be32(&super->block_size);
 	fs.inode_size = 256;
-	CHECK(fs.info.block_size == 1024 || fs.info.block_size == 4096);
+	CHECK(fs.info.block_size >= EXT4_MIN_BLOCK_SIZE &&
+	    fs.info.block_size <= EXT4_MAX_BLOCK_SIZE &&
+	    (fs.info.block_size & (fs.info.block_size - 1U)) == 0);
 	journal.fs = &fs;
 	journal.blocks = ext4_be32(&super->max_length);
 	journal.first = ext4_be32(&super->first);

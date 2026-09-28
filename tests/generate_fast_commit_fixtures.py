@@ -14,6 +14,11 @@ from generate_fixtures import EXPECTED_FEATURES, UUID, resolve_tools
 from fast_commit_reference import read_namespace
 
 IMAGE_BYTES = 32 * 1024 * 1024
+JOURNAL_MIB = 8
+# mke2fs requires at least 1,024 journal blocks, no more than half the free blocks.
+LARGE_BLOCK = 65536
+LARGE_BLOCK_JOURNAL_MIB = 64
+LARGE_BLOCK_IMAGE_BLOCKS = 2176
 SOURCE_BLOCKS = 5
 DIRECT_BLOCKS = 12
 POINTER_BYTES = 4
@@ -29,6 +34,7 @@ COMMITS = 3
 PROFILES = (
     ("1k", 1024, set(), set()),
     ("4k", 4096, set(), set()),
+    ("64k", 65536, set(), set()),
     ("checksum-seed", 4096, {"metadata_csum_seed"}, set()),
     ("no-checksum", 1024, set(), {"metadata_csum"}),
     ("orphan-1k", 1024, {"orphan_file"}, set()),
@@ -173,12 +179,14 @@ def main():
                    commands=[], passed=False)
         rows.append(row)
         features = (EXPECTED_FEATURES | {"fast_commit"} | added) - removed
+        journal_mib = LARGE_BLOCK_JOURNAL_MIB if block == LARGE_BLOCK else JOURNAL_MIB
+        image_blocks = LARGE_BLOCK_IMAGE_BLOCKS if block == LARGE_BLOCK else IMAGE_BYTES // block
         geometry = ["-C", BIGALLOC_CLUSTER] if "bigalloc" in features else []
         run(row, [tools["mke2fs"], "-F", "-t", "ext4", "-b", block,
                   "-N", max(256, created_files + 64), *geometry,
                   "-I", 256, "-m", 0, "-O", "none," + ",".join(sorted(features)),
-                  "-U", UUID, "-J", f"size=8,fast_commit_size={fast_commit_kib}",
-                  "-E", "lazy_itable_init=0,nodiscard", "-d", root, before, IMAGE_BYTES // block])
+                  "-U", UUID, "-J", f"size={journal_mib},fast_commit_size={fast_commit_kib}",
+                  "-E", "lazy_itable_init=0,nodiscard", "-d", root, before, image_blocks])
         if indirect:
             row["old_mapping"] = run(row, [helper, "--prepare-indirect", before])
         if xattr_reuse:

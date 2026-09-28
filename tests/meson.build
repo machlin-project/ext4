@@ -15,7 +15,7 @@ foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
 endforeach
 
 if paths['fast_commit_fixtures'] != ''
-  foreach profile : ['1k', '4k', 'checksum-seed', 'no-checksum', 'orphan-1k', 'orphan-4k',
+  foreach profile : ['1k', '4k', '64k', 'checksum-seed', 'no-checksum', 'orphan-1k', 'orphan-4k',
     'special-1k', 'special-4k', 'xattr-reuse-1k', 'xattr-reuse-4k', 'xattr-reuse-legacy-1k',
     'indirect-1k', 'indirect-4k', 'large-prefix-1k', 'large-prefix-4k', 'huge-prefix-1k',
     'bigalloc-4k', 'casefold-4k', 'quota-4k', 'large-prefix-casefold-4k']
@@ -59,7 +59,7 @@ if paths['fast_commit_fixtures'] != ''
           timeout: 300, suite: 'fast-commit')
       endforeach
     endif
-    if profile in ['1k', '4k', 'orphan-1k', 'orphan-4k', 'special-1k', 'special-4k',
+    if profile in ['1k', '4k', '64k', 'orphan-1k', 'orphan-4k', 'special-1k', 'special-4k',
       'xattr-reuse-1k', 'xattr-reuse-4k', 'xattr-reuse-legacy-1k', 'indirect-1k', 'indirect-4k',
       'bigalloc-4k', 'casefold-4k', 'quota-4k']
       test('fast-commit-resources-' + profile, programs['fast-commit-recovery'],

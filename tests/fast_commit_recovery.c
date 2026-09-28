@@ -9,7 +9,7 @@
 #include <string.h>
 #include <time.h>
 
-#define IMAGE_LIMIT (128U * 1024U * 1024U)
+#define IMAGE_LIMIT (256U * 1024U * 1024U)
 #define EVENT_LIMIT 8192U
 #define DIRECTORY_DEPTH 16U
 #define FAULT_SAMPLES 16U
