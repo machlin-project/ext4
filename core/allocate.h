@@ -40,6 +40,10 @@ struct ext4_allocation {
 	 * owning inode independently of physical allocation or sharing. */
 	uint64_t attribute_blocks_added;
 	uint64_t attribute_blocks_removed;
+	/* Offline semantic replay excludes every logged data range from new
+	 * metadata allocation until the complete prefix has been materialized. */
+	const struct ext4_block_range *excluded;
+	size_t excluded_count;
 };
 
 enum ext4_result ext4_allocation_init(struct ext4_allocation *allocation, struct ext4_fs *fs,
@@ -58,6 +62,12 @@ enum ext4_result ext4_cluster_release(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, const struct ext4_inode_disk *disk, uint32_t logical,
     uint64_t physical, uint32_t length, uint64_t removed_end);
 enum ext4_result ext4_allocation_super(struct ext4_allocation *allocation);
+/* Recovery alone may claim an exact logged range idempotently. This updates
+ * bitmap/free-space accounting, not the per-inode allocation delta. */
+enum ext4_result ext4_allocation_claim(
+    struct ext4_allocation *allocation, uint64_t block, uint64_t length);
+enum ext4_result ext4_inode_claim(
+    struct ext4_allocation *allocation, uint32_t number, uint16_t mode, bool *created);
 /* Enroll one free inode and initialize its empty record in this transaction.
  * The caller links it into a directory before committing, and publishes the
  * primary free-inode count only after commit. */
@@ -119,6 +129,14 @@ enum ext4_result ext4_write_map_punch(struct ext4_allocation *allocation,
  * Reject shared physical ranges, invalid bitmaps and inconsistent i_blocks.
  * Validation reads the transaction view without enrolling mapping snapshots. */
 enum ext4_result ext4_write_map_validate(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, struct ext4_inode_disk *disk);
+/* Materialize a logged extent or hole in the private recovery transaction.
+ * Recount validates ownership, claims surviving backing and derives i_blocks
+ * from the resulting tree instead of trusting the logged tree shape. */
+enum ext4_result ext4_write_map_replay(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t logical,
+    uint64_t physical, uint32_t length, bool unwritten);
+enum ext4_result ext4_write_map_recount(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, struct ext4_inode_disk *disk);
 enum ext4_result ext4_write_map_truncate(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t first);

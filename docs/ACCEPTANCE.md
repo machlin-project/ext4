@@ -60,6 +60,62 @@ internal-journal recovery and both orphan representations; HTree creation, looku
 and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
 the remaining blocks have equal size or that the full core is accepted.
 
+## Fast-commit development evidence
+
+This is a development checkpoint, not completed journal compatibility. The decoder
+checks record bounds, expected transaction ID, committed CRC prefixes and reread
+identity. Semantic replay stages inode metadata, exact extent ranges and namespace
+changes in one ordinary conversion transaction; interrupted conversion retains
+the original fast prefix until its replacement commit is durable. The public
+recovery report counts fast commits separately from ordinary transactions.
+
+Native Linux captures with 1 and 4 KiB blocks each contain 37 committed fast
+transactions. The core's recovered namespace, file bytes, inode metadata and
+allocation totals match independent native recovery. Both pass nonrepairing
+e2fsck. The first fault batch covers 468 write/barrier interruption cases; six
+deliberately torn primary superblocks are rejected for offline repair. Decoder
+tests also inject source-read/allocation failures, malformed lengths, bad CRCs,
+stale IDs and changes between scan and replay.
+
+Expanded captures contain 53 commits and add final unlink followed by inode reuse,
+a new directory with long names and block-spanning records, fragmented extent
+trees, hole punching, preallocation and partial unwritten initialization. Both
+block sizes pass core recovery, nonrepairing e2fsck, native Linux verification of
+the resulting files, and a second nonrepairing check after native unmount. This
+found and fixed stale primary-summary checksums during private replay preparation;
+the primary free summaries can lag the ordinary committed group descriptors.
+
+The expanded 1 KiB image fails direct recovery in the pinned Linux reference with
+an error loading its journal. Independent e2fsck journal replay also reports a
+directory-recovery error and then repairs its separate diagnostic copy; that copy
+is not an accepted oracle. The preserved failing native case remains conformance
+work. Passing Linux verification of an image already recovered by the core must
+not be reported as successful native direct replay of that original journal.
+
+The completed focused batch repeats the two basic profiles and exercises both
+expanded profiles against frozen sanitized binaries. All four decoder/recovery
+pairs pass: 390 injected decoder read failures and 1,188 interrupted recoveries.
+Twelve deliberate primary-superblock tears reject for offline repair; all other
+interrupted cases recover the verified namespace, data and accounting. The
+expanded profiles cover ten padding records at 1 KiB and one at 4 KiB. The complete
+freestanding build and source-format checks also pass. These are focused checks;
+the new implementation still requires full regression acceptance.
+
+Generated evidence is under `artifacts/checks/fast-commit-replay-first/`,
+`artifacts/checks/fast-commit-summary-diagnosis/`,
+`artifacts/checks/fast-commit-batch-baseline/`,
+`artifacts/checks/fast-commit-batch-expanded/` and the lab's
+`artifacts/ext4-journal/fast-commit-native-ranges/`,
+`fast-commit-native-expanded/`, `fast-commit-core-expanded-native/` and
+`fast-commit-core-expanded-4k/`. Inputs and executable identities are recorded in
+those reports; the protected source images remain unchanged.
+
+Open work includes modern orphan slots, indirect/special-inode records, private
+attribute reclamation during generation reuse, larger prefixes, additional format
+combinations, semantic-corruption/resource-failure coverage, interrupted foreign
+replay and automatic CI fixture integration. The previously accepted 476-test CI
+run does not establish regression acceptance for this new implementation.
+
 ## External journals
 
 Writable mount and explicit recovery accept a separately owned journal resource.

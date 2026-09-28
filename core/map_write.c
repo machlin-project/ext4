@@ -771,7 +771,8 @@ ext4_extent_update(struct ext4_allocation *allocation, const struct ext4_inode *
 
 static enum ext4_result
 ext4_extent_insert(struct ext4_allocation *allocation, const struct ext4_inode *inode,
-    struct ext4_inode_disk *disk, uint32_t logical, uint64_t physical, bool unwritten)
+    struct ext4_inode_disk *disk, uint32_t logical, uint64_t physical, uint16_t length,
+    bool unwritten)
 {
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_extent_path path;
@@ -794,7 +795,7 @@ ext4_extent_insert(struct ext4_allocation *allocation, const struct ext4_inode *
 		return error;
 	}
 	for (level = 1; level < path.levels; level++) {
-		if (path.blocks[level] == physical) {
+		if (path.blocks[level] >= physical && path.blocks[level] - physical < length) {
 			return EXT4_CORRUPT;
 		}
 	}
@@ -811,11 +812,15 @@ ext4_extent_insert(struct ext4_allocation *allocation, const struct ext4_inode *
 		start = ext4_le32(&entries[index].logical);
 		end = start + ext4_extent_length(&entries[index]);
 		if (!inserted && logical < start) {
-			ext4_extent_make(&output[used++], logical, physical, 1, unwritten);
+			if ((uint64_t)logical + length > start) {
+				error = EXT4_CORRUPT;
+				goto out;
+			}
+			ext4_extent_make(&output[used++], logical, physical, length, unwritten);
 			inserted = true;
 		}
 		if (logical >= start && logical < end) {
-			if (unwritten ||
+			if (length != 1 || unwritten ||
 			    ext4_le16(&entries[index].length) <= EXT4_EXTENT_UNWRITTEN_LIMIT ||
 			    physical != ext4_extent_physical(&entries[index]) + logical - start) {
 				error = EXT4_CORRUPT;
@@ -837,7 +842,7 @@ ext4_extent_insert(struct ext4_allocation *allocation, const struct ext4_inode *
 		}
 	}
 	if (!inserted) {
-		ext4_extent_make(&output[used++], logical, physical, 1, unwritten);
+		ext4_extent_make(&output[used++], logical, physical, length, unwritten);
 	}
 	used = ext4_extent_merge(output, used);
 	error = ext4_extent_update(allocation, inode, &path, records, used);
@@ -940,7 +945,7 @@ ext4_write_map_allocate(struct ext4_allocation *allocation, const struct ext4_in
 			return error;
 		}
 	}
-	return ext4_extent_insert(allocation, inode, disk, logical, *physical, false);
+	return ext4_extent_insert(allocation, inode, disk, logical, *physical, 1, false);
 }
 
 enum ext4_result
@@ -996,7 +1001,7 @@ ext4_write_map_reserve(struct ext4_allocation *allocation, const struct ext4_ino
 	}
 	error = ext4_cluster_allocate(allocation, inode, disk, logical, &physical);
 	return error == EXT4_OK
-	    ? ext4_extent_insert(allocation, inode, disk, logical, physical, true)
+	    ? ext4_extent_insert(allocation, inode, disk, logical, physical, 1, true)
 	    : error;
 }
 
@@ -1257,9 +1262,9 @@ ext4_indirect_owners(struct ext4_allocation *allocation, struct ext4_inode_disk 
 	return EXT4_OK;
 }
 
-enum ext4_result
-ext4_write_map_validate(struct ext4_allocation *allocation, const struct ext4_inode *inode,
-    struct ext4_inode_disk *disk)
+static enum ext4_result
+ext4_write_map_inspect(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk, bool recount)
 {
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_map_owners owners;
@@ -1267,6 +1272,8 @@ ext4_write_map_validate(struct ext4_allocation *allocation, const struct ext4_in
 	uint8_t *scratch;
 	uint64_t attribute_block;
 	uint64_t value_blocks = 0;
+	uint64_t units;
+	uint32_t flags = inode->flags;
 	uint16_t type = inode->mode & EXT4_MODE_TYPE;
 	size_t scratch_size = (size_t)fs->info.block_size * EXT4_EXTENT_MAX_DEPTH;
 	size_t index;
@@ -1305,7 +1312,7 @@ ext4_write_map_validate(struct ext4_allocation *allocation, const struct ext4_in
 		}
 		ext4_xattr_close(&attributes);
 	}
-	if (error == EXT4_OK &&
+	if (error == EXT4_OK && !recount &&
 	    (inode->blocks_512 % (fs->info.block_size / EXT4_SECTOR_SIZE) != 0 ||
 		owners.blocks + value_blocks !=
 		    inode->blocks_512 / (fs->info.block_size / EXT4_SECTOR_SIZE))) {
@@ -1315,8 +1322,30 @@ ext4_write_map_validate(struct ext4_allocation *allocation, const struct ext4_in
 		error = ext4_ranges_sort(owners.ranges, &owners.count);
 	}
 	for (index = 0; error == EXT4_OK && index < owners.count; index++) {
-		error = ext4_allocation_valid_range(
-		    allocation, owners.ranges[index].first, owners.ranges[index].length);
+		error = recount ? ext4_allocation_claim(allocation, owners.ranges[index].first,
+				      owners.ranges[index].length)
+				: ext4_allocation_valid_range(allocation,
+				      owners.ranges[index].first, owners.ranges[index].length);
+	}
+	if (error == EXT4_OK && recount) {
+		units = owners.blocks + value_blocks;
+		if (!(flags & EXT4_INODE_HUGE_FILE)) {
+			units *= fs->info.block_size / EXT4_SECTOR_SIZE;
+		}
+		if (!(fs->info.feature_ro_compat & EXT4_FEATURE_RO_HUGE_FILE) &&
+		    units > UINT32_MAX) {
+			error = EXT4_RANGE;
+		} else {
+			if (units > EXT4_PHYSICAL_BLOCK_MAX) {
+				units = owners.blocks + value_blocks;
+				flags |= EXT4_INODE_HUGE_FILE;
+			}
+			ext4_encode32(&disk->blocks_lo, (uint32_t)units);
+			if (fs->info.feature_ro_compat & EXT4_FEATURE_RO_HUGE_FILE) {
+				ext4_encode16(&disk->blocks_hi, (uint16_t)(units >> 32));
+			}
+			ext4_encode32(&disk->flags, flags);
+		}
 	}
 	if (owners.ranges != NULL) {
 		fs->environment.release(fs->environment.context, owners.ranges,
@@ -1324,6 +1353,20 @@ ext4_write_map_validate(struct ext4_allocation *allocation, const struct ext4_in
 	}
 	fs->environment.release(fs->environment.context, scratch, scratch_size);
 	return error;
+}
+
+enum ext4_result
+ext4_write_map_validate(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk)
+{
+	return ext4_write_map_inspect(allocation, inode, disk, false);
+}
+
+enum ext4_result
+ext4_write_map_recount(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk)
+{
+	return ext4_write_map_inspect(allocation, inode, disk, true);
 }
 
 static void
@@ -1614,6 +1657,69 @@ ext4_write_map_punch(struct ext4_allocation *allocation, const struct ext4_inode
 		return ext4_extent_punch(allocation, inode, disk, logical, length);
 	}
 	return length == 1 ? ext4_indirect_punch(allocation, disk, logical) : EXT4_INVALID_ARGUMENT;
+}
+
+enum ext4_result
+ext4_write_map_replay(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk, uint32_t logical, uint64_t physical, uint32_t length,
+    bool unwritten)
+{
+	struct ext4_fs *fs = allocation->fs;
+	struct ext4_map_run run;
+	uint64_t position = logical;
+	uint64_t end = position + length;
+	uint32_t chunk;
+	uint32_t maximum = EXT4_EXTENT_UNWRITTEN_LIMIT - (unwritten ? 1U : 0U);
+	enum ext4_result error;
+
+	if (!(inode->flags & EXT4_INODE_EXTENTS)) {
+		return EXT4_UNSUPPORTED;
+	}
+	if (length == 0 || end > (uint64_t)UINT32_MAX + 1U ||
+	    (physical != 0 &&
+		(physical >= fs->info.blocks || length > fs->info.blocks - physical ||
+		    physical % fs->cluster_blocks != logical % fs->cluster_blocks ||
+		    ext4_system_overlaps(fs, physical, length)))) {
+		return EXT4_CORRUPT;
+	}
+	while (position < end) {
+		error = ext4_write_map_lookup(allocation, inode, disk, (uint32_t)position, &run);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		chunk = (uint32_t)(run.length < end - position ? run.length : end - position);
+		if (physical != 0 && chunk > maximum) {
+			chunk = maximum;
+		}
+		if (chunk == 0) {
+			return EXT4_CORRUPT;
+		}
+		if (run.physical != physical || (physical != 0 && run.unwritten != unwritten)) {
+			if (run.physical != 0) {
+				error = ext4_write_map_punch(
+				    allocation, inode, disk, (uint32_t)position, chunk);
+				if (error != EXT4_OK) {
+					return error;
+				}
+			}
+			if (physical != 0) {
+				error = ext4_allocation_claim(allocation, physical, chunk);
+				if (error == EXT4_OK) {
+					error = ext4_extent_insert(allocation, inode, disk,
+					    (uint32_t)position, physical, (uint16_t)chunk,
+					    unwritten);
+				}
+				if (error != EXT4_OK) {
+					return error;
+				}
+			}
+		}
+		position += chunk;
+		if (physical != 0) {
+			physical += chunk;
+		}
+	}
+	return EXT4_OK;
 }
 
 static enum ext4_result

@@ -60,7 +60,7 @@ ext4_inode_bitmap_prepare(struct ext4_fs *fs, uint32_t index, const struct ext4_
 			}
 		}
 	}
-	if (free_inodes != group->free_inodes || *selected == UINT32_MAX) {
+	if (free_inodes != group->free_inodes) {
 		return EXT4_CORRUPT;
 	}
 	return EXT4_OK;
@@ -173,8 +173,8 @@ ext4_allocate_inode(struct ext4_allocation *allocation, uint16_t mode,
 	}
 	bitmap = buffer;
 	error = ext4_inode_bitmap_prepare(fs, index, &group, unused, bitmap, &within);
-	if (error != EXT4_OK) {
-		return error;
+	if (error != EXT4_OK || within == UINT32_MAX) {
+		return error == EXT4_OK ? EXT4_CORRUPT : error;
 	}
 	number = index * fs->inodes_per_group + within + 1;
 	offset = group.inode_table * fs->info.block_size + (uint64_t)within * fs->inode_size;
@@ -242,6 +242,114 @@ ext4_allocate_inode(struct ext4_allocation *allocation, uint16_t mode,
 		*result = disk;
 	}
 	return error;
+}
+
+enum ext4_result
+ext4_inode_claim(struct ext4_allocation *allocation, uint32_t number, uint16_t mode, bool *created)
+{
+	struct ext4_fs *fs = allocation->fs;
+	struct ext4_group group;
+	struct ext4_group_disk *descriptor;
+	uint8_t *bitmap;
+	void *buffer = NULL;
+	uint64_t offset;
+	uint32_t index;
+	uint32_t within;
+	uint32_t selected;
+	uint32_t unused;
+	uint32_t directories;
+	uint32_t available;
+	uint32_t checksum;
+	enum ext4_result error;
+
+	*created = false;
+	if (number == 0 || number > fs->info.inodes ||
+	    (number < fs->first_inode && number != EXT4_ROOT_INODE) ||
+	    number == fs->journal_inode || number == fs->orphan_file_inode) {
+		return EXT4_CORRUPT;
+	}
+	index = (number - 1U) / fs->inodes_per_group;
+	within = (number - 1U) % fs->inodes_per_group;
+	error = ext4_allocation_super(allocation);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	error = ext4_group_descriptor_offset(fs, index, &offset);
+	if (error == EXT4_OK) {
+		error = ext4_transaction_buffer(
+		    allocation->transaction, offset / fs->info.block_size, &buffer);
+	}
+	if (error != EXT4_OK) {
+		return error;
+	}
+	descriptor = (struct ext4_group_disk *)((uint8_t *)buffer + offset % fs->info.block_size);
+	error = ext4_group_decode(fs, index, descriptor, &group);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	unused = ext4_le16(&descriptor->unused_inodes_lo);
+	directories = ext4_le16(&descriptor->used_directories_lo);
+	if (fs->descriptor_size >= EXT4_GROUP_64_SIZE) {
+		unused |= (uint32_t)ext4_le16(&descriptor->unused_inodes_hi) << 16;
+		directories |= (uint32_t)ext4_le16(&descriptor->used_directories_hi) << 16;
+	}
+	available = fs->info.inodes - index * fs->inodes_per_group;
+	if (available > fs->inodes_per_group) {
+		available = fs->inodes_per_group;
+	}
+	if (group.free_inodes > available || directories > available - group.free_inodes ||
+	    ext4_le32(&allocation->super->free_inodes) != allocation->free_inodes) {
+		return EXT4_CORRUPT;
+	}
+	error = ext4_transaction_buffer(allocation->transaction, group.inode_bitmap, &buffer);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	bitmap = buffer;
+	error = ext4_inode_bitmap_prepare(fs, index, &group, unused, bitmap, &selected);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (bitmap[within / EXT4_BITS_PER_BYTE] & (1U << (within % EXT4_BITS_PER_BYTE))) {
+		return EXT4_OK;
+	}
+	if (group.free_inodes == 0 || allocation->free_inodes == 0) {
+		return EXT4_CORRUPT;
+	}
+	bitmap[within / EXT4_BITS_PER_BYTE] |= (uint8_t)(1U << (within % EXT4_BITS_PER_BYTE));
+	group.free_inodes--;
+	group.flags &= (uint16_t)~EXT4_GROUP_INODE_UNINIT;
+	if ((mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY) {
+		directories++;
+	}
+	if (unused > fs->inodes_per_group - within - 1U) {
+		unused = fs->inodes_per_group - within - 1U;
+	}
+	ext4_encode16(&descriptor->free_inodes_lo, (uint16_t)group.free_inodes);
+	ext4_encode16(&descriptor->used_directories_lo, (uint16_t)directories);
+	ext4_encode16(&descriptor->unused_inodes_lo, (uint16_t)unused);
+	ext4_encode16(&descriptor->flags, group.flags);
+	if (fs->descriptor_size >= EXT4_GROUP_64_SIZE) {
+		ext4_encode16(&descriptor->free_inodes_hi, (uint16_t)(group.free_inodes >> 16));
+		ext4_encode16(&descriptor->used_directories_hi, (uint16_t)(directories >> 16));
+		ext4_encode16(&descriptor->unused_inodes_hi, (uint16_t)(unused >> 16));
+	}
+	if (fs->metadata_checksum) {
+		checksum = ext4_crc32c(
+		    fs->checksum_seed, bitmap, fs->inodes_per_group / EXT4_BITS_PER_BYTE);
+		ext4_encode16(&descriptor->inode_bitmap_checksum_lo, (uint16_t)checksum);
+		if (fs->descriptor_size >= EXT4_GROUP_64_SIZE) {
+			ext4_encode16(
+			    &descriptor->inode_bitmap_checksum_hi, (uint16_t)(checksum >> 16));
+		}
+	}
+	ext4_group_checksum_set(fs, index, descriptor);
+	allocation->free_inodes--;
+	ext4_encode32(&allocation->super->free_inodes, allocation->free_inodes);
+	/* Block and inode claims can share a descriptor; discard its cached copy. */
+	allocation->bitmap = NULL;
+	*created = true;
+	return EXT4_OK;
 }
 
 enum ext4_result

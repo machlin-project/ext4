@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "journal.h"
+#include "fast_commit.h"
 
 #define EXT4_RECOVERY_REVOKED 0x80000000U
 
@@ -36,7 +37,7 @@ ext4_recovery_read(struct ext4_recovery_scan *scan, void *buffer)
 {
 	enum ext4_result error;
 
-	if (scan->visited == scan->journal->blocks - scan->journal->first) {
+	if (scan->visited == scan->journal->last - scan->journal->first) {
 		return EXT4_CORRUPT;
 	}
 	error = ext4_journal_read(scan->journal, scan->cursor, buffer);
@@ -230,7 +231,7 @@ ext4_recovery_async_tail(struct ext4_recovery_scan *scan)
 	 * be dismissed as the interrupted tail. Scan without trusting torn tags. */
 	scan->cursor = scan->transaction_start;
 	scan->visited = scan->transaction_visited;
-	while (scan->visited < journal->blocks - journal->first) {
+	while (scan->visited < journal->last - journal->first) {
 		error = ext4_recovery_read(scan, journal->data);
 		if (error != EXT4_OK) {
 			return error;
@@ -288,7 +289,7 @@ ext4_recovery_incomplete_tail(struct ext4_recovery_scan *scan)
 	 * Recheck from the beginning of this transaction, not from that cursor. */
 	scan->cursor = scan->transaction_start;
 	scan->visited = scan->transaction_visited;
-	while (scan->visited < journal->blocks - journal->first) {
+	while (scan->visited < journal->last - journal->first) {
 		error = ext4_recovery_read(scan, journal->data);
 		if (error != EXT4_OK) {
 			return error;
@@ -689,6 +690,7 @@ ext4_recover_with_journal(const struct ext4_environment *environment,
 	struct ext4_recovery_scan replay;
 	struct ext4_fs *fs;
 	struct ext4_journal *journal;
+	struct ext4_fast_commit *fast = NULL;
 	size_t bytes = 0;
 	enum ext4_result error;
 
@@ -737,6 +739,14 @@ ext4_recover_with_journal(const struct ext4_environment *environment,
 	}
 	completed.transactions = scan.transactions;
 	completed.discarded_tail = scan.discarded_tail;
+	if (journal->features & EXT4_JBD_FAST_COMMIT) {
+		error = ext4_fast_commit_load(
+		    journal, journal->last + 1U, journal->blocks, scan.sequence, &fast);
+		if (error != EXT4_OK) {
+			goto out;
+		}
+		completed.discarded_tail |= fast->discarded_tail;
+	}
 	if (scan.committed_count != 0) {
 		bytes = (size_t)scan.committed_count * sizeof(*replay.records);
 		replay.records = fs->environment.allocate(fs->environment.context, bytes);
@@ -760,14 +770,23 @@ ext4_recover_with_journal(const struct ext4_environment *environment,
 		error = ext4_recovery_validate_home(journal);
 	}
 	if (error == EXT4_OK) {
-		error = ext4_journal_reset(journal, scan.sequence + 1);
+		if (fast != NULL && fast->count != 0) {
+			error = ext4_fast_commit_replay(fast);
+			if (error == EXT4_OK) {
+				completed.fast_commits = fast->commits;
+			}
+		} else {
+			error = ext4_journal_reset(journal, scan.sequence + 1);
+		}
 	}
 	if (error == EXT4_OK) {
 		error = ext4_recovery_account(fs, &completed);
 	}
 	if (error == EXT4_OK) {
 		if (fs->last_orphan != 0 || fs->orphan_file_inode != 0) {
-			error = ext4_system_ranges_build(fs);
+			if (fs->system_ranges == NULL) {
+				error = ext4_system_ranges_build(fs);
+			}
 			if (error == EXT4_OK) {
 				error = ext4_orphan_cleanup(fs, &completed);
 			}
@@ -777,6 +796,7 @@ ext4_recover_with_journal(const struct ext4_environment *environment,
 		error = ext4_journal_finish(journal);
 	}
 out:
+	ext4_fast_commit_close(fast);
 	if (replay.records != NULL) {
 		fs->environment.release(fs->environment.context, replay.records, bytes);
 	}

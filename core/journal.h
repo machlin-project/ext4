@@ -15,9 +15,11 @@
 #define EXT4_JBD_ASYNC_COMMIT 0x0004U
 #define EXT4_JBD_CSUM_V2 0x0008U
 #define EXT4_JBD_CSUM_V3 0x0010U
+#define EXT4_JBD_FAST_COMMIT 0x0020U
+#define EXT4_JBD_DEFAULT_FAST_BLOCKS 256U
 #define EXT4_JBD_SUPPORTED                                                                         \
 	(EXT4_JBD_REVOKE_FEATURE | EXT4_JBD_64BIT | EXT4_JBD_ASYNC_COMMIT | EXT4_JBD_CSUM_V2 |     \
-	    EXT4_JBD_CSUM_V3)
+	    EXT4_JBD_CSUM_V3 | EXT4_JBD_FAST_COMMIT)
 #define EXT4_JBD_CRC32C 4U
 #define EXT4_JBD_CRC32 1U
 #define EXT4_JBD_ESCAPE 0x0001U
@@ -118,6 +120,8 @@ struct ext4_journal {
 	uint32_t blocks;
 	uint32_t super_block;
 	uint32_t first;
+	/* Exclusive ordinary ring limit; storage after it can belong to fast commit. */
+	uint32_t last;
 	uint32_t sequence;
 	uint32_t start;
 	uint32_t features;
@@ -150,6 +154,10 @@ void ext4_journal_close(struct ext4_journal *journal);
 enum ext4_result ext4_journal_finish(struct ext4_journal *journal);
 enum ext4_result ext4_transaction_begin(
     struct ext4_journal *journal, uint32_t credits, struct ext4_transaction **result);
+/* The ordinary committed prefix must already be checkpointed and flushed.
+ * Keep its on-disk recovery authority until commit publishes this sequence. */
+enum ext4_result ext4_transaction_begin_recovery(struct ext4_journal *journal, uint32_t sequence,
+    uint32_t credits, struct ext4_transaction **result);
 enum ext4_result ext4_transaction_buffer(
     struct ext4_transaction *transaction, uint64_t block, void **result);
 /* A snapshot request exhausted this transaction's credits. Inspect before cancel;

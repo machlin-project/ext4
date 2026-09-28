@@ -41,11 +41,12 @@ main(int argc, char **argv)
 	}
 	error = ext4_recover_with_journal(&image.environment, &image.writer, external, &report);
 	printf("recovery: %s; transactions=%u replayed=%u revoked=%u discarded_tail=%s orphans=%u "
-	       "orphan_transactions=%u orphan_file_transfers=%u accounting_updated=%s\n",
+	       "orphan_transactions=%u orphan_file_transfers=%u accounting_updated=%s "
+	       "fast_commits=%u\n",
 	    ext4_result_string(error), report.transactions, report.replayed_blocks,
 	    report.revoked_blocks, report.discarded_tail ? "yes" : "no", report.cleaned_orphans,
 	    report.orphan_transactions, report.orphan_file_transfers,
-	    report.accounting_updated ? "yes" : "no");
+	    report.accounting_updated ? "yes" : "no", report.fast_commits);
 	if (image.live_allocations != 0) {
 		fprintf(stderr, "recovery leaked allocations\n");
 		error = EXT4_CORRUPT;

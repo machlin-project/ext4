@@ -98,6 +98,15 @@ with independently surviving device caches. Four native Linux profiles pass all
 expanded 476-test regression passes; this support is not yet exposed by either
 native adapter.
 
+Fast-commit recovery is under development. The decoder validates bounded committed
+records and semantic replay converts them into one ordinary durable transaction.
+Linux-generated 1 and 4 KiB images pass basic replay comparisons and expanded
+core/Linux roundtrips with inode reuse, new directories, long names, sparse maps
+and unwritten extents. Modern orphan slots, wider format combinations and broader
+semantic-corruption acceptance remain open. See the fast-commit development
+evidence and the recorded native-reference failure in the acceptance matrix;
+these checks do not close the journal-compatibility requirement.
+
 Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.
 Both native adapters remain read-only. The FSKit adapter builds for macOS 26.4,
 but installation/mount tests await a signing profile with FSKit Module capability.

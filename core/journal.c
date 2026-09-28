@@ -10,6 +10,7 @@ struct ext4_transaction {
 	struct ext4_journal *journal;
 	uint32_t credits;
 	uint32_t count;
+	uint32_t sequence;
 	bool capacity_failed;
 	struct ext4_transaction_entry entries[];
 };
@@ -201,7 +202,7 @@ ext4_journal_flush_log(struct ext4_journal *journal)
 uint32_t
 ext4_journal_next(const struct ext4_journal *journal, uint32_t block)
 {
-	return block + 1 == journal->blocks ? journal->first : block + 1;
+	return block + 1 == journal->last ? journal->first : block + 1;
 }
 
 size_t
@@ -357,6 +358,7 @@ ext4_journal_validate(struct ext4_journal *journal)
 	uint32_t expected;
 	uint32_t checksum;
 	uint32_t length;
+	uint32_t fast_blocks;
 
 	if (ext4_be32(&super->header.magic) != EXT4_JBD_MAGIC) {
 		return EXT4_CORRUPT;
@@ -397,11 +399,25 @@ ext4_journal_validate(struct ext4_journal *journal)
 	journal->first = ext4_be32(&super->first);
 	journal->start = ext4_be32(&super->start);
 	journal->sequence = ext4_be32(&super->sequence);
+	journal->last = length;
+	if (journal->features & EXT4_JBD_FAST_COMMIT) {
+		if (!(journal->fs->info.feature_compat & EXT4_FEATURE_COMPAT_FAST_COMMIT)) {
+			return EXT4_CORRUPT;
+		}
+		fast_blocks = ext4_be32(&super->fast_commit_blocks);
+		if (fast_blocks == 0) {
+			fast_blocks = EXT4_JBD_DEFAULT_FAST_BLOCKS;
+		}
+		if (fast_blocks < 2 || fast_blocks >= length) {
+			return EXT4_CORRUPT;
+		}
+		journal->last -= fast_blocks;
+	}
 	if (ext4_be32(&super->block_size) != journal->fs->info.block_size ||
 	    length > journal->blocks || length < 4 || journal->first <= journal->super_block ||
-	    journal->first >= length - 2 ||
+	    journal->last < 4 || journal->first >= journal->last - 2 ||
 	    (journal->start != 0 &&
-		(journal->start < journal->first || journal->start >= length)) ||
+		(journal->start < journal->first || journal->start >= journal->last)) ||
 	    !ext4_equal(super->uuid,
 		journal->external.read != NULL ? journal->fs->journal_uuid : journal->fs->info.uuid,
 		EXT4_UUID_SIZE) ||
@@ -760,9 +776,9 @@ ext4_journal_finish(struct ext4_journal *journal)
 	return ext4_journal_set_recovery(journal, false);
 }
 
-enum ext4_result
-ext4_transaction_begin(
-    struct ext4_journal *journal, uint32_t credits, struct ext4_transaction **result)
+static enum ext4_result
+ext4_transaction_create(struct ext4_journal *journal, uint32_t credits, bool recovery,
+    uint32_t sequence, struct ext4_transaction **result)
 {
 	struct ext4_transaction *transaction;
 	size_t size;
@@ -775,11 +791,11 @@ ext4_transaction_begin(
 	    credits > EXT4_TRANSACTION_MAX_BLOCKS) {
 		return EXT4_INVALID_ARGUMENT;
 	}
-	if (journal->aborted || journal->start != 0) {
+	if (journal->aborted || (!recovery && journal->start != 0)) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
 	/* Reserve conservatively: at worst one descriptor for every data block. */
-	if (credits * 2U + 1U >= journal->blocks - journal->first) {
+	if (credits * 2U + 1U >= journal->last - journal->first) {
 		return EXT4_RANGE;
 	}
 	size = sizeof(*transaction) + credits * sizeof(*transaction->entries);
@@ -790,9 +806,24 @@ ext4_transaction_begin(
 	ext4_zero(transaction, size);
 	transaction->journal = journal;
 	transaction->credits = credits;
+	transaction->sequence = recovery ? sequence : journal->sequence;
 	journal->transaction_active = true;
 	*result = transaction;
 	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_transaction_begin(
+    struct ext4_journal *journal, uint32_t credits, struct ext4_transaction **result)
+{
+	return ext4_transaction_create(journal, credits, false, 0, result);
+}
+
+enum ext4_result
+ext4_transaction_begin_recovery(struct ext4_journal *journal, uint32_t sequence, uint32_t credits,
+    struct ext4_transaction **result)
+{
+	return ext4_transaction_create(journal, credits, true, sequence, result);
 }
 
 static enum ext4_result
@@ -911,7 +942,7 @@ ext4_transaction_read(struct ext4_transaction *transaction, uint64_t block, void
 uint32_t
 ext4_journal_credits(const struct ext4_journal *journal)
 {
-	uint32_t credits = (journal->blocks - journal->first - 2U) / 2U;
+	uint32_t credits = (journal->last - journal->first - 2U) / 2U;
 
 	return credits > EXT4_TRANSACTION_MAX_BLOCKS ? EXT4_TRANSACTION_MAX_BLOCKS : credits;
 }
@@ -1104,13 +1135,12 @@ ext4_transaction_commit(struct ext4_transaction *transaction)
 	ext4_transaction_prepare_super(transaction);
 	error = ext4_journal_set_recovery(journal, true);
 	if (error == EXT4_OK) {
-		error = ext4_journal_publish(journal, journal->first, journal->sequence);
+		error = ext4_journal_publish(journal, journal->first, transaction->sequence);
 	}
 	if (error == EXT4_OK) {
 		error = ext4_transaction_log(transaction, &commit_block, &transaction_checksum);
 	}
-	if (error == EXT4_OK &&
-	    (commit_block < journal->first || commit_block >= journal->blocks)) {
+	if (error == EXT4_OK && (commit_block < journal->first || commit_block >= journal->last)) {
 		error = EXT4_CORRUPT;
 	}
 	/* This barrier includes ordered file data submitted by the owner, all log

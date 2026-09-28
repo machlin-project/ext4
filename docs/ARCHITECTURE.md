@@ -116,8 +116,34 @@ journals with legacy, v1, v2 or v3 checksums/tags (legacy means no journal check
 64-bit addresses and revokes. It bounds the journal to 1,048,576 data blocks,
 1,024 data runs and 8,192
 mapping blocks, a writing transaction to 256 snapshots, and recovery to 1,048,576
-records. Exceeding a bound
-is an explicit unsupported result. Fast commit remains separate work.
+records. Exceeding a bound is an explicit unsupported result.
+
+Fast-commit recovery retains only the CRC-validated prefix for the transaction ID
+following the ordinary journal prefix. A digest binds each subsequently reread
+record to that scan. The ordinary ring excludes the fast-commit area. Recovery
+checkpoints the ordinary prefix without clearing its authority, then materializes
+the fast records in private metadata snapshots. Exact logged data ranges are
+excluded from metadata allocation; inode and block claims update their bitmaps
+and allocation summaries. Directory layout and extent-tree shape are rebuilt
+through the core's existing mutation mechanisms, and inode block charges are
+derived from the resulting maps.
+
+The complete semantic conversion commits as an ordinary journal transaction with
+the same ID as the fast prefix. Before its commit becomes durable, the original
+fast prefix remains authoritative. Afterward, ordinary recovery advances past
+that ID and ignores the stale fast records. Home metadata is never partially
+published without that ordinary recovery record. Last unlinks join legacy orphan
+cleanup; replacing an inode generation requires a preceding last unlink and
+reclaims its previous backing within the same transaction. New directories retain
+their reconstructed size and index representation rather than the logged layout.
+
+This implementation bounds the fast area to 4,096 blocks, the prefix to 65,536
+records, and the complete conversion to the ordinary 256-snapshot transaction
+limit. Capacity exhaustion returns unsupported. Active modern orphan slots and
+generation reuse requiring staged private-value reclamation are not yet supported.
+Indirect/special-inode records, partially completed foreign replay and broader
+ownership-corruption cases still require acceptance. The writer continues to
+emit ordinary full transactions; it does not emit fast commits.
 
 External journals require an explicitly supplied `ext4_journal_environment` and
 exclusive ownership of two distinct resources. The filesystem environment still

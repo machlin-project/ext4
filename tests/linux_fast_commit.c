@@ -1,0 +1,367 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mount.h>
+#include <sys/reboot.h>
+#include <sys/stat.h>
+#include <sys/statfs.h>
+#include <sys/syscall.h>
+#include <sys/utsname.h>
+#include <unistd.h>
+
+#define CREATED_FILES 32U
+#define CREATED_MODE 0604U
+#define SPARSE_BLOCK 8U
+#define SPARSE_OFFSET 11U
+#define TAIL_BYTES 513U
+#define LONG_FILES 12U
+#define LONG_NAME_BYTES 230U
+#define SCATTER_EXTENTS 32U
+#define RESERVED_START 100U
+#define RESERVED_BLOCKS 8U
+#define INITIALIZED_BLOCK 102U
+#define INITIALIZED_OFFSET 7U
+
+static void
+power_off(int passed)
+{
+	printf("LINUX_FAST_COMMIT_RESULT=%s\n", passed ? "PASS" : "FAIL");
+	fflush(stdout);
+	fflush(stderr);
+	reboot(RB_POWER_OFF);
+	for (;;) {
+		pause();
+	}
+}
+
+static void
+require(int condition, const char *operation)
+{
+	if (!condition) {
+		fprintf(stderr, "%s: %s\n", operation, strerror(errno));
+		power_off(0);
+	}
+}
+
+static void
+small_file_name(char *path, size_t size, unsigned int index)
+{
+	int length;
+
+	length = snprintf(path, size, "/mnt/item-%02u", index);
+	require(length > 0 && (size_t)length < size, "form fixture filename");
+}
+
+static size_t
+small_file_data(char *bytes, size_t size, unsigned int index)
+{
+	int length;
+
+	length = snprintf(bytes, size, "Native fast commit file %02u\n", index);
+	require(length > 0 && (size_t)length < size, "form fixture contents");
+	return (size_t)length;
+}
+
+static void
+long_file_name(char *path, size_t size, unsigned int index)
+{
+	int prefix;
+	size_t length;
+
+	prefix = snprintf(path, size, "/mnt/new-dir/entry-%02u-", index);
+	require(prefix > 0 && (size_t)prefix + LONG_NAME_BYTES < size, "form long pathname");
+	length = strlen("entry-00-");
+	memset(path + prefix, 'a' + (int)index, LONG_NAME_BYTES - length);
+	path[(size_t)prefix + LONG_NAME_BYTES - length] = 0;
+}
+
+static void
+verify_extra(unsigned int block_size)
+{
+	struct stat metadata;
+	uint8_t bytes[4096];
+	uint8_t expected;
+	char path[512];
+	size_t position;
+	size_t length;
+	off_t offset;
+	off_t size = (off_t)INITIALIZED_BLOCK * block_size + INITIALIZED_OFFSET + 1U;
+	unsigned int index;
+	int fd;
+
+	require(access("/mnt/victim", F_OK) < 0 && errno == ENOENT, "verify final unlink");
+	require(stat("/mnt/new-dir", &metadata) == 0 && S_ISDIR(metadata.st_mode) &&
+		metadata.st_nlink == 2,
+	    "verify created directory");
+	for (index = 0; index < LONG_FILES; index++) {
+		long_file_name(path, sizeof(path), index);
+		fd = open(path, O_RDONLY | O_CLOEXEC);
+		require(fd >= 0 && read(fd, bytes, sizeof(bytes)) == 1 && bytes[0] == 'a' + index,
+		    "verify long-name created file");
+		require(close(fd) == 0, "close long-name file");
+	}
+	fd = open("/mnt/ranges", O_RDONLY | O_CLOEXEC);
+	require(fd >= 0 && fstat(fd, &metadata) == 0 && metadata.st_size == size,
+	    "open fragmented and preallocated file");
+	for (offset = 0; offset < size; offset += (off_t)length) {
+		length = (uint64_t)(size - offset) < sizeof(bytes) ? (size_t)(size - offset)
+								   : sizeof(bytes);
+		require(read(fd, bytes, length) == (ssize_t)length, "read fragmented file");
+		for (position = 0; position < length; position++) {
+			expected = 0;
+			if ((uint64_t)offset + position ==
+			    (uint64_t)INITIALIZED_BLOCK * block_size + INITIALIZED_OFFSET) {
+				expected = 'E';
+			} else if (((uint64_t)offset + position) % (2U * block_size) == 0) {
+				index = (unsigned int)(((uint64_t)offset + position) /
+				    (2U * block_size));
+				if (index < SCATTER_EXTENTS && index != 4U) {
+					expected = (uint8_t)('D' + index % 26U);
+				}
+			}
+			require(bytes[position] == expected,
+			    "verify holes, unwritten data and initialized byte");
+		}
+	}
+	require(close(fd) == 0, "close fragmented file");
+}
+
+static void
+verify(unsigned int block_size)
+{
+	struct stat metadata;
+	struct stat alias;
+	uint8_t *bytes;
+	uint8_t expected;
+	char path[128];
+	char contents[64];
+	size_t size = (size_t)SPARSE_BLOCK * block_size + SPARSE_OFFSET + TAIL_BYTES;
+	size_t offset;
+	size_t length;
+	unsigned int index;
+	int fd;
+
+	bytes = malloc(size);
+	require(bytes != NULL, "allocate native verification buffer");
+	fd = open("/mnt/hello.txt", O_RDONLY | O_CLOEXEC);
+	require(fd >= 0 && fstat(fd, &metadata) == 0, "open sparse fast-commit file");
+	require(metadata.st_size == (off_t)size && (metadata.st_mode & 07777) == 0640,
+	    "verify sparse size and permissions");
+	require(read(fd, bytes, size) == (ssize_t)size, "read sparse fast-commit data");
+	for (offset = 0; offset < size; offset++) {
+		if (offset < block_size + 3U) {
+			expected = 'B';
+		} else if (offset >= 2U * block_size && offset < 3U * block_size) {
+			expected = 0;
+		} else if (offset < 3U * block_size + 17U) {
+			expected = 'A';
+		} else if (offset < (size_t)SPARSE_BLOCK * block_size + SPARSE_OFFSET) {
+			expected = 0;
+		} else {
+			expected = 'C';
+		}
+		require(bytes[offset] == expected, "verify fast-commit range and sparse gap");
+	}
+	require(close(fd) == 0, "close sparse file");
+	for (index = 0; index < CREATED_FILES; index++) {
+		small_file_name(path, sizeof(path), index);
+		if (index == 0) {
+			require(access(path, F_OK) < 0 && errno == ENOENT,
+			    "verify renamed source is absent");
+			strcpy(path, "/mnt/moved");
+		}
+		length = small_file_data(contents, sizeof(contents), index);
+		fd = open(path, O_RDONLY | O_CLOEXEC);
+		require(fd >= 0 && fstat(fd, &metadata) == 0, "open replayed created file");
+		require(
+		    metadata.st_size == (off_t)length && (metadata.st_mode & 07777) == CREATED_MODE,
+		    "verify replayed inode fields");
+		require(read(fd, bytes, size) == (ssize_t)length &&
+			memcmp(bytes, contents, length) == 0,
+		    "verify replayed created data");
+		require(metadata.st_nlink == (index == 0 ? 2U : 1U), "verify final link counts");
+		if (index == 0) {
+			require(stat("/mnt/alias", &alias) == 0 && alias.st_ino == metadata.st_ino,
+			    "verify retained hardlink identity");
+		}
+		require(close(fd) == 0, "close replayed created file");
+	}
+	free(bytes);
+	verify_extra(block_size);
+}
+
+static void
+mutate_extra(unsigned int block_size)
+{
+	char path[512];
+	uint8_t byte;
+	unsigned int index;
+	int descriptors[LONG_FILES];
+	int fd;
+
+	fd = open("/mnt/victim", O_RDWR | O_CLOEXEC);
+	require(fd >= 0 && unlink("/mnt/victim") == 0 && fsync(fd) == 0,
+	    "fast commit final unlink while the inode is open");
+	require(close(fd) == 0, "close unlinked inode");
+	require(mkdir("/mnt/new-dir", 0750) == 0, "create logged directory");
+	for (index = 0; index < LONG_FILES; index++) {
+		long_file_name(path, sizeof(path), index);
+		descriptors[index] =
+		    open(path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, CREATED_MODE);
+		byte = (uint8_t)('a' + index);
+		require(descriptors[index] >= 0 && write(descriptors[index], &byte, 1) == 1,
+		    "create queued long-name file");
+	}
+	/* Several queued creates force records to cross journal block boundaries. */
+	for (index = 0; index < LONG_FILES; index++) {
+		require(fsync(descriptors[index]) == 0 && close(descriptors[index]) == 0,
+		    "commit queued long-name files");
+	}
+	fd = open("/mnt/ranges", O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, CREATED_MODE);
+	require(fd >= 0, "create fragmented file");
+	for (index = 0; index < SCATTER_EXTENTS; index++) {
+		byte = (uint8_t)('D' + index % 26U);
+		require(pwrite(fd, &byte, 1, (off_t)index * 2U * block_size) == 1,
+		    "create separate extent");
+	}
+	require(fsync(fd) == 0, "commit extent tree split");
+	require(fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t)8U * block_size,
+		    block_size) == 0,
+	    "punch fragmented extent");
+	require(fallocate(fd, FALLOC_FL_KEEP_SIZE, (off_t)RESERVED_START * block_size,
+		    (off_t)RESERVED_BLOCKS * block_size) == 0 &&
+		fsync(fd) == 0,
+	    "commit unwritten extents");
+	require(
+	    pwrite(fd, "E", 1, (off_t)INITIALIZED_BLOCK * block_size + INITIALIZED_OFFSET) == 1 &&
+		fsync(fd) == 0,
+	    "commit partial unwritten initialization");
+	require(close(fd) == 0, "close fragmented file");
+}
+
+static void
+mutate(unsigned int block_size)
+{
+	uint8_t *bytes;
+	char path[128];
+	char contents[64];
+	char line[256];
+	FILE *stats;
+	size_t length;
+	unsigned long commits = 0;
+	unsigned int index;
+	int fd;
+
+	bytes = malloc(block_size + 3U);
+	require(bytes != NULL, "allocate native mutation buffer");
+	fd = open("/mnt/victim", O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, CREATED_MODE);
+	memset(bytes, 'V', block_size + 3U);
+	require(fd >= 0 && write(fd, bytes, block_size + 3U) == (ssize_t)block_size + 3U &&
+		close(fd) == 0,
+	    "create checkpointed unlink target");
+	fd = open("/mnt/hello.txt", O_RDWR | O_CLOEXEC);
+	require(fd >= 0, "open initial file");
+	/* Finish one ordinary transaction before asking Linux for fast commits. */
+	require(pwrite(fd, "A", 1, 0) == 1 && syncfs(fd) == 0, "checkpoint initial transaction");
+	memset(bytes, 'B', block_size + 3U);
+	require(pwrite(fd, bytes, block_size + 3U, 0) == (ssize_t)block_size + 3,
+	    "overwrite range for fast commit");
+	require(fsync(fd) == 0, "commit overwritten range");
+	require(fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t)2U * block_size,
+		    block_size) == 0 &&
+		fsync(fd) == 0,
+	    "commit removal of an allocated range");
+	memset(bytes, 'C', TAIL_BYTES);
+	require(pwrite(fd, bytes, TAIL_BYTES, (off_t)SPARSE_BLOCK * block_size + SPARSE_OFFSET) ==
+		TAIL_BYTES,
+	    "write sparse appended range");
+	require(fchmod(fd, 0640) == 0 && fsync(fd) == 0, "commit sparse range and metadata");
+	require(close(fd) == 0, "close changed file");
+	for (index = 0; index < CREATED_FILES; index++) {
+		small_file_name(path, sizeof(path), index);
+		length = small_file_data(contents, sizeof(contents), index);
+		fd = open(path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, CREATED_MODE);
+		require(fd >= 0 && write(fd, contents, length) == (ssize_t)length,
+		    "create fast-commit file");
+		require(fsync(fd) == 0, "commit created file");
+		if (index == 0) {
+			require(link(path, "/mnt/alias") == 0 && fsync(fd) == 0, "commit hardlink");
+			require(rename(path, "/mnt/moved") == 0 && fsync(fd) == 0,
+			    "commit same-directory rename");
+		}
+		require(close(fd) == 0, "close created file");
+	}
+	free(bytes);
+	mutate_extra(block_size);
+	verify(block_size);
+	stats = fopen("/proc/fs/ext4/vda/fc_info", "r");
+	require(stats != NULL, "open native fast-commit statistics");
+	puts("LINUX_FAST_COMMIT_STATS_BEGIN");
+	while (fgets(line, sizeof(line), stats) != NULL) {
+		fputs(line, stdout);
+		if (strstr(line, " commits\n") != NULL) {
+			require(sscanf(line, "%lu commits", &commits) == 1,
+			    "decode native fast-commit count");
+		}
+	}
+	require(fclose(stats) == 0 && commits != 0, "require actual native fast commits");
+	puts("LINUX_FAST_COMMIT_STATS_END");
+	/* Keep the mount dirty; the next owner must replay the actual fast log. */
+	power_off(1);
+}
+
+int
+main(void)
+{
+	const char *modules[] = { "virtio_blk", "crc32c_generic", "crc16", "mbcache", "jbd2",
+		"ext4" };
+	/* The filesystem feature enables fast commits; Linux has no fast_commit
+	 * mount parameter. The delayed full-commit timer preserves capture inputs. */
+	const char *options = "data=ordered,commit=600";
+	struct utsname identity;
+	struct statfs geometry;
+	FILE *config;
+	char path[128];
+	unsigned int phase = 0;
+	unsigned int index;
+	int fd;
+	int result;
+
+	setvbuf(stdout, NULL, _IOLBF, 0);
+	umask(0);
+	require(uname(&identity) == 0, "uname");
+	printf("LINUX_FAST_COMMIT_KERNEL=%s %s %s\n", identity.sysname, identity.release,
+	    identity.machine);
+	require(mount("devtmpfs", "/dev", "devtmpfs", 0, NULL) == 0, "mount devtmpfs");
+	require(mount("proc", "/proc", "proc", 0, NULL) == 0, "mount guest procfs");
+	for (index = 0; index < sizeof(modules) / sizeof(modules[0]); index++) {
+		snprintf(path, sizeof(path), "/modules/%s.ko", modules[index]);
+		fd = open(path, O_RDONLY | O_CLOEXEC);
+		require(fd >= 0, "open matching module");
+		result = (int)syscall(SYS_finit_module, fd, "", 0);
+		require(result == 0 || errno == EEXIST, path);
+		require(close(fd) == 0, "close module");
+	}
+	config = fopen("/phase", "r");
+	require(config != NULL && fscanf(config, "%u", &phase) == 1, "read fixture phase");
+	require(fclose(config) == 0 && phase <= 1, "validate fixture phase");
+	printf("LINUX_FAST_COMMIT_MOUNT_OPTIONS=%s\n", options);
+	require(mount("/dev/vda", "/mnt", "ext4", MS_NOATIME | MS_NOSUID | MS_NODEV, options) == 0,
+	    "mount fast-commit filesystem");
+	require(statfs("/mnt", &geometry) == 0 &&
+		(geometry.f_bsize == 1024 || geometry.f_bsize == 4096),
+	    "require fixture block size");
+	if (phase == 0) {
+		mutate((unsigned int)geometry.f_bsize);
+	}
+	verify((unsigned int)geometry.f_bsize);
+	require(umount("/mnt") == 0, "cleanly unmount recovered filesystem");
+	puts("LINUX_FAST_COMMIT_REPLAY_PASS");
+	power_off(1);
+	return 0;
+}

@@ -194,6 +194,22 @@ ext4_allocation_account(struct ext4_allocation *allocation)
 	ext4_group_checksum_set(fs, allocation->group_index, disk);
 }
 
+static bool
+ext4_allocation_excluded(const struct ext4_allocation *allocation, uint64_t block)
+{
+	const struct ext4_block_range *range;
+	size_t index;
+	uint64_t end = block + allocation->fs->cluster_blocks;
+
+	for (index = 0; index < allocation->excluded_count; index++) {
+		range = &allocation->excluded[index];
+		if (range->first < end && block < range->first + range->length) {
+			return true;
+		}
+	}
+	return false;
+}
+
 enum ext4_result
 ext4_allocate_block(struct ext4_allocation *allocation, uint64_t *block)
 {
@@ -251,7 +267,9 @@ ext4_allocate_block(struct ext4_allocation *allocation, uint64_t *block)
 			    first + (uint64_t)(bit + 1U) * fs->cluster_blocks - 1U <=
 				allocation->maximum_block;
 			    bit++) {
-				if (!ext4_bitmap_test(allocation->bitmap, bit)) {
+				if (!ext4_bitmap_test(allocation->bitmap, bit) &&
+				    !ext4_allocation_excluded(
+					allocation, first + (uint64_t)bit * fs->cluster_blocks)) {
 					ext4_bitmap_set(allocation->bitmap, bit);
 					allocation->next_bit = bit + 1;
 					allocation->group.free_blocks -= fs->cluster_blocks;
@@ -270,6 +288,87 @@ ext4_allocate_block(struct ext4_allocation *allocation, uint64_t *block)
 		}
 	}
 	return EXT4_NO_SPACE;
+}
+
+enum ext4_result
+ext4_allocation_claim(struct ext4_allocation *allocation, uint64_t block, uint64_t length)
+{
+	struct ext4_fs *fs = allocation->fs;
+	void *buffer;
+	uint64_t relative;
+	uint64_t offset;
+	uint64_t chunk;
+	uint32_t index;
+	uint32_t bit;
+	uint32_t group_index;
+	enum ext4_result error;
+
+	if (block < fs->first_data_block || block >= fs->info.blocks || length == 0 ||
+	    length > fs->info.blocks - block) {
+		return EXT4_CORRUPT;
+	}
+	relative = (block - fs->first_data_block) % fs->cluster_blocks;
+	block -= relative;
+	length =
+	    (length + relative + fs->cluster_blocks - 1U) / fs->cluster_blocks * fs->cluster_blocks;
+	if (length > fs->info.blocks - block || ext4_system_overlaps(fs, block, length)) {
+		return EXT4_CORRUPT;
+	}
+	error = ext4_allocation_super(allocation);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	while (length != 0) {
+		relative = block - fs->first_data_block;
+		group_index = (uint32_t)(relative / fs->blocks_per_group);
+		bit = (uint32_t)(relative % fs->blocks_per_group);
+		chunk = fs->blocks_per_group - bit;
+		if (chunk > length) {
+			chunk = length;
+		}
+		/* Reload after a different inode or bitmap operation shared the same
+		 * descriptor snapshot. No cached group counts cross this boundary. */
+		allocation->bitmap = NULL;
+		allocation->group_index = group_index;
+		error = ext4_allocation_group(allocation, group_index, &allocation->group, &offset);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		error = ext4_transaction_buffer(
+		    allocation->transaction, offset / fs->info.block_size, &buffer);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		allocation->descriptor =
+		    (struct ext4_group_disk *)((uint8_t *)buffer + offset % fs->info.block_size);
+		error = ext4_transaction_buffer(
+		    allocation->transaction, allocation->group.block_bitmap, &buffer);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		allocation->bitmap = buffer;
+		error = ext4_allocation_bitmap(allocation);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		for (index = bit / fs->cluster_blocks; index < (bit + chunk) / fs->cluster_blocks;
+		    index++) {
+			if (!ext4_bitmap_test(allocation->bitmap, index)) {
+				if (allocation->group.free_blocks < fs->cluster_blocks ||
+				    allocation->free_blocks < fs->cluster_blocks) {
+					return EXT4_CORRUPT;
+				}
+				ext4_bitmap_set(allocation->bitmap, index);
+				allocation->group.free_blocks -= fs->cluster_blocks;
+				allocation->free_blocks -= fs->cluster_blocks;
+			}
+		}
+		ext4_allocation_account(allocation);
+		allocation->bitmap = NULL;
+		block += chunk;
+		length -= chunk;
+	}
+	return EXT4_OK;
 }
 
 enum ext4_result

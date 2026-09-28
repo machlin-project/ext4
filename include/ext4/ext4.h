@@ -131,6 +131,7 @@ struct ext4_recovery_report {
 	uint32_t orphan_file_transfers;
 	bool accounting_updated;
 	bool discarded_tail;
+	uint32_t fast_commits;
 };
 
 struct ext4_info {
