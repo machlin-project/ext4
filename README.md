@@ -17,8 +17,10 @@ rename exchange and whiteout, HTree mutation, automatic indexing, LARGEDIR and
 DIR_NLINK. Raw inode-body and external xattrs follow metadata, data and namespace
 transactions. Internal journal recovery handles legacy and modern orphan records.
 
-The completed 466-test CI regression passes all six jobs, alongside independent
-image checks and Linux mutation/recovery roundtrips. Tests cover malformed media,
+The completed 469-test CI regression passes all six suites, alongside independent
+image checks and Linux mutation/recovery roundtrips. The namespace job's timeout
+was raised after its checks finished at the old limit; its targeted rerun passes,
+including artifact upload and job cleanup. Tests cover malformed media,
 allocation/read failures and interrupted writes under ASan/UBSan; freestanding
 compilation enforces a 2 KiB stack-frame budget. Read profiles span 1–64 KiB blocks,
 checksummed and legacy formats. Detailed evidence and known exceptions are in
@@ -86,7 +88,7 @@ data, extent nodes and xattrs, including physical block numbers above 32 bits.
 The writer promotes an empty 32-bit journal to wide tags at its first transaction.
 Three profiles pass 21 independent read/mutation/reclamation/recovery states and
 native Linux/core/Linux roundtrips, including direct Linux replay of the core's
-high-address journal. The expanded regression for this change remains pending.
+high-address journal. The expanded 469-test regression and independent checks pass.
 
 Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.
 Both native adapters remain read-only. The FSKit adapter builds for macOS 26.4,

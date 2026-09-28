@@ -41,7 +41,7 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Finish large-volume regression acceptance and wider geometry coverage; retain the Linux delayed-allocation maximum-offset exception | Open; BIGALLOC and large logical files pass the 466-test regression; high physical addresses pass three focused/native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
+| Format compatibility | Wider geometry and format coverage; retain the Linux delayed-allocation maximum-offset exception | Open; BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | Fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; v1 and async compatibility pass focused faults, independent replay, eight Linux roundtrips and their combined full regression |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
@@ -84,8 +84,19 @@ reclamation, and core/oracle recovery of both uncommitted and committed journals
 All 258 commands and 21 strict nonrepairing fsck checks pass. Exact mappings, data
 and zero padding, inode/cluster charges, free totals, unchanged seeds and replay
 idempotence agree. This is selected large-volume geometry evidence, not a sustained
-throughput result or coverage of every group layout. The expanded full regression
-remains pending for the journal-width change.
+throughput result or coverage of every group layout.
+
+The expanded CI run passes all 469 registered tests across six suites, with no
+Meson failures or skips. All applicable independent checks finish successfully;
+289 report files contain no unexpected failures. The existing ten shared-value
+reader-only fsck exceptions and ten fixture refcount normalization commands retain
+their separate classifications. The namespace job reaches its 45-minute timeout
+after its final check and artifact upload succeed, so that workflow is cancelled,
+not a successful whole run. The limit is now 60 minutes. A targeted namespace rerun
+passes all 63 tests, all six independent stages, artifact upload and job cleanup.
+The other five suites retain their successful full-run evidence. Main reviews are
+`artifacts/checks/large-volume-ci-accepted.json` and
+`artifacts/checks/namespace-timeout-ci-accepted.json`.
 
 All three profiles also pass four native Linux boots each with ordinary ordered
 mounts and delayed allocation enabled. Linux reads and overwrites high-address
@@ -99,10 +110,7 @@ checks return zero, covering 12 Linux transactions and three orphans.
 Linux may place a new file's data and xattr in lower groups despite its high inode
 number. The native checker permits that allocator policy while retaining exact
 bytes, mappings, charges, high inode-table locations and the existing high-address
-data/extent-node/xattr checks. The first native attempt stopped after its mutation
-boot because frozen binaries had lost executable permissions; the next exposed
-the overly restrictive placement expectation after successful core recovery and
-fsck. Those harness corrections did not change the core.
+data/extent-node/xattr checks.
 
 Native evidence is `lab/artifacts/ext4-journal/large-volume-native-retry2/report.json`
 and main review is `artifacts/checks/large-volume-linux-accepted.json`. This adds
@@ -253,8 +261,9 @@ The first expanded regression ran all 454 cases: 452 passed and two hand-built
 filesystem models failed because they omitted the new cluster geometry fields.
 Both model initializers are corrected and the two targeted tests pass locally.
 The same run exposed artifact discovery following an overlong host symlink;
-the upload step now removes fixture-host links after testing. The failed run
-does not establish regression acceptance; the corrected full run remains pending.
+the upload step now removes fixture-host links after testing. The corrected
+466-test full run and later 469-test acceptance above pass; the historical failed
+run remains available as diagnostic evidence.
 
 ## Inode-resident file and directory data
 
