@@ -2,6 +2,8 @@
 /* Test-only oracle linked with e2fsprogs: prints ext4 utf8-12.1 casefold and
  * casefolded directory-hash vectors computed by libext2fs, which follows the
  * Linux utf8data semantics. The portable core never links this program. */
+/* libext2fs headers use POSIX and GNU types that glibc hides under -std=c11. */
+#define _GNU_SOURCE
 #include <sys/stat.h>
 #include "ext2fs/ext2fsP.h"
 
