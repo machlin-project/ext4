@@ -18,7 +18,7 @@ DIR_NLINK. Raw inode-body and external xattrs follow metadata, data and namespac
 transactions. Internal and single-user external journal recovery handles legacy
 and modern orphan records.
 
-The completed 516-test CI regression passes all six jobs, including independent
+The completed 552-test CI regression passes all six jobs, including independent
 image checks, artifact upload and job cleanup. Linux mutation/recovery roundtrips
 provide separate native interoperability evidence. Tests cover malformed media,
 allocation/read failures and interrupted writes under ASan/UBSan; freestanding
@@ -104,8 +104,8 @@ Linux-generated 1 and 4 KiB images pass basic replay comparisons and expanded
 core/Linux roundtrips with inode reuse, new directories, long names, sparse maps
 and unwritten extents. Seventy-six automated cases on thirteen independently authored
 profiles cover decode/replay, resource failures and interrupted recovery; independent
-output checks pass. Modern-orphan and special-inode fast replay also pass the
-516-test CI regression; full regression of subsequent extensions is pending.
+output checks pass. Modern-orphan, special-inode, attribute-reuse and indirect
+fast replay also pass the 552-test CI regression.
 Modern orphan slots
 are coordinated with inode-generation reuse, final deletion and linked truncation.
 Protocol fixtures also exercise short and mapped symlinks, device identities,
@@ -119,6 +119,13 @@ on generation reuse, and handles legacy orphans and mapped symlinks. Journal fre
 now consumes validated mapping runs, removing repeated reads of the same indirect
 nodes. All 94 affected recovery, mapping and journal tests pass, as do thirteen
 independent output checks and native Linux readback of both indirect profiles.
+The next recovery-scaling checkpoint passes 129 affected sanitized tests, including
+86 fast-commit cases on fifteen profiles, allocator and clustered/group-layout
+regressions. It adds sorted replay indexes, journal-block reuse, one directory scan
+per name operation and range-based bitmap validation. Large protocol prefixes
+exercise 256 and 1,024 created files. Independent output verification of this
+checkpoint, release benchmarks, large-prefix Linux readback and its expanded full
+CI remain pending. See [the continuation prompt](docs/CORE-HANDOFF.md).
 Wider format combinations and broader semantic-corruption acceptance remain open.
 See the fast-commit development
 evidence and the recorded native-reference failure in the acceptance matrix;

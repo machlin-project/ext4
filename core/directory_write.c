@@ -214,13 +214,15 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 						return EXT4_CORRUPT;
 					}
 					exists = true;
+					/* INSERT also reports the existing identity, allowing
+					 * idempotent replay without a separate full FIND pass. */
+					slot->number = number;
 					if (action == EXT4_DIRECTORY_FIND) {
 						slot->logical = logical;
 						slot->physical = run.physical;
 						slot->offset = offset;
 						slot->length = length;
 						slot->previous = previous;
-						slot->number = number;
 						slot->type = (fs->info.feature_incompat &
 								 EXT4_FEATURE_INCOMPAT_FILETYPE)
 						    ? (enum ext4_file_type)entry->type

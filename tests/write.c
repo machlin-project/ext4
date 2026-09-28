@@ -1160,6 +1160,12 @@ indirect_boundaries(struct device *device)
 static void
 bitmap_corruption(struct device *device)
 {
+	enum {
+		BITMAP_CHECKSUM_DAMAGE,
+		BITMAP_SYSTEM_FIRST,
+		BITMAP_FREE_COUNT_DAMAGE = BITMAP_SYSTEM_FIRST + EXT4_BITS_PER_BYTE,
+		BITMAP_DAMAGE_COUNT
+	};
 	struct ext4_fs *fs;
 	struct ext4_inode inode;
 	struct ext4_inode_update update;
@@ -1175,7 +1181,7 @@ bitmap_corruption(struct device *device)
 	uint32_t group_index;
 	size_t completed;
 
-	for (test = 0; test < 3; test++) {
+	for (test = 0; test < BITMAP_DAMAGE_COUNT; test++) {
 		device_reset(device, device->base);
 		fs = mount_writer(device);
 		inode = lookup(fs, "empty");
@@ -1189,7 +1195,9 @@ bitmap_corruption(struct device *device)
 		CHECK(group_index < fs->info.groups && !(group.flags & EXT4_GROUP_BLOCK_UNINIT));
 		first = fs->first_data_block + (uint64_t)group_index * fs->blocks_per_group;
 		for (relative = 0; relative < fs->blocks_per_group; relative++) {
-			if (ext4_system_block(fs, first + relative)) {
+			if (ext4_system_block(fs, first + relative) &&
+			    (test == BITMAP_CHECKSUM_DAMAGE || test == BITMAP_FREE_COUNT_DAMAGE ||
+				(relative % EXT4_BITS_PER_BYTE == test - BITMAP_SYSTEM_FIRST))) {
 				break;
 			}
 		}
@@ -1203,13 +1211,13 @@ bitmap_corruption(struct device *device)
 		    (size_t)group_index * fs->descriptor_size);
 		super = (struct ext4_super_disk *)(device->cache + EXT4_SUPER_OFFSET);
 		bitmap = device->cache + group.block_bitmap * device->block_size;
-		if (test == 0) {
+		if (test == BITMAP_CHECKSUM_DAMAGE) {
 			/* An ordinary damaged bitmap, with its old checksum. */
 			bitmap[0] ^= 1U;
 		} else {
-			if (test == 1) {
+			if (test != BITMAP_FREE_COUNT_DAMAGE) {
 				/* A forged free system block with matching checksums and
-				 * all counters updated must still be rejected. */
+				 * counters must reject at every bit position within a byte. */
 				bitmap[relative / EXT4_BITS_PER_BYTE] &=
 				    (uint8_t)~(1U << (relative % EXT4_BITS_PER_BYTE));
 			}

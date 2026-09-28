@@ -34,6 +34,10 @@
 #define ATTRIBUTE_SURVIVORS 6U
 #define PHASE_PROTOCOL_READBACK 2U
 #define PHASE_INDIRECT_READBACK 3U
+#define PHASE_LARGE_PREFIX_READBACK 4U
+#define LARGE_PREFIX_FILES_1K 256U
+#define LARGE_PREFIX_FILES_4K 1024U
+#define PROTOCOL_SOURCE_BLOCKS 5U
 #define DIRECT_BLOCKS 12U
 #define INDIRECT_POINTER_BYTES 4U
 
@@ -101,8 +105,8 @@ long_file_name(char *path, size_t size, unsigned int index)
 
 	prefix = snprintf(path, size, "/mnt/new-dir/entry-%02u-", index);
 	require(prefix > 0 && (size_t)prefix + LONG_NAME_BYTES < size, "form long pathname");
-	length = strlen("entry-00-");
-	memset(path + prefix, 'a' + (int)index, LONG_NAME_BYTES - length);
+	length = (size_t)prefix - strlen("/mnt/new-dir/");
+	memset(path + prefix, 'a' + (int)(index % 26U), LONG_NAME_BYTES - length);
 	path[(size_t)prefix + LONG_NAME_BYTES - length] = 0;
 }
 
@@ -520,6 +524,49 @@ verify_indirect(unsigned int block_size)
 }
 
 static void
+verify_large_prefix(unsigned int block_size)
+{
+	struct stat metadata;
+	struct stat alias;
+	uint8_t bytes[4096];
+	uint8_t expected;
+	char path[512];
+	unsigned int files = block_size == 1024 ? LARGE_PREFIX_FILES_1K : LARGE_PREFIX_FILES_4K;
+	unsigned int index;
+	unsigned int logical;
+	size_t position;
+	int fd;
+
+	require(access("/mnt/hello.txt", F_OK) < 0 && errno == ENOENT,
+	    "verify old large-prefix name is absent");
+	require(stat("/mnt/new-dir", &metadata) == 0 && S_ISDIR(metadata.st_mode) &&
+		metadata.st_nlink == 2,
+	    "verify large-prefix directory");
+	fd = open("/mnt/renamed", O_RDONLY | O_CLOEXEC);
+	require(fd >= 0 && fstat(fd, &metadata) == 0 && metadata.st_mode == (S_IFREG | 0640) &&
+		metadata.st_size == (off_t)PROTOCOL_SOURCE_BLOCKS * block_size &&
+		metadata.st_nlink == 2 && stat("/mnt/alias", &alias) == 0 &&
+		metadata.st_ino == alias.st_ino,
+	    "verify large-prefix sparse inode and hardlink");
+	for (logical = 0; logical < PROTOCOL_SOURCE_BLOCKS; logical++) {
+		expected = logical == 1 ? 0 : 'A';
+		require(read(fd, bytes, block_size) == (ssize_t)block_size,
+		    "read large-prefix sparse file");
+		for (position = 0; position < block_size; position++) {
+			require(bytes[position] == expected, "verify large-prefix sparse data");
+		}
+	}
+	require(read(fd, bytes, 1) == 0 && close(fd) == 0, "verify large-prefix EOF and close");
+	for (index = 0; index < files; index++) {
+		long_file_name(path, sizeof(path), index);
+		verify_uniform_file(
+		    path, block_size + 17U + index, CREATED_MODE, (uint8_t)('a' + index % 26U));
+	}
+	printf("LINUX_FAST_COMMIT_LARGE_PREFIX_FILES=%u\n", files);
+	puts("LINUX_FAST_COMMIT_LARGE_PREFIX_PASS");
+}
+
+static void
 verify_xattr_reuse(unsigned int block_size)
 {
 	const char *replacements[] = { "/mnt/reused", "/mnt/reused-shared" };
@@ -619,7 +666,8 @@ main(void)
 	}
 	config = fopen("/phase", "r");
 	require(config != NULL && fscanf(config, "%u", &phase) == 1, "read fixture phase");
-	require(fclose(config) == 0 && phase <= PHASE_INDIRECT_READBACK, "validate fixture phase");
+	require(
+	    fclose(config) == 0 && phase <= PHASE_LARGE_PREFIX_READBACK, "validate fixture phase");
 	config = fopen("/modern-orphans", "r");
 	require(config != NULL && fscanf(config, "%u", &modern_orphans) == 1,
 	    "read orphan fixture mode");
@@ -641,6 +689,8 @@ main(void)
 		verify_xattr_reuse((unsigned int)geometry.f_bsize);
 	} else if (phase == PHASE_INDIRECT_READBACK) {
 		verify_indirect((unsigned int)geometry.f_bsize);
+	} else if (phase == PHASE_LARGE_PREFIX_READBACK) {
+		verify_large_prefix((unsigned int)geometry.f_bsize);
 	} else {
 		verify((unsigned int)geometry.f_bsize);
 		if (special_files) {

@@ -132,6 +132,26 @@ and allocation summaries. Directory layout and extent or indirect trees are rebu
 through the core's existing mutation mechanisms, and inode block charges are
 derived from the resulting maps.
 
+Before materialization, replay gathers every referenced inode into a sorted,
+unique state index and merges logged data ranges into a sorted exclusion union.
+Inode lookup and allocation exclusion use binary search. Repeated, nested and
+adjacent logged ranges remain admissible; the union only prevents their data
+from being reused for new metadata. Per-inode mapping validation retains its
+separate overlap checks. The semantic records retain their original committed order.
+Each sequential pass retains one journal block in the existing replay buffer,
+checking each record's saved digest before exposing its payload. The block cache
+is invalidated between preparation and materialization and has no lifetime beyond
+that pass. Neither index introduces persistent filesystem state or changes journal
+credit limits, commit ordering or resource ownership.
+
+Creation and link replay combine name lookup with insertion-slot preparation in
+one complete directory validation. An existing name reports its inode identity;
+replay accepts the same identity without changing link counts and rejects a
+conflicting owner. Duplicate entries, checksums and index placement remain checked
+across the directory. This removes the consecutive FIND and INSERT scans, but
+still visits the directory for each name operation; large namespace replay is not
+yet a linear-time algorithm.
+
 The complete semantic conversion commits as an ordinary journal transaction with
 the same ID as the fast prefix. Before its commit becomes durable, the original
 fast prefix remains authoritative. Afterward, ordinary recovery advances past
@@ -298,6 +318,11 @@ including flex_bg placement. Writable mount bounds its input index to 1,048,576
 ranges. It is a metadata exclusion index, not a global filesystem consistency
 checker. Ordinary allocation preserves the reserved-block pool; admitted use of
 reserved space remains a separate policy contract.
+Bitmap validation starts at the first protected range intersecting the group,
+checks or initializes each covered cluster interval, and reserves the incomplete
+tail and bitmap padding. A byte population pass then verifies the free count.
+It preserves complete bitmap and checksum validation without searching the system
+range index separately for every cluster. It needs no additional cache or allocation.
 
 New blocks are fully zeroed before partial writes. Growth skips sparse/unwritten
 runs and zeroes exposed bytes in existing written allocations beyond the old EOF.

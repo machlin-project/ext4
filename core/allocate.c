@@ -115,18 +115,98 @@ ext4_allocation_super(struct ext4_allocation *allocation)
 }
 
 static enum ext4_result
+ext4_bitmap_protect(uint8_t *bitmap, uint32_t first, uint32_t end, bool initialize)
+{
+	uint32_t byte;
+	uint8_t mask;
+
+	while (first < end && first % EXT4_BITS_PER_BYTE != 0) {
+		if (!initialize && !ext4_bitmap_test(bitmap, first)) {
+			return EXT4_CORRUPT;
+		}
+		ext4_bitmap_set(bitmap, first++);
+	}
+	while (end - first >= EXT4_BITS_PER_BYTE) {
+		byte = first / EXT4_BITS_PER_BYTE;
+		if (!initialize && bitmap[byte] != UINT8_MAX) {
+			return EXT4_CORRUPT;
+		}
+		bitmap[byte] = UINT8_MAX;
+		first += EXT4_BITS_PER_BYTE;
+	}
+	if (first < end) {
+		byte = first / EXT4_BITS_PER_BYTE;
+		mask = (uint8_t)((1U << (end - first)) - 1U);
+		if (!initialize && (bitmap[byte] & mask) != mask) {
+			return EXT4_CORRUPT;
+		}
+		bitmap[byte] |= mask;
+	}
+	return EXT4_OK;
+}
+
+static enum ext4_result
+ext4_allocation_protect(
+    struct ext4_allocation *allocation, uint64_t first, uint32_t available, bool initialize)
+{
+	struct ext4_fs *fs = allocation->fs;
+	const struct ext4_block_range *range;
+	uint64_t end = first + (uint64_t)available * fs->cluster_blocks;
+	uint64_t lower;
+	uint64_t upper;
+	size_t low = 0;
+	size_t high = fs->system_range_count;
+	size_t middle;
+	enum ext4_result error;
+
+	/* Exclude the incomplete final cluster and all bitmap padding. */
+	error = ext4_bitmap_protect(
+	    allocation->bitmap, available, fs->info.block_size * EXT4_BITS_PER_BYTE, initialize);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	/* Find the first protected range touching this group, then visit each
+	 * intersection once instead of searching the range index for every bit. */
+	while (low < high) {
+		middle = low + (high - low) / 2U;
+		range = &fs->system_ranges[middle];
+		if (range->first + range->length <= first) {
+			low = middle + 1U;
+		} else {
+			high = middle;
+		}
+	}
+	for (; low < fs->system_range_count; low++) {
+		range = &fs->system_ranges[low];
+		if (range->first >= end) {
+			break;
+		}
+		lower = range->first < first ? 0 : range->first - first;
+		upper = range->first + range->length;
+		upper = (upper > end ? end : upper) - first;
+		error = ext4_bitmap_protect(allocation->bitmap,
+		    (uint32_t)(lower / fs->cluster_blocks),
+		    (uint32_t)((upper + fs->cluster_blocks - 1U) / fs->cluster_blocks), initialize);
+		if (error != EXT4_OK) {
+			return error;
+		}
+	}
+	return EXT4_OK;
+}
+
+static enum ext4_result
 ext4_allocation_bitmap(struct ext4_allocation *allocation)
 {
+	static const uint8_t population[] = { 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4 };
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_group *group = &allocation->group;
 	uint64_t first =
 	    fs->first_data_block + (uint64_t)allocation->group_index * fs->blocks_per_group;
 	uint64_t available = fs->info.blocks - first;
 	uint32_t free_blocks = 0;
-	uint32_t bit;
+	uint32_t byte;
+	uint8_t value;
 	bool uninitialized = (group->flags & EXT4_GROUP_BLOCK_UNINIT) != 0;
-	bool system;
-	bool used;
 	enum ext4_result error;
 
 	if (uninitialized) {
@@ -144,20 +224,15 @@ ext4_allocation_bitmap(struct ext4_allocation *allocation)
 		available = fs->blocks_per_group;
 	}
 	available /= fs->cluster_blocks;
-	for (bit = 0; bit < fs->info.block_size * EXT4_BITS_PER_BYTE; bit++) {
-		system = bit >= available ||
-		    ext4_system_overlaps(
-			fs, first + (uint64_t)bit * fs->cluster_blocks, fs->cluster_blocks);
-		if (uninitialized && system) {
-			ext4_bitmap_set(allocation->bitmap, bit);
-		}
-		used = ext4_bitmap_test(allocation->bitmap, bit);
-		if (system && !used) {
-			return EXT4_CORRUPT;
-		}
-		if (!used) {
-			free_blocks += fs->cluster_blocks;
-		}
+	error = ext4_allocation_protect(allocation, first, (uint32_t)available, uninitialized);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	for (byte = 0; byte < fs->info.block_size; byte++) {
+		value = allocation->bitmap[byte];
+		free_blocks +=
+		    (EXT4_BITS_PER_BYTE - population[value & 0x0fU] - population[value >> 4U]) *
+		    fs->cluster_blocks;
 	}
 	if (free_blocks != group->free_blocks) {
 		return EXT4_CORRUPT;
@@ -197,17 +272,8 @@ ext4_allocation_account(struct ext4_allocation *allocation)
 static bool
 ext4_allocation_excluded(const struct ext4_allocation *allocation, uint64_t block)
 {
-	const struct ext4_block_range *range;
-	size_t index;
-	uint64_t end = block + allocation->fs->cluster_blocks;
-
-	for (index = 0; index < allocation->excluded_count; index++) {
-		range = &allocation->excluded[index];
-		if (range->first < end && block < range->first + range->length) {
-			return true;
-		}
-	}
-	return false;
+	return ext4_ranges_overlap(allocation->excluded, allocation->excluded_count, block,
+	    allocation->fs->cluster_blocks);
 }
 
 enum ext4_result

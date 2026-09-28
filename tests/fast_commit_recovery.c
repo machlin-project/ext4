@@ -1,14 +1,21 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
+#define _POSIX_C_SOURCE 200809L
 #include "journal.h"
 #include "image.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define IMAGE_LIMIT (128U * 1024U * 1024U)
 #define EVENT_LIMIT 8192U
 #define DIRECTORY_DEPTH 16U
+#define FAULT_SAMPLES 16U
+#define FAULT_EDGE_SAMPLES 4U
+#define BENCHMARK_SAMPLES 31U
+#define NANOSECONDS_PER_SECOND 1000000000U
 #define CHECK(expression)                                                                          \
 	do {                                                                                       \
 		if (!(expression)) {                                                               \
@@ -31,6 +38,8 @@ struct device {
 	uint8_t *stable;
 	uint8_t *dirty;
 	size_t size;
+	size_t live_bytes;
+	size_t peak_bytes;
 	uint32_t block_size;
 	uint32_t blocks;
 	uint32_t events;
@@ -44,6 +53,7 @@ struct device {
 	bool partial;
 	bool off;
 	struct event history[EVENT_LIMIT];
+	bool selected_events[EVENT_LIMIT];
 };
 
 enum orphan_damage {
@@ -87,6 +97,10 @@ allocate(void *context, size_t bytes)
 	result = malloc(bytes);
 	if (result != NULL) {
 		device->live++;
+		device->live_bytes += bytes;
+		if (device->live_bytes > device->peak_bytes) {
+			device->peak_bytes = device->live_bytes;
+		}
 	}
 	return result;
 }
@@ -96,9 +110,9 @@ release(void *context, void *buffer, size_t bytes)
 {
 	struct device *device = context;
 
-	(void)bytes;
-	CHECK(device->live != 0 && buffer != NULL);
+	CHECK(device->live != 0 && buffer != NULL && bytes <= device->live_bytes);
 	device->live--;
+	device->live_bytes -= bytes;
 	free(buffer);
 }
 
@@ -185,7 +199,8 @@ flush_device(void *context)
 static void
 reset(struct device *device)
 {
-	CHECK(device->live == 0);
+	CHECK(device->live == 0 && device->live_bytes == 0);
+	device->peak_bytes = 0;
 	memcpy(device->cache, device->base, device->size);
 	memcpy(device->stable, device->base, device->size);
 	memset(device->dirty, 0, device->blocks);
@@ -202,7 +217,8 @@ reset(struct device *device)
 static void
 reboot_device(struct device *device)
 {
-	CHECK(device->live == 0);
+	CHECK(device->live == 0 && device->live_bytes == 0);
+	device->peak_bytes = 0;
 	memcpy(device->cache, device->stable, device->size);
 	memset(device->dirty, 0, device->blocks);
 	device->events = 0;
@@ -514,6 +530,48 @@ journal_map_guards(struct device *device)
 	    "PASS %u corrupt journal mappings rejected without writes\n", JOURNAL_MAP_DAMAGE_COUNT);
 }
 
+static bool
+sample_selected(uint32_t position, uint32_t total)
+{
+	return position <= FAULT_EDGE_SAMPLES || total - position < FAULT_EDGE_SAMPLES ||
+	    (uint64_t)position * FAULT_SAMPLES / total !=
+	    (uint64_t)(position - 1U) * FAULT_SAMPLES / total;
+}
+
+static void
+benchmark_recovery(struct device *device, struct ext4_fs *reference)
+{
+	struct ext4_recovery_report report;
+	struct timespec start;
+	struct timespec end;
+	uint64_t elapsed;
+	uint32_t sample;
+	uint32_t checksum;
+	uint32_t reads;
+	uint32_t allocations;
+	size_t peak_bytes;
+
+	for (sample = 0; sample < BENCHMARK_SAMPLES; sample++) {
+		reset(device);
+		CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+		EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_OK);
+		CHECK(clock_gettime(CLOCK_MONOTONIC, &end) == 0);
+		elapsed = (uint64_t)(end.tv_sec - start.tv_sec) * NANOSECONDS_PER_SECOND;
+		elapsed += (uint64_t)end.tv_nsec;
+		elapsed -= (uint64_t)start.tv_nsec;
+		CHECK(device->live == 0 && device->live_bytes == 0 && report.fast_commits != 0);
+		reads = device->reads;
+		allocations = device->allocations;
+		peak_bytes = device->peak_bytes;
+		/* Timing excludes input restoration, output comparison and hashing. */
+		compare(device, reference);
+		checksum = ext4_crc32c(UINT32_MAX, device->stable, device->size);
+		printf("BENCHMARK sample=%u ns=%" PRIu64
+		       " reads=%u allocations=%u peak_bytes=%zu events=%u checksum=%08x\n",
+		    sample, elapsed, reads, allocations, peak_bytes, device->events, checksum);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -534,27 +592,37 @@ main(int argc, char **argv)
 	unsigned int survival;
 	unsigned int partial;
 	uint32_t checksum;
+	uint32_t injected[2] = { 0, 0 };
 	bool damaged_super;
 	bool faults;
 	bool resources;
 	bool orphans;
 	bool journal_map;
 	bool reject;
+	bool sampled;
+	bool benchmark;
 	enum ext4_result error;
 
 	if (argc != 3 && argc != 4) {
 		fprintf(stderr,
 		    "usage: %s PENDING_IMAGE VERIFIED_REFERENCE_IMAGE "
-		    "[--faults|--resources|--orphans|--journal-map|--reject]\n",
+		    "[--faults|--resources|--sampled-faults|--sampled-resources|"
+		    "--orphans|--journal-map|--reject|--benchmark]\n",
 		    argv[0]);
 		return 2;
 	}
-	faults = argc == 4 && strcmp(argv[3], "--faults") == 0;
-	resources = argc == 4 && strcmp(argv[3], "--resources") == 0;
+	faults = argc == 4 &&
+	    (strcmp(argv[3], "--faults") == 0 || strcmp(argv[3], "--sampled-faults") == 0);
+	resources = argc == 4 &&
+	    (strcmp(argv[3], "--resources") == 0 || strcmp(argv[3], "--sampled-resources") == 0);
+	sampled = argc == 4 &&
+	    (strcmp(argv[3], "--sampled-faults") == 0 ||
+		strcmp(argv[3], "--sampled-resources") == 0);
+	benchmark = argc == 4 && strcmp(argv[3], "--benchmark") == 0;
 	orphans = argc == 4 && strcmp(argv[3], "--orphans") == 0;
 	journal_map = argc == 4 && strcmp(argv[3], "--journal-map") == 0;
 	reject = argc == 4 && strcmp(argv[3], "--reject") == 0;
-	CHECK(argc == 3 || faults || resources || orphans || journal_map || reject);
+	CHECK(argc == 3 || faults || resources || orphans || journal_map || reject || benchmark);
 	EXPECT(ext4_posix_open(&source, argv[1]), EXT4_OK);
 	EXPECT(ext4_posix_open(&oracle, argv[2]), EXT4_OK);
 	EXPECT(ext4_mount(&oracle.environment, &reference), EXT4_OK);
@@ -594,7 +662,8 @@ main(int argc, char **argv)
 			CHECK(device->history[stop].flush);
 		}
 		CHECK(memcmp(device->base, device->cache, device->size) == 0);
-		printf("PASS malformed inode payload rejected without home or journal writes\n");
+		printf(
+		    "PASS malformed fast-commit payload rejected without home or journal writes\n");
 		goto out;
 	}
 	EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_OK);
@@ -602,6 +671,12 @@ main(int argc, char **argv)
 	operations = device->events;
 	allocations = device->allocations;
 	reads = device->reads;
+	for (stop = 1; stop <= operations; stop++) {
+		device->selected_events[stop - 1U] = !sampled ||
+		    sample_selected(stop, operations) || device->history[stop - 1U].flush ||
+		    (stop > 1 && device->history[stop - 2U].flush) ||
+		    (stop < operations && device->history[stop].flush);
+	}
 	compare(device, reference);
 	printf("PASS %u fast commits match verified namespace, data and accounting; %u durability "
 	       "events; %u allocations, %u reads\n",
@@ -609,10 +684,16 @@ main(int argc, char **argv)
 	if (orphans) {
 		orphan_guards(device);
 	}
+	if (benchmark) {
+		benchmark_recovery(device, reference);
+	}
 	if (resources) {
 		for (fault = 0; fault < 2; fault++) {
 			limit = fault == 0 ? allocations : reads;
 			for (stop = 1; stop <= limit; stop++) {
+				if (sampled && !sample_selected(stop, limit)) {
+					continue;
+				}
 				reset(device);
 				device->fail_allocation = fault == 0 ? stop : 0;
 				device->fail_read = fault == 0 ? 0 : stop;
@@ -623,16 +704,20 @@ main(int argc, char **argv)
 				EXPECT(ext4_recover(&device->environment, &device->writer, &report),
 				    EXT4_OK);
 				compare(device, reference);
+				injected[fault]++;
 			}
 		}
 		printf(
 		    "PASS %u allocation and %u read failures; restart completes semantic replay\n",
-		    allocations, reads);
+		    injected[0], injected[1]);
 	}
 	if (faults) {
 		for (survival = 0; survival < 3; survival++) {
 			for (partial = 0; partial < 2; partial++) {
 				for (stop = 1; stop <= operations; stop++) {
+					if (!device->selected_events[stop - 1U]) {
+						continue;
+					}
 					reset(device);
 					device->stop_at = stop;
 					device->survival = survival;

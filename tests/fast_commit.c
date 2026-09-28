@@ -29,6 +29,7 @@ read_source(void *context, uint64_t offset, void *buffer, size_t length)
 
 	CHECK(offset <= source->size && length <= source->size - offset);
 	if (++source->reads == source->fail_read) {
+		memset(buffer, 0, length / 2U);
 		return EXT4_IO;
 	}
 	memcpy(buffer, source->bytes + offset, length);
@@ -58,6 +59,9 @@ main(int argc, char **argv)
 	uint32_t index;
 	uint32_t types[EXT4_FC_HEAD + 1U] = { 0 };
 	uint32_t old_checksum;
+	uint32_t cached_block;
+	uint32_t cached_reads;
+	uint32_t expected_reads;
 	uint16_t old_length;
 	uint8_t old_byte;
 
@@ -105,11 +109,45 @@ main(int argc, char **argv)
 		    ext4_fast_commit_read(log, index, buffer, &value) == EXT4_OK && value != NULL);
 	}
 	CHECK(types[EXT4_FC_HEAD] == 1 && types[EXT4_FC_TAIL] == expected);
+	cached_block = UINT32_MAX;
+	cached_reads = source.reads;
+	expected_reads = 0;
+	for (index = 0; index < log->count; index++) {
+		if (index == 0 || log->records[index].block != log->records[index - 1U].block) {
+			expected_reads++;
+		}
+		CHECK(ext4_fast_commit_read_cached(log, index, buffer, &cached_block, &value) ==
+		    EXT4_OK);
+		CHECK(value != NULL && cached_block == log->records[index].block);
+	}
+	CHECK(source.reads - cached_reads == expected_reads && expected_reads < log->count);
+	/* A failed block load must not publish a cache hit for a later retry. */
+	cached_block = UINT32_MAX;
+	source.fail_read = source.reads + 1U;
+	CHECK(ext4_fast_commit_read_cached(log, 0, buffer, &cached_block, &value) == EXT4_IO);
+	CHECK(cached_block == UINT32_MAX && value == NULL);
+	source.fail_read = 0;
+	CHECK(ext4_fast_commit_read_cached(log, 0, buffer, &cached_block, &value) == EXT4_OK);
+	/* A partial failed read of another block also invalidates the old cache. */
+	CHECK(log->records[log->count - 1U].block != log->records[0].block);
+	source.fail_read = source.reads + 1U;
+	CHECK(ext4_fast_commit_read_cached(log, log->count - 1U, buffer, &cached_block, &value) ==
+	    EXT4_IO);
+	CHECK(cached_block == UINT32_MAX && value == NULL);
+	source.fail_read = 0;
+	CHECK(ext4_fast_commit_read_cached(log, 0, buffer, &cached_block, &value) == EXT4_OK);
 	/* A later reader must not silently consume a record changed after scan. */
 	saved_record = source.bytes + (size_t)log->records[1].block * fs.info.block_size +
 	    log->records[1].offset + sizeof(struct ext4_fc_header_disk);
 	old_byte = *saved_record;
 	*saved_record ^= 1U;
+	/* The first record loads a block containing the damaged second record.
+	 * A cache hit must still compare that record with the original scan. */
+	CHECK(log->records[0].block == log->records[1].block);
+	cached_block = UINT32_MAX;
+	CHECK(ext4_fast_commit_read_cached(log, 0, buffer, &cached_block, &value) == EXT4_OK);
+	CHECK(ext4_fast_commit_read_cached(log, 1, buffer, &cached_block, &value) == EXT4_CORRUPT);
+	CHECK(value == NULL);
 	CHECK(ext4_fast_commit_read(log, 1, buffer, &value) == EXT4_CORRUPT && value == NULL);
 	/* The same alteration invalidates the first committed CRC. */
 	CHECK(ext4_fast_commit_load(&journal, first, journal.blocks, sequence, &other) ==

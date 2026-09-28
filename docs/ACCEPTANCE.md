@@ -118,10 +118,10 @@ Expected-image construction detaches shared external blocks with the public
 whole-block e2fsprogs operation: pinned debugfs per-key removal freed surviving
 value inodes and failed strict fsck. That failed image was never used as an oracle.
 
-The completed 516-test GitHub CI regression passes all six jobs with no test
+The completed 552-test GitHub CI regression passes all six jobs with no test
 failures, errors or skips, including independent checks and artifact upload. It
-covers forty fast-commit cases including modern-orphan and special-inode replay;
-full-regression acceptance for subsequent attribute and indirect extensions remains pending.
+covers seventy-six fast-commit cases including modern-orphan, special-inode,
+attribute-reuse and indirect replay.
 The existing declared reader-only xattr fsck exceptions and fixture-normalization
 steps remain separate from unexpected command failures. CI identities and complete
 artifact inventories are in the generated `artifacts/checks/fast-commit-ci-*/` reports.
@@ -196,7 +196,34 @@ fixtures and the frozen recovery executable remain unchanged. Evidence is in
 consumption of core output, not Linux generation or direct fast replay of the
 pending indirect protocol images.
 
-Open work includes larger prefixes, additional format combinations,
+The recovery-scaling checkpoint adds two larger protocol profiles: 256 created
+files at 1 KiB and 1,024 at 4 KiB, reversed inode/range revisits, repeated overlapping
+ranges and duplicate name records. Conflicting name owners reject without writes.
+All 129 affected sanitized cases pass, including 86 fast-commit cases, the range
+index unit test, allocator exhaustion/corruption, BIGALLOC and distributed group
+geometry. Fixture generation passes all fifteen profiles; the 137-target build
+includes freestanding compilation and the 2 KiB stack-frame check.
+
+The first two large-prefix runs retained 102/103 and 104/105 passes with the same
+4 KiB sampled-fault case timing out at 600 seconds. Replay now combines FIND and
+INSERT preparation, and bitmap validation visits protected range intersections
+and counts bits by byte rather than searching for every cluster. Complete directory
+and bitmap validation remain in place. With those changes the same fault case
+passes in 431.76 seconds under its original bound. This is a sanitized fault-test
+duration, not a throughput benchmark. The accepted local evidence is
+`artifacts/checks/fast-commit-bitmap/results.json`; both failed attempts remain in
+`artifacts/checks/fast-commit-large-prefix-accepted/` and
+`artifacts/checks/fast-commit-large-prefix-fixed/`.
+
+Independent verification of all fifteen outputs from the latest core, equivalent
+release benchmarks, the two large-prefix native readback boots and the expanded
+563-test CI are pending at handoff. The preceding full 552-test regression,
+thirteen-profile independent verification and earlier native results do not replace
+those checks.
+The exact continuation commands and remaining scope are in
+`docs/CORE-HANDOFF.md`.
+
+Open work includes larger transaction/prefix capacity, additional format combinations,
 broader ownership-corruption coverage and interrupted foreign replay. Native fixture
 capture remains separate from ordinary CI. The writer emits ordinary full commits.
 

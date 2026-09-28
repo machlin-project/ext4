@@ -39,13 +39,11 @@ ext4_range_sift(struct ext4_block_range *ranges, size_t root, size_t count)
 	ranges[root] = saved;
 }
 
-enum ext4_result
-ext4_ranges_sort(struct ext4_block_range *ranges, size_t *range_count)
+static void
+ext4_ranges_order(struct ext4_block_range *ranges, size_t count)
 {
 	struct ext4_block_range temporary;
-	size_t count = *range_count;
 	size_t index;
-	size_t used = 0;
 
 	for (index = count / 2; index > 0; index--) {
 		ext4_range_sift(ranges, index - 1, count);
@@ -56,6 +54,16 @@ ext4_ranges_sort(struct ext4_block_range *ranges, size_t *range_count)
 		ranges[index - 1] = temporary;
 		ext4_range_sift(ranges, 0, index - 1);
 	}
+}
+
+enum ext4_result
+ext4_ranges_sort(struct ext4_block_range *ranges, size_t *range_count)
+{
+	size_t count = *range_count;
+	size_t index;
+	size_t used = 0;
+
+	ext4_ranges_order(ranges, count);
 	for (index = 0; index < count; index++) {
 		if (used != 0) {
 			if (ranges[index].first <
@@ -72,6 +80,31 @@ ext4_ranges_sort(struct ext4_block_range *ranges, size_t *range_count)
 	}
 	*range_count = used;
 	return EXT4_OK;
+}
+
+void
+ext4_ranges_union(struct ext4_block_range *ranges, size_t *range_count)
+{
+	struct ext4_block_range *previous;
+	uint64_t end;
+	size_t index;
+	size_t used = 0;
+
+	ext4_ranges_order(ranges, *range_count);
+	for (index = 0; index < *range_count; index++) {
+		if (used != 0) {
+			previous = &ranges[used - 1];
+			if (ranges[index].first <= previous->first + previous->length) {
+				end = ranges[index].first + ranges[index].length;
+				if (end > previous->first + previous->length) {
+					previous->length = end - previous->first;
+				}
+				continue;
+			}
+		}
+		ranges[used++] = ranges[index];
+	}
+	*range_count = used;
 }
 
 enum ext4_result
@@ -169,14 +202,21 @@ ext4_system_block(const struct ext4_fs *fs, uint64_t block)
 bool
 ext4_system_overlaps(const struct ext4_fs *fs, uint64_t block, uint64_t length)
 {
+	return ext4_ranges_overlap(fs->system_ranges, fs->system_range_count, block, length);
+}
+
+bool
+ext4_ranges_overlap(
+    const struct ext4_block_range *ranges, size_t count, uint64_t block, uint64_t length)
+{
 	const struct ext4_block_range *range;
 	size_t low = 0;
-	size_t high = fs->system_range_count;
+	size_t high = count;
 	size_t middle;
 
 	while (low < high) {
 		middle = low + (high - low) / 2;
-		range = &fs->system_ranges[middle];
+		range = &ranges[middle];
 		if (block < range->first) {
 			if (range->first - block < length) {
 				return true;

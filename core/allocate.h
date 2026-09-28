@@ -41,7 +41,8 @@ struct ext4_allocation {
 	uint64_t attribute_blocks_added;
 	uint64_t attribute_blocks_removed;
 	/* Offline semantic replay excludes every logged data range from new
-	 * metadata allocation until the complete prefix has been materialized. */
+	 * metadata allocation until the complete prefix has been materialized.
+	 * This immutable set is sorted and disjoint, with adjacent ranges merged. */
 	const struct ext4_block_range *excluded;
 	size_t excluded_count;
 };

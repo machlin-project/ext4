@@ -21,6 +21,8 @@ struct ext4_directory_slot {
 
 enum ext4_directory_action { EXT4_DIRECTORY_INSERT, EXT4_DIRECTORY_FIND, EXT4_DIRECTORY_EMPTY };
 
+/* INSERT returning EXT4_EXISTS reports the matching inode in slot->number.
+ * Both FIND and INSERT validate the complete directory before returning. */
 enum ext4_result ext4_directory_scan(struct ext4_allocation *allocation, struct ext4_inode *parent,
     struct ext4_inode_disk *disk, const uint8_t *name, size_t name_length,
     enum ext4_directory_action action, uint32_t expected_parent, struct ext4_directory_slot *slot);

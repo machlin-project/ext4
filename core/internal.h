@@ -92,6 +92,11 @@ struct ext4_group {
 
 /* Sort, reject overlaps and merge adjacent already-bounded physical ranges. */
 enum ext4_result ext4_ranges_sort(struct ext4_block_range *ranges, size_t *count);
+/* Sort and merge already-bounded ranges, allowing repeated or overlapping input. */
+void ext4_ranges_union(struct ext4_block_range *ranges, size_t *count);
+/* Search a sorted, disjoint range set without visiting each member. */
+bool ext4_ranges_overlap(
+    const struct ext4_block_range *ranges, size_t count, uint64_t block, uint64_t length);
 /* Geometry is shared by reads, transactional mutation and metadata exclusion.
  * A group's fixed prefix can be empty; bitmap/table locations remain in its
  * descriptor and can belong to another group when FLEX_BG is enabled. */

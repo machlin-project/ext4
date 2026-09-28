@@ -81,6 +81,11 @@ void ext4_fast_commit_close(struct ext4_fast_commit *log);
  * to their scanned bytes before their value is exposed to semantic replay. */
 enum ext4_result ext4_fast_commit_read(
     const struct ext4_fast_commit *log, uint32_t index, void *buffer, const void **value);
+/* A sequential pass may retain its last block. Initialize cached_block to
+ * UINT32_MAX for each pass and keep buffer unmodified between calls. Every
+ * returned record still verifies its identity against the original scan. */
+enum ext4_result ext4_fast_commit_read_cached(const struct ext4_fast_commit *log, uint32_t index,
+    void *buffer, uint32_t *cached_block, const void **value);
 /* The ordinary journal prefix has been durably checkpointed, but its on-disk
  * authority has not been reset. Materialize the complete fast prefix privately,
  * then commit a full transaction with the same ID to supersede it atomically. */

@@ -32,19 +32,81 @@ ext4_fc_inode_valid(const struct ext4_fs *fs, uint32_t number)
 static struct ext4_fc_inode_state *
 ext4_fc_inode_state(struct ext4_fc_replay *replay, uint32_t number)
 {
-	uint32_t index;
+	uint32_t low = 0;
+	uint32_t high = replay->inode_count;
+	uint32_t middle;
 
-	for (index = 0; index < replay->inode_count; index++) {
-		if (replay->inodes[index].number == number) {
-			return &replay->inodes[index];
+	while (low < high) {
+		middle = low + (high - low) / 2U;
+		if (replay->inodes[middle].number == number) {
+			return &replay->inodes[middle];
+		}
+		if (replay->inodes[middle].number < number) {
+			low = middle + 1U;
+		} else {
+			high = middle;
 		}
 	}
-	if (replay->inode_count == replay->inode_capacity) {
-		return NULL;
+	return NULL;
+}
+
+static void
+ext4_fc_inode_sift(struct ext4_fc_inode_state *inodes, uint32_t root, uint32_t count)
+{
+	struct ext4_fc_inode_state saved = inodes[root];
+	uint32_t child;
+
+	while (root < count / 2U) {
+		child = root * 2U + 1U;
+		if (child + 1U < count && inodes[child + 1U].number > inodes[child].number) {
+			child++;
+		}
+		if (saved.number >= inodes[child].number) {
+			break;
+		}
+		inodes[root] = inodes[child];
+		root = child;
 	}
-	replay->inodes[index].number = number;
-	replay->inode_count++;
-	return &replay->inodes[index];
+	inodes[root] = saved;
+}
+
+static void
+ext4_fc_inodes_sort(struct ext4_fc_replay *replay)
+{
+	struct ext4_fc_inode_state *inodes = replay->inodes;
+	struct ext4_fc_inode_state saved;
+	uint32_t count = replay->inode_count;
+	uint32_t index;
+	uint32_t used = 0;
+
+	for (index = count / 2U; index > 0; index--) {
+		ext4_fc_inode_sift(inodes, index - 1U, count);
+	}
+	for (index = count; index > 1; index--) {
+		saved = inodes[0];
+		inodes[0] = inodes[index - 1U];
+		inodes[index - 1U] = saved;
+		ext4_fc_inode_sift(inodes, 0, index - 1U);
+	}
+	for (index = 0; index < count; index++) {
+		if (used == 0 || inodes[index].number != inodes[used - 1U].number) {
+			inodes[used++] = inodes[index];
+		}
+	}
+	replay->inode_count = used;
+}
+
+static enum ext4_result
+ext4_fc_inode_collect(struct ext4_fc_replay *replay, uint32_t number)
+{
+	if (!ext4_fc_inode_valid(replay->allocation.fs, number)) {
+		return EXT4_CORRUPT;
+	}
+	if (replay->inode_count == replay->inode_capacity) {
+		return EXT4_UNSUPPORTED;
+	}
+	replay->inodes[replay->inode_count++].number = number;
+	return EXT4_OK;
 }
 
 static enum ext4_result
@@ -551,8 +613,8 @@ ext4_fc_apply_name(struct ext4_fc_replay *replay, uint16_t type,
 		replay->allocation.allocated = 0;
 		replay->allocation.freed = 0;
 	}
-	error = ext4_directory_scan(
-	    &replay->allocation, &parent, parent_disk, name, length, EXT4_DIRECTORY_FIND, 0, &slot);
+	error = ext4_directory_scan(&replay->allocation, &parent, parent_disk, name, length,
+	    type == EXT4_FC_UNLINK ? EXT4_DIRECTORY_FIND : EXT4_DIRECTORY_INSERT, 0, &slot);
 	if (type == EXT4_FC_UNLINK) {
 		if (error == EXT4_NOT_FOUND) {
 			return EXT4_OK;
@@ -566,19 +628,16 @@ ext4_fc_apply_name(struct ext4_fc_replay *replay, uint16_t type,
 			state->unlinked = directory || child.links == 1;
 			change_parent_links = directory;
 		}
-	} else if (error == EXT4_OK) {
+	} else if (error == EXT4_EXISTS) {
 		/* A previous interrupted replay may already have installed this name. */
 		if (slot.number != child.number) {
 			return EXT4_CORRUPT;
 		}
-	} else if (error == EXT4_NOT_FOUND) {
-		error = ext4_directory_scan(&replay->allocation, &parent, parent_disk, name, length,
-		    EXT4_DIRECTORY_INSERT, 0, &slot);
-		if (error == EXT4_OK) {
-			error = ext4_directory_insert(&replay->allocation, &parent, parent_disk,
-			    &slot, child.number, ext4_fc_type(child.mode), name, length);
-			change_parent_links = directory;
-		}
+		error = EXT4_OK;
+	} else if (error == EXT4_OK) {
+		error = ext4_directory_insert(&replay->allocation, &parent, parent_disk, &slot,
+		    child.number, ext4_fc_type(child.mode), name, length);
+		change_parent_links = directory;
 		if (error == EXT4_OK && type == EXT4_FC_LINK) {
 			if (child.links == EXT4_LINK_MAX) {
 				return EXT4_CORRUPT;
@@ -616,21 +675,44 @@ ext4_fc_prepare(struct ext4_fc_replay *replay)
 {
 	struct ext4_fs *fs = replay->allocation.fs;
 	const struct ext4_fc_add_disk *record;
+	const struct ext4_fc_name_disk *name;
+	const struct ext4_le32 *number;
 	const void *value;
 	struct ext4_block_range *range;
 	uint32_t index;
 	uint32_t logical;
 	uint32_t length;
 	bool unwritten;
+	uint16_t type;
+	uint32_t cached_block = UINT32_MAX;
 	enum ext4_result error;
 
 	for (index = 0; index < replay->log->count; index++) {
-		if (replay->log->records[index].type != EXT4_FC_ADD_RANGE) {
+		type = replay->log->records[index].type;
+		if (type == EXT4_FC_HEAD || type == EXT4_FC_TAIL || type == EXT4_FC_PAD) {
 			continue;
 		}
-		error = ext4_fast_commit_read(replay->log, index, replay->buffer, &value);
+		error = ext4_fast_commit_read_cached(
+		    replay->log, index, replay->buffer, &cached_block, &value);
 		if (error != EXT4_OK) {
 			return error;
+		}
+		if (type == EXT4_FC_CREATE || type == EXT4_FC_LINK || type == EXT4_FC_UNLINK) {
+			name = value;
+			error = ext4_fc_inode_collect(replay, ext4_le32(&name->parent));
+			number = &name->inode;
+		} else {
+			/* INODE, ADD_RANGE and DEL_RANGE all begin with the inode number. */
+			number = value;
+		}
+		if (error == EXT4_OK) {
+			error = ext4_fc_inode_collect(replay, ext4_le32(number));
+		}
+		if (error != EXT4_OK) {
+			return error;
+		}
+		if (type != EXT4_FC_ADD_RANGE) {
+			continue;
 		}
 		record = value;
 		range = &replay->excluded[replay->allocation.excluded_count];
@@ -644,6 +726,10 @@ ext4_fc_prepare(struct ext4_fc_replay *replay)
 		}
 		replay->allocation.excluded_count++;
 	}
+	/* Only the lookup indexes are reordered. Semantic records still execute
+	 * in their committed order, including generation reuse and repeated ranges. */
+	ext4_fc_inodes_sort(replay);
+	ext4_ranges_union(replay->excluded, &replay->allocation.excluded_count);
 	replay->allocation.excluded = replay->excluded;
 	return EXT4_OK;
 }
@@ -728,6 +814,7 @@ ext4_fast_commit_replay(struct ext4_fast_commit *log)
 	uint64_t free_inodes = 0;
 	uint32_t index;
 	uint32_t orphan_head;
+	uint32_t cached_block = UINT32_MAX;
 	uint16_t type;
 	bool allocation_ready = false;
 	enum ext4_result error;
@@ -803,7 +890,8 @@ ext4_fast_commit_replay(struct ext4_fast_commit *log)
 	allocation_ready = true;
 	error = ext4_fc_prepare(replay);
 	for (index = 0; error == EXT4_OK && index < log->count; index++) {
-		error = ext4_fast_commit_read(log, index, replay->buffer, &value);
+		error =
+		    ext4_fast_commit_read_cached(log, index, replay->buffer, &cached_block, &value);
 		if (error != EXT4_OK) {
 			break;
 		}

@@ -18,6 +18,7 @@ SOURCE_BLOCKS = 5
 DIRECT_BLOCKS = 12
 POINTER_BYTES = 4
 CREATED_FILES = 12
+LARGE_PREFIX_FILES = {1024: 256, 4096: 1024}
 LONG_NAME_BYTES = 230
 SEQUENCE = 7
 COMMITS = 3
@@ -35,6 +36,8 @@ PROFILES = (
     ("xattr-reuse-legacy-1k", 1024, {"ea_inode"}, set()),
     ("indirect-1k", 1024, set(), {"extent", "64bit"}),
     ("indirect-4k", 4096, set(), {"extent", "64bit"}),
+    ("large-prefix-1k", 1024, set(), set()),
+    ("large-prefix-4k", 4096, set(), set()),
 )
 
 SPECIAL_NODES = {
@@ -57,7 +60,7 @@ def digest(path):
 
 def long_name(index):
     prefix = f"entry-{index:02d}-"
-    return prefix + chr(ord("a") + index) * (LONG_NAME_BYTES - len(prefix))
+    return prefix + chr(ord("a") + index % 26) * (LONG_NAME_BYTES - len(prefix))
 
 
 def attribute_value(index, block_size):
@@ -124,6 +127,8 @@ def main():
         root = directory / "root"
         root.mkdir()
         indirect = "extent" in removed
+        large_prefix = name.startswith("large-prefix-")
+        created_files = LARGE_PREFIX_FILES[block] if large_prefix else CREATED_FILES
         original_data = indirect_data(block) if indirect else b"A" * (SOURCE_BLOCKS * block)
         (root / "hello.txt").write_bytes(original_data)
         (root / "hello.txt").chmod(0o640)
@@ -149,9 +154,10 @@ def main():
                    commands=[], passed=False)
         rows.append(row)
         features = (EXPECTED_FEATURES | {"fast_commit"} | added) - removed
-        run(row, [tools["mke2fs"], "-F", "-t", "ext4", "-b", block, "-N", 256,
+        run(row, [tools["mke2fs"], "-F", "-t", "ext4", "-b", block,
+                  "-N", max(256, created_files + 64),
                   "-I", 256, "-m", 0, "-O", "none," + ",".join(sorted(features)),
-                  "-U", UUID, "-J", "size=8,fast_commit_size=256",
+                  "-U", UUID, "-J", f"size=8,fast_commit_size={1024 if large_prefix else 256}",
                   "-E", "lazy_itable_init=0,nodiscard", "-d", root, before, IMAGE_BYTES // block])
         if indirect:
             row["old_mapping"] = run(row, [helper, "--prepare-indirect", before])
@@ -180,7 +186,7 @@ def main():
         tail_bytes = 12 if "metadata_csum" in features else 0
         remaining = block - tail_bytes - 24
         extra_blocks = 0
-        for _ in range(CREATED_FILES):
+        for _ in range(created_files):
             if entry_bytes > remaining:
                 extra_blocks += 1
                 remaining = block - tail_bytes
@@ -188,10 +194,10 @@ def main():
         commands += ["expand_dir /new-dir"] * extra_blocks
         final_files = {"renamed": original_data[:block] + bytes(block) + original_data[2 * block:]}
         final_files["alias"] = final_files["renamed"]
-        for index in range(CREATED_FILES):
+        for index in range(created_files):
             filename = long_name(index)
             payload = directory / f"data-{index:02d}"
-            contents = bytes([ord("a") + index]) * (block + 17 + index)
+            contents = bytes([ord("a") + index % 26]) * (block + 17 + index)
             if indirect and index == 0:
                 contents = b"a" * ((DIRECT_BLOCKS + 1) * block + 17)
             payload.write_bytes(contents)
@@ -232,7 +238,8 @@ def main():
             run(row, [helper, "--create-specials", expected])
         run(row, [tools["e2fsck"], "-fn", expected])
         row["serialization"] = run(row, [helper, pending, expected] +
-                                   (["--specials"] if special_files else []))
+                                   (["--specials"] if special_files else
+                                    ["--large-prefix"] if large_prefix else []))
         if f"sequence={SEQUENCE} commits={COMMITS} " not in row["serialization"]:
             raise RuntimeError("Unexpected serialized fast-commit inventory")
         run(row, [tools["debugfs"], "-R", f'dump <8> "{journal}"', pending])
@@ -270,7 +277,13 @@ def main():
                 shutil.copyfile(before, candidate)
                 run(row, [helper, candidate, expected, "--" + damage])
                 row["malformed"][damage] = digest(candidate)
+        if large_prefix:
+            candidate = directory / "conflicting-name-owner.img"
+            shutil.copyfile(before, candidate)
+            run(row, [helper, candidate, expected, "--large-prefix-conflict"])
+            row["malformed"] = {"conflicting-name-owner": digest(candidate)}
         row.update(passed=True, expected_sha256=digest(expected), journal_sha256=digest(journal),
+                   created_files=created_files,
                    **wanted, direct_replay=args.direct_replay)
         if args.direct_replay:
             row["oracle_sha256"] = digest(oracle)

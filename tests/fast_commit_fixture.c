@@ -2,6 +2,7 @@
 /* Independent fixture serialization using e2fsprogs disk types and checksums. */
 #include "config.h"
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,8 @@
 
 #define FIXTURE_SEQUENCE 7U
 #define CREATED_FILES 12U
+#define LARGE_PREFIX_FILES_1K 256U
+#define LARGE_PREFIX_FILES_4K 1024U
 #define LONG_NAME_BYTES 230U
 #define DEVICE_LEGACY_MASK 0xffU
 #define DEVICE_MAJOR_SHIFT 8U
@@ -45,7 +48,8 @@ enum fixture_damage {
 	DAMAGE_SPECIAL_SIZE,
 	DAMAGE_MISSING_LINK_RANGE,
 	DAMAGE_INDIRECT_UNWRITTEN,
-	DAMAGE_INDIRECT_LOGICAL_LIMIT
+	DAMAGE_INDIRECT_LOGICAL_LIMIT,
+	DAMAGE_NAME_OWNER
 };
 
 struct fixture {
@@ -59,6 +63,7 @@ struct fixture {
 	__u32 first;
 	__u32 blocks;
 	unsigned int commits;
+	bool large_prefix;
 	enum fixture_damage damage;
 };
 
@@ -78,6 +83,16 @@ check(errcode_t error, const char *operation)
 		fprintf(stderr, "%s: %ld\n", operation, (long)error);
 		exit(1);
 	}
+}
+
+static void
+created_name(char *name, unsigned int index)
+{
+	int prefix = snprintf(name, LONG_NAME_BYTES + 1U, "entry-%02u-", index);
+
+	require(prefix > 0 && (unsigned int)prefix < LONG_NAME_BYTES, "form fixture name");
+	memset(name + prefix, 'a' + (int)(index % 26U), LONG_NAME_BYTES - (size_t)prefix);
+	name[LONG_NAME_BYTES] = 0;
 }
 
 static blk64_t
@@ -200,7 +215,8 @@ inode_record(struct fixture *fixture, ext2_ino_t number, unsigned int links)
 	if (links != 0) {
 		inode->i_links_count = links;
 	}
-	if (fixture->damage != DAMAGE_NONE &&
+	if ((fixture->damage == DAMAGE_LINK_SIZE || fixture->damage == DAMAGE_LINK_NUL ||
+		fixture->damage == DAMAGE_LINK_TERMINATOR) &&
 	    number == lookup(fixture, EXT2_ROOT_INO, "link-short")) {
 		if (fixture->damage == DAMAGE_LINK_SIZE) {
 			inode->i_size = sizeof(inode->i_block);
@@ -302,6 +318,30 @@ pending_lookup(struct fixture *fixture, const char *name)
 	    ext2fs_lookup(fixture->pending, EXT2_ROOT_INO, name, (int)strlen(name), NULL, &number),
 	    "lookup checkpointed orphan inode");
 	return number;
+}
+
+static void
+overlapping_ranges(struct fixture *fixture, ext2_ino_t number)
+{
+	struct ext4_fc_add_range range;
+	struct ext3_extent extent = { 0 };
+	blk64_t first;
+	blk64_t second;
+	int flags;
+
+	first = mapped_block(fixture->expected, number, 0, &flags);
+	require(first != 0 && flags == 0, "require initialized repeated range");
+	second = mapped_block(fixture->expected, number, 1, &flags);
+	require(second == first + 1U && flags == 0, "require contiguous repeated range");
+	extent.ee_len = ext2fs_cpu_to_le16(2);
+	extent.ee_start = ext2fs_cpu_to_le32(first);
+	extent.ee_start_hi = ext2fs_cpu_to_le16(first >> 32);
+	range.fc_ino = ext2fs_cpu_to_le32(number);
+	memcpy(range.fc_ex, &extent, sizeof(extent));
+	record(fixture, EXT4_FC_TAG_ADD_RANGE, &range, sizeof(range));
+	/* Repeated single-block records are contained by this two-block record.
+	 * Their ranges must protect one union, without rejecting legitimate reuse. */
+	data_records(fixture, number);
 }
 
 static void
@@ -649,7 +689,7 @@ main(int argc, char **argv)
 	__u32 block;
 	char name[LONG_NAME_BYTES + 1U];
 	unsigned int index;
-	int prefix;
+	unsigned int created_files;
 	int flags;
 
 	if (argc == 3 && strcmp(argv[1], "--create-specials") == 0) {
@@ -670,10 +710,17 @@ main(int argc, char **argv)
 	}
 	if (argc != 3 && argc != 4) {
 		fprintf(stderr,
-		    "usage: fast-commit-fixture PENDING_COPY EXPECTED_IMAGE [--specials]\n");
+		    "usage: fast-commit-fixture PENDING_COPY EXPECTED_IMAGE "
+		    "[--specials|--large-prefix]\n");
 		return 2;
 	}
-	if (argc == 4 && strcmp(argv[3], "--specials") != 0) {
+	fixture.large_prefix = argc == 4 &&
+	    (strcmp(argv[3], "--large-prefix") == 0 ||
+		strcmp(argv[3], "--large-prefix-conflict") == 0);
+	if (fixture.large_prefix && strcmp(argv[3], "--large-prefix-conflict") == 0) {
+		fixture.damage = DAMAGE_NAME_OWNER;
+	}
+	if (argc == 4 && strcmp(argv[3], "--specials") != 0 && !fixture.large_prefix) {
 		if (strcmp(argv[3], "--bad-link-size") == 0) {
 			fixture.damage = DAMAGE_LINK_SIZE;
 		} else if (strcmp(argv[3], "--bad-link-nul") == 0) {
@@ -747,11 +794,11 @@ main(int argc, char **argv)
 	directory = lookup(&fixture, EXT2_ROOT_INO, "new-dir");
 	inode_record(&fixture, directory, 0);
 	name_record(&fixture, EXT4_FC_TAG_CREAT, EXT2_ROOT_INO, directory, "new-dir");
-	for (index = 0; index < CREATED_FILES; index++) {
-		prefix = snprintf(name, sizeof(name), "entry-%02u-", index);
-		require(prefix > 0 && (unsigned int)prefix < LONG_NAME_BYTES, "form fixture name");
-		memset(name + prefix, 'a' + (int)index, LONG_NAME_BYTES - (size_t)prefix);
-		name[LONG_NAME_BYTES] = 0;
+	created_files = fixture.large_prefix
+	    ? (fixture.pending->blocksize == 1024 ? LARGE_PREFIX_FILES_1K : LARGE_PREFIX_FILES_4K)
+	    : CREATED_FILES;
+	for (index = 0; index < created_files; index++) {
+		created_name(name, index);
 		child = lookup(&fixture, directory, name);
 		inode_record(&fixture, child, 0);
 		data_records(&fixture, child);
@@ -764,7 +811,23 @@ main(int argc, char **argv)
 	name_record(&fixture, EXT4_FC_TAG_UNLINK, EXT2_ROOT_INO, hello, "hello.txt");
 	inode_record(&fixture, hello, 0);
 	orphan_records(&fixture);
-	if (argc == 4) {
+	if (fixture.large_prefix) {
+		for (index = created_files; index > 0; index--) {
+			created_name(name, index - 1U);
+			child = lookup(&fixture, directory, name);
+			inode_record(&fixture, child, 0);
+			overlapping_ranges(&fixture, child);
+			if (index == created_files || index == created_files / 2U || index == 1) {
+				/* Repeated creation/link records must preserve the existing
+				 * identity and its link count after an interrupted replay. */
+				name_record(&fixture, EXT4_FC_TAG_CREAT, directory, child, name);
+				name_record(&fixture, EXT4_FC_TAG_LINK, directory, child, name);
+			}
+		}
+		if (fixture.damage == DAMAGE_NAME_OWNER) {
+			name_record(&fixture, EXT4_FC_TAG_LINK, directory, hello, name);
+		}
+	} else if (argc == 4) {
 		special_records(&fixture);
 	}
 	commit(&fixture);

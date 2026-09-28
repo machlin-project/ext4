@@ -2,6 +2,7 @@
 # Every test belongs to exactly one CI suite. Selecting a fixture profile adds
 # required cases; missing images fail tests instead of silently removing them.
 paths = {}
+test('range-index', programs['ranges'], suite: 'core')
 foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'namespace_fixtures', 'xattr_fixtures', 'ea_inode_fixtures', 'inline_fixtures', 'inline_space_fixtures', 'cluster_fixtures', 'cluster_space_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
   'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures', 'geometry_fixtures',
@@ -15,12 +16,22 @@ endforeach
 if paths['fast_commit_fixtures'] != ''
   foreach profile : ['1k', '4k', 'checksum-seed', 'no-checksum', 'orphan-1k', 'orphan-4k',
     'special-1k', 'special-4k', 'xattr-reuse-1k', 'xattr-reuse-4k', 'xattr-reuse-legacy-1k',
-    'indirect-1k', 'indirect-4k']
+    'indirect-1k', 'indirect-4k', 'large-prefix-1k', 'large-prefix-4k']
     directory = paths['fast_commit_fixtures'] / profile
     test('fast-commit-decoder-' + profile, programs['fast-commit'],
       args: [directory / 'pending.journal', '7', '3'], timeout: 300, suite: 'core')
     test('fast-commit-recovery-' + profile, programs['fast-commit-recovery'],
       args: [directory / 'pending.img', directory / 'expected.img'], timeout: 300, suite: 'core')
+    if profile in ['large-prefix-1k', 'large-prefix-4k']
+      test('fast-commit-conflicting-name-owner-' + profile, programs['fast-commit-recovery'],
+        args: [directory / 'conflicting-name-owner.img', directory / 'expected.img', '--reject'],
+        timeout: 300, suite: 'core')
+      foreach mode : ['faults', 'resources']
+        test('fast-commit-sampled-' + mode + '-' + profile, programs['fast-commit-recovery'],
+          args: [directory / 'pending.img', directory / 'expected.img', '--sampled-' + mode],
+          timeout: 600, suite: 'core')
+      endforeach
+    endif
     if profile in ['orphan-1k', 'orphan-4k']
       test('fast-commit-orphan-guards-' + profile, programs['fast-commit-recovery'],
         args: [directory / 'pending.img', directory / 'expected.img', '--orphans'],

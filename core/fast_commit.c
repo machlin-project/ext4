@@ -201,6 +201,13 @@ enum ext4_result
 ext4_fast_commit_read(
     const struct ext4_fast_commit *log, uint32_t index, void *buffer, const void **value)
 {
+	return ext4_fast_commit_read_cached(log, index, buffer, NULL, value);
+}
+
+enum ext4_result
+ext4_fast_commit_read_cached(const struct ext4_fast_commit *log, uint32_t index, void *buffer,
+    uint32_t *cached_block, const void **value)
+{
 	const struct ext4_fc_record *record;
 	const struct ext4_fc_header_disk *header;
 	enum ext4_result error;
@@ -213,9 +220,18 @@ ext4_fast_commit_read(
 		return EXT4_INVALID_ARGUMENT;
 	}
 	record = &log->records[index];
-	error = ext4_journal_read(log->journal, record->block, buffer);
-	if (error != EXT4_OK) {
-		return error;
+	if (cached_block == NULL || *cached_block != record->block) {
+		error = ext4_journal_read(log->journal, record->block, buffer);
+		if (error != EXT4_OK) {
+			/* A failed read may still overwrite part of the previous block. */
+			if (cached_block != NULL) {
+				*cached_block = UINT32_MAX;
+			}
+			return error;
+		}
+		if (cached_block != NULL) {
+			*cached_block = record->block;
+		}
 	}
 	header = (const struct ext4_fc_header_disk *)((const uint8_t *)buffer + record->offset);
 	if (ext4_crc32c(UINT32_MAX, header, sizeof(*header) + record->length) != record->checksum ||

@@ -17,6 +17,7 @@ from fast_commit_reference import read_namespace
 
 PROTOCOL_READBACK_PHASE = 2
 INDIRECT_READBACK_PHASE = 3
+LARGE_PREFIX_READBACK_PHASE = 4
 
 
 def digest(path):
@@ -25,11 +26,16 @@ def digest(path):
 
 
 def readback_fixtures(args, output, tools, recover, prep, runner, kernel, archive, rows, run):
-    fixtures = (args.xattr_fixtures or args.indirect_fixtures).resolve()
-    profiles = (('xattr-reuse-1k', 'xattr-reuse-4k', 'xattr-reuse-legacy-1k')
-                if args.xattr_fixtures else ('indirect-1k', 'indirect-4k'))
-    marker = ('LINUX_FAST_COMMIT_XATTR_REUSE_PASS' if args.xattr_fixtures
-              else 'LINUX_FAST_COMMIT_INDIRECT_PASS')
+    fixtures = (args.xattr_fixtures or args.indirect_fixtures or args.large_prefix_fixtures).resolve()
+    if args.xattr_fixtures:
+        profiles = ('xattr-reuse-1k', 'xattr-reuse-4k', 'xattr-reuse-legacy-1k')
+        marker = 'LINUX_FAST_COMMIT_XATTR_REUSE_PASS'
+    elif args.indirect_fixtures:
+        profiles = ('indirect-1k', 'indirect-4k')
+        marker = 'LINUX_FAST_COMMIT_INDIRECT_PASS'
+    else:
+        profiles = ('large-prefix-1k', 'large-prefix-4k')
+        marker = 'LINUX_FAST_COMMIT_LARGE_PREFIX_PASS'
     source_rows = json.loads((fixtures / 'report.json').read_text())
     if not source_rows or not all(row.get('passed') for row in source_rows):
         raise RuntimeError('Protocol fixture generation is not accepted')
@@ -106,9 +112,12 @@ def main():
                           help='verify core-recovered xattr protocol fixtures in Linux')
     fixtures.add_argument('--indirect-fixtures', type=Path,
                           help='verify core-recovered indirect protocol fixtures in Linux')
+    fixtures.add_argument('--large-prefix-fixtures', type=Path,
+                          help='verify large core-recovered protocol prefixes in Linux')
     a = p.parse_args()
     fixture_phase = (PROTOCOL_READBACK_PHASE if a.xattr_fixtures else
-                     INDIRECT_READBACK_PHASE if a.indirect_fixtures else None)
+                     INDIRECT_READBACK_PHASE if a.indirect_fixtures else
+                     LARGE_PREFIX_READBACK_PHASE if a.large_prefix_fixtures else None)
     if fixture_phase is not None and (not a.recover or a.orphan_file or a.special_files):
         p.error('protocol fixtures require --recover and exclude native capture options')
     lab, prepared, runner, output = (v.resolve() for v in (a.lab, a.prepared, a.runner, a.output))

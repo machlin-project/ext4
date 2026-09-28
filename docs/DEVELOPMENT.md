@@ -197,6 +197,29 @@ reused mapping node and a pointer cycle. Each must reject before any write.
 Recovery output also records allocation and read counts before result comparison;
 these are operation counts for the fixture, not a throughput benchmark.
 
+The large-prefix profiles create 256 files at 1 KiB and 1,024 at 4 KiB, then revisit
+their inode and range records in reverse order. Repeated single-block ranges and
+containing two-block ranges exercise exclusion-union semantics. They retain three
+committed prefixes and use a 1 MiB fast area in an 8 MiB journal; the ordinary
+conversion credit bound is unchanged. Their sampled resource tests include early,
+late and evenly spaced failure positions. Sampled power cuts additionally include
+every durability barrier and its adjacent events. The smaller profiles retain
+exhaustive allocation/read failures and write/barrier cuts.
+Duplicate CREATE and LINK records revisit existing names at the beginning, middle
+and end of the created set; identities and link counts must remain unchanged.
+Two valid-CRC malformed logs instead link an existing name to another inode and
+must reject without home or journal writes.
+
+`ext4-fast-commit-recovery-test PENDING EXPECTED --benchmark` performs one checked
+warmup and 31 measured recoveries. Each recovery starts from the same image in the
+test's memory-backed device, with its modeled volatile cache and durability events.
+Timing excludes image restoration, result comparison and hashing; every sample
+still compares the recovered filesystem with the independently authored reference.
+Output includes elapsed nanoseconds, read/allocation counts, peak core allocation,
+durability-event count and an image checksum. Use equivalent optimized unsanitized
+builds and the same test driver/fixtures when comparing source revisions. These
+measurements exclude real device latency and mounted filesystem operation.
+
 For native consumption of these protocol images, pass
 `--xattr-fixtures /absolute/path/to/fast-commit-fixtures` and `--recover` to
 `run_linux_fast_commit.py` with the same lab, prepared reference, runner and fresh
@@ -211,6 +234,9 @@ two indirect profiles. Linux reads the complete sparse file, checks its hardlink
 identity, reads created files, the replacement inode, truncated orphan and symlink
 targets, and checks the special-device identities before clean unmount and
 independent verification.
+The `--large-prefix-fixtures` option checks every created file in both large-prefix
+profiles, including its full contents, permissions and size, plus the sparse source
+and hardlink identity. It is mutually exclusive with the other protocol profiles.
 
 ```sh
 python3 tests/generate_fast_commit_fixtures.py --tools-root E2FSPROGS_BUILD \
