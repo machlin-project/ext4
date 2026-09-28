@@ -146,6 +146,19 @@ pending image with the POSIX utility. These steps use real waits of about 21 to 
 seconds per acquisition. The POSIX adapter supplies wall-clock sleeps, `/dev/urandom`
 values and the host name.
 
+`tests/run_linux_mmp.py` runs from the lab with `--lab`, `--prepared`, `--runner`,
+`--core-test` (an `ext4-mmp-test` from the core under test), `--exports` with the
+released and pending images of the 4 KiB, 1 KiB and unchecksummed profiles, and a
+fresh `--output`. Linux mounts each released image read-write, writes a file and
+unmounts; strict fsck must pass and the MMP block must hold the clean sequence, the
+guest's node name and the check interval. `ext4-mmp-test --continue IMAGE` then
+acquires that image through the POSIX adapter with real waits, requires the Linux
+file, adds its own and releases it with its host name; Linux must find both files and
+release again. Finally Linux takes over each pending image, replaying its journal,
+and releases it clean. The guest's monotonic clock does not advance across the
+kernel's MMP sleeps in this VM, so the runner records Linux's elapsed mount time but
+does not rely on it.
+
 ## fs-verity tests
 
 `tests/generate_verity_fixtures.py --output artifacts/verity-fixtures` authors fs-verity

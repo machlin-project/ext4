@@ -416,6 +416,40 @@ recovery(struct host *host, const uint8_t *image, const char *exports, const cha
 	puts("PASS offline recovery holds the checker sequence and releases it clean");
 }
 
+/* Acquire a volume another host released with the POSIX adapter's wall-clock
+ * sleeps, entropy and host name, write one file, then release it clean. */
+static void
+continuation(const char *path)
+{
+	struct ext4_posix_image image;
+	struct ext4_inode_update update = { 0 };
+	struct ext4_timestamp now = { MMP_SECONDS, 0 };
+	struct ext4_inode root;
+	struct ext4_inode inode;
+	struct ext4_fs *fs;
+
+	update.fields = EXT4_ATTR_PERMISSIONS | EXT4_ATTR_UID | EXT4_ATTR_GID |
+	    EXT4_ATTR_ACCESS_TIME | EXT4_ATTR_MODIFY_TIME | EXT4_ATTR_CHANGE_TIME |
+	    EXT4_ATTR_XATTRS;
+	update.permissions = 0644;
+	update.access_time = now;
+	update.modify_time = now;
+	update.change_time = now;
+	EXPECT(ext4_posix_open_writable(&image, path), EXT4_OK);
+	EXPECT(ext4_mount_writable(&image.environment, &image.writer, &fs), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"linux-mmp", 9, &inode), EXT4_OK);
+	EXPECT(ext4_create(fs, root.number, root.generation, (const uint8_t *)"core-after-linux",
+		   16, &update, &now, &inode),
+	    EXT4_OK);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	EXPECT(ext4_mmp_release(fs), EXT4_OK);
+	ext4_unmount(fs);
+	CHECK(image.live_allocations == 0);
+	ext4_posix_close(&image);
+	printf("PASS multi-mount protection acquired after Linux by %s\n", image.node_name);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -426,8 +460,12 @@ main(int argc, char **argv)
 	uint32_t interval;
 	const char *exports = argc == 3 ? argv[2] : NULL;
 
+	if (argc == 3 && strcmp(argv[1], "--continue") == 0) {
+		continuation(argv[2]);
+		return 0;
+	}
 	if (argc != 2 && argc != 3) {
-		fprintf(stderr, "usage: %s MMP_IMAGE [EXPORT_DIRECTORY]\n", argv[0]);
+		fprintf(stderr, "usage: %s [--continue] MMP_IMAGE [EXPORT_DIRECTORY]\n", argv[0]);
 		return 2;
 	}
 	storage_open(&device, argv[1]);

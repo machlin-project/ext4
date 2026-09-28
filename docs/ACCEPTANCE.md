@@ -90,8 +90,14 @@ suite on four e2fsprogs profiles, including a 40-second interval. Independently,
 released images pass strict fsck with a clean sequence and the core's node name and
 check interval, e2fsck acquires a released 4 KiB image read-write, and the POSIX
 recovery utility waits, replays and releases each pending image. The complete local
-583-test regression with MMP passes (`artifacts/checks/scale-regression-3/`). Linux
-acquisition after a core release has not yet been run in the reference VM.
+583-test regression with MMP passes (`artifacts/checks/scale-regression-3/`). In the
+reference VM, Linux 6.12 acquires the released 4 KiB, 1 KiB and unchecksummed images
+read-write, writes a file and releases them with the clean sequence and its node
+name; the core then acquires each with the POSIX adapter's real waits, finds the Linux
+file, adds its own and releases it; Linux finds both files and releases again; and
+Linux takes over each pending image, replays its journal and releases it. Strict fsck
+passes after every step (lab `artifacts/ext4-mmp/exchange/`). The guest clock does not
+advance across the kernel's MMP sleeps, so this does not measure Linux's wait.
 
 ## fs-verity evidence
 
