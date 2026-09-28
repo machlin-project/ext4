@@ -654,12 +654,15 @@ with exact file bytes/attributes and e2fsck verified afterward. The same lab
 working directory, explicit profile selection and Sol/Luna VM handoff apply.
 
 The `Portable filesystem` GitHub Actions workflow runs on development/main pushes
-and pull requests. Separate Ubuntu jobs cover the base core, orphan files and
-namespace mutations, each generating fresh fixtures and building with Clang and
+and pull requests. Separate Ubuntu jobs cover the core, orphan files, namespace,
+removal, rename and indexed directories, each generating fresh fixtures and building with Clang and
 ASan/UBSan. They run disjoint Meson suites, inspect mutation exports independently
 and recover debugfs-authored journals. Reports and logs are retained; successfully
 verified image exports are released between stages, and namespace exports are
 checked one source profile at a time to bound disk use.
+Each branch and suite selection retains its active run to completion. New pushes
+queue the latest source revision; a newer pending revision can replace an older
+pending one, but publishing does not cancel the already running acceptance checks.
 CI uses `debugoptimized` with both sanitizers enabled and two concurrent Meson
 workers; fixture and fault coverage is identical to `debug`. Use the same build
 type locally when reproducing CI timing.

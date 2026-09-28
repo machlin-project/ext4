@@ -19,7 +19,8 @@ permissions:
 
 concurrency:
   group: core-${{ github.ref }}-${{ inputs.suite || 'all' }}
-  cancel-in-progress: true
+  # Complete the active acceptance run while the newest source waits its turn.
+  cancel-in-progress: false
 
 jobs:
   linux:
