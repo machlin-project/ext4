@@ -41,7 +41,7 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Finish INLINE_DATA regression acceptance and BIGALLOC native/capacity/regression acceptance; large logical/physical addresses and volume geometry beyond the current bounded images | Open; BIGALLOC focused faults and independent states/replay pass; INLINE_DATA focused faults, independent states/replay and eight Linux roundtrips pass; EA_INODE and distributed geometry retain accepted evidence |
+| Format compatibility | Finish BIGALLOC regression acceptance; large logical/physical addresses and volume geometry beyond the current bounded images | Open; BIGALLOC focused faults, capacity, private attributes, independent states/replay and eight native Linux roundtrips pass; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | Fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; v1 and async compatibility pass focused faults, independent replay, eight Linux roundtrips and their combined full regression |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
@@ -90,8 +90,36 @@ Main-agent review: `artifacts/checks/cluster-focused-accepted.json`. Raw reports
 `artifacts/cluster-fault-independent/report.json`. Reproduce with
 `generate_cluster_fixtures.py`, `ext4-cluster-test` (ordinary and `--faults` modes),
 `check_clusters.py` and `check_cluster_faults.py`; the core CI job runs the same
-independent checks. Native Linux roundtrips, full-disk cluster reuse and the
-expanded full regression remain pending. This does not establish adapter support.
+independent checks.
+
+Two independently filled images have zero free clusters in every group. Ordinary
+allocation and reservation return ENOSPC without writes; holes in an existing
+cluster remain writable. Partial removal retains the cluster, final removal frees
+it, and unwritten reservation plus adjacent writes consume that same space again.
+Both final images remain full and pass exact independent state and nonrepairing
+fsck checks. A private EA value spanning three clusters also passes exact read,
+logical/physical accounting and replacement with an inode-body value, returning
+both block and inode totals to baseline. Four additional states and 378 independent
+commands pass. Reports: `artifacts/cluster-space-independent/report.json` and
+`artifacts/cluster-values-independent/report.json`; main reviews are
+`artifacts/checks/cluster-space-accepted.json` and
+`artifacts/checks/cluster-values-accepted.json`.
+
+Eight native Linux/core/Linux roundtrips pass: six clean profiles and two pending
+core journals, with 24 actual boots identifying Linux 6.12.94-0-virt aarch64.
+Linux validates core contents, punches sparse mappings, creates clustered files,
+directories and attributes, reserves unwritten space and leaves a fragmented
+open-unlinked orphan. Core replay of 40 Linux transactions reclaims eight orphans
+and exactly matches native recovery. Core then reads, shrinks, writes, punches,
+changes attributes and reclaims Linux-created objects; Linux verifies the returned
+state. All 2,032 commands and 32 strict fsck checks return zero. Main review:
+`artifacts/checks/cluster-linux-accepted.json`; lab reports are
+`artifacts/ext4-journal/cluster-clean-retry1/report.json` and
+`artifacts/ext4-journal/cluster-pending/report.json`. The first attempt stopped at
+guest-probe compilation because geometry scan variables lacked initialization;
+no VM boot occurred until that harness fix. No core fix was needed for native
+acceptance. The expanded full regression remains pending. This does not establish
+adapter support.
 
 ## Inode-resident file and directory data
 
@@ -145,7 +173,10 @@ are `artifacts/ext4-journal/inline-clean-retry1/report.json` and
 `artifacts/ext4-journal/inline-pending-retry2/report.json`. Two earlier harness
 failures remain recorded: creation-only fields supplied to a write, and a
 127-character manifest path limit that rejected a valid 255-byte directory name.
-Neither required a core change. The expanded 444-test regression is pending.
+Neither required a core change. The expanded 444-test regression passes all six
+suites with no failures, errors or skips. Raw JUnit names match the frozen test
+inventory exactly; CI also repeats all 168 independent states successfully.
+Main-agent acceptance is `artifacts/checks/inline-ci-accepted.json`.
 This evidence does not establish installed FSKit or kext inline reads.
 
 ## Large values in private attribute inodes

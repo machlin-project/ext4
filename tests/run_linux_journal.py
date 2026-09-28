@@ -293,6 +293,8 @@ def main():
             raise RuntimeError("Missing Linux EA_INODE mutation evidence")
         if case.get("inline_data") and "LINUX_EXT4_INLINE_PASS" not in console:
             raise RuntimeError("Missing Linux inline mutation evidence")
+        if case.get("clustered") and "LINUX_EXT4_CLUSTER_PASS" not in console:
+            raise RuntimeError("Missing Linux clustered allocation evidence")
         header = run([tools / "misc/dumpe2fs", "-h", scratch])
         if "needs_recovery" not in header:
             raise RuntimeError("Linux did not leave a pending journal for the reverse roundtrip")

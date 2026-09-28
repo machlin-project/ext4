@@ -17,7 +17,7 @@ rename exchange and whiteout, HTree mutation, automatic indexing, LARGEDIR and
 DIR_NLINK. Raw inode-body and external xattrs follow metadata, data and namespace
 transactions. Internal journal recovery handles legacy and modern orphan records.
 
-The combined 412-test CI regression passes all six jobs, alongside independent
+The completed 444-test CI regression passes all six jobs, alongside independent
 image checks and Linux mutation/recovery roundtrips. Tests cover malformed media,
 allocation/read failures and interrupted writes under ASan/UBSan; freestanding
 compilation enforces a 2 KiB stack-frame budget. Read profiles span 1–64 KiB blocks,
@@ -59,14 +59,16 @@ Independent checks accept 84 functional/lifetime states and 84 journal states;
 2,016 interrupted-write cases recover the old or new transaction, or reject a
 torn primary superblock. Eight native Linux roundtrips also pass, including
 open-unlinked cleanup and two pending core journals. The expanded 444-test CI
-regression is pending for this block.
+regression passes all six suites with no failures or skips.
 
 BIGALLOC implements cluster bitmap accounting, shared cluster backing within an
 inode, whole-cluster allocation and final-reference release. Eight profiles pass
 functional checks and 88 malformed cases. Independent verification accepts 32
 mutation/lifetime states and 72 transaction/replay states; 1,536 power cuts cover
-allocation, reuse, partial release, reservation and attribute reclamation. Native
-Linux roundtrips, full-disk cluster reuse and the expanded regression remain pending.
+allocation, reuse, partial release, reservation and attribute reclamation. Two
+completely allocated images and private attribute values pass four further
+independent states. Eight native Linux/core/Linux roundtrips pass, including orphan
+recovery and pending core journals. The expanded full regression remains pending.
 
 Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.
 Both native adapters remain read-only. The FSKit adapter builds for macOS 26.4,

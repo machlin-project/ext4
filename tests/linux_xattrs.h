@@ -265,6 +265,7 @@ xattr_check_acl_access(void)
 
 #include "linux_ea_inode.h"
 #include "linux_inline.h"
+#include "linux_cluster.h"
 
 static void
 check_xattrs(void)
@@ -295,6 +296,9 @@ check_xattrs(void)
 	}
 	if (access("/inline-data", F_OK) == 0) {
 		check_inline_data();
+	}
+	if (access("/cluster-geometry", F_OK) == 0) {
+		check_clusters();
 	}
 	for (index = 0; index < sizeof(bytes); index++) {
 		bytes[index] = (uint8_t)(index * 23U + 0x67U);

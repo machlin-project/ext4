@@ -3,7 +3,7 @@
 # required cases; missing images fail tests instead of silently removing them.
 paths = {}
 foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
-  'namespace_fixtures', 'xattr_fixtures', 'ea_inode_fixtures', 'inline_fixtures', 'inline_space_fixtures', 'cluster_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
+  'namespace_fixtures', 'xattr_fixtures', 'ea_inode_fixtures', 'inline_fixtures', 'inline_space_fixtures', 'cluster_fixtures', 'cluster_space_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
   'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures', 'geometry_fixtures',
   'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
   'directory_index_64k_fixture']
@@ -12,6 +12,9 @@ foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
 endforeach
 
 if paths['cluster_fixtures'] != ''
+  test('cluster-private-values', programs['cluster'],
+    args: ['--values', paths['cluster_fixtures'] / 'cluster-ea-inode.img'],
+    timeout: 300, suite: 'core')
   foreach profile : ['1k', '4k', 'wide', 'no-checksum', 'checksum-seed', 'inline', 'ea-inode', 'orphan-file']
     test('cluster-mutation-' + profile, programs['cluster'],
       args: paths['cluster_fixtures'] / ('cluster-' + profile + '.img'), timeout: 600, suite: 'core')
@@ -20,6 +23,14 @@ if paths['cluster_fixtures'] != ''
         args: ['--faults', paths['cluster_fixtures'] / ('cluster-' + profile + '.img')],
         timeout: 600, suite: 'core')
     endif
+  endforeach
+endif
+
+if paths['cluster_space_fixtures'] != ''
+  foreach profile : ['1k', '4k']
+    test('cluster-full-space-' + profile, programs['cluster'],
+      args: ['--full', paths['cluster_space_fixtures'] / ('cluster-' + profile + '.img')],
+      timeout: 300, suite: 'core')
   endforeach
 endif
 

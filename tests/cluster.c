@@ -307,6 +307,9 @@ namespace_lifetime(struct device *device, const char *exports, const char *path)
 
 #include "cluster_corruption.h"
 #include "cluster_faults.h"
+#include "cluster_linux.h"
+#include "cluster_space.h"
+#include "cluster_values.h"
 
 int
 main(int argc, char **argv)
@@ -316,12 +319,31 @@ main(int argc, char **argv)
 	int argument = 1;
 	bool faults = false;
 	bool smoke = false;
+	bool full = false;
+	bool values = false;
 
 	CHECK(argc >= 2);
+	if (strcmp(argv[argument], "--linux-return") == 0) {
+		CHECK(argc == 4);
+		storage_open(&device, argv[3]);
+		linux_return(&device, argv[2]);
+		storage_close(&device);
+		return 0;
+	}
 	if (strcmp(argv[argument], "--faults") == 0 ||
 	    strcmp(argv[argument], "--fault-smoke") == 0) {
 		faults = true;
 		smoke = strcmp(argv[argument], "--fault-smoke") == 0;
+		argument++;
+		CHECK(argument < argc);
+	}
+	if (strcmp(argv[argument], "--full") == 0) {
+		full = true;
+		argument++;
+		CHECK(argument < argc);
+	}
+	if (strcmp(argv[argument], "--values") == 0) {
+		values = true;
 		argument++;
 		CHECK(argument < argc);
 	}
@@ -332,6 +354,16 @@ main(int argc, char **argv)
 	}
 	for (; argument < argc; argument++) {
 		storage_open(&device, argv[argument]);
+		if (values) {
+			private_values(&device, exports, argv[argument]);
+			storage_close(&device);
+			continue;
+		}
+		if (full) {
+			full_space(&device, exports, argv[argument]);
+			storage_close(&device);
+			continue;
+		}
 		if (faults) {
 			mutation_faults(&device, exports, argv[argument], smoke);
 			storage_close(&device);

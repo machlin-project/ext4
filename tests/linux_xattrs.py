@@ -245,6 +245,8 @@ def prepare(case, tree, tools, *, verify_only=False):
         (tree / "ea-inode").touch()
     if case.get("inline_data"):
         (tree / "inline-data").touch()
+    if case.get("clustered"):
+        (tree / "cluster-geometry").write_text(f"{case['block_size']} {case['cluster_blocks']}\n")
     (tree / "linux-acl").write_bytes(acl_bytes(LINUX_ACL_ENTRIES, userspace=True))
     (tree / "linux-capability").write_bytes(struct.pack(
         "<IIIII", CAPABILITY_REVISION_2 | CAPABILITY_EFFECTIVE, 1 << CAP_NET_BIND_SERVICE, 0, 0, 0))
@@ -330,6 +332,9 @@ def write_core_expectations(state, output):
 
 
 def verify(case, image, output, tools, recover, reader, run, *, native_replay=None):
+    if case.get("clustered"):
+        from linux_cluster import verify as verify_cluster
+        return verify_cluster(case, image, output, tools, recover, reader, run, native_replay)
     if case.get("inline_data"):
         from linux_inline import verify as verify_inline
         return verify_inline(case, image, output, tools, recover, reader, run, native_replay)

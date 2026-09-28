@@ -114,6 +114,7 @@ def main():
                         selected.append(dict(image=str(image), input_sha256=clean_hash,
                                              pending=str(source), pending_sha256=original_hash,
                                              recovered_outcome="new", passed=True, clustered=True,
+                                             cluster_blocks=4,
                                              block_size=state["accounting"]["Block size"]))
                     else:
                         image.unlink()
