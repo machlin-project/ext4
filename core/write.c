@@ -554,8 +554,9 @@ ext4_inode_account(struct ext4_allocation *allocation, const struct ext4_inode *
 {
 	struct ext4_fs *fs = allocation->fs;
 	uint64_t units = ext4_le32(&disk->blocks_lo);
-	uint64_t increment = allocation->allocated;
-	uint64_t decrement = allocation->freed + allocation->detached_shared_blocks;
+	uint64_t increment = allocation->allocated + allocation->attribute_blocks_added;
+	uint64_t decrement = allocation->freed + allocation->detached_shared_blocks +
+	    allocation->attribute_blocks_removed;
 	uint64_t maximum = UINT32_MAX;
 	uint32_t flags = inode->flags;
 
@@ -581,7 +582,7 @@ ext4_inode_account(struct ext4_allocation *allocation, const struct ext4_inode *
 			return EXT4_RANGE;
 		}
 		units /= fs->info.block_size / EXT4_SECTOR_SIZE;
-		increment = allocation->allocated;
+		increment = allocation->allocated + allocation->attribute_blocks_added;
 		flags |= EXT4_INODE_HUGE_FILE;
 	}
 	units += increment;

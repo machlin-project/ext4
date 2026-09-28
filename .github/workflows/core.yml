@@ -105,6 +105,8 @@ jobs:
             --output artifacts/xattr-space-fixtures 2>&1 | tee artifacts/checks/xattr-space-fixtures.log
           python3 tests/generate_xattr_enable_fixtures.py --output artifacts/xattr-enable-fixtures \
             2>&1 | tee artifacts/checks/xattr-enable-fixtures.log
+          python3 tests/generate_ea_inode_fixtures.py --tools-root vendor/e2fsprogs/build \
+            --output artifacts/ea-inode-fixtures 2>&1 | tee artifacts/checks/ea-inode-fixtures.log
       - name: Generate legacy group checksum images
         if: matrix.suite == 'core'
         run: |
@@ -134,6 +136,7 @@ jobs:
             group_options=(-Dgroup_checksum_fixtures="$PWD/artifacts/group-checksum-fixtures" \
               -Dgeometry_fixtures="$PWD/artifacts/geometry-fixtures")
             xattr_options=(-Dxattr_fixtures="$PWD/artifacts/xattr-fixtures" \
+              -Dea_inode_fixtures="$PWD/artifacts/ea-inode-fixtures" \
               -Dxattr_space_fixtures="$PWD/artifacts/xattr-space-fixtures" \
               -Dxattr_enable_fixtures="$PWD/artifacts/xattr-enable-fixtures")
           fi
@@ -164,6 +167,19 @@ jobs:
             2>&1 | tee artifacts/checks/xattr-independent.log
           find artifacts/xattr-exports artifacts/xattr-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Independently verify large attribute values and orphan reclamation
+        if: matrix.suite == 'core'
+        run: |
+          mkdir artifacts/ea-inode-exports
+          for image in artifacts/ea-inode-fixtures/*.img; do
+            .build/ext4-ea-inode-test --export artifacts/ea-inode-exports "$image"
+            .build/ext4-ea-inode-test --value-orphans --export artifacts/ea-inode-exports "$image"
+          done 2>&1 | tee artifacts/checks/ea-inode-exports.log
+          python3 tests/check_ea_inode.py --fixtures artifacts/ea-inode-fixtures/report.json \
+            --exports artifacts/ea-inode-exports --output artifacts/ea-inode-independent \
+            2>&1 | tee artifacts/checks/ea-inode-independent.log
+          find artifacts/ea-inode-fixtures artifacts/ea-inode-exports artifacts/ea-inode-independent \
+            -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Independently verify persistent inode flags and recovery
         if: matrix.suite == 'core'
         run: |

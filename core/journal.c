@@ -944,6 +944,7 @@ ext4_transaction_commit(struct ext4_transaction *transaction)
 {
 	struct ext4_journal *journal;
 	struct ext4_jbd_commit *commit;
+	const struct ext4_super_disk *super;
 	uint32_t commit_block = 0;
 	uint32_t transaction_checksum = UINT32_MAX;
 	uint32_t index;
@@ -1003,6 +1004,19 @@ ext4_transaction_commit(struct ext4_transaction *transaction)
 	}
 	if (error != EXT4_OK) {
 		journal->aborted = true;
+	} else {
+		/* One attribute transaction can allocate or release multiple private
+		 * value inodes. Publish their shared counter only after checkpoint. */
+		for (index = 0; index < transaction->count; index++) {
+			if (transaction->entries[index].block !=
+			    EXT4_SUPER_OFFSET / journal->fs->info.block_size) {
+				continue;
+			}
+			super = (const struct ext4_super_disk
+				*)((const uint8_t *)transaction->entries[index].buffer +
+			    EXT4_SUPER_OFFSET % journal->fs->info.block_size);
+			journal->fs->info.free_inodes = ext4_le32(&super->free_inodes);
+		}
 	}
 	ext4_transaction_cancel(transaction);
 	return error;

@@ -60,6 +60,7 @@ ext4_allocation_init(struct ext4_allocation *allocation, struct ext4_fs *fs,
 	allocation->fs = fs;
 	allocation->transaction = transaction;
 	allocation->free_blocks = fs->info.free_blocks;
+	allocation->free_inodes = fs->info.free_inodes;
 	allocation->maximum_block =
 	    (inode->flags & EXT4_INODE_EXTENTS) ? EXT4_PHYSICAL_BLOCK_MAX : UINT32_MAX;
 	if (!(fs->journal->features & EXT4_JBD_64BIT)) {

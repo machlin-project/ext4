@@ -3,7 +3,7 @@
 # required cases; missing images fail tests instead of silently removing them.
 paths = {}
 foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
-  'namespace_fixtures', 'xattr_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
+  'namespace_fixtures', 'xattr_fixtures', 'ea_inode_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
   'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures', 'geometry_fixtures',
   'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
   'directory_index_64k_fixture']
@@ -13,6 +13,21 @@ endforeach
 
 xattr_profiles = ['1k', '4k', '16k', '64k', 'indirect', 'no-checksum',
   'checksum-seed', 'inode128', 'inode512', 'orphan-file']
+if paths['ea_inode_fixtures'] != ''
+  foreach profile : ['1k', '4k', 'no-checksum', 'checksum-seed', 'inode128', 'orphan-file']
+    stem = paths['ea_inode_fixtures'] / ('ea-inode-' + profile)
+    test('ea-inode-reader-' + profile, programs['xattr'],
+      args: ['--verify', stem + '.img', stem + '.xattrs'], timeout: 300, suite: 'core')
+    test('ea-inode-mutation-' + profile, programs['ea-inode'],
+      args: stem + '.img', timeout: 600, suite: 'core')
+    test('ea-inode-orphans-' + profile, programs['ea-inode'],
+      args: ['--value-orphans', stem + '.img'], timeout: 300, suite: 'core')
+    if profile in ['1k', 'inode128']
+      test('ea-inode-faults-' + profile, programs['ea-inode'],
+        args: ['--faults', stem + '.img'], timeout: 600, suite: 'core')
+    endif
+  endforeach
+endif
 if paths['xattr_fixtures'] != ''
   foreach profile : xattr_profiles
     stem = paths['xattr_fixtures'] / ('xattr-' + profile)

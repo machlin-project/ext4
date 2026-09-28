@@ -271,6 +271,37 @@ The checker distinguishes clean unknown-namespace exports from synthetic shared-
 reader compatibility images. The latter deliberately fail e2fsck and are never
 reported as clean filesystem acceptance. No input image is repaired or modified.
 
+## Large attribute values
+
+EA_INODE fixtures use the pinned e2fsprogs build's static libext2fs and a small
+fixture-only helper. This avoids debugfs's one-block input limit for `ea_set -f`.
+The helper is not linked into the portable core. Generate all six profiles and
+run their reader, mutation, corruption, fault and private-orphan tests with:
+
+```sh
+python3 tests/generate_ea_inode_fixtures.py --tools-root /path/to/e2fsprogs/build \
+  --output artifacts/ea-inode-fixtures
+meson setup --reconfigure .build -Dea_inode_fixtures="$PWD/artifacts/ea-inode-fixtures"
+meson compile -C .build
+env -i PATH="$PATH" meson test -C .build 'ea-inode-*' --no-rebuild -j 2 --print-errorlogs
+mkdir artifacts/ea-inode-exports
+for image in artifacts/ea-inode-fixtures/*.img; do
+  .build/ext4-ea-inode-test --export artifacts/ea-inode-exports "$image"
+  .build/ext4-ea-inode-test --value-orphans --export artifacts/ea-inode-exports "$image"
+done
+python3 tests/check_ea_inode.py --fixtures artifacts/ea-inode-fixtures/report.json \
+  --exports artifacts/ea-inode-exports --tools-root /path/to/e2fsprogs/build \
+  --output artifacts/ea-inode-independent
+```
+
+Twenty registered cases cover six reader, six mutation/corruption, six private
+orphan and two exhaustive mutation-fault suites. The checker requires eighteen
+states per profile and never repairs source/export images. It replays an isolated
+copy with `e2fsck -y -E journal_only`, rejects any full-check passes at this stage,
+then verifies exact values, namespace and counters before `e2fsck -fn`. Use repeated
+`--state` arguments to inspect only named states during a focused development
+batch. CI runs the complete 108-state matrix at the feature boundary.
+
 ## Extended-attribute mutation tests
 
 The same ten fixtures drive `xattr-mutation-*` and `xattr-packing-*`. The first

@@ -111,6 +111,10 @@ ext4_symlink_initialize(struct ext4_allocation *allocation, struct ext4_inode *i
 	enum ext4_result error;
 
 	if (length < sizeof(disk->block_data)) {
+		if (allocation->attribute_blocks_added != 0) {
+			/* Short symlinks cannot carry EA value charges in the Linux format. */
+			return EXT4_UNSUPPORTED;
+		}
 		inode->flags &= ~EXT4_INODE_EXTENTS;
 		ext4_zero(disk->block_data, sizeof(disk->block_data));
 		ext4_copy(disk->block_data, target, length);
@@ -350,6 +354,8 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		allocation.allocated = 0;
 		allocation.freed = 0;
 		allocation.detached_shared_blocks = 0;
+		allocation.attribute_blocks_added = 0;
+		allocation.attribute_blocks_removed = 0;
 	}
 	type = ext4_namespace_type(child.mode);
 	if (type == EXT4_FT_UNKNOWN) {
@@ -384,9 +390,6 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	fs->info.free_blocks = free_blocks;
 	fs->info.feature_compat = feature_compat;
 	fs->info.feature_ro_compat |= feature_ro_compat & EXT4_FEATURE_RO_DIR_NLINK;
-	if (create_mode != 0) {
-		fs->info.free_inodes--;
-	}
 	*result = child;
 	return EXT4_OK;
 cancel:
@@ -972,6 +975,8 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 		state->allocation.allocated = 0;
 		state->allocation.freed = 0;
 		state->allocation.detached_shared_blocks = 0;
+		state->allocation.attribute_blocks_added = 0;
+		state->allocation.attribute_blocks_removed = 0;
 	}
 	if (exists && !exchange) {
 		if (directory[1]) {
@@ -1100,9 +1105,6 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 	fs->info.free_blocks = free_blocks;
 	fs->info.feature_compat = feature_compat;
 	fs->info.feature_ro_compat |= feature_ro_compat & EXT4_FEATURE_RO_DIR_NLINK;
-	if (whiteout_attributes != NULL) {
-		fs->info.free_inodes--;
-	}
 	if (last) {
 		error = ext4_namespace_orphan_complete(
 		    fs, state->objects[1].number, state->objects[1].generation);

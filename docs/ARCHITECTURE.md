@@ -399,7 +399,30 @@ an unchanged shared external block during an inode-body-only update. When repack
 is necessary, bounded subset selection avoids false ENOSPC from a greedy placement.
 It writes sorted entries, disjoint padded values, entry/block hashes and metadata
 checksums. Existing nonzero extra_isize bounds inode-body storage; 128-byte inodes
-and records with no extended body use external storage. EA_INODE is unsupported.
+and records with no extended body use external storage.
+
+On EA_INODE filesystems, values up to 64 KiB can move into private regular inodes
+when inode-body and external-block packing is insufficient. Their entries retain
+the name, size, private inode number and hash; their value offset is zero. Reads
+validate the private inode, initialized allocation map and complete CRC32C before
+publishing any value bytes. These inodes cannot be opened through the public inode
+or lifetime APIs. Legacy Lustre value backpointers are explicitly unsupported.
+
+Value references count physical attribute entries. An inode-body entry owns one
+reference; a shared external block owns each value reference once regardless of
+the number of owners of that block. Copying the block increments retained value
+references, while detaching one owner leaves them intact. Each owner separately
+accounts for the rounded value size in its logical block charge. The private
+value inode owns its actual data and mapping allocations. Changes to all three
+owners commit together, including multiple inode bitmap/counter changes. Credit
+exhaustion cancels before device writes; values are not truncated to fit a journal.
+
+Final deletion can drop one value entry per transaction before releasing its
+owner. The zero-reference private orphan representation is also admitted for
+recovery. Large values on short symlinks reject before writes because their block
+charge conflicts with Linux's fast-symlink encoding; ordinary small attributes and
+mapped symlinks remain supported. Value deduplication is not implemented, but
+existing shared values retain correct reference counts during copy and deletion.
 
 Changing a shared block decrements its reference count and allocates a private copy
 in the same transaction. Dropping a shared reference changes the inode's block count

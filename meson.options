@@ -25,6 +25,8 @@ option('geometry_fixtures', type: 'string', value: '',
   description: 'Enable distributed descriptors and sparse-superblock images')
 option('xattr_fixtures', type: 'string', value: '',
   description: 'Enable inode-body, external and shared xattr image tests')
+option('ea_inode_fixtures', type: 'string', value: '',
+  description: 'Enable large attribute values stored in private inodes')
 option('xattr_space_fixtures', type: 'string', value: '',
   description: 'Enable full-space images with shared xattr blocks')
 option('xattr_enable_fixtures', type: 'string', value: '',

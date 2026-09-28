@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "allocate.h"
+#include "xattr.h"
 
 struct ext4_extent_path {
 	uint8_t *nodes[EXT4_EXTENT_MAX_DEPTH + 1];
@@ -1216,8 +1217,10 @@ ext4_write_map_validate(struct ext4_allocation *allocation, const struct ext4_in
 {
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_map_owners owners;
+	struct ext4_xattr_snapshot attributes;
 	uint8_t *scratch;
 	uint64_t attribute_block;
+	uint64_t value_blocks = 0;
 	uint16_t type = inode->mode & EXT4_MODE_TYPE;
 	size_t scratch_size = (size_t)fs->info.block_size * EXT4_EXTENT_MAX_DEPTH;
 	size_t index;
@@ -1241,9 +1244,18 @@ ext4_write_map_validate(struct ext4_allocation *allocation, const struct ext4_in
 	if (error == EXT4_OK && attribute_block != 0) {
 		error = ext4_map_owner_add(allocation, &owners, attribute_block, 1);
 	}
+	if (error == EXT4_OK && (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EA_INODE) &&
+	    ext4_inode_has_xattrs(fs, disk)) {
+		error = ext4_xattr_open_inode(fs, inode, disk, &attributes);
+		if (error == EXT4_OK) {
+			value_blocks = ext4_xattr_value_blocks(&attributes);
+		}
+		ext4_xattr_close(&attributes);
+	}
 	if (error == EXT4_OK &&
 	    (inode->blocks_512 % (fs->info.block_size / EXT4_SECTOR_SIZE) != 0 ||
-		owners.blocks != inode->blocks_512 / (fs->info.block_size / EXT4_SECTOR_SIZE))) {
+		owners.blocks + value_blocks !=
+		    inode->blocks_512 / (fs->info.block_size / EXT4_SECTOR_SIZE))) {
 		error = EXT4_CORRUPT;
 	}
 	if (error == EXT4_OK) {

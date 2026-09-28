@@ -31,7 +31,7 @@ static size_t
 ext4_xattr_record_size(const struct ext4_xattr_record *record)
 {
 	return ext4_xattr_round(sizeof(*record->entry) + record->entry->name_length) +
-	    ext4_xattr_round(ext4_le32(&record->entry->value_size));
+	    (record->inode_storage ? 0 : ext4_xattr_round(ext4_le32(&record->entry->value_size)));
 }
 
 enum ext4_result
@@ -63,7 +63,12 @@ ext4_xattr_changes_validate(
 				return EXT4_INVALID_ARGUMENT;
 			}
 		}
-		if (change->value_size > fs->info.block_size) {
+		if ((fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EA_INODE) &&
+		    change->value_size > EXT4_XATTR_VALUE_MAX) {
+			return EXT4_RANGE;
+		}
+		if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EA_INODE) &&
+		    change->value_size > fs->info.block_size) {
 			return EXT4_NO_SPACE;
 		}
 	}
@@ -127,6 +132,10 @@ ext4_xattr_merge(struct ext4_xattr_edit *edit, const struct ext4_xattr_change *c
 		edit->changes[index].record.entry = entry;
 		edit->changes[index].record.value = changes[index].value;
 		edit->changes[index].record.external = false;
+		edit->changes[index].record.value_inode = 0;
+		edit->changes[index].record.value_hash = 0;
+		edit->changes[index].record.inode_storage = false;
+		edit->changes[index].record.new_inode = false;
 		edit->changes[index].policy = changes[index].policy;
 		offset += ext4_xattr_round(sizeof(*entry) + entry->name_length);
 	}
@@ -175,9 +184,15 @@ ext4_xattr_merge(struct ext4_xattr_edit *edit, const struct ext4_xattr_change *c
 static bool
 ext4_xattr_record_equal(const struct ext4_xattr_record *left, const struct ext4_xattr_record *right)
 {
-	return ext4_xattr_compare(left->entry, right->entry) == 0 &&
-	    ext4_le32(&left->entry->value_size) == ext4_le32(&right->entry->value_size) &&
-	    ext4_equal(left->value, right->value, ext4_le32(&left->entry->value_size));
+	if (ext4_xattr_compare(left->entry, right->entry) != 0 ||
+	    ext4_le32(&left->entry->value_size) != ext4_le32(&right->entry->value_size)) {
+		return false;
+	}
+	if (left->inode_storage || right->inode_storage) {
+		return left->inode_storage && right->inode_storage && left->value_inode != 0 &&
+		    left->value_inode == right->value_inode;
+	}
+	return ext4_equal(left->value, right->value, ext4_le32(&left->entry->value_size));
 }
 
 static bool
@@ -275,6 +290,38 @@ ext4_xattr_place(struct ext4_xattr_edit *edit, size_t body_capacity)
 	return EXT4_OK;
 }
 
+static enum ext4_result
+ext4_xattr_place_values(struct ext4_xattr_edit *edit, size_t body_capacity)
+{
+	size_t index;
+	size_t selected;
+	uint32_t largest;
+	uint32_t size;
+	enum ext4_result error;
+
+	for (;;) {
+		error = ext4_xattr_place(edit, body_capacity);
+		if (error != EXT4_NO_SPACE ||
+		    !(edit->snapshot.fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EA_INODE)) {
+			return error;
+		}
+		largest = 0;
+		selected = edit->count;
+		for (index = 0; index < edit->count; index++) {
+			size = ext4_le32(&edit->records[index].entry->value_size);
+			if (!edit->records[index].inode_storage && size > largest) {
+				largest = size;
+				selected = index;
+			}
+		}
+		if (selected == edit->count) {
+			return EXT4_NO_SPACE;
+		}
+		edit->records[selected].inode_storage = true;
+		edit->records[selected].external = false;
+	}
+}
+
 static void
 ext4_xattr_pack(
     struct ext4_xattr_edit *edit, uint8_t *buffer, size_t size, size_t first, bool external)
@@ -299,13 +346,20 @@ ext4_xattr_pack(
 		present = true;
 		entry = (struct ext4_xattr_entry_disk *)(buffer + next);
 		value_size = ext4_le32(&record->entry->value_size);
-		value_end -= ext4_xattr_round(value_size);
 		ext4_copy(entry, record->entry, sizeof(*entry) + record->entry->name_length);
-		ext4_encode16(&entry->value_offset,
-		    value_size == 0 ? 0 : (uint16_t)(value_end - (external ? 0 : first)));
-		ext4_encode32(&entry->value_inode, 0);
-		ext4_copy(buffer + value_end, record->value, value_size);
-		entry_hash = external ? ext4_xattr_hash(entry, buffer + value_end, false) : 0;
+		if (record->inode_storage) {
+			ext4_encode16(&entry->value_offset, 0);
+			ext4_encode32(&entry->value_inode, record->value_inode);
+			entry_hash = ext4_xattr_inode_entry_hash(entry, record->value_hash, false);
+		} else {
+			value_end -= ext4_xattr_round(value_size);
+			ext4_encode16(&entry->value_offset,
+			    value_size == 0 ? 0 : (uint16_t)(value_end - (external ? 0 : first)));
+			ext4_encode32(&entry->value_inode, 0);
+			ext4_copy(buffer + value_end, record->value, value_size);
+			entry_hash =
+			    external ? ext4_xattr_hash(entry, buffer + value_end, false) : 0;
+		}
 		ext4_encode32(&entry->hash, entry_hash);
 		hashable = hashable && entry_hash != 0;
 		hash = ((hash << EXT4_XATTR_BLOCK_HASH_SHIFT) |
@@ -323,6 +377,92 @@ ext4_xattr_pack(
 		ext4_encode32((struct ext4_le32 *)(buffer + first - sizeof(struct ext4_le32)),
 		    EXT4_XATTR_MAGIC);
 	}
+}
+
+static bool
+ext4_xattr_external_changed(struct ext4_xattr_edit *edit)
+{
+	size_t index;
+	bool external = false;
+
+	for (index = 0; index < edit->count; index++) {
+		external = external || edit->records[index].external;
+	}
+	return (!external && edit->snapshot.external_block != 0) ||
+	    !ext4_xattr_unchanged(edit, true);
+}
+
+static enum ext4_result
+ext4_xattr_reference_edits(struct ext4_allocation *allocation, struct ext4_xattr_edit *edit)
+{
+	const struct ext4_xattr_record *old_record;
+	const struct ext4_xattr_record *new_record;
+	const struct ext4_xattr_header_disk *header;
+	uint64_t old_blocks = ext4_xattr_value_blocks(&edit->snapshot);
+	uint64_t new_blocks = 0;
+	size_t old;
+	size_t next;
+	size_t index;
+	int order;
+	unsigned int pass;
+	bool old_owned;
+	bool new_owned;
+	bool changed = ext4_xattr_external_changed(edit);
+	bool shared = false;
+	enum ext4_result error;
+
+	if (edit->snapshot.external_block != 0) {
+		header = (const struct ext4_xattr_header_disk *)edit->snapshot.block;
+		shared = ext4_le32(&header->references) > 1;
+	}
+	/* A shared block owns one value reference, irrespective of its own refcount.
+	 * Copying it creates references; detaching one owner preserves the old ones.
+	 * Increment all surviving values before dropping any old references. */
+	for (pass = 0; pass < 2; pass++) {
+		old = 0;
+		next = 0;
+		while (old < edit->snapshot.count || next < edit->count) {
+			order = old == edit->snapshot.count ? 1
+			    : next == edit->count
+			    ? -1
+			    : ext4_xattr_compare(
+				  edit->snapshot.records[old].entry, edit->records[next].entry);
+			old_record = order <= 0 ? &edit->snapshot.records[old++] : NULL;
+			new_record = order >= 0 ? &edit->records[next++] : NULL;
+			old_owned = old_record != NULL && old_record->inode_storage &&
+			    (!old_record->external || (changed && !shared));
+			new_owned = new_record != NULL && new_record->inode_storage &&
+			    (!new_record->external || changed);
+			if (old_owned && new_owned &&
+			    old_record->value_inode == new_record->value_inode) {
+				continue;
+			}
+			if (pass == 0 && new_owned && !new_record->new_inode) {
+				error = ext4_xattr_inode_adjust(allocation, new_record, 1);
+			} else if (pass == 1 && old_owned) {
+				error = ext4_xattr_inode_adjust(allocation, old_record, -1);
+			} else {
+				continue;
+			}
+			if (error != EXT4_OK) {
+				return error;
+			}
+		}
+	}
+	for (index = 0; index < edit->count; index++) {
+		if (edit->records[index].inode_storage) {
+			new_blocks +=
+			    ((uint64_t)ext4_le32(&edit->records[index].entry->value_size) +
+				allocation->fs->info.block_size - 1U) /
+			    allocation->fs->info.block_size;
+		}
+	}
+	if (new_blocks > old_blocks) {
+		allocation->attribute_blocks_added += new_blocks - old_blocks;
+	} else {
+		allocation->attribute_blocks_removed += old_blocks - new_blocks;
+	}
+	return EXT4_OK;
 }
 
 static enum ext4_result
@@ -402,6 +542,7 @@ ext4_xattr_apply(struct ext4_allocation *allocation, const struct ext4_inode *in
 	size_t body = fs->inode_size;
 	size_t body_capacity = 0;
 	size_t extra;
+	size_t index;
 	enum ext4_result error;
 
 	ext4_zero(&edit, sizeof(edit));
@@ -425,7 +566,7 @@ ext4_xattr_apply(struct ext4_allocation *allocation, const struct ext4_inode *in
 			body_capacity = fs->inode_size - body - sizeof(struct ext4_le32);
 		}
 	}
-	error = ext4_xattr_place(&edit, body_capacity);
+	error = ext4_xattr_place_values(&edit, body_capacity);
 	if (error != EXT4_OK) {
 		goto out;
 	}
@@ -437,7 +578,24 @@ ext4_xattr_apply(struct ext4_allocation *allocation, const struct ext4_inode *in
 		ext4_encode32(&allocation->super->feature_compat,
 		    ext4_le32(&allocation->super->feature_compat) | EXT4_FEATURE_COMPAT_EXT_ATTR);
 	}
-	error = ext4_xattr_external_edit(allocation, &edit, disk);
+	for (index = 0; index < edit.count; index++) {
+		if (inode->fast_symlink && inode->size != 0 && edit.records[index].inode_storage) {
+			/* Value charges make i_blocks look like a mapped symlink to Linux.
+			 * Do not publish inode-body target bytes as physical block pointers. */
+			error = EXT4_UNSUPPORTED;
+			goto out;
+		}
+		if (edit.records[index].inode_storage && edit.records[index].value_inode == 0) {
+			error = ext4_xattr_inode_create(allocation, inode, &edit.records[index]);
+			if (error != EXT4_OK) {
+				goto out;
+			}
+		}
+	}
+	error = ext4_xattr_reference_edits(allocation, &edit);
+	if (error == EXT4_OK) {
+		error = ext4_xattr_external_edit(allocation, &edit, disk);
+	}
 	if (error == EXT4_OK && body < fs->inode_size) {
 		ext4_zero((uint8_t *)disk + body - sizeof(struct ext4_le32),
 		    fs->inode_size - body + sizeof(struct ext4_le32));
@@ -461,16 +619,46 @@ out:
 
 enum ext4_result
 ext4_xattr_drop(struct ext4_allocation *allocation, const struct ext4_inode *inode,
-    struct ext4_inode_disk *disk)
+    struct ext4_inode_disk *disk, bool *done)
 {
 	struct ext4_xattr_edit edit;
+	struct ext4_xattr_change change;
+	const struct ext4_xattr_record *record;
+	const struct ext4_xattr_header_disk *header;
+	size_t index;
+	bool shared = false;
 	enum ext4_result error;
 
 	ext4_zero(&edit, sizeof(edit));
 	error = ext4_xattr_open_inode(allocation->fs, inode, disk, &edit.snapshot);
+	if (error != EXT4_OK) {
+		goto out;
+	}
+	if (edit.snapshot.external_block != 0) {
+		header = (const struct ext4_xattr_header_disk *)edit.snapshot.block;
+		shared = ext4_le32(&header->references) > 1;
+	}
+	/* Reclaim one private value per transaction. Shared blocks can be detached
+	 * whole without allocating a copy or changing any value reference. */
+	for (index = 0; index < edit.snapshot.count; index++) {
+		record = &edit.snapshot.records[index];
+		if (!record->inode_storage || (record->external && shared)) {
+			continue;
+		}
+		ext4_zero(&change, sizeof(change));
+		change.policy = EXT4_XATTR_REMOVE;
+		change.name_index = record->entry->name_index;
+		change.name = (const uint8_t *)(record->entry + 1);
+		change.name_length = record->entry->name_length;
+		error = ext4_xattr_apply(allocation, inode, disk, &change, 1);
+		*done = false;
+		goto out;
+	}
+	error = ext4_xattr_reference_edits(allocation, &edit);
 	if (error == EXT4_OK) {
 		error = ext4_xattr_external_edit(allocation, &edit, disk);
 	}
+out:
 	ext4_xattr_close(&edit.snapshot);
 	return error;
 }

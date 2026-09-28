@@ -29,6 +29,9 @@ ext4_inode_decode_live(struct ext4_fs *fs, uint32_t number, void *buffer, struct
 	if (error != EXT4_OK) {
 		return error;
 	}
+	if (decoded.flags & EXT4_INODE_EA_INODE) {
+		return EXT4_CORRUPT;
+	}
 	if (hold != NULL && decoded.generation != hold->generation) {
 		return EXT4_STALE;
 	}

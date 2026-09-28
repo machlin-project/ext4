@@ -17,7 +17,7 @@ rename exchange and whiteout, HTree mutation, automatic indexing, LARGEDIR and
 DIR_NLINK. Raw inode-body and external xattrs follow metadata, data and namespace
 transactions. Internal journal recovery handles legacy and modern orphan records.
 
-The combined 394-test CI regression passes all six jobs, alongside independent
+The combined 412-test CI regression passes all six jobs, alongside independent
 image checks and Linux mutation/recovery roundtrips. Tests cover malformed media,
 allocation/read failures and interrupted writes under ASan/UBSan; freestanding
 compilation enforces a 2 KiB stack-frame budget. Read profiles span 1–64 KiB blocks,
@@ -33,14 +33,22 @@ the full regression. META_BG and SPARSE_SUPER2 pass focused
 fault tests, independent mutation/recovery checks, eight Linux roundtrips and
 their expanded full regression. JBD2 checksum v1 and async commit
 compatibility pass focused faults, independent replay in both directions and
-eight Linux roundtrips. Their combined full regression is pending; the writer
+eight Linux roundtrips and their combined full regression; the writer
 retains its existing durability barriers on async-format journals.
 Reservation now retains mapping capacity for partial KEEP_SIZE growth, including
 moving EOF between extents at zero free blocks. Focused faults, 30 independent
-image states and six Linux roundtrips pass; its expanded regression is pending.
+image states, six Linux roundtrips and its expanded regression pass.
 Imported full trees without spare capacity can still reject a reservation or
 short growth safely. Wider format and journal compatibility, sustained scale and
 performance remain open core work.
+
+EA_INODE adds values up to 64 KiB, shared value references, transactional updates
+and staged reclamation. Six format profiles pass focused mutation/corruption
+checks, 96 independent image states and twelve private-orphan recovery states.
+Power-cut tests cover create, replace, remove and shared-block copying.
+Native Linux roundtrips and the expanded full
+regression remain pending. Large attributes on short symlinks and legacy Lustre
+value-inode encodings are explicitly unsupported.
 
 Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.
 Both native adapters remain read-only. The FSKit adapter builds for macOS 26.4,

@@ -40,9 +40,9 @@ counted as portable-core implementation.
 
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
-| Ordinary filesystem operations | Full regression for reserved mapping capacity and partial KEEP_SIZE growth under allocator exhaustion | Pending full regression; root/external-leaf reservations, repeated partial growth and EOF-boundary transfers pass focused faults, 30 independent states and six Linux roundtrips; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | EA_INODE and INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; distributed geometry passes focused faults, independent checks, eight Linux roundtrips and the full regression |
-| Journal compatibility | Combined checksum-v1/async regression; fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; v1 and async compatibility pass focused faults, independent replay and eight Linux roundtrips |
+| Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
+| Format compatibility | Complete EA_INODE acceptance; INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; EA_INODE focused mutations/faults and 96 independent states pass, native/full regression pending; distributed geometry is accepted |
+| Journal compatibility | Fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; v1 and async compatibility pass focused faults, independent replay, eight Linux roundtrips and their combined full regression |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
 MMP, quota/project accounting, casefold, encryption and verity also remain
@@ -59,6 +59,44 @@ create/link/symlink/mkdir/mknod/unlink/rmdir/rename and atomic whiteout; raw xat
 internal-journal recovery and both orphan representations; HTree creation, lookup
 and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
 the remaining blocks have equal size or that the full core is accepted.
+
+## Large values in private attribute inodes
+
+Modern EA_INODE values through 64 KiB are readable and writable. Private value
+inodes, entry hashes, whole-value CRC32C, physical reference counts and each
+owner's logical block charges are validated separately. Mutation supports creation,
+replacement, shrinking back to ordinary storage, removal, shared-block copying,
+attributed file/directory/mapped-symlink creation, data writes/truncate, held
+replacement and staged final deletion. Multiple allocated/freed inode counters
+become visible only after a successful transaction checkpoint.
+
+Six independently authored profiles cover 1/4 KiB blocks, missing metadata
+checksums, a stored checksum seed, 128-byte inodes and orphan-file capability.
+Exact reader values pass, together with seventeen malformed cases per profile and
+every getter allocation/read failure. Create, replace, remove and shared-block
+copy faults cover 1,129 allocation failures, 567 read failures and 4,320 storage
+cuts: 4,276 recover a complete allowed state, while 44 torn primary superblocks
+reject explicitly. These fault tests do not yet cover every staged final-release
+boundary. Sanitized and freestanding builds pass.
+
+Independent checks accept 96 functional states and twelve zero-reference private
+orphan states. All 2,736 commands return zero, including 108 journal-only replays
+and 108 subsequent nonrepairing checks. Exact values, attribute names, namespace,
+reference counts and reclamation agree; source/export hashes remain unchanged.
+The orphan tests compare complete home blocks against ordinary successful removal.
+They synthesize the private orphan representation; actual Linux-authored recovery
+is still pending. The final focused compatibility check passes eight tests, and
+the separate private-orphan check passes six. Earlier fault evidence is retained
+separately in `artifacts/checks/ea-inode-hardening-summary.json`; final evidence is
+in `artifacts/checks/ea-inode-{compatibility,orphans}-summary.json`.
+
+The expanded 432-test CI regression, actual Linux roundtrips and independent
+replay of interrupted large-value updates remain pending. Large values on short
+symlinks reject before writes: their logical block charge conflicts with Linux's
+fast-symlink interpretation. Small short-symlink attributes remain supported.
+Legacy Lustre value-inode encodings and new-value deduplication are unsupported;
+existing shared modern values are preserved. This checkpoint does not close the
+remaining format-compatibility block.
 
 ## Transaction checksum v1
 
@@ -81,7 +119,8 @@ retains v1 and replays three transactions with one revoke in each case. Core and
 e2fsck agree on complete file bytes and inode metadata, with unchanged original
 images. Reports are in `artifacts/checks/journal-v1-local-summary.json` and
 `artifacts/checks/journal-v1-linux-summary.json`. The combined 400-test full
-regression, including the async support below, is pending.
+regression, including the async support below, passes all six jobs. Its reviewed
+evidence is in `artifacts/checks/journal-compat-ci-36367767361/summary.json`.
 
 ## Asynchronous journal compatibility
 
@@ -115,7 +154,7 @@ six journal-only replays pass; repeated portable recovery changes nothing and
 guest logs contain no warnings. Linux retains async commit, with checksum v3 on
 modern profiles and v1 on the two legacy profiles. Evidence is in
 `artifacts/checks/journal-async-linux-summary.json`. The combined 400-test full
-regression is pending. External journals and fast commit remain open work.
+regression passes all six jobs. External journals and fast commit remain open work.
 
 ## Persistent inode flags
 
@@ -344,7 +383,14 @@ acceptance used frozen binaries before the final non-KEEP_SIZE checkpoint fix;
 that fix has separate focused evidence. Final review also covers imported leaves
 whose advertised capacity is below their physical room, expanding that bound
 before a reservation-driven split. Root/external controls verify reuse of that
-room without new allocation. The full 412-test regression remains pending.
+room without new allocation. The full 412-test regression passes all six jobs,
+with all registered tests represented once and no failures or skipped tests.
+Its independent reservation checks again pass all 30 states and 594 commands.
+Evidence is in `artifacts/checks/reservation-ci-36370249935/summary.json`.
+The historical checker invokes `e2fsck -fy -E journal_only`; `-f` also requests full
+checking, so these are not evidence of journal-only execution. All reservation
+oracle statuses are zero, without repairs. New EA_INODE checks below omit `-f`
+and reject any unexpected filesystem-check passes during journal replay.
 Imported full leaves without a spare or reclaimable boundary can still
 require new metadata, and the fallback's sustained zeroing cost is unaccepted.
 

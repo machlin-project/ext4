@@ -26,6 +26,7 @@ struct ext4_allocation {
 	uint64_t maximum_block;
 	/* Size published by this transaction, when it extends the inode. */
 	uint64_t mapping_size;
+	uint32_t free_inodes;
 	uint32_t group_index;
 	uint32_t next_bit;
 	uint32_t allocated;
@@ -33,6 +34,10 @@ struct ext4_allocation {
 	/* Dropping a shared external attribute reference changes i_blocks without
 	 * freeing that physical block. Keep it separate from allocation counters. */
 	uint64_t detached_shared_blocks;
+	/* Value-inode references charge rounded logical value blocks to each
+	 * owning inode independently of physical allocation or sharing. */
+	uint64_t attribute_blocks_added;
+	uint64_t attribute_blocks_removed;
 };
 
 enum ext4_result ext4_allocation_init(struct ext4_allocation *allocation, struct ext4_fs *fs,
@@ -50,6 +55,8 @@ enum ext4_result ext4_allocation_super(struct ext4_allocation *allocation);
  * primary free-inode count only after commit. */
 enum ext4_result ext4_allocate_inode(struct ext4_allocation *allocation, uint16_t mode,
     struct ext4_inode_disk **disk, struct ext4_inode *inode);
+enum ext4_result ext4_free_inode(struct ext4_allocation *allocation, struct ext4_inode_disk *disk,
+    const struct ext4_inode *inode);
 enum ext4_result ext4_inode_account(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint64_t size);
 

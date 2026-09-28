@@ -139,8 +139,14 @@ ext4_inode_decode_record(
 	}
 	xattr_block =
 	    ext4_le32(&disk->xattr_block_lo) | ((uint64_t)ext4_le16(&disk->xattr_block_hi) << 32);
+	if ((decoded.flags & EXT4_INODE_EA_INODE) &&
+	    (decoded.mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR) {
+		/* Validate before following any attributes to bound private-inode reads. */
+		error = EXT4_CORRUPT;
+		goto out;
+	}
 	decoded.fast_symlink = (decoded.mode & EXT4_MODE_TYPE) == EXT4_MODE_SYMLINK &&
-	    decoded.blocks_512 == (xattr_block == 0 ? 0 : fs->info.block_size / 512U);
+	    decoded.blocks_512 == (xattr_block == 0 ? 0 : fs->info.block_size / EXT4_SECTOR_SIZE);
 	if (decoded.mode == 0 || (!orphan && decoded.links == 0)) {
 		error = EXT4_NOT_FOUND;
 	} else if (decoded.flags & EXT4_INODE_INLINE_DATA) {
@@ -256,6 +262,7 @@ ext4_inode_checksum_set(struct ext4_fs *fs, uint32_t number, struct ext4_inode_d
 enum ext4_result
 ext4_get_inode(struct ext4_fs *fs, uint32_t number, struct ext4_inode *inode)
 {
+	struct ext4_inode decoded = { 0 };
 	void *buffer;
 	uint64_t offset;
 	enum ext4_result error;
@@ -276,9 +283,16 @@ ext4_get_inode(struct ext4_fs *fs, uint32_t number, struct ext4_inode *inode)
 	}
 	error = ext4_device_read(fs, offset, buffer, fs->inode_size);
 	if (error == EXT4_OK) {
-		error = ext4_inode_decode(fs, number, buffer, inode);
+		error = ext4_inode_decode(fs, number, buffer, &decoded);
+		if (error == EXT4_OK && (decoded.flags & EXT4_INODE_EA_INODE)) {
+			/* These objects are reachable only through validated xattr entries. */
+			error = EXT4_CORRUPT;
+		}
 	}
 	fs->environment.release(fs->environment.context, buffer, fs->inode_size);
+	if (error == EXT4_OK) {
+		*inode = decoded;
+	}
 	return error;
 }
 

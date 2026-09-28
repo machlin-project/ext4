@@ -124,6 +124,7 @@ ext4_xattr_region(struct ext4_xattr_snapshot *snapshot, const uint8_t *buffer, s
 	size_t value_size;
 	uint32_t hash = 0;
 	bool hashable = true;
+	enum ext4_result error;
 
 	for (;;) {
 		if (offset > size || sizeof(struct ext4_le32) > size - offset) {
@@ -138,8 +139,7 @@ ext4_xattr_region(struct ext4_xattr_snapshot *snapshot, const uint8_t *buffer, s
 		}
 		entry = (const struct ext4_xattr_entry_disk *)(buffer + offset);
 		length = ext4_xattr_aligned(sizeof(*entry) + entry->name_length);
-		if (length > size - offset || ext4_le32(&entry->value_inode) != 0 ||
-		    (entry->name_index == 0 && entry->name_length == 0)) {
+		if (length > size - offset || (entry->name_index == 0 && entry->name_length == 0)) {
 			return EXT4_CORRUPT;
 		}
 		for (name_index = 0; name_index < entry->name_length; name_index++) {
@@ -151,6 +151,7 @@ ext4_xattr_region(struct ext4_xattr_snapshot *snapshot, const uint8_t *buffer, s
 		    ext4_xattr_compare(snapshot->records[snapshot->count - 1].entry, entry) >= 0) {
 			return EXT4_CORRUPT;
 		}
+		ext4_zero(&snapshot->records[snapshot->count], sizeof(*record));
 		snapshot->records[snapshot->count].external = sorted;
 		snapshot->records[snapshot->count++].entry = entry;
 		offset += length;
@@ -160,15 +161,25 @@ ext4_xattr_region(struct ext4_xattr_snapshot *snapshot, const uint8_t *buffer, s
 		entry = record->entry;
 		value_offset = (size_t)ext4_le16(&entry->value_offset) + value_base;
 		value_size = ext4_le32(&entry->value_size);
-		if (value_offset > size || value_size > size - value_offset ||
+		record->value_inode = ext4_le32(&entry->value_inode);
+		record->inode_storage = record->value_inode != 0;
+		if (record->inode_storage) {
+			error = ext4_xattr_inode_read(snapshot->fs, snapshot->number,
+			    snapshot->generation, entry, NULL, &record->value_hash);
+			if (error != EXT4_OK) {
+				return error;
+			}
+		} else if (value_offset > size || value_size > size - value_offset ||
 		    ext4_xattr_aligned(value_size) > size - value_offset ||
 		    (value_size != 0 &&
 			(value_offset < offset ||
 			    (value_offset & (EXT4_XATTR_ALIGNMENT - 1)) != 0))) {
 			return EXT4_CORRUPT;
 		}
-		record->value = buffer + value_offset;
-		if (ext4_le32(&entry->hash) != 0 &&
+		if (!record->inode_storage) {
+			record->value = buffer + value_offset;
+		}
+		if (!record->inode_storage && ext4_le32(&entry->hash) != 0 &&
 		    ext4_le32(&entry->hash) != ext4_xattr_hash(entry, record->value, false) &&
 		    ext4_le32(&entry->hash) != ext4_xattr_hash(entry, record->value, true)) {
 			return EXT4_CORRUPT;
@@ -282,6 +293,8 @@ ext4_xattr_parse_inode(struct ext4_xattr_snapshot *snapshot, const struct ext4_i
 	bool body_present = false;
 	enum ext4_result error;
 
+	snapshot->number = inode->number;
+	snapshot->generation = inode->generation;
 	block =
 	    ext4_le32(&disk->xattr_block_lo) | ((uint64_t)ext4_le16(&disk->xattr_block_hi) << 32);
 	snapshot->external_block = block;
@@ -334,6 +347,10 @@ ext4_xattr_parse_inode(struct ext4_xattr_snapshot *snapshot, const struct ext4_i
 		if (error != EXT4_OK) {
 			return error;
 		}
+	}
+	if (inode->blocks_512 < (ext4_xattr_value_blocks(snapshot) + (block != 0)) *
+		(fs->info.block_size / EXT4_SECTOR_SIZE)) {
+		return EXT4_CORRUPT;
 	}
 	return ext4_xattr_sort(snapshot);
 }
@@ -427,7 +444,16 @@ ext4_get_xattr(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint8_t
 				break;
 			}
 			if (buffer != NULL) {
-				ext4_copy(buffer, snapshot.records[index].value, value_size);
+				if (snapshot.records[index].inode_storage) {
+					error = ext4_xattr_inode_read(fs, number, generation, entry,
+					    buffer, &snapshot.records[index].value_hash);
+					if (error != EXT4_OK) {
+						break;
+					}
+				} else {
+					ext4_copy(
+					    buffer, snapshot.records[index].value, value_size);
+				}
 			}
 			*size = value_size;
 			error = EXT4_OK;

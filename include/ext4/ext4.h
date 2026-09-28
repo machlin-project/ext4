@@ -227,6 +227,8 @@ enum ext4_xattr_policy { EXT4_XATTR_SET, EXT4_XATTR_CREATE, EXT4_XATTR_REPLACE, 
  * enforce existence against the original inode; REMOVE requires an existing key
  * and NULL/zero value. Caller-owned names and values remain valid through return.
  * ACL/security values are opaque; the owner supplies their admitted transition.
+ * EA_INODE filesystems admit values up to 64 KiB, subject to transaction capacity.
+ * Other formats require values to fit the inode body and external attribute block.
  * On an inode with attributes, permission/owner changes, writes and truncates
  * require this selection. An empty batch explicitly admits preserving the keys. */
 struct ext4_xattr_change {
