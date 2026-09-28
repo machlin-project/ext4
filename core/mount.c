@@ -10,8 +10,13 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	uint32_t revision;
 	uint32_t incompat;
 	uint32_t checksum;
+	uint32_t bitmap_capacity;
+	uint32_t expected_first_block;
+	uint64_t device_blocks;
+	uint64_t group_blocks;
 	uint64_t group_count;
 	uint64_t inode_groups;
+	uint16_t minimum_descriptor_size;
 	uint16_t state;
 	unsigned int word;
 
@@ -105,26 +110,56 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	fs->descriptor_size = (incompat & EXT4_FEATURE_INCOMPAT_64BIT)
 	    ? ext4_le16(&super->descriptor_size)
 	    : EXT4_GROUP_BASE_SIZE;
-	if (fs->info.blocks <= fs->first_data_block ||
-	    fs->info.blocks > fs->environment.size_bytes / fs->info.block_size ||
-	    fs->first_data_block !=
-		(fs->info.block_size == EXT4_MIN_BLOCK_SIZE && fs->cluster_blocks == 1 ? 1U : 0U) ||
-	    fs->clusters_per_group == 0 ||
-	    fs->clusters_per_group > fs->info.block_size * EXT4_BITS_PER_BYTE ||
-	    (uint64_t)fs->clusters_per_group * fs->cluster_blocks != fs->blocks_per_group ||
-	    fs->info.free_blocks % fs->cluster_blocks != 0 || fs->inodes_per_group == 0 ||
-	    fs->inodes_per_group > fs->info.block_size * 8U || fs->info.inodes < EXT4_ROOT_INODE ||
-	    fs->info.free_inodes > fs->info.inodes || fs->info.free_blocks > fs->info.blocks ||
-	    fs->inode_size < EXT4_INODE_BASE_SIZE || fs->inode_size > fs->info.block_size ||
-	    (fs->inode_size & (fs->inode_size - 1)) != 0 ||
-	    fs->descriptor_size < EXT4_GROUP_BASE_SIZE ||
-	    fs->descriptor_size > EXT4_GROUP_MAX_SIZE ||
-	    fs->descriptor_size > fs->info.block_size ||
-	    (fs->descriptor_size & (fs->descriptor_size - 1)) != 0 ||
-	    ((incompat & EXT4_FEATURE_INCOMPAT_64BIT) &&
-		fs->descriptor_size < EXT4_GROUP_64_SIZE)) {
+
+	/* Device bounds and cluster geometry. */
+	device_blocks = fs->environment.size_bytes / fs->info.block_size;
+	bitmap_capacity = fs->info.block_size * EXT4_BITS_PER_BYTE;
+	expected_first_block =
+	    (fs->info.block_size == EXT4_MIN_BLOCK_SIZE && fs->cluster_blocks == 1) ? 1U : 0U;
+	if (fs->first_data_block != expected_first_block) {
 		return EXT4_CORRUPT;
 	}
+	if (fs->info.blocks <= fs->first_data_block || fs->info.blocks > device_blocks) {
+		return EXT4_CORRUPT;
+	}
+	if (fs->clusters_per_group == 0 || fs->clusters_per_group > bitmap_capacity) {
+		return EXT4_CORRUPT;
+	}
+	group_blocks = (uint64_t)fs->clusters_per_group * fs->cluster_blocks;
+	if (group_blocks != fs->blocks_per_group) {
+		return EXT4_CORRUPT;
+	}
+	if (fs->info.free_blocks > fs->info.blocks ||
+	    fs->info.free_blocks % fs->cluster_blocks != 0) {
+		return EXT4_CORRUPT;
+	}
+
+	/* Inode counts and on-disk record size. */
+	if (fs->inodes_per_group == 0 || fs->inodes_per_group > bitmap_capacity) {
+		return EXT4_CORRUPT;
+	}
+	if (fs->info.inodes < EXT4_ROOT_INODE || fs->info.free_inodes > fs->info.inodes) {
+		return EXT4_CORRUPT;
+	}
+	if (fs->inode_size < EXT4_INODE_BASE_SIZE || fs->inode_size > fs->info.block_size) {
+		return EXT4_CORRUPT;
+	}
+	if ((fs->inode_size & (fs->inode_size - 1)) != 0) {
+		return EXT4_CORRUPT;
+	}
+
+	/* Group descriptors must accommodate the enabled address width. */
+	minimum_descriptor_size =
+	    (incompat & EXT4_FEATURE_INCOMPAT_64BIT) ? EXT4_GROUP_64_SIZE : EXT4_GROUP_BASE_SIZE;
+	if (fs->descriptor_size < minimum_descriptor_size ||
+	    fs->descriptor_size > EXT4_GROUP_MAX_SIZE ||
+	    fs->descriptor_size > fs->info.block_size) {
+		return EXT4_CORRUPT;
+	}
+	if ((fs->descriptor_size & (fs->descriptor_size - 1)) != 0) {
+		return EXT4_CORRUPT;
+	}
+
 	group_count = (fs->info.blocks - fs->first_data_block - 1) / fs->blocks_per_group + 1;
 	inode_groups = ((uint64_t)fs->info.inodes - 1) / fs->inodes_per_group + 1;
 	if (group_count > UINT32_MAX || group_count != inode_groups ||
