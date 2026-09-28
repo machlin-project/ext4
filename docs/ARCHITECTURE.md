@@ -216,10 +216,25 @@ Capacity exhaustion returns unsupported, including an old generation whose
 complete attribute reclamation cannot fit the private conversion transaction.
 Accepted fast-commit combinations include BIGALLOC, casefolded directories, which
 replay indexes with casefolded hashes, and quota volumes, whose usage the conversion
-accounts. A 64 KiB fast-commit fixture cannot yet be serialized. Linux's own
-fast-commit replay cannot be interrupted under test, and e2fsprogs' fails on these
-fixtures, so interrupted foreign replay is accepted for ordinary JBD2 logs only. The
-writer continues to emit ordinary full transactions; it does not emit fast commits.
+accounts, and 64 KiB blocks. Replay derives both free counters from the group
+descriptors first, since Linux writes the superblock's counters lazily. The writer
+continues to emit ordinary full transactions; it does not emit fast commits.
+
+Interrupted foreign replay is accepted for ordinary JBD2 logs. e2fsprogs' fast-commit
+replay cannot grow a directory, and Linux's is deliberately not atomic: it clears an
+inode's bitmap bits before replaying its record, writes the logged record over the
+on-disk map root and syncs it before recomputing its checksum, and skips bitmap and
+inode checksum validation while replaying, expecting a later mount to replay the
+log again over whatever an interruption left. A power cut during Linux's replay
+can therefore leave a bitmap whose checksum in the group descriptor is stale, or an
+inode record with an invalid checksum. The core refuses such a volume as corrupt
+before any fast-commit write and leaves the log pending, so Linux can still replay
+it and fsck can repair it. Recovering it in the core would require an explicit
+replay-authority rule: for inodes the log names and groups its ranges and inodes
+touch, the committed log would replace checksum validation of those records and
+bitmaps, and replay would rebuild their bits, checksums and counts from the replayed
+maps. That accepts unverifiable bitmaps in those groups, as Linux does, so it is a
+product decision rather than a compatibility fix.
 
 External journals require an explicitly supplied `ext4_journal_environment` and
 exclusive ownership of two distinct resources. The filesystem environment still

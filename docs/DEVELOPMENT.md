@@ -605,6 +605,24 @@ are counted as clean, refused by the core, or left for fsck, since neither the c
 nor Linux's mount-time recovery audits every bitmap. The state after all of e2fsck's
 writes must recover and pass strict fsck.
 
+Interrupted replay by Linux itself is recorded below the filesystem.
+`tests/run_linux_log_writes.py` runs from the lab with `--lab`, `--prepared`, a
+two-disk `--runner`, `--modloop`, `--recover`, one `--image` per pending volume and
+a fresh `--output`. The guest probe `tests/linux_log_writes.c` loads `dm-mod` and
+`dm-log-writes` from the pinned Alpine module image, places a log-writes target over
+the pending volume with its log on the second disk, mounts ext4 through it, which
+replays the journal and its fast commits, unmounts and removes the target. The
+runner parses the log, requires the complete log to reproduce Linux's result
+exactly and that result to pass strict fsck and read like the core's recovery of
+the untouched volume. Power-cut states follow the device's volatile cache: a flush
+makes every earlier completed write durable, a FUA write is durable when it
+completes, and any subset of the other completed writes may have reached the
+medium. While the log is still pending, the core must recover each state, strict
+fsck must pass and independently read names, data and attributes must equal the
+untouched recovery; blocks are not compared, as Linux places replayed names by its
+own algorithm. States after Linux emptied the log are counted as for e2fsck. The
+report lists every failing state and keeps the first eight failing images.
+
 ## Orphan recovery tests
 
 `ext4-orphan-test IMAGE...` constructs linked-truncate intents in RAM copies and

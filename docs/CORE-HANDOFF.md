@@ -153,12 +153,10 @@ uses `PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin` and `CC=/usr/bin/cla
 Continue the actual remaining queue in `docs/ACCEPTANCE.md`:
 
 - Fast-commit BIGALLOC, casefold, quota and 64 KiB profiles, ownership-corruption
-  rejection and interrupted e2fsck replay of ordinary logs are accepted. Interrupted
-  fast-commit replay by a foreign implementation remains: e2fsck's fast-commit
-  replay cannot grow a directory, so record Linux's own replay below the
-  filesystem, for example with `dm-log-writes` from the reference module set, and
-  check each state with strict fsck and independent namespace and data reads,
-  since Linux places names differently from the core. Preserve unresolved
+  rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay
+  of two native captures are accepted (`tests/run_linux_log_writes.py`). Torn states
+  of Linux's range-heavy fast-commit replay fail closed; recovering them needs the
+  replay-authority decision in `docs/ARCHITECTURE.md`. Preserve unresolved
   native-reference failures; a repaired diagnostic image is not an accepted oracle.
 - Growth, fragmentation, allocator and recovery cost, memory and write
   amplification are measured ("Scale measurement evidence"). Remaining: whole-tree

@@ -42,7 +42,7 @@ counted as portable-core implementation.
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
 | Format compatibility | Wider geometry and format coverage; quota limit enforcement and key-based encryption await product decisions; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
-| Journal compatibility | Interrupted fast-commit replay by a foreign implementation: e2fsck's fast-commit replay cannot add a name to a full directory block, so the oracle must record Linux's own replay | Open; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection and interrupted e2fsck replay of ordinary logs are accepted (see "Fast-commit combinations and interrupted foreign replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
+| Journal compatibility | Recovering volumes whose Linux fast-commit replay was interrupted needs a replay-authority decision; until then the core refuses torn bitmap and inode checksums and leaves the log pending | Open; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay of two native captures are accepted, and the torn states of two range-heavy captures fail closed (see "Fast-commit combinations and interrupted foreign replay evidence" and "Interrupted Linux replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
 | Scale and sustained operation | Indexed operations still classify the whole index tree; first-fit allocation fragments large writes in fragmented free space; decisions on larger live transactions, ordered data writes and group commit | Open; measured workloads show bounded peak memory, about 2.1 times device writes for journaled data and five barriers per operation, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence" and "Sustained operation and fuzzing evidence") |
 
 MMP, fs-verity reading with protected writable metadata, encrypted volumes without
@@ -264,6 +264,50 @@ profile its replay stops with "No free space in the directory" in
 adding names, and it leaves the volume marked with errors. The remaining oracle is
 Linux's own replay, recorded below the filesystem, for example with the
 `dm-log-writes` target that the reference kernel's module set provides.
+
+## Interrupted Linux replay evidence
+
+Quota accounting had removed the fast-commit replay's free-block baseline together
+with the post-commit publications it replaced. Linux leaves the superblock's free
+counters behind its group descriptors, so from that change the core refused Linux's
+own pending fast-commit volumes as corrupt; bisection identified the change. With
+the baseline restored, all nine Linux-captured pending volumes whose recovered
+digests were recorded at their acceptance recover to exactly those images again.
+Every fixture profile now also carries a pending image with stale superblock
+counters, and four profiles recover it in the fast-commit suite; the complete
+631-test regression passes (`artifacts/checks/scale-regression-12/`).
+
+The reference kernel replays pending volumes directly through the same probe. Of the
+native captures, those without the orphan file replay in Linux; every capture made
+with the orphan file and a held open-unlinked file fails in Linux itself with
+"JBD2: journal recovery failed" and EUCLEAN, while the core recovers all of them.
+Linux replays 15 of the independently authored fixture profiles. The casefold
+profiles need Unicode support that the reference kernel lacks, the quota profile
+needs quota modules that the probe does not load, and Linux's replay of the two
+indirect-map logs did not finish within 120 seconds; their partially written disks
+are kept. Linux replays a logged directory creation with one link and without the
+parent's link, so strict fsck reports link and directory counts in its result for
+these fixtures. The fixtures now log each regular file's ranges before its final
+record, as Linux does; with that order Linux's replay also derives their block
+counts. Linux never logs a directory or reserved inode outside a creation, and
+replaying a logged root inode fails in Linux.
+
+A dm-log-writes target recorded Linux's complete replay of four native captures;
+each complete log reproduces Linux's result exactly, and that result reads like the
+core's recovery of the untouched volume. For a capture whose commit Linux had
+converted to an ordinary transaction (31 writes, 7 flushes, 6 FUA writes), all 122
+states while the log was pending recover under the core to the untouched result
+and strict fsck passes; so do all 68 states of a small fast-commit capture (48
+writes, 13 flushes, 4 FUA writes). Every state after Linux emptied the log is clean.
+The two captures with 53 range-heavy fast commits (363 writes, 74 flushes and 4 FUA
+writes each) recover in 9 of 285 pending states with 4 KiB blocks and 111 of 301
+with 1 KiB blocks. In the others Linux's non-atomic replay has left a bitmap whose
+checksum in the group descriptor is stale or an inode record with an invalid
+checksum, and the core refuses the volume before any fast-commit write. The log
+stays pending: Linux replays such a volume again, and in one sampled case its own
+result still needs fsck for the group's unused and free inode counts. Recovering
+these states in the core needs the replay-authority decision described in
+`docs/ARCHITECTURE.md`. Evidence is in the lab's `artifacts/ext4-log-writes/`.
 
 ## Fast-commit development evidence
 
