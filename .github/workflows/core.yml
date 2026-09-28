@@ -147,6 +147,11 @@ jobs:
         run: |
           python3 tests/generate_large_volume_fixtures.py --tools-root vendor/e2fsprogs/build \
             --output artifacts/large-volume-fixtures 2>&1 | tee artifacts/checks/large-volume-fixtures.log
+      - name: Generate filesystem and external-journal device pairs
+        if: matrix.suite == 'core'
+        run: |
+          python3 tests/generate_external_journal_fixtures.py --tools-root vendor/e2fsprogs/build \
+            --output artifacts/external-journal-fixtures 2>&1 | tee artifacts/checks/external-journal-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
@@ -176,6 +181,7 @@ jobs:
               -Dcluster_space_fixtures="$PWD/artifacts/cluster-space-fixtures" \
               -Dlarge_file_fixtures="$PWD/artifacts/large-file-fixtures" \
               -Dlarge_volume_fixtures="$PWD/artifacts/large-volume-fixtures" \
+              -Dexternal_journal_fixtures="$PWD/artifacts/external-journal-fixtures" \
               -Dxattr_space_fixtures="$PWD/artifacts/xattr-space-fixtures" \
               -Dxattr_enable_fixtures="$PWD/artifacts/xattr-enable-fixtures")
           fi
@@ -299,6 +305,15 @@ jobs:
             --test .build/ext4-large-volume-test --recover .build/ext4-recover \
             --output artifacts/large-volume-independent 2>&1 | tee artifacts/checks/large-volume-independent.log
           find artifacts/large-volume-fixtures artifacts/large-volume-independent \
+            -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Independently verify paired-device journal transactions and recovery
+        if: matrix.suite == 'core'
+        run: |
+          python3 tests/check_external_journals.py --tools-root vendor/e2fsprogs/build \
+            --fixtures artifacts/external-journal-fixtures \
+            --test .build/ext4-external-journal-test --recover .build/ext4-recover \
+            --output artifacts/external-journal-independent 2>&1 | tee artifacts/checks/external-journal-independent.log
+          find artifacts/external-journal-fixtures artifacts/external-journal-independent \
             -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Independently verify persistent inode flags and recovery
         if: matrix.suite == 'core'

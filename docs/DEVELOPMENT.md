@@ -358,6 +358,41 @@ verification. Image identities use the explicitly recorded sparse digest format;
 executable identities remain ordinary SHA-256. Preserve executable permissions
 when freezing the two binaries for a run.
 
+## External journal device pairs
+
+The core's `ext4_mount_writable_with_journal` and `ext4_recover_with_journal` APIs
+take the explicitly owned second resource. NULL selects the internal journal.
+Generate and check independent pairs with:
+
+```sh
+python3 tests/generate_external_journal_fixtures.py --tools-root /path/to/e2fsprogs/build \
+  --output artifacts/external-journal-fixtures
+meson setup --reconfigure .build
+meson configure .build -Dexternal_journal_fixtures=artifacts/external-journal-fixtures
+meson compile -C .build ext4-external-journal-test ext4-recover
+meson test -C .build --no-rebuild 'external-journal-*'
+python3 tests/check_external_journals.py --tools-root /path/to/e2fsprogs/build \
+  --fixtures artifacts/external-journal-fixtures --test .build/ext4-external-journal-test \
+  --recover .build/ext4-recover --output artifacts/external-journal-independent
+```
+
+The fixture author links only with e2fsprogs. Its registered filesystem UUID differs
+from the journal device UUID. Each journal reserves at least 1,024 usable ring
+blocks after its control prefix, as required for a Linux mount. The checker
+compares complete transactions and both recovery outcomes, verifies paired-device
+idempotence, and uses strict `e2fsck -fn
+-j JOURNAL IMAGE`. Its oracle invokes `e2fsck -y -E journal_only` without `-f` and
+rejects any filesystem repair pass. Force checking overrides journal-only mode.
+
+From the explicit lab directory, `run_linux_external_journal.py` accepts `--lab`,
+`--fixtures`, `--independent`, `--test`, `--recover`, `--module-report`, `--runner`
+and a new `--output`, all as absolute paths. Use a signed runner built from the
+lab's `scripts/linux-vm.swift`, with both disposable images attached. Four native
+boots per 1/4 KiB profile check Linux mutations and open-unlinked recovery, direct
+Linux replay of a committed core log, and Linux verification of returned core
+mutations. The 64 KiB profile remains portable-only on the pinned 4 KiB-page kernel.
+The harness freezes executable copies and checks original input identities.
+
 ## Extended-attribute mutation tests
 
 The same ten fixtures drive `xattr-mutation-*` and `xattr-packing-*`. The first

@@ -65,3 +65,6 @@ option('large_file_fixtures', type: 'string', value: '',
 
 option('large_volume_fixtures', type: 'string', value: '',
   description: 'Path to sparse multi-terabyte images with high-address metadata and data')
+
+option('external_journal_fixtures', type: 'string', value: '',
+  description: 'Path to independent filesystem/external-journal device pairs')

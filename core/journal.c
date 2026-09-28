@@ -50,6 +50,10 @@ ext4_journal_physical(const struct ext4_journal *journal, uint32_t block, uint64
 	const struct ext4_journal_run *run;
 	uint32_t index;
 
+	if (journal->external.read != NULL) {
+		*physical = block;
+		return EXT4_OK;
+	}
 	for (index = 0; index < journal->run_count; index++) {
 		run = &journal->runs[index];
 		if (block >= run->logical && block - run->logical < run->length) {
@@ -94,7 +98,13 @@ ext4_journal_read(struct ext4_journal *journal, uint32_t block, void *buffer)
 	}
 	error = ext4_journal_physical(journal, block, &physical);
 	if (error == EXT4_OK) {
-		error = ext4_block_read(journal->fs, physical, buffer);
+		if (journal->external.read != NULL) {
+			error = journal->external.read(journal->external.context,
+			    physical * journal->fs->info.block_size, buffer,
+			    journal->fs->info.block_size);
+		} else {
+			error = ext4_block_read(journal->fs, physical, buffer);
+		}
 	}
 	return error;
 }
@@ -133,12 +143,24 @@ ext4_journal_write_log(struct ext4_journal *journal, uint32_t block, const void 
 	uint64_t physical;
 	enum ext4_result error;
 
-	if (block >= journal->blocks) {
+	if (journal->aborted) {
+		return EXT4_IO;
+	}
+	if (block >= journal->blocks || block < journal->super_block) {
 		return EXT4_CORRUPT;
 	}
 	error = ext4_journal_physical(journal, block, &physical);
 	if (error == EXT4_OK) {
-		error = ext4_journal_write(journal, physical, buffer);
+		if (journal->external.read != NULL) {
+			error = journal->external.write(journal->external.context,
+			    physical * journal->fs->info.block_size, buffer,
+			    journal->fs->info.block_size);
+			if (error != EXT4_OK) {
+				journal->aborted = true;
+			}
+		} else {
+			error = ext4_journal_write(journal, physical, buffer);
+		}
 	}
 	return error;
 }
@@ -152,6 +174,24 @@ ext4_journal_flush(struct ext4_journal *journal)
 		return EXT4_IO;
 	}
 	error = journal->writer.flush(journal->writer.context);
+	if (error != EXT4_OK) {
+		journal->aborted = true;
+	}
+	return error;
+}
+
+static enum ext4_result
+ext4_journal_flush_log(struct ext4_journal *journal)
+{
+	enum ext4_result error;
+
+	if (journal->external.read == NULL) {
+		return ext4_journal_flush(journal);
+	}
+	if (journal->aborted) {
+		return EXT4_IO;
+	}
+	error = journal->external.flush(journal->external.context);
 	if (error != EXT4_OK) {
 		journal->aborted = true;
 	}
@@ -358,11 +398,15 @@ ext4_journal_validate(struct ext4_journal *journal)
 	journal->start = ext4_be32(&super->start);
 	journal->sequence = ext4_be32(&super->sequence);
 	if (ext4_be32(&super->block_size) != journal->fs->info.block_size ||
-	    length > journal->blocks || length < 4 || journal->first == 0 ||
+	    length > journal->blocks || length < 4 || journal->first <= journal->super_block ||
 	    journal->first >= length - 2 ||
 	    (journal->start != 0 &&
 		(journal->start < journal->first || journal->start >= length)) ||
-	    !ext4_equal(super->uuid, journal->fs->info.uuid, EXT4_UUID_SIZE)) {
+	    !ext4_equal(super->uuid,
+		journal->external.read != NULL ? journal->fs->journal_uuid : journal->fs->info.uuid,
+		EXT4_UUID_SIZE) ||
+	    (journal->external.read != NULL &&
+		!ext4_equal(super->user_ids, journal->fs->info.uuid, EXT4_UUID_SIZE))) {
 		return EXT4_CORRUPT;
 	}
 	if (ext4_be32(&super->error) != 0) {
@@ -373,14 +417,83 @@ ext4_journal_validate(struct ext4_journal *journal)
 	return EXT4_OK;
 }
 
+static enum ext4_result
+ext4_journal_external_geometry(struct ext4_journal *journal)
+{
+	struct ext4_super_disk *super = (struct ext4_super_disk *)journal->work;
+	uint32_t incompat;
+	uint32_t ro_compat;
+	uint32_t logarithm;
+	uint64_t blocks;
+	enum ext4_result error;
+
+	if (journal->external.size_bytes < EXT4_SUPER_OFFSET + sizeof(*super)) {
+		return EXT4_CORRUPT;
+	}
+	error = journal->external.read(
+	    journal->external.context, EXT4_SUPER_OFFSET, super, sizeof(*super));
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (ext4_le16(&super->magic) != EXT4_SUPER_MAGIC ||
+	    !ext4_equal(super->uuid, journal->fs->journal_uuid, EXT4_UUID_SIZE)) {
+		return EXT4_CORRUPT;
+	}
+	incompat = ext4_le32(&super->feature_incompat);
+	ro_compat = ext4_le32(&super->feature_ro_compat);
+	if (!(incompat & EXT4_FEATURE_INCOMPAT_JOURNAL_DEV) ||
+	    (incompat &
+		~(EXT4_FEATURE_INCOMPAT_JOURNAL_DEV | EXT4_FEATURE_INCOMPAT_64BIT |
+		    EXT4_FEATURE_INCOMPAT_CSUM_SEED)) ||
+	    (ro_compat & ~EXT4_FEATURE_RO_METADATA_CSUM) ||
+	    ext4_le32(&super->revision) > EXT4_DYNAMIC_REV) {
+		return EXT4_UNSUPPORTED;
+	}
+	if (ro_compat & EXT4_FEATURE_RO_METADATA_CSUM) {
+		if (super->checksum_type != EXT4_CHECKSUM_CRC32C) {
+			return EXT4_UNSUPPORTED;
+		}
+		if (ext4_crc32c(UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum)) !=
+		    ext4_le32(&super->checksum)) {
+			return EXT4_CORRUPT;
+		}
+	}
+	logarithm = ext4_le32(&super->log_block_size);
+	if (logarithm > 6 || EXT4_MIN_BLOCK_SIZE << logarithm != journal->fs->info.block_size) {
+		return EXT4_CORRUPT;
+	}
+	blocks = ext4_le32(&super->blocks_count_lo);
+	if (incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
+		blocks |= (uint64_t)ext4_le32(&super->blocks_count_hi) << 32;
+	}
+	if (blocks < 4 || blocks > journal->external.size_bytes / journal->fs->info.block_size) {
+		return EXT4_CORRUPT;
+	}
+	if (blocks > EXT4_JOURNAL_MAX_BLOCKS) {
+		return EXT4_UNSUPPORTED;
+	}
+	journal->blocks = (uint32_t)blocks;
+	/* External ring addresses are device-relative. Only the journal
+	 * superblock moves past the ext4 device superblock; tags keep home addresses. */
+	journal->super_block = EXT4_SUPER_OFFSET / journal->fs->info.block_size + 1U;
+	return EXT4_OK;
+}
+
 enum ext4_result
 ext4_journal_load(
     struct ext4_fs *fs, const struct ext4_write_environment *writer, struct ext4_journal **result)
 {
-	struct ext4_super_disk super;
+	return ext4_journal_load_external(fs, writer, NULL, result);
+}
+
+enum ext4_result
+ext4_journal_load_external(struct ext4_fs *fs, const struct ext4_write_environment *writer,
+    const struct ext4_journal_environment *external, struct ext4_journal **result)
+{
 	struct ext4_inode inode;
 	struct ext4_journal *journal;
-	uint64_t blocks;
+	const uint8_t zero_uuid[EXT4_UUID_SIZE] = { 0 };
+	uint64_t blocks = 0;
 	enum ext4_result error;
 
 	if (result == NULL) {
@@ -388,7 +501,9 @@ ext4_journal_load(
 	}
 	*result = NULL;
 	if (fs == NULL || writer == NULL || writer->write == NULL || writer->flush == NULL ||
-	    fs->writer_attached) {
+	    fs->writer_attached ||
+	    (external != NULL &&
+		(external->read == NULL || external->write == NULL || external->flush == NULL))) {
 		return EXT4_INVALID_ARGUMENT;
 	}
 	if (!(fs->info.feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL) ||
@@ -396,24 +511,26 @@ ext4_journal_load(
 	    (fs->info.feature_ro_compat & ~EXT4_WRITABLE_RO_COMPAT)) {
 		return EXT4_UNSUPPORTED;
 	}
-	error = ext4_device_read(fs, EXT4_SUPER_OFFSET, &super, sizeof(super));
-	if (error != EXT4_OK) {
-		return error;
-	}
-	if (ext4_le32(&super.journal_device) != 0 || ext4_le32(&super.journal_inode) == 0) {
-		return EXT4_UNSUPPORTED;
-	}
-	error = ext4_get_inode(fs, ext4_le32(&super.journal_inode), &inode);
-	if (error != EXT4_OK) {
-		return error;
-	}
-	blocks = inode.size / fs->info.block_size;
-	if ((inode.mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR || inode.links != 1 ||
-	    inode.size % fs->info.block_size != 0 || blocks < 4 || blocks > UINT32_MAX) {
+	if (external == NULL) {
+		if (fs->journal_device != 0 || fs->journal_inode == 0) {
+			return EXT4_UNSUPPORTED;
+		}
+		error = ext4_get_inode(fs, fs->journal_inode, &inode);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		blocks = inode.size / fs->info.block_size;
+		if ((inode.mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR || inode.links != 1 ||
+		    inode.size % fs->info.block_size != 0 || blocks < 4 || blocks > UINT32_MAX) {
+			return EXT4_CORRUPT;
+		}
+		if (blocks > EXT4_JOURNAL_MAX_BLOCKS) {
+			return EXT4_UNSUPPORTED;
+		}
+	} else if (fs->journal_inode != 0) {
+		return EXT4_INVALID_ARGUMENT;
+	} else if (ext4_equal(fs->journal_uuid, zero_uuid, sizeof(zero_uuid))) {
 		return EXT4_CORRUPT;
-	}
-	if (blocks > EXT4_JOURNAL_MAX_BLOCKS) {
-		return EXT4_UNSUPPORTED;
 	}
 	journal = fs->environment.allocate(fs->environment.context, sizeof(*journal));
 	if (journal == NULL) {
@@ -423,21 +540,27 @@ ext4_journal_load(
 	journal->fs = fs;
 	journal->writer = *writer;
 	journal->blocks = (uint32_t)blocks;
+	if (external != NULL) {
+		journal->external = *external;
+	}
 	fs->writer_attached = true;
-	journal->runs = fs->environment.allocate(
-	    fs->environment.context, EXT4_JOURNAL_MAX_RUNS * sizeof(*journal->runs));
+	if (external == NULL) {
+		journal->runs = fs->environment.allocate(
+		    fs->environment.context, EXT4_JOURNAL_MAX_RUNS * sizeof(*journal->runs));
+	}
 	journal->super_buffer =
 	    fs->environment.allocate(fs->environment.context, fs->info.block_size);
 	journal->work = fs->environment.allocate(fs->environment.context, fs->info.block_size);
 	journal->data = fs->environment.allocate(fs->environment.context, fs->info.block_size);
-	if (journal->runs == NULL || journal->super_buffer == NULL || journal->work == NULL ||
-	    journal->data == NULL) {
+	if ((external == NULL && journal->runs == NULL) || journal->super_buffer == NULL ||
+	    journal->work == NULL || journal->data == NULL) {
 		error = EXT4_NO_MEMORY;
 		goto fail;
 	}
-	error = ext4_journal_map(journal, &inode);
+	error = external == NULL ? ext4_journal_map(journal, &inode)
+				 : ext4_journal_external_geometry(journal);
 	if (error == EXT4_OK) {
-		error = ext4_journal_read(journal, 0, journal->super_buffer);
+		error = ext4_journal_read(journal, journal->super_block, journal->super_buffer);
 	}
 	if (error == EXT4_OK) {
 		error = ext4_journal_validate(journal);
@@ -455,6 +578,13 @@ enum ext4_result
 ext4_journal_open(
     struct ext4_fs *fs, const struct ext4_write_environment *writer, struct ext4_journal **result)
 {
+	return ext4_journal_open_external(fs, writer, NULL, result);
+}
+
+enum ext4_result
+ext4_journal_open_external(struct ext4_fs *fs, const struct ext4_write_environment *writer,
+    const struct ext4_journal_environment *external, struct ext4_journal **result)
+{
 	struct ext4_journal *journal;
 	enum ext4_result error;
 
@@ -462,7 +592,7 @@ ext4_journal_open(
 		return EXT4_INVALID_ARGUMENT;
 	}
 	*result = NULL;
-	error = ext4_journal_load(fs, writer, &journal);
+	error = ext4_journal_load_external(fs, writer, external, &journal);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -533,9 +663,9 @@ ext4_journal_publish(struct ext4_journal *journal, uint32_t start, uint32_t sequ
 		checksum = ext4_crc32c(UINT32_MAX, super, sizeof(*super));
 		ext4_encode_be32(&super->checksum, checksum);
 	}
-	error = ext4_journal_write_log(journal, 0, super);
+	error = ext4_journal_write_log(journal, journal->super_block, super);
 	if (error == EXT4_OK) {
-		error = ext4_journal_flush(journal);
+		error = ext4_journal_flush_log(journal);
 	}
 	if (error == EXT4_OK) {
 		journal->start = start;
@@ -985,8 +1115,11 @@ ext4_transaction_commit(struct ext4_transaction *transaction)
 	}
 	/* This barrier includes ordered file data submitted by the owner, all log
 	 * records, and the recovery pointer. No commit can precede their persistence. */
-	if (error == EXT4_OK) {
+	if (error == EXT4_OK && journal->external.read != NULL) {
 		error = ext4_journal_flush(journal);
+	}
+	if (error == EXT4_OK) {
+		error = ext4_journal_flush_log(journal);
 	}
 	if (error == EXT4_OK) {
 		ext4_zero(journal->work, journal->fs->info.block_size);
@@ -1002,7 +1135,7 @@ ext4_transaction_commit(struct ext4_transaction *transaction)
 		error = ext4_journal_write_log(journal, commit_block, journal->work);
 	}
 	if (error == EXT4_OK) {
-		error = ext4_journal_flush(journal);
+		error = ext4_journal_flush_log(journal);
 	}
 	/* The durable commit owns recovery before the first home block changes. */
 	for (index = 0; error == EXT4_OK && index < transaction->count; index++) {

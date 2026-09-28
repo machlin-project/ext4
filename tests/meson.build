@@ -6,10 +6,22 @@ foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'namespace_fixtures', 'xattr_fixtures', 'ea_inode_fixtures', 'inline_fixtures', 'inline_space_fixtures', 'cluster_fixtures', 'cluster_space_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
   'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures', 'geometry_fixtures',
   'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
-  'directory_index_64k_fixture', 'large_file_fixtures', 'large_volume_fixtures']
+  'directory_index_64k_fixture', 'large_file_fixtures', 'large_volume_fixtures', 'external_journal_fixtures']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
 endforeach
+
+if paths['external_journal_fixtures'] != ''
+  foreach profile : ['legacy-1k', 'v1-4k', 'v2-1k', 'v3-4k', 'v3-64k']
+    stem = paths['external_journal_fixtures'] / profile
+    test('external-journal-' + profile, programs['external-journal'],
+      args: [stem + '.img', stem + '.journal'], timeout: 300, suite: 'core')
+    if profile in ['v2-1k', 'v3-4k']
+      test('external-journal-faults-' + profile, programs['external-journal'],
+        args: ['--faults', stem + '.img', stem + '.journal'], timeout: 600, suite: 'core')
+    endif
+  endforeach
+endif
 
 if paths['cluster_fixtures'] != ''
   test('cluster-private-values', programs['cluster'],

@@ -93,7 +93,7 @@ and cached metadata paths must not access the same ranges incoherently. XNU file
 data uses the native UBC owner; the core must not introduce another file-page
 cache. Journal buffers and metadata transaction snapshots have explicit ownership.
 
-The internal journal owner admits one transaction at a time under the filesystem
+The journal owner admits one transaction at a time under the filesystem
 owner's serialization. Each transaction has bounded credits and private block
 snapshots; affected metadata locks remain held through checkpoint completion.
 The ordered sequence is: persist the recovery marker, publish the log start,
@@ -111,13 +111,36 @@ The journal inode's data and mapping blocks are frozen before writes, and replay
 cannot target those blocks or ranges outside the filesystem. Checksummed primary-superblock
 damage remains an offline-repair condition. Recovery does not invent geometry.
 
-The current journal engine handles internal v2-superblock journals with legacy,
-v1, v2 or v3 checksums/tags (legacy means no journal checksums), 64-bit addresses and
-revokes. It bounds the journal to 1,048,576 data blocks, 1,024 data runs and 8,192
+The current journal engine handles internal and single-user external v2-superblock
+journals with legacy, v1, v2 or v3 checksums/tags (legacy means no journal checksums),
+64-bit addresses and revokes. It bounds the journal to 1,048,576 data blocks,
+1,024 data runs and 8,192
 mapping blocks, a writing transaction to 256 snapshots, and recovery to 1,048,576
 records. Exceeding a bound
-is an explicit unsupported result. External journals and fast commit remain
-separate work.
+is an explicit unsupported result. Fast commit remains separate work.
+
+External journals require an explicitly supplied `ext4_journal_environment` and
+exclusive ownership of two distinct resources. The filesystem environment still
+owns all allocations. The device superblock, journal superblock and single user
+UUID must agree with the filesystem association; stale host device numbers do not
+select a resource. Geometry, feature and checksum checks precede writes. Shared
+multi-user journals are rejected. Read-only mounts do not access an external
+journal; explicit clean recovery with a supplied journal verifies its association
+without writing either resource.
+
+External log addresses are device-relative, while descriptor tags retain home
+filesystem addresses. The journal superblock follows the device superblock; ring
+addresses are not shifted by that prefix. External addresses never enter the home
+filesystem's protected-range index. Recovery cannot change the recorded journal
+association through a logged filesystem superblock.
+
+The recovery marker is flushed on the home device before publishing the external
+log start. Ordered home data and log records are both flushed before the commit;
+the log's commit is flushed before checkpointing home blocks. Home checkpoint
+completion precedes flushing the empty log, which precedes clearing the recovery
+marker. Errors on either device poison the writer. Internal journals retain their
+existing barrier count. The POSIX recovery utility accepts `--journal` for a second
+exclusively locked offline image; native adapters still require integration.
 Checksum v1 uses seeded, non-reflected IEEE CRC32 over each complete descriptor
 and its escaped on-log data, in logical order. Revoke and commit blocks are excluded.
 The writer computes that order from its private snapshots while retaining its

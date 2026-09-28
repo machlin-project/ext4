@@ -57,6 +57,8 @@ struct ext4_fs {
 	uint32_t directory_hash_flags;
 	uint32_t first_inode;
 	uint32_t journal_inode;
+	uint32_t journal_device;
+	uint8_t journal_uuid[EXT4_UUID_SIZE];
 	uint32_t last_orphan;
 	uint32_t orphan_file_inode;
 	uint32_t first_meta_group;

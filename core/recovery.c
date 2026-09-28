@@ -144,7 +144,7 @@ ext4_recovery_descriptor(struct ext4_recovery_scan *scan)
 			if (EXT4_UUID_SIZE > end - offset) {
 				return EXT4_CORRUPT;
 			}
-			/* Internal journal ownership comes from its checked superblock.
+			/* Journal ownership comes from its checked superblock/user list.
 			 * These historical tag UUID bytes may be zero (e.g. debugfs). */
 			offset += EXT4_UUID_SIZE;
 		} else if (first) {
@@ -497,6 +497,9 @@ ext4_recovery_super(struct ext4_journal *journal)
 	}
 	if (((fs->info.feature_incompat ^ ext4_le32(&super->feature_incompat)) &
 		EXT4_FEATURE_INCOMPAT_META_BG) ||
+	    fs->journal_inode != ext4_le32(&super->journal_inode) ||
+	    fs->journal_device != ext4_le32(&super->journal_device) ||
+	    !ext4_equal(fs->journal_uuid, super->journal_uuid, sizeof(fs->journal_uuid)) ||
 	    ((fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_META_BG) &&
 		fs->first_meta_group != ext4_le32(&super->first_meta_group)) ||
 	    ((fs->info.feature_compat & EXT4_FEATURE_COMPAT_SPARSE_SUPER2) &&
@@ -591,6 +594,8 @@ ext4_recovery_validate_home(struct ext4_journal *journal)
 	    fresh->inodes_per_group != fs->inodes_per_group ||
 	    fresh->checksum_seed != fs->checksum_seed || fresh->first_inode != fs->first_inode ||
 	    fresh->journal_inode != fs->journal_inode ||
+	    fresh->journal_device != fs->journal_device ||
+	    !ext4_equal(fresh->journal_uuid, fs->journal_uuid, sizeof(fs->journal_uuid)) ||
 	    fresh->orphan_file_inode != fs->orphan_file_inode ||
 	    fresh->reserved_gdt_blocks != fs->reserved_gdt_blocks ||
 	    fresh->first_meta_group != fs->first_meta_group ||
@@ -671,6 +676,14 @@ enum ext4_result
 ext4_recover(const struct ext4_environment *environment,
     const struct ext4_write_environment *writer, struct ext4_recovery_report *report)
 {
+	return ext4_recover_with_journal(environment, writer, NULL, report);
+}
+
+enum ext4_result
+ext4_recover_with_journal(const struct ext4_environment *environment,
+    const struct ext4_write_environment *writer, const struct ext4_journal_environment *external,
+    struct ext4_recovery_report *report)
+{
 	struct ext4_recovery_report completed;
 	struct ext4_recovery_scan scan;
 	struct ext4_recovery_scan replay;
@@ -693,12 +706,20 @@ ext4_recover(const struct ext4_environment *environment,
 	if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER) &&
 	    !(fs->info.feature_ro_compat & EXT4_FEATURE_RO_ORPHAN_PRESENT) &&
 	    fs->last_orphan == 0) {
+		if (external != NULL) {
+			error = ext4_journal_open_external(fs, writer, external, &journal);
+			if (error != EXT4_OK) {
+				ext4_unmount(fs);
+				return error;
+			}
+			ext4_journal_close(journal);
+		}
 		ext4_unmount(fs);
 		error = ext4_mount(environment, &fs);
 		ext4_unmount(fs);
 		return error;
 	}
-	error = ext4_journal_load(fs, writer, &journal);
+	error = ext4_journal_load_external(fs, writer, external, &journal);
 	if (error != EXT4_OK) {
 		ext4_unmount(fs);
 		return error;

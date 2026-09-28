@@ -107,6 +107,21 @@ struct ext4_write_environment {
 	enum ext4_result (*flush)(void *context);
 };
 
+/* Optional external journal device, supplied explicitly by the resource owner.
+ * It follows the same exact-I/O, coherent-read and durability contracts above.
+ * The owner exclusively retains BOTH devices until unmount/recovery completes;
+ * they must not alias. Journal flushes persist this device independently of the
+ * filesystem writer. Allocation still belongs to the filesystem environment.
+ * The core verifies the on-disk UUID association; it never opens device names. */
+struct ext4_journal_environment {
+	void *context;
+	uint64_t size_bytes;
+	enum ext4_result (*read)(void *context, uint64_t offset, void *buffer, size_t length);
+	enum ext4_result (*write)(
+	    void *context, uint64_t offset, const void *buffer, size_t length);
+	enum ext4_result (*flush)(void *context);
+};
+
 struct ext4_recovery_report {
 	uint32_t transactions;
 	uint32_t replayed_blocks;
@@ -265,6 +280,11 @@ enum ext4_result ext4_mount(const struct ext4_environment *environment, struct e
  * Mount requires a clean resource and does not implicitly recover it. */
 enum ext4_result ext4_mount_writable(const struct ext4_environment *environment,
     const struct ext4_write_environment *writer, struct ext4_fs **result);
+/* NULL journal selects the internal journal. A supplied resource requires an
+ * external-journal filesystem with exactly one registered filesystem UUID. */
+enum ext4_result ext4_mount_writable_with_journal(const struct ext4_environment *environment,
+    const struct ext4_write_environment *writer, const struct ext4_journal_environment *journal,
+    struct ext4_fs **result);
 /* Mutations are synchronous durable transactions. sync also clears the recovery
  * marker. unmount only releases memory; call sync first for a clean shutdown.
  * An uncertain commit poisons the instance, including reads: unmount and recover. */
@@ -463,6 +483,9 @@ enum ext4_result ext4_rename_whiteout(struct ext4_fs *fs, const struct ext4_rena
  * On error the resource remains unmounted and must not be used for mutations. */
 enum ext4_result ext4_recover(const struct ext4_environment *environment,
     const struct ext4_write_environment *writer, struct ext4_recovery_report *report);
+enum ext4_result ext4_recover_with_journal(const struct ext4_environment *environment,
+    const struct ext4_write_environment *writer, const struct ext4_journal_environment *journal,
+    struct ext4_recovery_report *report);
 void ext4_unmount(struct ext4_fs *fs);
 void ext4_get_info(const struct ext4_fs *fs, struct ext4_info *info);
 enum ext4_result ext4_get_inode(struct ext4_fs *fs, uint32_t number, struct ext4_inode *inode);

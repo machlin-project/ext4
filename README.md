@@ -15,7 +15,8 @@ writes and allocation, bounded growth/truncate, and open-unlinked lifetime.
 Namespace operations include create/mkdir/symlink/mknod/link/unlink/rmdir/rename,
 rename exchange and whiteout, HTree mutation, automatic indexing, LARGEDIR and
 DIR_NLINK. Raw inode-body and external xattrs follow metadata, data and namespace
-transactions. Internal journal recovery handles legacy and modern orphan records.
+transactions. Internal and single-user external journal recovery handles legacy
+and modern orphan records.
 
 The completed 469-test CI regression passes all six suites, alongside independent
 image checks and Linux mutation/recovery roundtrips. The namespace job's timeout
@@ -89,6 +90,14 @@ The writer promotes an empty 32-bit journal to wide tags at its first transactio
 Three profiles pass 21 independent read/mutation/reclamation/recovery states and
 native Linux/core/Linux roundtrips, including direct Linux replay of the core's
 high-address journal. The expanded 469-test regression and independent checks pass.
+
+External journals now use an explicitly owned second device, with UUID association
+checks and separate durability barriers. Five format profiles pass 30 independent
+states. Fault tests cover 936 interrupted transactions and 396 interrupted recoveries
+with independently surviving device caches. Four native Linux profiles pass all
+16 boots, including recovery in both directions and open-unlinked cleanup. The
+expanded 476-test regression is pending; this support is not yet exposed by either
+native adapter.
 
 Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.
 Both native adapters remain read-only. The FSKit adapter builds for macOS 26.4,

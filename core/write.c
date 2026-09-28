@@ -13,6 +13,14 @@ enum ext4_result
 ext4_mount_writable(const struct ext4_environment *environment,
     const struct ext4_write_environment *writer, struct ext4_fs **result)
 {
+	return ext4_mount_writable_with_journal(environment, writer, NULL, result);
+}
+
+enum ext4_result
+ext4_mount_writable_with_journal(const struct ext4_environment *environment,
+    const struct ext4_write_environment *writer, const struct ext4_journal_environment *journal,
+    struct ext4_fs **result)
+{
 	struct ext4_fs *fs;
 	enum ext4_result error;
 
@@ -32,7 +40,7 @@ ext4_mount_writable(const struct ext4_environment *environment,
 	    fs->inodes_per_group % EXT4_BITS_PER_BYTE != 0) {
 		error = EXT4_CORRUPT;
 	} else {
-		error = ext4_journal_open(fs, writer, &fs->journal);
+		error = ext4_journal_open_external(fs, writer, journal, &fs->journal);
 	}
 	if (error == EXT4_OK) {
 		error = ext4_system_ranges_build(fs);

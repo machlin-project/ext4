@@ -107,6 +107,7 @@ struct ext4_journal_run {
 struct ext4_journal {
 	struct ext4_fs *fs;
 	struct ext4_write_environment writer;
+	struct ext4_journal_environment external;
 	struct ext4_journal_run *runs;
 	uint64_t *mapping_blocks;
 	uint8_t *super_buffer;
@@ -115,6 +116,7 @@ struct ext4_journal {
 	uint32_t run_count;
 	uint32_t mapping_count;
 	uint32_t blocks;
+	uint32_t super_block;
 	uint32_t first;
 	uint32_t sequence;
 	uint32_t start;
@@ -141,6 +143,9 @@ void ext4_encode_be32(struct ext4_be32 *output, uint32_t value);
  * close only frees memory. finish performs the clean-volume durability sequence. */
 enum ext4_result ext4_journal_open(
     struct ext4_fs *fs, const struct ext4_write_environment *writer, struct ext4_journal **result);
+enum ext4_result ext4_journal_open_external(struct ext4_fs *fs,
+    const struct ext4_write_environment *writer, const struct ext4_journal_environment *external,
+    struct ext4_journal **result);
 void ext4_journal_close(struct ext4_journal *journal);
 enum ext4_result ext4_journal_finish(struct ext4_journal *journal);
 enum ext4_result ext4_transaction_begin(
@@ -166,6 +171,9 @@ void ext4_transaction_cancel(struct ext4_transaction *transaction);
 /* Shared journal/recovery implementation, never exported to platform adapters. */
 enum ext4_result ext4_journal_load(
     struct ext4_fs *fs, const struct ext4_write_environment *writer, struct ext4_journal **result);
+enum ext4_result ext4_journal_load_external(struct ext4_fs *fs,
+    const struct ext4_write_environment *writer, const struct ext4_journal_environment *external,
+    struct ext4_journal **result);
 enum ext4_result ext4_journal_read(struct ext4_journal *journal, uint32_t block, void *buffer);
 enum ext4_result ext4_journal_write_home(
     struct ext4_journal *journal, uint64_t block, const void *buffer);

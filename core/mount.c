@@ -88,6 +88,8 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	fs->first_inode =
 	    revision == 0 ? EXT4_FIRST_NON_RESERVED_INODE : ext4_le32(&super->first_inode);
 	fs->journal_inode = ext4_le32(&super->journal_inode);
+	fs->journal_device = ext4_le32(&super->journal_device);
+	ext4_copy(fs->journal_uuid, super->journal_uuid, sizeof(fs->journal_uuid));
 	fs->last_orphan = ext4_le32(&super->last_orphan);
 	fs->orphan_file_inode = (fs->info.feature_compat & EXT4_FEATURE_COMPAT_ORPHAN_FILE)
 	    ? ext4_le32(&super->orphan_file_inode)

@@ -53,6 +53,7 @@ foreach name, source : {
   'ea-inode': 'ea_inode', 'inline': 'inline', 'cluster': 'cluster',
   'directory-index': 'directory_index', 'directory-lookup': 'directory_lookup', 'index-write': 'index_write',
   'reader': 'reader', 'read-ranges': 'read_ranges', 'corruption': 'corruption', 'journal': 'journal',
+  'external-journal': 'external_journal',
   'write': 'write', 'write-partial': 'write_partial', 'write-growth': 'write_growth',
   'file-range': 'file_range', 'large-file': 'large_file', 'large-volume': 'large_volume', 'inode-flags': 'inode_flags',
   'namespace': 'namespace', 'removal': 'removal',

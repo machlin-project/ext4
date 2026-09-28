@@ -16,7 +16,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir/rename and bounded indexed mutation pass portable, independent and Linux checks; core holds retain open-unlinked or replaced objects; platform writes and broader capacity/concurrency acceptance pending |
-| Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal journal engine, legacy lists and modern orphan files pass portable faults, independent recovery and Linux reuse; advanced journal formats and platform write integration remain pending |
+| Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal and single-user external journals, legacy lists and modern orphan files pass portable faults, independent recovery and Linux reuse; external-journal full regression, fast commit and platform write integration remain pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list, atomic attribute batches and mutation lifetime integration pass portable tests and targeted independent checks; bidirectional Linux attribute/ACL/security checks and direct replay of core attribute transactions pass eight profiles; the linked-truncate e2fsck defect remains explicit below; ACL enforcement and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
@@ -42,7 +42,7 @@ counted as portable-core implementation.
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
 | Format compatibility | Wider geometry and format coverage; retain the Linux delayed-allocation maximum-offset exception | Open; BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
-| Journal compatibility | Fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; v1 and async compatibility pass focused faults, independent replay, eight Linux roundtrips and their combined full regression |
+| Journal compatibility | Fast commit; finish external-journal regression after interrupted replay and cross-implementation recovery | Open; external journals pass focused faults, 30 independent states and four native Linux roundtrips; their expanded regression is pending. V1 and async compatibility retain their accepted evidence |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
 MMP, quota/project accounting, casefold, encryption and verity also remain
@@ -59,6 +59,52 @@ create/link/symlink/mkdir/mknod/unlink/rmdir/rename and atomic whiteout; raw xat
 internal-journal recovery and both orphan representations; HTree creation, lookup
 and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
 the remaining blocks have equal size or that the full core is accepted.
+
+## External journals
+
+Writable mount and explicit recovery accept a separately owned journal resource.
+Device and JBD2 superblocks, the filesystem's journal UUID and the single registered
+filesystem UUID must agree. The core validates geometry and checksums before any
+write, keeps external ring addresses separate from home block addresses, and
+orders persistence across both devices. Shared multi-user journals remain
+unsupported. Native adapters do not yet acquire or expose the second resource.
+
+Five independently generated profiles cover legacy, checksum v1, v2 and v3 journals
+with 1, 4 and 64 KiB blocks. Seven sanitized cases pass: five functional and
+association-validation cases plus two exhaustive fault cases. They reject 80
+malformed associations without writes, enumerate 32 mount read failures and 47
+mount allocation failures, and preserve the external device's control prefix.
+The fault cases interrupt every transaction write/flush with independent none,
+all and alternating survival on each device, including partial writes: 936 cuts.
+Another 396 cuts interrupt recovery itself, then retry it; 63 recovery read failures
+and 21 allocation failures also retry successfully. The 18 transaction cuts and 12
+recovery cuts that tear a checksummed primary superblock fail closed with an
+actually invalid checksum. They are repair conditions, not successful recovery.
+
+Independent verification accepts six states per profile: original and completed
+filesystems, both core replay outcomes and both e2fsprogs replay outcomes. All 165
+commands and 30 strict nonrepairing fsck checks pass. File data, permissions,
+timestamps, external attribute bytes and allocation accounting agree, and clean
+recovery changes neither device. The independent oracle performs journal-only
+replay without forcing a full check; no filesystem repair pass is permitted.
+
+Four profiles also pass four actual Linux boots each using two virtio devices and
+`data=ordered,journal_path=/dev/vdb`, with ordinary delayed allocation. Linux mutates
+the core-created file and leaves a committed journal plus an open-unlinked inode.
+Core and native Linux recovery agree on exact contents, attributes, metadata and
+allocation totals; all four orphans are reclaimed. Linux also replays the core's
+pending journal directly and verifies a later core mutation of the Linux-authored
+file. All 154 commands, 24 nonrepairing fsck checks and 16 identified guest boots
+pass. The 64 KiB profile has portable/independent evidence only because the pinned
+Linux reference uses 4 KiB pages. The first native attempt exposed a fixture
+minimum-size error: Linux requires 1,024 usable ring blocks in addition to the
+device control prefix. Correcting the fixture required no core change.
+
+Evidence is in `artifacts/checks/external-journal-focused-ring/`,
+`artifacts/external-journal-independent-ring/` and the lab's
+`artifacts/ext4-journal/external-journal-native-retry2/`. The main review is
+`artifacts/checks/external-journal-accepted.json`. The expanded 476-test full
+regression is pending.
 
 ## Large physical addresses and volume geometry
 
@@ -463,7 +509,8 @@ six journal-only replays pass; repeated portable recovery changes nothing and
 guest logs contain no warnings. Linux retains async commit, with checksum v3 on
 modern profiles and v1 on the two legacy profiles. Evidence is in
 `artifacts/checks/journal-async-linux-summary.json`. The combined 400-test full
-regression passes all six jobs. External journals and fast commit remain open work.
+regression passes all six jobs. External journals have subsequent acceptance above;
+fast commit remains open work.
 
 ## Persistent inode flags
 
@@ -1194,8 +1241,8 @@ remain separate from this successful run.
 This establishes the bounded journal engine, not general read/write filesystem
 operations. Namespace and held-inode evidence are recorded separately below;
 writable UBC/FSKit coherence and durable platform device barriers still need
-implementation and acceptance. External journals and fast commits remain
-unsupported; checksum v1 and async formats have their own subsequent acceptance
+implementation and acceptance. Fast commit remains unsupported; external journals,
+checksum v1 and async formats have their own subsequent acceptance
 batches above. Configured resource bounds are explicit in
 [ARCHITECTURE.md](ARCHITECTURE.md). Arbitrary media corruption and physical-device
 power-loss protection are not established by the modeled crash tests.
