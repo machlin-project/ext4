@@ -910,6 +910,12 @@ jobs:
             2>&1 | tee artifacts/checks/directory-growth-independent.log
           find "$exports" artifacts/directory-growth-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Remove fixture-host symlinks before artifact discovery
+        if: always()
+        run: |
+          if [[ -d artifacts ]]; then
+            find artifacts -type l -delete
+          fi
       - name: Preserve test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

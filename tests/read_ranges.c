@@ -411,6 +411,7 @@ main(void)
 				model_read, model_allocate, model_release };
 			model.fs.info.block_size = bs;
 			model.fs.info.blocks = MODEL_BLOCKS;
+			model.fs.cluster_blocks = 1;
 			model.fs.metadata_checksum = checksum != 0;
 			inode.mode = EXT4_MODE_REGULAR | 0644;
 			inode.number = EXT4_ROOT_INODE;

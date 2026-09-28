@@ -121,6 +121,13 @@ no VM boot occurred until that harness fix. No core fix was needed for native
 acceptance. The expanded full regression remains pending. This does not establish
 adapter support.
 
+The first expanded regression ran all 454 cases: 452 passed and two hand-built
+filesystem models failed because they omitted the new cluster geometry fields.
+Both model initializers are corrected and the two targeted tests pass locally.
+The same run exposed artifact discovery following an overlong host symlink;
+the upload step now removes fixture-host links after testing. The failed run
+does not establish regression acceptance; the corrected full run remains pending.
+
 ## Inode-resident file and directory data
 
 INLINE_DATA is implemented for regular files and directories. Reads and mutations

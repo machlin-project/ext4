@@ -169,6 +169,8 @@ group_checksums(void)
 	fs.info.groups = UINT32_MAX;
 	fs.info.block_size = 4096;
 	fs.blocks_per_group = 32768;
+	fs.cluster_blocks = 1;
+	fs.clusters_per_group = fs.blocks_per_group;
 	fs.inodes_per_group = 8192;
 	fs.inode_size = 256;
 	for (index = 0; index < sizeof(fs.info.uuid); index++) {
