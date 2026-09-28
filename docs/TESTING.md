@@ -77,6 +77,7 @@ contract, not physical power-loss protection on a particular disk.
 | Transaction ownership | One active writer/transaction, duplicate buffer identity, credit exhaustion, cancellation, empty commit, protected journal/control ranges |
 | Journal layouts | Legacy without checksums, checksum v1/v2/v3, 32/64-bit tags, escape records, multiple descriptor blocks, ring wrap and sequence wrap |
 | Transaction checksum v1 | Descriptor/data/commit corruption before replay, type/size validation, all-zero legacy transition, incompatible checksum combinations, independent committed prefix and later rewrite, native Linux revoke records |
+| Async commit | V1/v2/v3 and 32/64-bit tags; interrupted tail versus later-commit corruption, valid preceding transactions, sequence and timestamp bounds; independent committed/discarded replay and native Linux revokes |
 | Revoke advertisement | Committed revokes before the feature bit is durable; 32/64-bit targets, checksum variations, later reuse across sequence wrap, and malformed-record rejection before writes |
 | Persistence | Every write/flush interruption, three pending-write survival patterns, partial writes, durable commit before home writes, all-old or all-new metadata after recovery |
 | Recovery faults | Interrupted replay and retry, allocation/read failures in each distinct ownership phase, no leaks, no writes on already clean media |
@@ -537,8 +538,9 @@ create/link/unlink/rename, orphan cleanup, open-but-unlinked files, truncate ver
 mmap/pageout, failed writeback, metadata locking and forced unmount. Exercise
 large physical addresses and fragmented journals as real images, not only flag
 variations. ACL/xattr/security and LXNU operation-policy tests must include native
-controls and mixed-ABI races. Journal v1 checksums, asynchronous/fast commits and
-external journals require their own accepted recovery cases.
+controls and mixed-ABI races. Checksum v1 and async commits have focused,
+independent and Linux recovery cases; their combined full regression is pending.
+Fast commits and external journals still require implementation and acceptance.
 
 Keep CPU sanitizers, freestanding stack checks, unsigned FSKit builds, kext builds,
 stock FSKit mounts, custom-kernel execution and LXNU acceptance as distinct rows.

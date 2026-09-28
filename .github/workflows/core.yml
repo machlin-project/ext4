@@ -379,6 +379,26 @@ jobs:
             artifacts/journal-v1-independent artifacts/journal-v1-writers artifacts/journal-v1-writer-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
+      - name: Independently verify asynchronous journal commits
+        if: matrix.suite == 'core'
+        run: |
+          mkdir artifacts/journal-async-writers
+          for profile in 1k 4k; do
+            .build/ext4-journal-test --async --export-only "artifacts/fixtures/ext4-$profile.img" \
+              artifacts/journal-async-writers
+            .build/ext4-journal-test --checksum-v1 --async --export-only "artifacts/fixtures/ext4-$profile.img" \
+              artifacts/journal-async-writers
+          done
+          python3 tests/check_journal_recovery.py --writers artifacts/journal-async-writers \
+            --recover .build/ext4-recover --e2fsck "$(command -v e2fsck)" \
+            --output artifacts/journal-async-independent 2>&1 | tee artifacts/checks/journal-async-independent.log
+          python3 tests/check_journal_recovery.py --discard-commit --writers artifacts/journal-async-writers \
+            --recover .build/ext4-recover --e2fsck "$(command -v e2fsck)" \
+            --output artifacts/journal-async-discard-independent \
+            2>&1 | tee artifacts/checks/journal-async-discard-independent.log
+          find artifacts/journal-async-writers artifacts/journal-async-independent \
+            artifacts/journal-async-discard-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Independently verify allocation and unwritten conversion
         if: matrix.suite == 'core'
         run: |

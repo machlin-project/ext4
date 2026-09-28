@@ -135,6 +135,14 @@ the `ext4-no-checksum.img` source: Linux otherwise upgrades journal checksums al
 with `metadata_csum`. The Linux harness selects `journal_checksum` for v1 exports,
 requires an independently decoded revoke, and compares both reverse replayers.
 
+Add `--async` after `--checksum-v1`, or use it alone for v2/v3 profiles, to exercise
+async-format journals with the same ordered writer. The independent checker adds
+`--discard-commit --tools-root /path/to/e2fsprogs/build` to corrupt only the commit
+checksum on a private copy and require both replayers to discard that transaction.
+The Linux harness selects `data=writeback,journal_async_commit`, fsyncs the file
+before stopping and requires a decoded directory-block revoke. This mount mode
+matters because Linux deliberately omits revokes in `data=journal` mode.
+
 Generate and check independent logs using the same prepared e2fsprogs build:
 
 The modern orphan-file journal-only oracle requires e2fsprogs 1.47.2 or newer.

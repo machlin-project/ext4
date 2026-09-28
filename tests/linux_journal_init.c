@@ -366,6 +366,7 @@ main(void)
 	int fd;
 	int result;
 	int checksum_v1;
+	int async_commit;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	require(uname(&identity) == 0, "uname");
@@ -406,12 +407,19 @@ main(void)
 	    clock_gettime(CLOCK_REALTIME_COARSE, &recovery_start) == 0, "read recovery start time");
 #endif
 	checksum_v1 = access("/journal-checksum-v1", F_OK) == 0;
+	async_commit = access("/journal-async-commit", F_OK) == 0;
 	if (checksum_v1) {
 		require(
 		    (decode_le32(&super.feature_ro_compat) & EXT4_FEATURE_RO_METADATA_CSUM) == 0,
 		    "verify native checksum v1 filesystem profile");
 		mount_options = "data=ordered,journal_checksum";
 	}
+	if (async_commit) {
+		/* Linux omits revoke records in data=journal mode. Use writeback
+		 * here and fsync the changed file before stopping the guest. */
+		mount_options = "data=writeback,journal_async_commit";
+	}
+	printf("LINUX_EXT4_MOUNT_OPTIONS=%s\n", mount_options);
 	require(mount("/dev/vda", "/mnt", "ext4", MS_NOATIME | MS_NOSUID | MS_NODEV,
 		    mount_options) == 0,
 	    "Linux ext4 mount and recovery");
@@ -478,7 +486,7 @@ main(void)
 	free(buffer);
 #endif
 	/* Linux now authors a real inode transaction for the reverse roundtrip. */
-	if (checksum_v1) {
+	if (checksum_v1 || async_commit) {
 		exercise_journal_revoke();
 	}
 	require(fchown(fd, TEST_UID, TEST_GID) == 0, "Linux chown");

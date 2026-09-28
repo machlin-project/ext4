@@ -16,6 +16,7 @@ struct ext4_recovery_record {
 struct ext4_recovery_scan {
 	struct ext4_journal *journal;
 	struct ext4_recovery_record *records;
+	uint64_t last_commit_seconds;
 	uint32_t capacity;
 	uint32_t cursor;
 	uint32_t visited;
@@ -216,10 +217,68 @@ ext4_recovery_revoke(struct ext4_recovery_scan *scan)
 }
 
 static enum ext4_result
+ext4_recovery_async_tail(struct ext4_recovery_scan *scan)
+{
+	struct ext4_journal *journal = scan->journal;
+	const struct ext4_jbd_commit *commit = (const struct ext4_jbd_commit *)journal->data;
+	uint64_t seconds;
+
+	enum ext4_result error;
+
+	/* An async commit can reach storage before its own log. A later commit
+	 * proves that the earlier transaction completed, so its damage cannot
+	 * be dismissed as the interrupted tail. Scan without trusting torn tags. */
+	scan->cursor = scan->transaction_start;
+	scan->visited = scan->transaction_visited;
+	while (scan->visited < journal->blocks - journal->first) {
+		error = ext4_recovery_read(scan, journal->data);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		if (ext4_be32(&commit->header.magic) != EXT4_JBD_MAGIC ||
+		    ext4_be32(&commit->header.type) != EXT4_JBD_COMMIT ||
+		    ext4_be32(&commit->header.sequence) != scan->sequence + 1U) {
+			continue;
+		}
+		seconds = ((uint64_t)ext4_be32(&commit->seconds_hi) << 32) |
+		    ext4_be32(&commit->seconds_lo);
+		/* Only a preceding validated commit provides a timestamp boundary.
+		 * With no such boundary, ambiguous old records reject conservatively. */
+		if (seconds >= scan->last_commit_seconds) {
+			return EXT4_CORRUPT;
+		}
+	}
+	scan->discarded_tail = true;
+	return EXT4_OK;
+}
+
+static bool
+ext4_recovery_commit_v1_valid(
+    const struct ext4_journal *journal, const void *buffer, uint32_t transaction_checksum)
+{
+	const struct ext4_jbd_commit *commit = buffer;
+	uint32_t checksum = ext4_be32(&commit->checksum[0]);
+
+	if (!journal->checksum_v1) {
+		return true;
+	}
+	/* Enabling the compatible feature can leave an older checksum-free commit
+	 * in the same log. Linux admits only this exact all-zero legacy encoding. */
+	if (commit->checksum_type == 0 && commit->checksum_size == 0 && checksum == 0) {
+		return true;
+	}
+	return commit->checksum_type == EXT4_JBD_CRC32 &&
+	    commit->checksum_size == sizeof(commit->checksum[0]) &&
+	    checksum == transaction_checksum;
+}
+
+static enum ext4_result
 ext4_recovery_incomplete_tail(struct ext4_recovery_scan *scan)
 {
 	struct ext4_journal *journal = scan->journal;
 	const struct ext4_jbd_header *header = (const struct ext4_jbd_header *)journal->data;
+	uint32_t checksum = UINT32_MAX;
+	bool async = (journal->features & EXT4_JBD_ASYNC_COMMIT) != 0;
 	enum ext4_result error;
 
 	/* A torn descriptor cannot provide trusted tag lengths. Search the
@@ -236,35 +295,30 @@ ext4_recovery_incomplete_tail(struct ext4_recovery_scan *scan)
 		}
 		if (ext4_be32(&header->magic) == EXT4_JBD_MAGIC &&
 		    ext4_be32(&header->type) == EXT4_JBD_COMMIT &&
-		    ext4_be32(&header->sequence) == scan->sequence &&
-		    ext4_journal_checksum_valid(
-			journal, journal->data, offsetof(struct ext4_jbd_commit, checksum))) {
-			return EXT4_CORRUPT;
+		    ext4_be32(&header->sequence) == scan->sequence) {
+			if (ext4_journal_checksum_valid(journal, journal->data,
+				offsetof(struct ext4_jbd_commit, checksum)) &&
+			    (!async ||
+				ext4_recovery_commit_v1_valid(journal, journal->data, checksum))) {
+				return EXT4_CORRUPT;
+			}
+			if (async) {
+				return ext4_recovery_async_tail(scan);
+			}
 		}
+		if (async && journal->checksum_v1 &&
+		    !(ext4_be32(&header->magic) == EXT4_JBD_MAGIC &&
+			ext4_be32(&header->type) == EXT4_JBD_REVOKE &&
+			ext4_be32(&header->sequence) == scan->sequence)) {
+			checksum =
+			    ext4_crc32_be(checksum, journal->data, journal->fs->info.block_size);
+		}
+	}
+	if (async) {
+		return ext4_recovery_async_tail(scan);
 	}
 	scan->discarded_tail = true;
 	return EXT4_OK;
-}
-
-static enum ext4_result
-ext4_recovery_commit_v1(struct ext4_recovery_scan *scan)
-{
-	const struct ext4_jbd_commit *commit = (const struct ext4_jbd_commit *)scan->journal->work;
-	uint32_t checksum = ext4_be32(&commit->checksum[0]);
-
-	if (!scan->journal->checksum_v1) {
-		return EXT4_OK;
-	}
-	/* Enabling the compatible feature can leave an older checksum-free commit
-	 * in the same log. Linux admits only this exact all-zero legacy encoding. */
-	if (commit->checksum_type == 0 && commit->checksum_size == 0 && checksum == 0) {
-		return EXT4_OK;
-	}
-	return commit->checksum_type == EXT4_JBD_CRC32 &&
-		commit->checksum_size == sizeof(commit->checksum[0]) &&
-		checksum == scan->transaction_checksum
-	    ? EXT4_OK
-	    : EXT4_CORRUPT;
 }
 
 static enum ext4_result
@@ -272,6 +326,7 @@ ext4_recovery_scan_log(struct ext4_recovery_scan *scan, uint32_t transaction_lim
 {
 	struct ext4_journal *journal = scan->journal;
 	const struct ext4_jbd_header *header = (const struct ext4_jbd_header *)journal->work;
+	const struct ext4_jbd_commit *commit = (const struct ext4_jbd_commit *)journal->work;
 	uint32_t type;
 	bool in_transaction = false;
 	enum ext4_result error;
@@ -307,12 +362,17 @@ ext4_recovery_scan_log(struct ext4_recovery_scan *scan, uint32_t transaction_lim
 			in_transaction = true;
 			error = ext4_recovery_revoke(scan);
 		} else if (type == EXT4_JBD_COMMIT) {
-			error = ext4_recovery_commit_v1(scan);
-			if (error != EXT4_OK) {
-				return error;
+			if (!ext4_recovery_commit_v1_valid(
+				journal, journal->work, scan->transaction_checksum)) {
+				return journal->features & EXT4_JBD_ASYNC_COMMIT
+				    ? ext4_recovery_async_tail(scan)
+				    : EXT4_CORRUPT;
 			}
 			if (!ext4_journal_checksum_valid(journal, journal->work,
 				offsetof(struct ext4_jbd_commit, checksum))) {
+				if (journal->features & EXT4_JBD_ASYNC_COMMIT) {
+					return ext4_recovery_async_tail(scan);
+				}
 				scan->discarded_tail = true;
 				break;
 			}
@@ -322,6 +382,9 @@ ext4_recovery_scan_log(struct ext4_recovery_scan *scan, uint32_t transaction_lim
 			scan->transactions++;
 			scan->sequence++;
 			scan->committed_count = scan->count;
+			scan->last_commit_seconds =
+			    ((uint64_t)ext4_be32(&commit->seconds_hi) << 32) |
+			    ext4_be32(&commit->seconds_lo);
 			in_transaction = false;
 		} else {
 			return EXT4_CORRUPT;

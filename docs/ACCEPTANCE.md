@@ -42,7 +42,7 @@ counted as portable-core implementation.
 | --- | --- | --- |
 | Ordinary filesystem operations | Metadata-space guarantee for future KEEP_SIZE growth under allocator exhaustion | Open; persistent inode flags pass full regression, focused, independent and Linux checks; bounded preallocation/hole punching, special files, atomic whiteout, automatic index creation and DIR_NLINK pass focused, independent and Linux acceptance; full-disk writes within existing EOF also pass Linux roundtrips |
 | Format compatibility | Full META_BG/SPARSE_SUPER2 regression; EA_INODE and INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; distributed geometry passes focused faults, independent checks and eight Linux roundtrips |
-| Journal compatibility | Full checksum-v1 regression; asynchronous commit, fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; synchronous v1 passes focused faults, independent replay and two Linux roundtrips |
+| Journal compatibility | Combined checksum-v1/async regression; fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; v1 and async compatibility pass focused faults, independent replay and eight Linux roundtrips |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
 MMP, quota/project accounting, casefold, encryption and verity also remain
@@ -80,8 +80,42 @@ and inode attributes, and commits a directory-block revoke. Its returned journal
 retains v1 and replays three transactions with one revoke in each case. Core and
 e2fsck agree on complete file bytes and inode metadata, with unchanged original
 images. Reports are in `artifacts/checks/journal-v1-local-summary.json` and
-`artifacts/checks/journal-v1-linux-summary.json`. The expanded 396-test full
-regression is pending; async, external and fast-commit journals remain open.
+`artifacts/checks/journal-v1-linux-summary.json`. The combined 400-test full
+regression, including the async support below, is pending.
+
+## Asynchronous journal compatibility
+
+The core accepts async commit with checksum v1/v2/v3 and 32/64-bit tags. Its writer
+keeps the existing durability barriers. Recovery distinguishes an interrupted
+async tail from a damaged transaction followed by another commit, rejects the
+latter before writes, and retains any complete preceding transactions. The
+bounded search handles untrusted tags, sequence wrap and 64-bit commit timestamps;
+checksum-free async journals reject during admission.
+
+Ten focused tests pass, including four new async suites and existing journal,
+malformed-image and checksum controls. Twelve async profiles cover 120 tail
+boundary cases and 1,224 write/barrier cuts: 1,188 recover allowed states and 36
+torn primary superblocks reject explicitly. Revoke coverage includes 224
+applicable async cases and sixteen checksum-absent skips within those cases;
+there are no skipped Meson tests. Sanitized and freestanding builds pass.
+
+Fourteen committed writer profiles and fourteen copies with damaged commits pass
+portable and independent e2fsck replay, exact home-block comparisons, repeated
+recovery and nonrepairing consistency checks. All 182 commands succeed, including
+56 core recoveries, 56 nonrepairing checks and 28 journal-only oracle replays.
+The remaining commands independently locate commit records. Inputs remain
+unchanged. Evidence is in `artifacts/checks/journal-async-local-summary.json` and
+`artifacts/checks/journal-async-independent-summary.json`.
+
+Six Linux roundtrips pass: four modern-checksum inputs and two v1 inputs. The guest
+uses `data=writeback,journal_async_commit`, fsyncs each tested mutation and leaves
+three committed transactions with one directory-block revoke. Both replayers
+agree on every file byte and inode attribute. All twelve nonrepairing checks and
+six journal-only replays pass; repeated portable recovery changes nothing and
+guest logs contain no warnings. Linux retains async commit, with checksum v3 on
+modern profiles and v1 on the two legacy profiles. Evidence is in
+`artifacts/checks/journal-async-linux-summary.json`. The combined 400-test full
+regression is pending. External journals and fast commit remain open work.
 
 ## Persistent inode flags
 
@@ -760,8 +794,9 @@ remain separate from this successful run.
 This establishes the bounded journal engine, not general read/write filesystem
 operations. Namespace and held-inode evidence are recorded separately below;
 writable UBC/FSKit coherence and durable platform device barriers still need
-implementation and acceptance. External journals and async or fast commits remain
-unsupported; checksum v1 has its own subsequent acceptance batch. Configured resource bounds are explicit in
+implementation and acceptance. External journals and fast commits remain
+unsupported; checksum v1 and async formats have their own subsequent acceptance
+batches above. Configured resource bounds are explicit in
 [ARCHITECTURE.md](ARCHITECTURE.md). Arbitrary media corruption and physical-device
 power-loss protection are not established by the modeled crash tests.
 

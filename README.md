@@ -31,9 +31,10 @@ writes within existing EOF also pass. KEEP_SIZE growth reaching a reserved exten
 last block passes focused faults, independent checks, six Linux roundtrips and
 the full regression. META_BG and SPARSE_SUPER2 pass focused
 fault tests, independent mutation/recovery checks and eight Linux roundtrips;
-their expanded full regression is running. Synchronous JBD2 checksum v1 passes
-focused faults, independent replay in both directions and two Linux roundtrips;
-its expanded full regression is pending.
+their expanded full regression is running. JBD2 checksum v1 and async commit
+compatibility pass focused faults, independent replay in both directions and
+eight Linux roundtrips. Their combined full regression is pending; the writer
+retains its existing durability barriers on async-format journals.
 Growth ending earlier in a full extent still needs mapping space. Wider format and
 journal compatibility, sustained scale and performance remain open core work.
 

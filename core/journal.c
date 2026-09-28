@@ -336,6 +336,10 @@ ext4_journal_validate(struct ext4_journal *journal)
 	if (journal->checksum && journal->checksum_v1) {
 		return EXT4_UNSUPPORTED;
 	}
+	if ((journal->features & EXT4_JBD_ASYNC_COMMIT) && !journal->checksum &&
+	    !journal->checksum_v1) {
+		return EXT4_UNSUPPORTED;
+	}
 	if (journal->checksum) {
 		if (super->checksum_type != EXT4_JBD_CRC32C) {
 			return EXT4_UNSUPPORTED;

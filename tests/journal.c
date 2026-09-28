@@ -443,8 +443,10 @@ export_pending(struct device *device, const char *directory)
 	CHECK(file != NULL);
 	CHECK(
 	    fprintf(file,
-		"{\"block_size\":%u,\"features\":%u,\"checksum_v1\":%s,\"targets\":[%llu,%llu]}\n",
+		"{\"block_size\":%u,\"features\":%u,\"checksum_v1\":%s,\"async_commit\":%s,"
+		"\"targets\":[%llu,%llu]}\n",
 		device->block_size, device->profile, device->checksum_v1 ? "true" : "false",
+		device->profile & EXT4_JBD_ASYNC_COMMIT ? "true" : "false",
 		(unsigned long long)device->target[0], (unsigned long long)device->target[1]) > 0);
 	CHECK(fclose(file) == 0);
 }
@@ -629,6 +631,7 @@ test_checksum_v1(struct device *device)
 	struct ext4_jbd_commit *commit;
 	uint64_t offset;
 	uint32_t index;
+	bool async = (device->profile & EXT4_JBD_ASYNC_COMMIT) != 0;
 
 	if (!device->checksum_v1) {
 		return;
@@ -654,10 +657,14 @@ test_checksum_v1(struct device *device)
 		}
 		memcpy(device->stable, device->cache, device->size);
 		EXPECT(ext4_recover(&device->environment, &device->writer, &report),
-		    index == 5 ? EXT4_OK : EXT4_CORRUPT);
+		    index == 5 || async ? EXT4_OK : EXT4_CORRUPT);
 		CHECK(device->live == 0);
-		if (index != 5) {
+		if (index != 5 && !async) {
 			CHECK(device->writes == 0);
+		} else if (index != 5) {
+			CHECK(report.transactions == 0 && report.discarded_tail &&
+			    !check_outcome(device));
+			check_clean(device);
 		} else {
 			CHECK(report.transactions == 1 && check_outcome(device));
 			check_clean(device);
@@ -674,6 +681,7 @@ test_malformed_records(struct device *device)
 	struct ext4_jbd_super *super;
 	struct ext4_jbd_tag *tag;
 	struct ext4_jbd_tag3 *tag3;
+	struct ext4_jbd_commit *commit;
 	struct ext4_be32 *tail;
 	uint8_t *descriptor;
 	size_t tag_size;
@@ -681,6 +689,7 @@ test_malformed_records(struct device *device)
 	uint32_t checksum;
 	uint32_t flags;
 	uint32_t variant;
+	uint32_t block;
 	bool checksum_enabled;
 
 	checksum_enabled = (device->profile & (EXT4_JBD_CSUM_V2 | EXT4_JBD_CSUM_V3)) != 0;
@@ -726,11 +735,23 @@ test_malformed_records(struct device *device)
 			checksum = ext4_crc32c(checksum, descriptor, device->block_size);
 			ext4_encode_be32(tail, checksum);
 		}
+		if (device->checksum_v1) {
+			checksum = UINT32_MAX;
+			for (block = 0; block <= TEST_TARGETS; block++) {
+				checksum = ext4_crc32_be(checksum,
+				    device->cache +
+					device->journal_map[device->journal_first + block] *
+					    device->block_size,
+				    device->block_size);
+			}
+			commit = (struct ext4_jbd_commit *)(device->cache + device->commit_offset);
+			ext4_encode_be32(&commit->checksum[0], checksum);
+		}
 		memcpy(device->stable, device->cache, device->size);
 		EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_CORRUPT);
 		CHECK(device->writes == 0 && device->live == 0);
 	}
-	for (variant = 0; variant < 5; variant++) {
+	for (variant = 0; variant < 6; variant++) {
 		device_reset(device, device->pending);
 		super = (struct ext4_jbd_super *)(device->cache +
 		    device->journal_map[0] * device->block_size);
@@ -741,10 +762,13 @@ test_malformed_records(struct device *device)
 			ext4_encode_be32(&super->max_length, device->journal_blocks + 1);
 		} else if (variant == 2) {
 			ext4_encode_be32(&super->start, device->journal_blocks);
-		} else {
+		} else if (variant < 5) {
 			ext4_encode_be32(&super->feature_compat, EXT4_JBD_COMPAT_CHECKSUM);
 			ext4_encode_be32(&super->feature_incompat,
 			    variant == 3 ? EXT4_JBD_CSUM_V2 : EXT4_JBD_CSUM_V3);
+		} else {
+			ext4_encode_be32(&super->feature_compat, 0);
+			ext4_encode_be32(&super->feature_incompat, EXT4_JBD_ASYNC_COMMIT);
 		}
 		journal_super_checksum(super);
 		memcpy(device->stable, device->cache, device->size);
@@ -907,6 +931,7 @@ test_ownership(struct device *device)
 }
 
 #include "journal_revoke.h"
+#include "journal_async.h"
 
 int
 main(int argc, char **argv)
@@ -921,6 +946,7 @@ main(int argc, char **argv)
 	size_t index;
 	bool checksum_v1 = false;
 	bool export_only = false;
+	bool async = false;
 	int argument = 1;
 
 	if (argument < argc && strcmp(argv[argument], "--checksum-v1") == 0) {
@@ -929,13 +955,22 @@ main(int argc, char **argv)
 		count = sizeof(v1_profiles) / sizeof(v1_profiles[0]);
 		argument++;
 	}
+	if (argument < argc && strcmp(argv[argument], "--async") == 0) {
+		async = true;
+		if (!checksum_v1) {
+			selected++;
+			count--;
+		}
+		argument++;
+	}
 	if (argument < argc && strcmp(argv[argument], "--export-only") == 0) {
 		export_only = true;
 		argument++;
 	}
 	if (argc < argument + 1 || argc > argument + 2 || (export_only && argc != argument + 2)) {
 		fprintf(stderr,
-		    "usage: %s [--checksum-v1] [--export-only] IMAGE [NEW_EXPORT_DIRECTORY]\n",
+		    "usage: %s [--checksum-v1] [--async] [--export-only] IMAGE "
+		    "[NEW_EXPORT_DIRECTORY]\n",
 		    argv[0]);
 		return 2;
 	}
@@ -943,7 +978,9 @@ main(int argc, char **argv)
 	directory = argc == argument + 2 ? argv[argument + 1] : NULL;
 	device_initialize(&device, argv[argument]);
 	for (index = 0; index < count; index++) {
-		device_profile(&device, selected[index] | EXT4_JBD_REVOKE_FEATURE, checksum_v1);
+		device_profile(&device,
+		    selected[index] | EXT4_JBD_REVOKE_FEATURE | (async ? EXT4_JBD_ASYNC_COMMIT : 0),
+		    checksum_v1);
 		test_power_loss(&device, directory, export_only);
 		if (export_only) {
 			continue;
@@ -954,6 +991,7 @@ main(int argc, char **argv)
 		test_checksum_v1(&device);
 		test_malformed_records(&device);
 		test_revoke_advertisement(&device);
+		test_async_tail(&device);
 		test_wrap(&device);
 		test_multiple_descriptors(&device);
 	}

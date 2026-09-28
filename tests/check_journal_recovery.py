@@ -7,7 +7,14 @@ import json
 from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
+
+from generate_fixtures import resolve_tools
+
+JBD2_MAGIC = 0xC03B3998
+JBD2_COMMIT = 2
+JBD2_COMMIT_PREFIX = struct.Struct(">IIIBB2x")
 
 
 def digest(path):
@@ -23,7 +30,13 @@ def main():
     parser.add_argument("--recover", required=True, type=Path)
     parser.add_argument("--e2fsck", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--discard-commit", action="store_true",
+                        help="damage the sole async writer commit and require both replayers to discard it")
+    parser.add_argument("--tools-root", type=Path, help="e2fsprogs build used to locate the commit")
     args = parser.parse_args()
+    if args.discard_commit and not args.writers:
+        parser.error("--discard-commit requires --writers")
+    tools = resolve_tools(args.tools_root) if args.discard_commit else None
     output = args.output.resolve()
     if output.exists():
         parser.error("output must be a new directory")
@@ -67,6 +80,41 @@ def main():
             done.check_returncode()
             return done.stdout
 
+        if args.discard_commit:
+            if not case.get("async_commit"):
+                raise RuntimeError("discard-commit requires an async writer profile")
+            header = run([tools["dumpe2fs"], "-h", image])
+            features = re.search(r"^Journal features:\s+(.+)$", header, re.M)
+            journal = re.search(r"^Journal inode:\s+(\d+)$", header, re.M)
+            if not journal or not features or "journal_async_commit" not in features[1].split():
+                raise RuntimeError("independent header did not identify an internal async journal")
+            log = run([tools["debugfs"], "-R", "logdump -a", image])
+            commits = re.findall(rf"^Found expected sequence (\d+), type {JBD2_COMMIT} \(commit block\) at block (\d+)$", log, re.M)
+            if len(commits) != 1:
+                raise RuntimeError("commit damage requires one independently decoded transaction")
+            mapped = run([tools["debugfs"], "-R", f"bmap <{journal[1]}> {commits[0][1]}", image]).strip()
+            if not mapped.isdecimal():
+                raise RuntimeError("independent journal block lookup failed")
+            offset = int(mapped) * case["block_size"]
+            if offset + case["block_size"] > image.stat().st_size:
+                raise RuntimeError("journal commit is out of bounds")
+            with image.open("r+b") as file:
+                file.seek(offset)
+                magic, kind, sequence, _, _ = JBD2_COMMIT_PREFIX.unpack(file.read(JBD2_COMMIT_PREFIX.size))
+                if (magic, kind, sequence) != (JBD2_MAGIC, JBD2_COMMIT, int(commits[0][0])):
+                    raise RuntimeError("independent commit location does not match the record")
+                checksum_byte = file.read(1)
+                file.seek(offset + JBD2_COMMIT_PREFIX.size)
+                file.write(bytes([checksum_byte[0] ^ 1]))
+                case["expected_bytes"] = []
+                for block in case["targets"]:
+                    file.seek(block * case["block_size"])
+                    case["expected_bytes"].append(file.read(case["block_size"]))
+            case["transactions"] = 0
+            result.update(discarded_commit=True, damaged_checksum_offset=offset + JBD2_COMMIT_PREFIX.size)
+        oracle = output / f"oracle-{source.name}"
+        shutil.copyfile(image, oracle)
+        result["replay_input_sha256"] = digest(image)
         log = run([args.recover.resolve(), "--write", image])
         match = re.search(r"transactions=(\d+)", log)
         if not match or int(match[1]) != case["transactions"]:
@@ -84,8 +132,6 @@ def main():
         if digest(image) != before:
             raise RuntimeError("repeated recovery changed an already clean image")
         run([args.e2fsck.resolve(), "-fn", image])
-        oracle = output / f"oracle-{source.name}"
-        shutil.copyfile(source, oracle)
         run([args.e2fsck.resolve(), "-fy", "-E", "journal_only", oracle])
         check_bytes(oracle)
         run([args.e2fsck.resolve(), "-fn", oracle])

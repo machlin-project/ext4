@@ -151,8 +151,9 @@ def main():
             return Path(case["image"]).stem
         if args.live_truncate:
             return (case["block_size"], case["target"], case["inode"]["blocks"])
-        if case.get("checksum_v1"):
-            return (case["block_size"], "checksum-v1")
+        if case.get("checksum_v1") or case.get("async_commit"):
+            return (case["block_size"], "checksum-v1" if case.get("checksum_v1") else "checksum-modern",
+                    "async" if case.get("async_commit") else "sync")
         return case["block_size"]
 
     def archive_tree(tree, archive):
@@ -189,6 +190,8 @@ def main():
         (tree / "block-size").write_text(f"{block_size}\n")
         if case.get("checksum_v1"):
             (tree / "journal-checksum-v1").touch()
+        if case.get("async_commit"):
+            (tree / "journal-async-commit").touch()
         if args.live_truncate:
             empty = int(case["target"] == "empty")
             (tree / "live-truncate").write_text(f"{empty} {empty} {case['inode']['blocks']}\n")
@@ -293,14 +296,25 @@ def main():
             features = re.search(r"^Journal features:\s+(.+)$", header, re.M)
             if not features or "journal_checksum" not in features[1].split() or any(
                     feature in features[1].split() for feature in
-                    ("journal_checksum_v2", "journal_checksum_v3", "journal_async_commit")):
-                raise RuntimeError("Linux did not retain synchronous journal checksum v1")
+                    ("journal_checksum_v2", "journal_checksum_v3")):
+                raise RuntimeError("Linux did not retain journal checksum v1")
             record["journal_checksum_v1"] = True
+        if case.get("async_commit"):
+            if "LINUX_EXT4_MOUNT_OPTIONS=data=writeback,journal_async_commit" not in console:
+                raise RuntimeError("Linux did not identify the prepared async/revoke mount profile")
+            features = re.search(r"^Journal features:\s+(.+)$", header, re.M)
+            if not features or "journal_async_commit" not in features[1].split():
+                raise RuntimeError("Linux did not retain asynchronous journal commits")
+            record["journal_async_commit"] = True
+        if case.get("checksum_v1") or case.get("async_commit"):
+            features = re.search(r"^Journal features:\s+(.+)$", header, re.M)
+            if not features or ("journal_async_commit" in features[1].split()) != bool(case.get("async_commit")):
+                raise RuntimeError("Linux changed the requested journal commit mode")
             if "LINUX_EXT4_CHECKSUM_REVOKE_PASS" not in console:
                 raise RuntimeError("Linux did not complete the committed directory release")
             journal_log = run([tools / "debugfs/debugfs", "-R", "logdump -a", scratch])
             if "Revoke FS block " not in journal_log:
-                raise RuntimeError("Linux v1 journal has no independently decoded revoke record")
+                raise RuntimeError("Linux journal has no independently decoded revoke record")
             record["linux_revoke_records"] = journal_log.count("Revoke FS block ")
         if digest(recover) != recover_sha:
             raise RuntimeError("Recovery executable changed during the roundtrip")
@@ -357,7 +371,7 @@ def main():
             print(f"PASS {source.name}: Linux namespace, Linux commit, core/oracle replay, e2fsck", flush=True)
             continue
         oracle = None
-        if case.get("checksum_v1"):
+        if case.get("checksum_v1") or case.get("async_commit"):
             oracle = output / f"oracle-{source.name}"
             shutil.copyfile(scratch, oracle)
             record["linux_pending_sha256"] = digest(scratch)
@@ -403,11 +417,11 @@ def main():
             run([tools / "debugfs/debugfs", "-R", f"dump /{name} {oracle_contents}", oracle])
             oracle_status = run([tools / "debugfs/debugfs", "-R", f"stat /{name}", oracle])
             if oracle_contents.read_bytes() != data or oracle_status != status:
-                raise RuntimeError("core and independent replay disagree on Linux v1 data/metadata")
+                raise RuntimeError("core and independent replay disagree on Linux data/metadata")
             before = digest(scratch)
             run([recover, "--write", scratch])
             if digest(scratch) != before:
-                raise RuntimeError("repeated recovery changed the clean Linux v1 image")
+                raise RuntimeError("repeated recovery changed the clean Linux image")
             record.update(oracle_sha256=digest(oracle), independent_replay=True)
         run([tools / "e2fsck/e2fsck", "-fn", scratch])
         if digest(source) != record["input_sha256"] or digest(recover) != recover_sha:
