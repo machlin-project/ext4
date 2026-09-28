@@ -1045,6 +1045,7 @@ ext4_fast_commit_replay(struct ext4_fast_commit *log)
 	if (free_blocks > fs->info.blocks || free_inodes > fs->info.inodes) {
 		return EXT4_CORRUPT;
 	}
+	fs->info.free_blocks = free_blocks;
 	fs->info.free_inodes = (uint32_t)free_inodes;
 	error = ext4_system_ranges_build(fs);
 	if (error == EXT4_OK) {

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -55,6 +56,10 @@ PROFILES = (
     ("quota-4k", 4096, {"quota", "project"}, set()),
 )
 BIGALLOC_CLUSTER = 16384
+# Linux writes the primary superblock's free counters lazily, so a pending volume
+# can count more free blocks and inodes than its group descriptors.
+STALE_FREE_BLOCKS = 29
+STALE_FREE_INODES = 5
 CASEFOLD_DIRECTORY_FLAGS = 0x40080000
 
 SPECIAL_NODES = {
@@ -308,6 +313,16 @@ def main():
                 raise RuntimeError(f"{name}: {label} namespace or data differs from expected")
         if digest(pending) != row["pending_sha256"]:
             raise RuntimeError("Protected pending input changed")
+        stale = directory / "stale-summary.img"
+        shutil.copyfile(pending, stale)
+        summary = run(row, [tools["dumpe2fs"], "-h", stale])
+        free_blocks = int(re.search(r"^Free blocks:\s+(\d+)$", summary, re.M)[1])
+        free_inodes = int(re.search(r"^Free inodes:\s+(\d+)$", summary, re.M)[1])
+        run(row, [tools["debugfs"], "-w", "-R",
+                  f"ssv free_blocks_count {free_blocks + STALE_FREE_BLOCKS}", stale])
+        run(row, [tools["debugfs"], "-w", "-R",
+                  f"ssv free_inodes_count {free_inodes + STALE_FREE_INODES}", stale])
+        row["stale_summary_sha256"] = digest(stale)
         if special_files:
             row["malformed"] = {}
             for damage in MALFORMED + (INDIRECT_MALFORMED if indirect else ()):

@@ -24,6 +24,12 @@ if paths['fast_commit_fixtures'] != ''
       args: [directory / 'pending.journal', '7', '3'], timeout: 300, suite: 'fast-commit')
     test('fast-commit-recovery-' + profile, programs['fast-commit-recovery'],
       args: [directory / 'pending.img', directory / 'expected.img'], timeout: 300, suite: 'fast-commit')
+    if profile in ['1k', '4k', 'orphan-4k', 'quota-4k']
+      # Replay derives the free counters Linux leaves stale in the superblock.
+      test('fast-commit-stale-summary-' + profile, programs['fast-commit-recovery'],
+        args: [directory / 'stale-summary.img', directory / 'expected.img'], timeout: 300,
+        suite: 'fast-commit')
+    endif
     if profile in ['large-prefix-1k', 'large-prefix-4k', 'large-prefix-casefold-4k']
       test('fast-commit-conflicting-name-owner-' + profile, programs['fast-commit-recovery'],
         args: [directory / 'conflicting-name-owner.img', directory / 'expected.img', '--reject'],
