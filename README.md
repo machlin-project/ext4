@@ -46,8 +46,9 @@ EA_INODE adds values up to 64 KiB, shared value references, transactional update
 and staged reclamation. Six format profiles pass focused mutation/corruption
 checks, 96 independent image states and twelve private-orphan recovery states.
 Power-cut tests cover create, replace, remove and shared-block copying.
-Independent replay accepts 48 transaction states. A full 4 KiB Linux roundtrip
-passes; the remaining native profiles and expanded regression are pending.
+Independent replay accepts 48 transaction states. All six Linux roundtrips pass,
+including native orphan recovery and two pending core journals; the expanded
+regression is pending.
 Large attributes on short symlinks and legacy Lustre
 value-inode encodings are explicitly unsupported.
 

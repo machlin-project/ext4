@@ -41,7 +41,7 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Complete EA_INODE acceptance; INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; EA_INODE focused mutations/faults and 96 independent states pass, native/full regression pending; distributed geometry is accepted |
+| Format compatibility | Complete EA_INODE regression; INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; EA_INODE focused faults, independent states/replay and six Linux roundtrips pass, expanded regression pending; distributed geometry is accepted |
 | Journal compatibility | Fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; v1 and async compatibility pass focused faults, independent replay, eight Linux roundtrips and their combined full regression |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
@@ -99,12 +99,24 @@ journal-only replays. Evidence is in
 journal repeat these 48 states and pass 24 functional states; their preparation
 is reviewed in `artifacts/checks/ea-inode-native-inputs-summary.json`.
 
-The expanded 432-test CI regression and complete native matrix remain pending.
+Six actual Linux roundtrips pass: four clean inputs and two committed core
+journals. Eighteen successful guest boots identify Linux 6.12.94-0-virt aarch64.
+Linux reads exact core-authored values and namespace, shares large values across
+keys and owners, creates attributed files/directories and leaves an open-unlinked
+owner in its committed journal. Core and actual Linux recovery agree on all
+metadata, values, data and allocation counts. Core then changes ownership/mode,
+replaces one shared value and removes another reference; Linux checks the result.
+All 1,144 recorded commands return zero, including 24 strict nonrepairing fsck
+checks. Eighteen Linux-authored transactions replay and six orphan owners are
+reclaimed. Source images and frozen portable executables remain unchanged.
+Evidence is in `artifacts/checks/ea-inode-linux-summary.json`; the successful 4 KiB
+case is retained from the first retry, with the remaining five accepted in the
+next run. Failed cases below remain excluded.
+
+The expanded 432-test CI regression remains pending.
 The initial core CI job failed while compiling its fixture helper because Linux
 requires `sys/types.h` before the e2fsprogs header; other suites are collected
-separately. A full 4 KiB Linux/core/Linux roundtrip passes, including matching
-recovery of a Linux-authored open-unlinked owner and a subsequent core mutation.
-The initial 1 KiB fixture exposed Linux's journal credit requirement for a 64 KiB
+separately. The initial 1 KiB fixture exposed Linux's journal credit requirement for a 64 KiB
 replacement: 341 requested credits exceed the default small journal's 335-credit
 limit. Fixtures now reserve at least 2 MiB and 1,024 journal blocks. This failed
 native invocation is not counted as filesystem acceptance.
