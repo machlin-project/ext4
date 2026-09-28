@@ -65,6 +65,7 @@ struct device {
 	uint32_t home_event;
 	uint32_t writes;
 	uint32_t profile;
+	bool checksum_v1;
 	struct event events[TEST_EVENTS];
 	enum survival survival;
 	bool partial;
@@ -314,7 +315,7 @@ journal_super_checksum(struct ext4_jbd_super *super)
 }
 
 static void
-device_profile(struct device *device, uint32_t features)
+device_profile(struct device *device, uint32_t features, bool checksum_v1)
 {
 	struct ext4_jbd_super *super;
 
@@ -322,11 +323,13 @@ device_profile(struct device *device, uint32_t features)
 	super =
 	    (struct ext4_jbd_super *)(device->base + device->journal_map[0] * device->block_size);
 	ext4_encode_be32(&super->feature_incompat, features);
+	ext4_encode_be32(&super->feature_compat, checksum_v1 ? EXT4_JBD_COMPAT_CHECKSUM : 0);
 	super->checksum_type = EXT4_JBD_CRC32C;
 	/* Exercise unsigned transaction-ID wraparound as part of every profile. */
 	ext4_encode_be32(&super->sequence, UINT32_MAX - 1);
 	journal_super_checksum(super);
 	device->profile = features;
+	device->checksum_v1 = checksum_v1;
 	device_reset(device, device->base);
 }
 
@@ -420,31 +423,34 @@ export_pending(struct device *device, const char *directory)
 {
 	char path[1024];
 	FILE *file;
+	const char *version = device->checksum_v1 ? "v1-" : "";
 	int length;
 
 	if (directory == NULL) {
 		return;
 	}
-	length = snprintf(path, sizeof(path), "%s/writer-%u-%u.img", directory, device->block_size,
-	    device->profile);
+	length = snprintf(path, sizeof(path), "%s/writer-%s%u-%u.img", directory, version,
+	    device->block_size, device->profile);
 	CHECK(length > 0 && (size_t)length < sizeof(path));
 	file = fopen(path, "wbx");
 	CHECK(file != NULL);
 	CHECK(fwrite(device->pending, 1, device->size, file) == device->size);
 	CHECK(fclose(file) == 0);
-	length = snprintf(path, sizeof(path), "%s/writer-%u-%u.json", directory, device->block_size,
-	    device->profile);
+	length = snprintf(path, sizeof(path), "%s/writer-%s%u-%u.json", directory, version,
+	    device->block_size, device->profile);
 	CHECK(length > 0 && (size_t)length < sizeof(path));
 	file = fopen(path, "wx");
 	CHECK(file != NULL);
-	CHECK(fprintf(file, "{\"block_size\":%u,\"features\":%u,\"targets\":[%llu,%llu]}\n",
-		  device->block_size, device->profile, (unsigned long long)device->target[0],
-		  (unsigned long long)device->target[1]) > 0);
+	CHECK(
+	    fprintf(file,
+		"{\"block_size\":%u,\"features\":%u,\"checksum_v1\":%s,\"targets\":[%llu,%llu]}\n",
+		device->block_size, device->profile, device->checksum_v1 ? "true" : "false",
+		(unsigned long long)device->target[0], (unsigned long long)device->target[1]) > 0);
 	CHECK(fclose(file) == 0);
 }
 
 static void
-test_power_loss(struct device *device, const char *directory)
+test_power_loss(struct device *device, const char *directory, bool export_only)
 {
 	struct ext4_recovery_report report;
 	struct ext4_fs *fs;
@@ -466,6 +472,19 @@ test_power_loss(struct device *device, const char *directory)
 	CHECK(check_outcome(device));
 	check_clean(device);
 	CHECK(home_event != 0);
+	if (export_only) {
+		device_reset(device, device->base);
+		device->stop_at = home_event;
+		device->survival = DROP_VOLATILE;
+		EXPECT(run_transaction(device), EXT4_IO);
+		device_power_on(device);
+		memcpy(device->pending, device->stable, device->size);
+		export_pending(device, directory);
+		EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_OK);
+		CHECK(report.transactions == 1 && check_outcome(device));
+		check_clean(device);
+		return;
+	}
 	for (survival = 0; survival < SURVIVAL_COUNT; survival++) {
 		for (partial = 0; partial < 2; partial++) {
 			for (cut = 1; cut <= operations; cut++) {
@@ -604,6 +623,51 @@ test_corruption(struct device *device)
 }
 
 static void
+test_checksum_v1(struct device *device)
+{
+	struct ext4_recovery_report report;
+	struct ext4_jbd_commit *commit;
+	uint64_t offset;
+	uint32_t index;
+
+	if (!device->checksum_v1) {
+		return;
+	}
+	for (index = 0; index < 6; index++) {
+		device_reset(device, device->pending);
+		commit = (struct ext4_jbd_commit *)(device->cache + device->commit_offset);
+		CHECK(commit->checksum_type == EXT4_JBD_CRC32 &&
+		    commit->checksum_size == sizeof(commit->checksum[0]));
+		if (index < 2) {
+			offset =
+			    device->journal_map[device->journal_first + index] * device->block_size;
+			device->cache[offset + device->block_size - 1U] ^= 1;
+		} else if (index == 2) {
+			commit->checksum[0].bytes[0] ^= 1;
+		} else if (index == 3) {
+			commit->checksum_type = EXT4_JBD_CRC32C;
+		} else if (index == 4) {
+			commit->checksum_size--;
+		} else {
+			commit->checksum_type = commit->checksum_size = 0;
+			ext4_encode_be32(&commit->checksum[0], 0);
+		}
+		memcpy(device->stable, device->cache, device->size);
+		EXPECT(ext4_recover(&device->environment, &device->writer, &report),
+		    index == 5 ? EXT4_OK : EXT4_CORRUPT);
+		CHECK(device->live == 0);
+		if (index != 5) {
+			CHECK(device->writes == 0);
+		} else {
+			CHECK(report.transactions == 1 && check_outcome(device));
+			check_clean(device);
+		}
+	}
+	puts(
+	    "PASS transactional checksum: descriptor/data/commit corruption and legacy transition");
+}
+
+static void
 test_malformed_records(struct device *device)
 {
 	struct ext4_recovery_report report;
@@ -666,7 +730,7 @@ test_malformed_records(struct device *device)
 		EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_CORRUPT);
 		CHECK(device->writes == 0 && device->live == 0);
 	}
-	for (variant = 0; variant < 3; variant++) {
+	for (variant = 0; variant < 5; variant++) {
 		device_reset(device, device->pending);
 		super = (struct ext4_jbd_super *)(device->cache +
 		    device->journal_map[0] * device->block_size);
@@ -675,13 +739,17 @@ test_malformed_records(struct device *device)
 			    device->profile | TEST_UNKNOWN_JOURNAL_FEATURE);
 		} else if (variant == 1) {
 			ext4_encode_be32(&super->max_length, device->journal_blocks + 1);
-		} else {
+		} else if (variant == 2) {
 			ext4_encode_be32(&super->start, device->journal_blocks);
+		} else {
+			ext4_encode_be32(&super->feature_compat, EXT4_JBD_COMPAT_CHECKSUM);
+			ext4_encode_be32(&super->feature_incompat,
+			    variant == 3 ? EXT4_JBD_CSUM_V2 : EXT4_JBD_CSUM_V3);
 		}
 		journal_super_checksum(super);
 		memcpy(device->stable, device->cache, device->size);
 		EXPECT(ext4_recover(&device->environment, &device->writer, &report),
-		    variant == 0 ? EXT4_UNSUPPORTED : EXT4_CORRUPT);
+		    variant == 0 || variant > 2 ? EXT4_UNSUPPORTED : EXT4_CORRUPT);
 		CHECK(device->writes == 0 && device->live == 0);
 	}
 	puts("PASS valid-checksum malformed records: targets, missing last tag, flags, features, "
@@ -846,22 +914,44 @@ main(int argc, char **argv)
 	static struct device device;
 	static const uint32_t profiles[] = { 0, EXT4_JBD_CSUM_V2, EXT4_JBD_CSUM_V3,
 		EXT4_JBD_CSUM_V2 | EXT4_JBD_64BIT, EXT4_JBD_CSUM_V3 | EXT4_JBD_64BIT };
+	static const uint32_t v1_profiles[] = { 0, EXT4_JBD_64BIT };
+	const uint32_t *selected = profiles;
 	const char *directory;
+	size_t count = sizeof(profiles) / sizeof(profiles[0]);
 	size_t index;
+	bool checksum_v1 = false;
+	bool export_only = false;
+	int argument = 1;
 
-	if (argc < 2 || argc > 3) {
-		fprintf(stderr, "usage: %s IMAGE [NEW_EXPORT_DIRECTORY]\n", argv[0]);
+	if (argument < argc && strcmp(argv[argument], "--checksum-v1") == 0) {
+		checksum_v1 = true;
+		selected = v1_profiles;
+		count = sizeof(v1_profiles) / sizeof(v1_profiles[0]);
+		argument++;
+	}
+	if (argument < argc && strcmp(argv[argument], "--export-only") == 0) {
+		export_only = true;
+		argument++;
+	}
+	if (argc < argument + 1 || argc > argument + 2 || (export_only && argc != argument + 2)) {
+		fprintf(stderr,
+		    "usage: %s [--checksum-v1] [--export-only] IMAGE [NEW_EXPORT_DIRECTORY]\n",
+		    argv[0]);
 		return 2;
 	}
 	setvbuf(stdout, NULL, _IOLBF, 0);
-	directory = argc == 3 ? argv[2] : NULL;
-	device_initialize(&device, argv[1]);
-	for (index = 0; index < sizeof(profiles) / sizeof(profiles[0]); index++) {
-		device_profile(&device, profiles[index] | EXT4_JBD_REVOKE_FEATURE);
+	directory = argc == argument + 2 ? argv[argument + 1] : NULL;
+	device_initialize(&device, argv[argument]);
+	for (index = 0; index < count; index++) {
+		device_profile(&device, selected[index] | EXT4_JBD_REVOKE_FEATURE, checksum_v1);
+		test_power_loss(&device, directory, export_only);
+		if (export_only) {
+			continue;
+		}
 		test_ownership(&device);
-		test_power_loss(&device, directory);
 		test_recovery_faults(&device);
 		test_corruption(&device);
+		test_checksum_v1(&device);
 		test_malformed_records(&device);
 		test_revoke_advertisement(&device);
 		test_wrap(&device);
@@ -874,6 +964,6 @@ main(int argc, char **argv)
 	free(device.pending);
 	free(device.dirty);
 	free(device.journal_map);
-	puts("PASS journal durability suite");
+	puts(export_only ? "PASS exported committed journals" : "PASS journal durability suite");
 	return 0;
 }

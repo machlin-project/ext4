@@ -25,6 +25,7 @@ struct ext4_recovery_scan {
 	uint32_t count;
 	uint32_t committed_count;
 	uint32_t transactions;
+	uint32_t transaction_checksum;
 	bool bad_data;
 	bool discarded_tail;
 };
@@ -72,6 +73,12 @@ ext4_recovery_data_valid(struct ext4_journal *journal, const struct ext4_recover
 {
 	uint32_t checksum;
 
+	if (journal->checksum_v1) {
+		/* V1 covers the complete transaction on scan. A private per-block
+		 * digest also binds the bytes read again during the replay pass. */
+		return ext4_crc32c(UINT32_MAX, journal->data, journal->fs->info.block_size) ==
+		    record->checksum;
+	}
 	if (!journal->checksum) {
 		return true;
 	}
@@ -101,6 +108,10 @@ ext4_recovery_descriptor(struct ext4_recovery_scan *scan)
 	if (!ext4_journal_checksum_valid(
 		journal, journal->work, journal->fs->info.block_size - sizeof(struct ext4_be32))) {
 		return EXT4_CORRUPT;
+	}
+	if (journal->checksum_v1) {
+		scan->transaction_checksum = ext4_crc32_be(
+		    scan->transaction_checksum, journal->work, journal->fs->info.block_size);
 	}
 	while (offset <= end && tag_size <= end - offset) {
 		ext4_zero(&record, sizeof(record));
@@ -148,7 +159,14 @@ ext4_recovery_descriptor(struct ext4_recovery_scan *scan)
 		if (error != EXT4_OK) {
 			return error;
 		}
-		if (!ext4_recovery_data_valid(journal, &record)) {
+		if (journal->checksum_v1) {
+			scan->transaction_checksum = ext4_crc32_be(scan->transaction_checksum,
+			    journal->data, journal->fs->info.block_size);
+			if (scan->records != NULL) {
+				scan->records[scan->count - 1U].checksum = ext4_crc32c(
+				    UINT32_MAX, journal->data, journal->fs->info.block_size);
+			}
+		} else if (!ext4_recovery_data_valid(journal, &record)) {
 			scan->bad_data = true;
 		}
 		if (record.flags & EXT4_JBD_LAST_TAG) {
@@ -229,6 +247,27 @@ ext4_recovery_incomplete_tail(struct ext4_recovery_scan *scan)
 }
 
 static enum ext4_result
+ext4_recovery_commit_v1(struct ext4_recovery_scan *scan)
+{
+	const struct ext4_jbd_commit *commit = (const struct ext4_jbd_commit *)scan->journal->work;
+	uint32_t checksum = ext4_be32(&commit->checksum[0]);
+
+	if (!scan->journal->checksum_v1) {
+		return EXT4_OK;
+	}
+	/* Enabling the compatible feature can leave an older checksum-free commit
+	 * in the same log. Linux admits only this exact all-zero legacy encoding. */
+	if (commit->checksum_type == 0 && commit->checksum_size == 0 && checksum == 0) {
+		return EXT4_OK;
+	}
+	return commit->checksum_type == EXT4_JBD_CRC32 &&
+		commit->checksum_size == sizeof(commit->checksum[0]) &&
+		checksum == scan->transaction_checksum
+	    ? EXT4_OK
+	    : EXT4_CORRUPT;
+}
+
+static enum ext4_result
 ext4_recovery_scan_log(struct ext4_recovery_scan *scan, uint32_t transaction_limit)
 {
 	struct ext4_journal *journal = scan->journal;
@@ -246,6 +285,7 @@ ext4_recovery_scan_log(struct ext4_recovery_scan *scan, uint32_t transaction_lim
 		if (!in_transaction) {
 			scan->transaction_start = scan->cursor;
 			scan->transaction_visited = scan->visited;
+			scan->transaction_checksum = UINT32_MAX;
 		}
 		error = ext4_recovery_read(scan, journal->work);
 		if (error != EXT4_OK) {
@@ -267,6 +307,10 @@ ext4_recovery_scan_log(struct ext4_recovery_scan *scan, uint32_t transaction_lim
 			in_transaction = true;
 			error = ext4_recovery_revoke(scan);
 		} else if (type == EXT4_JBD_COMMIT) {
+			error = ext4_recovery_commit_v1(scan);
+			if (error != EXT4_OK) {
+				return error;
+			}
 			if (!ext4_journal_checksum_valid(journal, journal->work,
 				offsetof(struct ext4_jbd_commit, checksum))) {
 				scan->discarded_tail = true;

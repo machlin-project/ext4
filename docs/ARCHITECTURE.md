@@ -84,12 +84,22 @@ cannot target those blocks or ranges outside the filesystem. Checksummed primary
 damage remains an offline-repair condition. Recovery does not invent geometry.
 
 The current journal engine handles internal v2-superblock journals with legacy,
-v2 or v3 checksums/tags (legacy means no journal checksums), 64-bit addresses and
+v1, v2 or v3 checksums/tags (legacy means no journal checksums), 64-bit addresses and
 revokes. It bounds the journal to 1,048,576 data blocks, 1,024 data runs and 8,192
 mapping blocks, a writing transaction to 256 snapshots, and recovery to 1,048,576
 records. Exceeding a bound
-is an explicit unsupported result. External journals, checksum v1 and async/fast
+is an explicit unsupported result. External journals and async/fast
 commit remain separate work.
+Checksum v1 uses seeded, non-reflected IEEE CRC32 over each complete descriptor
+and its escaped on-log data, in logical order. Revoke and commit blocks are excluded.
+The writer computes that order from its private snapshots while retaining its
+existing data-before-descriptor submission and durability barriers. Recovery
+validates the whole transaction before replay; private per-block CRC32C digests
+bind subsequently reread data to that validated scan. The exact all-zero legacy
+commit encoding remains admissible when the compatible feature was enabled after
+an older transaction. V1 cannot coexist with v2/v3; async commit remains rejected.
+The CRC32 implementation has a read-only 64-byte table and no allocation or mutable
+initialization. See the [JBD2 format](https://docs.kernel.org/filesystems/ext4/journal.html).
 Recovery accepts a well-formed revoke even if REVOKE is absent from the saved
 journal feature word: Linux can commit that record before persisting the newly
 enabled bit. Record lengths, checksums, protected/out-of-range targets and the

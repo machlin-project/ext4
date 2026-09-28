@@ -151,6 +151,8 @@ def main():
             return Path(case["image"]).stem
         if args.live_truncate:
             return (case["block_size"], case["target"], case["inode"]["blocks"])
+        if case.get("checksum_v1"):
+            return (case["block_size"], "checksum-v1")
         return case["block_size"]
 
     def archive_tree(tree, archive):
@@ -185,6 +187,8 @@ def main():
         shutil.copyfile(probe, tree / "init")
         (tree / "init").chmod(0o755)
         (tree / "block-size").write_text(f"{block_size}\n")
+        if case.get("checksum_v1"):
+            (tree / "journal-checksum-v1").touch()
         if args.live_truncate:
             empty = int(case["target"] == "empty")
             (tree / "live-truncate").write_text(f"{empty} {empty} {case['inode']['blocks']}\n")
@@ -235,6 +239,10 @@ def main():
         console = run([runner, kernel, archives[key], "2", "512",
                        "console=hvc0 rdinit=/init panic=-1 loglevel=4", scratch])
         (output / f"{source.stem}.console.log").write_text(console)
+        if any(message in console for message in (
+                "Delayed block allocation failed", "Data will be lost", "EXT4-fs error",
+                "JBD2: Detected IO errors", "Aborting journal")):
+            raise RuntimeError("Linux reported a filesystem or journal failure")
         if args.xattr_truncate:
             for marker in ("LINUX_EXT4_XATTR_TRUNCATE_PASS", "LINUX_EXT4_PROBE_RESULT=PASS",
                            f"Linux {module_report['kernel_release']} aarch64"):
@@ -281,6 +289,19 @@ def main():
         header = run([tools / "misc/dumpe2fs", "-h", scratch])
         if "needs_recovery" not in header:
             raise RuntimeError("Linux did not leave a pending journal for the reverse roundtrip")
+        if case.get("checksum_v1"):
+            features = re.search(r"^Journal features:\s+(.+)$", header, re.M)
+            if not features or "journal_checksum" not in features[1].split() or any(
+                    feature in features[1].split() for feature in
+                    ("journal_checksum_v2", "journal_checksum_v3", "journal_async_commit")):
+                raise RuntimeError("Linux did not retain synchronous journal checksum v1")
+            record["journal_checksum_v1"] = True
+            if "LINUX_EXT4_CHECKSUM_REVOKE_PASS" not in console:
+                raise RuntimeError("Linux did not complete the committed directory release")
+            journal_log = run([tools / "debugfs/debugfs", "-R", "logdump -a", scratch])
+            if "Revoke FS block " not in journal_log:
+                raise RuntimeError("Linux v1 journal has no independently decoded revoke record")
+            record["linux_revoke_records"] = journal_log.count("Revoke FS block ")
         if digest(recover) != recover_sha:
             raise RuntimeError("Recovery executable changed during the roundtrip")
         if args.xattrs:
@@ -335,6 +356,13 @@ def main():
             (output / "report.json").write_text(json.dumps(results, indent=2) + "\n")
             print(f"PASS {source.name}: Linux namespace, Linux commit, core/oracle replay, e2fsck", flush=True)
             continue
+        oracle = None
+        if case.get("checksum_v1"):
+            oracle = output / f"oracle-{source.name}"
+            shutil.copyfile(scratch, oracle)
+            record["linux_pending_sha256"] = digest(scratch)
+            run([tools / "e2fsck/e2fsck", "-fy", "-E", "journal_only", oracle])
+            run([tools / "e2fsck/e2fsck", "-fn", oracle])
         recovery = run([recover, "--write", scratch])
         transactions = re.search(r"transactions=(\d+)", recovery)
         if not transactions or int(transactions[1]) == 0:
@@ -370,7 +398,20 @@ def main():
         status = run([tools / "debugfs/debugfs", "-R", f"stat /{name}", scratch])
         if not re.search(r"User:\s+12345\s+Group:\s+23456", status) or not re.search(r"Mode:\s+0600", status):
             raise RuntimeError("Linux-authored ownership or mode was not preserved")
+        if oracle:
+            oracle_contents = output / f"oracle-{source.stem}.contents"
+            run([tools / "debugfs/debugfs", "-R", f"dump /{name} {oracle_contents}", oracle])
+            oracle_status = run([tools / "debugfs/debugfs", "-R", f"stat /{name}", oracle])
+            if oracle_contents.read_bytes() != data or oracle_status != status:
+                raise RuntimeError("core and independent replay disagree on Linux v1 data/metadata")
+            before = digest(scratch)
+            run([recover, "--write", scratch])
+            if digest(scratch) != before:
+                raise RuntimeError("repeated recovery changed the clean Linux v1 image")
+            record.update(oracle_sha256=digest(oracle), independent_replay=True)
         run([tools / "e2fsck/e2fsck", "-fn", scratch])
+        if digest(source) != record["input_sha256"] or digest(recover) != recover_sha:
+            raise RuntimeError("Linux roundtrip changed its protected input or recovery executable")
         record["output_sha256"] = digest(scratch)
         record["passed"] = True
         (output / "report.json").write_text(json.dumps(results, indent=2) + "\n")

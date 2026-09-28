@@ -57,6 +57,50 @@ reference_crc16(uint16_t state, const uint8_t *bytes, size_t length)
 }
 
 static void
+transaction_checksum(const uint8_t *bytes)
+{
+	static const size_t lengths[] = { 0, 1, 2, 7, 16, 511, 1024, 4096, 65536 };
+	static const uint32_t seeds[] = { 0, UINT32_MAX, 0x12345678U };
+	uint32_t expected;
+	uint32_t streamed;
+	size_t seed;
+	size_t item;
+	size_t index;
+	size_t alignment;
+	unsigned int bit;
+	bool carry;
+
+	CHECK(ext4_crc32_be(UINT32_MAX, "123456789", 9) == 0x0376e6e7U);
+	for (seed = 0; seed < sizeof(seeds) / sizeof(seeds[0]); seed++) {
+		CHECK(ext4_crc32_be(seeds[seed], NULL, 0) == seeds[seed]);
+		for (alignment = 0; alignment < CHECKSUM_ALIGNMENTS; alignment++) {
+			for (item = 0; item < sizeof(lengths) / sizeof(lengths[0]); item++) {
+				expected = seeds[seed];
+				streamed = seeds[seed];
+				for (index = 0; index < lengths[item]; index++) {
+					for (bit = 0; bit < EXT4_BITS_PER_BYTE; bit++) {
+						carry =
+						    ((expected >> 31) ^
+							(bytes[alignment + index] >> (7U - bit))) &
+						    1U;
+						expected <<= 1;
+						if (carry) {
+							expected ^= EXT4_CRC32_POLYNOMIAL;
+						}
+					}
+					streamed =
+					    ext4_crc32_be(streamed, bytes + alignment + index, 1);
+				}
+				CHECK(ext4_crc32_be(seeds[seed], bytes + alignment,
+					  lengths[item]) == expected);
+				CHECK(streamed == expected);
+			}
+		}
+	}
+	puts("PASS journal CRC32: published MPEG-2 vector, seeded/aligned ranges and streaming");
+}
+
+static void
 legacy_checksum(const uint8_t *bytes)
 {
 	static const size_t lengths[] = { 0, 1, 2, 3, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128,
@@ -265,6 +309,7 @@ main(void)
 		}
 	}
 	legacy_checksum(bytes);
+	transaction_checksum(bytes);
 	group_checksums();
 	free(bytes);
 	printf("PASS CRC32C: known vector, all byte remainders, %zu seeded/aligned/range/stream "

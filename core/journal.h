@@ -9,6 +9,7 @@
 #define EXT4_JBD_COMMIT 2U
 #define EXT4_JBD_SUPER_V2 4U
 #define EXT4_JBD_REVOKE 5U
+#define EXT4_JBD_COMPAT_CHECKSUM 0x0001U
 #define EXT4_JBD_REVOKE_FEATURE 0x0001U
 #define EXT4_JBD_64BIT 0x0002U
 #define EXT4_JBD_CSUM_V2 0x0008U
@@ -16,6 +17,7 @@
 #define EXT4_JBD_SUPPORTED                                                                         \
 	(EXT4_JBD_REVOKE_FEATURE | EXT4_JBD_64BIT | EXT4_JBD_CSUM_V2 | EXT4_JBD_CSUM_V3)
 #define EXT4_JBD_CRC32C 4U
+#define EXT4_JBD_CRC32 1U
 #define EXT4_JBD_ESCAPE 0x0001U
 #define EXT4_JBD_SAME_UUID 0x0002U
 #define EXT4_JBD_LAST_TAG 0x0008U
@@ -117,6 +119,7 @@ struct ext4_journal {
 	uint32_t features;
 	uint32_t checksum_seed;
 	bool checksum;
+	bool checksum_v1;
 	bool aborted;
 	bool transaction_active;
 };

@@ -362,7 +362,21 @@ jobs:
           python3 tests/check_journal_recovery.py --fixtures artifacts/journal-fixtures \
             --recover .build/ext4-recover --e2fsck "$(command -v e2fsck)" \
             --output artifacts/journal-independent 2>&1 | tee artifacts/checks/journal-independent.log
-          find artifacts/journal-fixtures artifacts/journal-independent -type f \
+          python3 tests/generate_journal_fixtures.py --checksum-v1 \
+            --source artifacts/fixtures/ext4-no-checksum.img --output artifacts/journal-v1-fixtures
+          python3 tests/check_journal_recovery.py --fixtures artifacts/journal-v1-fixtures \
+            --recover .build/ext4-recover --e2fsck "$(command -v e2fsck)" \
+            --output artifacts/journal-v1-independent 2>&1 | tee artifacts/checks/journal-v1-independent.log
+          mkdir artifacts/journal-v1-writers
+          for profile in 1k 4k; do
+            .build/ext4-journal-test --checksum-v1 --export-only "artifacts/fixtures/ext4-$profile.img" \
+              artifacts/journal-v1-writers
+          done
+          python3 tests/check_journal_recovery.py --writers artifacts/journal-v1-writers \
+            --recover .build/ext4-recover --e2fsck "$(command -v e2fsck)" \
+            --output artifacts/journal-v1-writer-independent 2>&1 | tee artifacts/checks/journal-v1-writer-independent.log
+          find artifacts/journal-fixtures artifacts/journal-independent artifacts/journal-v1-fixtures \
+            artifacts/journal-v1-independent artifacts/journal-v1-writers artifacts/journal-v1-writer-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
       - name: Independently verify allocation and unwritten conversion

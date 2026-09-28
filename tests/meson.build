@@ -273,6 +273,8 @@ test('malformed-images', programs['corruption'], args: paths['fixtures'] / 'ext4
 foreach profile : ['4k', '1k']
   test('journal-durability-' + profile, programs['journal'],
     args: paths['fixtures'] / ('ext4-' + profile + '.img'), timeout: 300, suite: 'core')
+  test('journal-checksum-v1-' + profile, programs['journal'],
+    args: ['--checksum-v1', paths['fixtures'] / ('ext4-' + profile + '.img')], timeout: 300, suite: 'core')
 endforeach
 test('inode-and-file-write', programs['write'], args: write_images, timeout: 300, suite: 'core')
 test('file-write-partial', programs['write-partial'], args: write_images, timeout: 300, suite: 'core')

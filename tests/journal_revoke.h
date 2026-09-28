@@ -86,6 +86,10 @@ revoke_fixture(struct device *device, bool advertised, bool rewrite, enum revoke
 	header = (struct ext4_jbd_header *)commit;
 	ext4_encode_be32(&header->sequence, sequence + 1);
 	revoke_checksum(device, commit, offsetof(struct ext4_jbd_commit, checksum));
+	if (device->checksum_v1) {
+		/* V1 excludes revoke records: a revoke-only transaction retains its seed. */
+		ext4_encode_be32(&((struct ext4_jbd_commit *)commit)->checksum[0], UINT32_MAX);
+	}
 	memset(revoke_slot(device, first + TEST_TARGETS + 4), 0, device->block_size);
 	if (!rewrite) {
 		memcpy(device->stable, device->cache, device->size);
@@ -128,6 +132,15 @@ revoke_fixture(struct device *device, bool advertised, bool rewrite, enum revoke
 	header = (struct ext4_jbd_header *)commit;
 	ext4_encode_be32(&header->sequence, sequence + 2);
 	revoke_checksum(device, commit, offsetof(struct ext4_jbd_commit, checksum));
+	if (device->checksum_v1) {
+		checksum = ext4_crc32_be(UINT32_MAX, descriptor, device->block_size);
+		for (index = 0; index < TEST_TARGETS; index++) {
+			checksum = ext4_crc32_be(checksum,
+			    revoke_slot(device, first + TEST_TARGETS + 5 + index),
+			    device->block_size);
+		}
+		ext4_encode_be32(&((struct ext4_jbd_commit *)commit)->checksum[0], checksum);
+	}
 	memset(revoke_slot(device, first + TEST_TARGETS * 2 + 6), 0, device->block_size);
 	memcpy(device->stable, device->cache, device->size);
 }

@@ -17,7 +17,7 @@ rename exchange and whiteout, HTree mutation, automatic indexing, LARGEDIR and
 DIR_NLINK. Raw inode-body and external xattrs follow metadata, data and namespace
 transactions. Internal journal recovery handles legacy and modern orphan records.
 
-The combined 373-test CI regression passes all six jobs, alongside independent
+The combined 383-test CI regression passes all six jobs, alongside independent
 image checks and Linux mutation/recovery roundtrips. Tests cover malformed media,
 allocation/read failures and interrupted writes under ASan/UBSan; freestanding
 compilation enforces a 2 KiB stack-frame budget. Read profiles span 1–64 KiB blocks,
@@ -28,10 +28,12 @@ Atomic inode flags, immutable/append-only protection and inheritance pass focuse
 independent and six Linux roundtrip checks, including the full regression.
 Preallocation and hole punching pass independent and Linux acceptance. Full-disk
 writes within existing EOF also pass. KEEP_SIZE growth reaching a reserved extent's
-last block passes focused faults, independent checks and six Linux roundtrips;
-its expanded full regression is running. META_BG and SPARSE_SUPER2 pass focused
+last block passes focused faults, independent checks, six Linux roundtrips and
+the full regression. META_BG and SPARSE_SUPER2 pass focused
 fault tests, independent mutation/recovery checks and eight Linux roundtrips;
-their expanded full regression is pending.
+their expanded full regression is running. Synchronous JBD2 checksum v1 passes
+focused faults, independent replay in both directions and two Linux roundtrips;
+its expanded full regression is pending.
 Growth ending earlier in a full extent still needs mapping space. Wider format and
 journal compatibility, sustained scale and performance remain open core work.
 

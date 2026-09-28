@@ -126,6 +126,15 @@ recovery, obtains an advisory exclusive lock, and uses `F_FULLFSYNC` on macOS or
 `fsync` on Linux for durability. Use independent copies for destructive tests;
 the caller must exclude mounted or other noncooperating users of the image.
 
+Add `--checksum-v1` before the image to select v1 with 32/64-bit tags. Add
+`--export-only` after that option to retain committed logs without repeating the
+full fault matrix. `check_journal_recovery.py --writers EXPORT_DIRECTORY` checks
+these exports with both portable and e2fsck journal-only replay, followed by exact
+block comparisons and nonrepairing consistency checks. Native v1 roundtrips require
+the `ext4-no-checksum.img` source: Linux otherwise upgrades journal checksums along
+with `metadata_csum`. The Linux harness selects `journal_checksum` for v1 exports,
+requires an independently decoded revoke, and compares both reverse replayers.
+
 Generate and check independent logs using the same prepared e2fsprogs build:
 
 The modern orphan-file journal-only oracle requires e2fsprogs 1.47.2 or newer.
@@ -143,6 +152,11 @@ python3 tests/check_journal_recovery.py --fixtures artifacts/journal-fixtures \
   --recover .build/ext4-recover --e2fsck /path/to/e2fsprogs/build/e2fsck/e2fsck \
   --output artifacts/journal-recovery
 ```
+
+For independent v1 input, add `--checksum-v1` to the generator and select
+`ext4-no-checksum.img`. It generates committed, uncommitted-tail and later-rewrite
+cases; the same checker verifies them. Multi-descriptor transactions remain in
+the 1 KiB portable durability suite. Each checker preserves its original input.
 
 The Linux roundtrip harness is an optional Machlin lab acceptance command. Run
 `tests/run_linux_journal.py` by absolute path with the lab as the working directory.

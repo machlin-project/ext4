@@ -75,7 +75,8 @@ contract, not physical power-loss protection on a particular disk.
 | Live truncate failures | Every operation allocation/read and write/flush cut, including the large indirect map; a known durable first commit must recover the new outcome, never roll back to the original inode |
 | File mutation failures | Every allocation/read in the small overwrite, every write/flush cut through clean finish, torn writes and three survival patterns; consistent inode and data together after recovery, poisoned-instance read/write rejection |
 | Transaction ownership | One active writer/transaction, duplicate buffer identity, credit exhaustion, cancellation, empty commit, protected journal/control ranges |
-| Journal layouts | Legacy without checksums, checksum v2/v3, 32/64-bit tags, escape records, multiple descriptor blocks, ring wrap and sequence wrap |
+| Journal layouts | Legacy without checksums, checksum v1/v2/v3, 32/64-bit tags, escape records, multiple descriptor blocks, ring wrap and sequence wrap |
+| Transaction checksum v1 | Descriptor/data/commit corruption before replay, type/size validation, all-zero legacy transition, incompatible checksum combinations, independent committed prefix and later rewrite, native Linux revoke records |
 | Revoke advertisement | Committed revokes before the feature bit is durable; 32/64-bit targets, checksum variations, later reuse across sequence wrap, and malformed-record rejection before writes |
 | Persistence | Every write/flush interruption, three pending-write survival patterns, partial writes, durable commit before home writes, all-old or all-new metadata after recovery |
 | Recovery faults | Interrupted replay and retry, allocation/read failures in each distinct ownership phase, no leaks, no writes on already clean media |

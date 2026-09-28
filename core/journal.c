@@ -324,13 +324,18 @@ ext4_journal_validate(struct ext4_journal *journal)
 		return EXT4_UNSUPPORTED;
 	}
 	journal->features = ext4_be32(&super->feature_incompat);
-	if ((journal->features & ~EXT4_JBD_SUPPORTED) || ext4_be32(&super->feature_compat) != 0 ||
+	journal->checksum_v1 = (ext4_be32(&super->feature_compat) & EXT4_JBD_COMPAT_CHECKSUM) != 0;
+	if ((journal->features & ~EXT4_JBD_SUPPORTED) ||
+	    (ext4_be32(&super->feature_compat) & ~EXT4_JBD_COMPAT_CHECKSUM) ||
 	    ext4_be32(&super->feature_ro_compat) != 0 || ext4_be32(&super->users) != 1 ||
 	    ext4_be32(&super->dynamic_super) != 0 ||
 	    ((journal->features & EXT4_JBD_CSUM_V2) && (journal->features & EXT4_JBD_CSUM_V3))) {
 		return EXT4_UNSUPPORTED;
 	}
 	journal->checksum = (journal->features & (EXT4_JBD_CSUM_V2 | EXT4_JBD_CSUM_V3)) != 0;
+	if (journal->checksum && journal->checksum_v1) {
+		return EXT4_UNSUPPORTED;
+	}
 	if (journal->checksum) {
 		if (super->checksum_type != EXT4_JBD_CRC32C) {
 			return EXT4_UNSUPPORTED;
@@ -849,7 +854,8 @@ ext4_journal_tag(struct ext4_journal *journal, void *buffer, uint64_t block, uin
 }
 
 static enum ext4_result
-ext4_transaction_log(struct ext4_transaction *transaction, uint32_t *commit_block)
+ext4_transaction_log(
+    struct ext4_transaction *transaction, uint32_t *commit_block, uint32_t *transaction_checksum)
 {
 	struct ext4_journal *journal = transaction->journal;
 	struct ext4_jbd_super *super = (struct ext4_jbd_super *)journal->super_buffer;
@@ -860,6 +866,8 @@ ext4_transaction_log(struct ext4_transaction *transaction, uint32_t *commit_bloc
 	uint32_t count;
 	uint32_t capacity;
 	uint32_t flags;
+	uint32_t first_entry;
+	uint32_t checksum_entry;
 	size_t offset;
 	size_t tag_size = ext4_journal_tag_size(journal);
 	size_t end = block_size - (journal->checksum ? sizeof(struct ext4_be32) : 0);
@@ -867,6 +875,7 @@ ext4_transaction_log(struct ext4_transaction *transaction, uint32_t *commit_bloc
 
 	capacity = (uint32_t)((end - sizeof(struct ext4_jbd_header) - EXT4_UUID_SIZE) / tag_size);
 	while (index < transaction->count) {
+		first_entry = index;
 		descriptor = cursor;
 		cursor = ext4_journal_next(journal, cursor);
 		ext4_zero(journal->work, block_size);
@@ -900,6 +909,23 @@ ext4_transaction_log(struct ext4_transaction *transaction, uint32_t *commit_bloc
 		}
 		ext4_journal_checksum_set(
 		    journal, journal->work, block_size - sizeof(struct ext4_be32));
+		if (journal->checksum_v1) {
+			/* The checksum follows logical descriptor/data order even though
+			 * log submission writes data before publishing its descriptor. */
+			*transaction_checksum =
+			    ext4_crc32_be(*transaction_checksum, journal->work, block_size);
+			for (checksum_entry = first_entry; checksum_entry < index;
+			    checksum_entry++) {
+				ext4_copy(journal->data,
+				    transaction->entries[checksum_entry].buffer, block_size);
+				if (ext4_be32((struct ext4_be32 *)journal->data) ==
+				    EXT4_JBD_MAGIC) {
+					ext4_zero(journal->data, sizeof(struct ext4_be32));
+				}
+				*transaction_checksum =
+				    ext4_crc32_be(*transaction_checksum, journal->data, block_size);
+			}
+		}
 		error = ext4_journal_write_log(journal, descriptor, journal->work);
 		if (error != EXT4_OK) {
 			return error;
@@ -913,7 +939,9 @@ enum ext4_result
 ext4_transaction_commit(struct ext4_transaction *transaction)
 {
 	struct ext4_journal *journal;
+	struct ext4_jbd_commit *commit;
 	uint32_t commit_block = 0;
+	uint32_t transaction_checksum = UINT32_MAX;
 	uint32_t index;
 	enum ext4_result error;
 
@@ -931,7 +959,7 @@ ext4_transaction_commit(struct ext4_transaction *transaction)
 		error = ext4_journal_publish(journal, journal->first, journal->sequence);
 	}
 	if (error == EXT4_OK) {
-		error = ext4_transaction_log(transaction, &commit_block);
+		error = ext4_transaction_log(transaction, &commit_block, &transaction_checksum);
 	}
 	if (error == EXT4_OK &&
 	    (commit_block < journal->first || commit_block >= journal->blocks)) {
@@ -947,6 +975,12 @@ ext4_transaction_commit(struct ext4_transaction *transaction)
 		ext4_journal_header(journal->work, EXT4_JBD_COMMIT, journal->sequence);
 		ext4_journal_checksum_set(
 		    journal, journal->work, offsetof(struct ext4_jbd_commit, checksum));
+		if (journal->checksum_v1) {
+			commit = (struct ext4_jbd_commit *)journal->work;
+			commit->checksum_type = EXT4_JBD_CRC32;
+			commit->checksum_size = sizeof(commit->checksum[0]);
+			ext4_encode_be32(&commit->checksum[0], transaction_checksum);
+		}
 		error = ext4_journal_write_log(journal, commit_block, journal->work);
 	}
 	if (error == EXT4_OK) {

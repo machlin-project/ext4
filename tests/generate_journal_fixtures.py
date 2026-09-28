@@ -20,6 +20,8 @@ def main():
     parser.add_argument("--tools-root", type=Path, help="e2fsprogs build; defaults to tools on PATH")
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--checksum-v1", action="store_true",
+                        help="author transaction-wide CRC32 journals on a non-metadata_csum source")
     args = parser.parse_args()
     output = args.output.resolve()
     if output.exists():
@@ -41,6 +43,8 @@ def main():
 
     header = run([dumpe2fs, "-h", source])
     block_size = int(re.search(r"^Block size:\s+(\d+)$", header, re.M)[1])
+    if args.checksum_v1 and "metadata_csum" in header:
+        raise RuntimeError("checksum v1 generation requires a source without metadata_csum")
     # This fixture file has a shallow extent tree, so debugfs's block listing
     # consists of data blocks. Require enough independently reported locations.
     blocks = [int(x) for x in run([debugfs, "-R", f"blocks {JOURNAL_PAYLOAD}", source]).split()]
@@ -57,17 +61,23 @@ def main():
     (output / "later.bin").write_bytes(later)
     (output / "empty.bin").write_bytes(b"")
     cases = []
-    for name, version, uncommitted, revoke, rewrite in (
+    profiles = (
         ("committed-plain", 0, False, False, False),
         ("committed-v2", 2, False, False, False),
         ("committed-v3", 3, False, False, False),
         ("uncommitted-tail-v3", 3, True, False, False),
         ("revoked-v3", 3, False, True, False),
         ("rewritten-v3", 3, False, True, True),
-    ):
+    )
+    if args.checksum_v1:
+        profiles = (("committed-v1", 1, False, False, False),
+                    ("uncommitted-tail-v1", 1, True, False, False),
+                    ("rewritten-v1", 1, False, False, True))
+    for name, version, uncommitted, revoke, rewrite in profiles:
         image = output / f"{name}.img"
         shutil.copyfile(source, image)
-        options = f" -c -v {version}" if version else ""
+        # debugfs selects v1 when the filesystem has no metadata checksums.
+        options = " -c" if version == 1 else f" -c -v {version}" if version else ""
         commands = [f"journal_open{options}",
                     f"journal_write -b {targets[0]},{targets[1]} {data}"]
         if uncommitted:
@@ -81,6 +91,12 @@ def main():
         script.write_text("\n".join(commands) + "\n")
         run([debugfs, "-w", "-f", script, image])
         image_header = run([dumpe2fs, "-h", image])
+        if version == 1:
+            features = re.search(r"^Journal features:\s+(.+)$", image_header, re.M)
+            if not features or "journal_checksum" not in features[1].split() or any(
+                    feature in features[1].split() for feature in
+                    ("journal_checksum_v2", "journal_checksum_v3", "journal_async_commit")):
+                raise RuntimeError(f"{name}: debugfs did not select synchronous checksum v1")
         log = run([debugfs, "-R", "logdump -a", image])
         start = re.search(r"^Journal start:\s+(\d+)$", image_header, re.M)
         if "needs_recovery" not in image_header or not start or int(start[1]) == 0:
@@ -98,7 +114,7 @@ def main():
             path.write_bytes(contents)
             expected_paths.append(path.name)
         cases.append({"name": name, "image": image.name, "targets": targets,
-                      "expected": expected_paths, "transactions": 3 if rewrite else 2 if revoke else 1,
+                      "expected": expected_paths, "transactions": 1 + int(revoke) + int(rewrite),
                       "image_sha256": hashlib.sha256(image.read_bytes()).hexdigest()})
     manifest = {"source": str(source), "source_sha256": hashlib.sha256(original).hexdigest(),
                 "block_size": block_size, "cases": cases}

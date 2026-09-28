@@ -51,6 +51,24 @@ decode_le32(const struct ext4_le32 *field)
 	    ((uint32_t)field->bytes[2] << 16) | ((uint32_t)field->bytes[3] << 24);
 }
 
+static void
+exercise_journal_revoke(void)
+{
+	int directory;
+
+	require(mkdir("/mnt/checksum-revoke", 0700) == 0, "create journal revoke directory");
+	directory = open("/mnt/checksum-revoke", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	require(directory >= 0, "open journal revoke directory");
+	require(fsync(directory) == 0, "commit directory before releasing its block");
+	require(close(directory) == 0, "close journal revoke directory");
+	require(rmdir("/mnt/checksum-revoke") == 0, "release committed directory block");
+	directory = open("/mnt", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	require(directory >= 0, "open parent after directory release");
+	require(fsync(directory) == 0, "commit directory block revoke");
+	require(close(directory) == 0, "close directory release parent");
+	puts("LINUX_EXT4_CHECKSUM_REVOKE_PASS");
+}
+
 #ifdef EXT4_TEST_NAMESPACE
 #include "linux_namespace.h"
 #endif
@@ -340,12 +358,14 @@ main(void)
 	uint8_t expected;
 #endif
 	off_t write_offset = 0;
+	const char *mount_options = "data=ordered";
 	uint8_t linux_byte = TEST_LINUX_BYTE;
 	uint32_t block_size;
 	uint32_t logarithm;
 	uint32_t index;
 	int fd;
 	int result;
+	int checksum_v1;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	require(uname(&identity) == 0, "uname");
@@ -385,8 +405,15 @@ main(void)
 	require(
 	    clock_gettime(CLOCK_REALTIME_COARSE, &recovery_start) == 0, "read recovery start time");
 #endif
+	checksum_v1 = access("/journal-checksum-v1", F_OK) == 0;
+	if (checksum_v1) {
+		require(
+		    (decode_le32(&super.feature_ro_compat) & EXT4_FEATURE_RO_METADATA_CSUM) == 0,
+		    "verify native checksum v1 filesystem profile");
+		mount_options = "data=ordered,journal_checksum";
+	}
 	require(mount("/dev/vda", "/mnt", "ext4", MS_NOATIME | MS_NOSUID | MS_NODEV,
-		    "data=ordered") == 0,
+		    mount_options) == 0,
 	    "Linux ext4 mount and recovery");
 #ifdef EXT4_TEST_LIVE_TRUNCATE
 	require(clock_gettime(CLOCK_REALTIME, &recovery_end) == 0, "read recovery end time");
@@ -451,6 +478,9 @@ main(void)
 	free(buffer);
 #endif
 	/* Linux now authors a real inode transaction for the reverse roundtrip. */
+	if (checksum_v1) {
+		exercise_journal_revoke();
+	}
 	require(fchown(fd, TEST_UID, TEST_GID) == 0, "Linux chown");
 	require(fchmod(fd, TEST_MODE) == 0, "Linux chmod");
 #ifdef EXT4_TEST_TRUNCATE

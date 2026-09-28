@@ -69,6 +69,42 @@ ext4_equal(const void *left, const void *right, size_t length)
 	return true;
 }
 
+/* Nibble remainders for the non-reflected IEEE polynomial used by JBD2 v1.
+ * Seed and final-complement conventions remain with the caller. */
+_Static_assert(EXT4_CRC32_POLYNOMIAL == 0x04c11db7U, "CRC32 table polynomial");
+static const uint32_t ext4_crc32_be_table[16] = {
+	0x00000000U,
+	0x04c11db7U,
+	0x09823b6eU,
+	0x0d4326d9U,
+	0x130476dcU,
+	0x17c56b6bU,
+	0x1a864db2U,
+	0x1e475005U,
+	0x2608edb8U,
+	0x22c9f00fU,
+	0x2f8ad6d6U,
+	0x2b4bcb61U,
+	0x350c9b64U,
+	0x31cd86d3U,
+	0x3c8ea00aU,
+	0x384fbdbdU,
+};
+
+uint32_t
+ext4_crc32_be(uint32_t checksum, const void *buffer, size_t length)
+{
+	const uint8_t *bytes = buffer;
+	size_t index;
+
+	for (index = 0; index < length; index++) {
+		checksum ^= (uint32_t)bytes[index] << 24;
+		checksum = (checksum << 4) ^ ext4_crc32_be_table[checksum >> 28];
+		checksum = (checksum << 4) ^ ext4_crc32_be_table[checksum >> 28];
+	}
+	return checksum;
+}
+
 /* Byte remainders for the reflected Castagnoli polynomial. Read-only storage
  * avoids per-mount allocation, initialization races and platform CPU features.
  * The caller owns seed and final-complement conventions. */

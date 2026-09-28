@@ -42,7 +42,7 @@ counted as portable-core implementation.
 | --- | --- | --- |
 | Ordinary filesystem operations | Metadata-space guarantee for future KEEP_SIZE growth under allocator exhaustion | Open; persistent inode flags pass full regression, focused, independent and Linux checks; bounded preallocation/hole punching, special files, atomic whiteout, automatic index creation and DIR_NLINK pass focused, independent and Linux acceptance; full-disk writes within existing EOF also pass Linux roundtrips |
 | Format compatibility | Full META_BG/SPARSE_SUPER2 regression; EA_INODE and INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; distributed geometry passes focused faults, independent checks and eight Linux roundtrips |
-| Journal compatibility | Checksum v1, asynchronous commit, fast commit and external journals, including interrupted replay and cross-implementation recovery | Open |
+| Journal compatibility | Full checksum-v1 regression; asynchronous commit, fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; synchronous v1 passes focused faults, independent replay and two Linux roundtrips |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
 MMP, quota/project accounting, casefold, encryption and verity also remain
@@ -59,6 +59,29 @@ create/link/symlink/mkdir/mknod/unlink/rmdir/rename and atomic whiteout; raw xat
 internal-journal recovery and both orphan representations; HTree creation, lookup
 and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
 the remaining blocks have equal size or that the full core is accepted.
+
+## Transaction checksum v1
+
+The internal journal reads and writes synchronous JBD2 checksum v1 with 32/64-bit
+tags. It checks the complete descriptor/data stream, including escaped bytes,
+before replay and preserves Linux's exact all-zero legacy-commit transition.
+Mixed v1/v2/v3 feature combinations reject before writes. Six focused tests pass,
+covering the new profiles, existing journal modes, CRC reference comparisons and
+malformed images. The four v1 profiles exercise 408 power cuts: 396 recover allowed
+states and twelve torn primary superblocks reject explicitly. Revoke cases pass
+64 applicable checks; sixteen revoke-checksum corruption cases are inapplicable
+because v1 does not checksum revoke blocks. The 1 KiB profiles also pass 128-block
+transactions spanning descriptors. Sanitized and freestanding builds pass.
+
+Nine v1 independent cases and six existing-format controls pass both portable and
+e2fsck journal-only replay, exact block comparison, idempotence and nonrepairing
+consistency checks. Native Linux then recovers two v1 writer images, changes data
+and inode attributes, and commits a directory-block revoke. Its returned journal
+retains v1 and replays three transactions with one revoke in each case. Core and
+e2fsck agree on complete file bytes and inode metadata, with unchanged original
+images. Reports are in `artifacts/checks/journal-v1-local-summary.json` and
+`artifacts/checks/journal-v1-linux-summary.json`. The expanded 396-test full
+regression is pending; async, external and fast-commit journals remain open.
 
 ## Persistent inode flags
 
@@ -240,7 +263,11 @@ the disk remains full, then authors new ranges and a reverse journal. Core and
 oracle replay agree on retained bytes, metadata and allocation; twelve nonrepairing
 checks, six journal-only replays and six portable reads pass. No guest warnings
 occur. Evidence is in `artifacts/checks/preallocation-growth-linux-summary.json`.
-The expanded 383-test full regression is pending.
+The expanded 383-test full regression passes all six jobs with exact inventory
+coverage and no skipped tests. All 22 growth records and their 4,862 commands pass.
+The previously documented ten reader-only shared-value e2fsck exit-4 cases and ten
+fixture repair exit-1 statuses remain separate from writable acceptance. Evidence
+is in `artifacts/checks/preallocation-growth-ci-36363055799/summary.json`.
 
 ## Legacy group checksum evidence
 
@@ -707,7 +734,7 @@ The same suites check interrupted recovery and repeat recovery, ownership and
 credit limits, canceled transactions, allocation/read errors, balanced resources,
 escaped records, ring and sequence wrap, and 128-block transactions spanning
 multiple descriptors. Corrupted committed payloads/descriptors reject writes;
-invalid commits discard the incomplete tail. Structural cases with repaired
+invalid v2/v3 commits discard the incomplete tail. Structural cases with repaired
 checksums cover protected/out-of-range targets, unterminated tag lists, invalid
 flags/features and journal geometry. The parser must not lose a valid commit
 merely because malformed tag counts consumed it as apparent data.
@@ -733,8 +760,8 @@ remain separate from this successful run.
 This establishes the bounded journal engine, not general read/write filesystem
 operations. Namespace and held-inode evidence are recorded separately below;
 writable UBC/FSKit coherence and durable platform device barriers still need
-implementation and acceptance. Internal journals with external devices, old checksum v1, async or
-fast commits are unsupported; configured resource bounds are explicit in
+implementation and acceptance. External journals and async or fast commits remain
+unsupported; checksum v1 has its own subsequent acceptance batch. Configured resource bounds are explicit in
 [ARCHITECTURE.md](ARCHITECTURE.md). Arbitrary media corruption and physical-device
 power-loss protection are not established by the modeled crash tests.
 
