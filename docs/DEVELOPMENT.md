@@ -176,6 +176,25 @@ device encodings, a FIFO and a socket. Their journals are protocol fixtures;
 the pinned native Linux writer instead uses its full-commit fallback for these
 inode changes.
 
+Three attribute-reuse profiles cover modern orphan slots at both block sizes and
+a legacy orphan chain at 1 KiB. Two old inode generations share a 64 KiB body
+value and an external block with a surviving third owner; the first also owns
+two private values. Both old inode numbers are reused in the same fast prefix.
+The expected image uses e2fsprogs' whole-block detach before removing body keys:
+the pinned debugfs per-key removal of a shared external block incorrectly frees
+value inodes still owned by that block. Expected images must pass strict fsck
+without repair before they become references.
+
+For native consumption of these protocol images, pass
+`--xattr-fixtures /absolute/path/to/fast-commit-fixtures` and `--recover` to
+`run_linux_fast_commit.py` with the same lab, prepared reference, runner and fresh
+output arguments described above. This mode excludes `--orphan-file` and
+`--special-files`, which select native capture. It recovers independent image
+copies with the core, requires the recorded fast-commit count, boots Linux to read
+both replacements and every surviving attribute, and requires clean unmount plus
+strict fsck and unchanged namespace/value hashes. It proves Linux consumption of
+core output, not Linux generation or direct replay of that pending log.
+
 ```sh
 python3 tests/generate_fast_commit_fixtures.py --tools-root E2FSPROGS_BUILD \
   --output artifacts/fast-commit-fixtures
@@ -188,8 +207,9 @@ python3 tests/check_fast_commit.py --tools-root E2FSPROGS_BUILD \
 ```
 
 The checker requires nonrepairing e2fsck, independently read namespace, file
-hashes, symlink bytes and device identities, and an unchanged image after a second
-clean recovery. It exports regular file data only; special nodes are inspected
+hashes, symlink bytes, device identities and exact attribute values, and an
+unchanged image after a second clean recovery. It exports regular file data and
+attribute bytes; special nodes are inspected
 inside the image and never created or opened on the host. In-memory comparisons
 also check inode metadata and free-inode counts; any free-block difference must be
 charged exactly to a different reconstructed directory/index layout. Generated

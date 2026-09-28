@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "xattr.h"
+#include "allocate.h"
 
 #define EXT4_XATTR_NAME_HASH_SHIFT 5U
 #define EXT4_XATTR_VALUE_HASH_SHIFT 16U
@@ -256,7 +257,9 @@ ext4_xattr_external(struct ext4_xattr_snapshot *snapshot, uint64_t block)
 	if (snapshot->block == NULL) {
 		return EXT4_NO_MEMORY;
 	}
-	error = ext4_block_read(fs, block, snapshot->block);
+	error = snapshot->transaction == NULL
+	    ? ext4_block_read(fs, block, snapshot->block)
+	    : ext4_transaction_read(snapshot->transaction, block, snapshot->block);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -357,12 +360,14 @@ ext4_xattr_parse_inode(struct ext4_xattr_snapshot *snapshot, const struct ext4_i
 	return ext4_xattr_sort(snapshot);
 }
 
-enum ext4_result
-ext4_xattr_open_inode(struct ext4_fs *fs, const struct ext4_inode *inode,
-    const struct ext4_inode_disk *disk, struct ext4_xattr_snapshot *snapshot)
+static enum ext4_result
+ext4_xattr_open_record(struct ext4_fs *fs, struct ext4_transaction *transaction,
+    const struct ext4_inode *inode, const struct ext4_inode_disk *disk,
+    struct ext4_xattr_snapshot *snapshot)
 {
 	ext4_zero(snapshot, sizeof(*snapshot));
 	snapshot->fs = fs;
+	snapshot->transaction = transaction;
 	if (fs->aborted) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
@@ -372,6 +377,23 @@ ext4_xattr_open_inode(struct ext4_fs *fs, const struct ext4_inode *inode,
 	}
 	ext4_copy(snapshot->inode, disk, fs->inode_size);
 	return ext4_xattr_parse_inode(snapshot, inode);
+}
+
+enum ext4_result
+ext4_xattr_open_inode(struct ext4_fs *fs, const struct ext4_inode *inode,
+    const struct ext4_inode_disk *disk, struct ext4_xattr_snapshot *snapshot)
+{
+
+	return ext4_xattr_open_record(fs, NULL, inode, disk, snapshot);
+}
+
+enum ext4_result
+ext4_xattr_open_transaction(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    const struct ext4_inode_disk *disk, struct ext4_xattr_snapshot *snapshot)
+{
+
+	return ext4_xattr_open_record(
+	    allocation->fs, allocation->transaction, inode, disk, snapshot);
 }
 
 enum ext4_result

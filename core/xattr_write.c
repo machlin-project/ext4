@@ -653,6 +653,25 @@ out:
 }
 
 enum ext4_result
+ext4_xattr_drop_all(
+    struct ext4_allocation *allocation, struct ext4_inode *inode, struct ext4_inode_disk *disk)
+{
+	struct ext4_xattr_edit edit;
+	enum ext4_result error;
+
+	ext4_zero(&edit, sizeof(edit));
+	error = ext4_xattr_open_transaction(allocation, inode, disk, &edit.snapshot);
+	if (error == EXT4_OK) {
+		error = ext4_xattr_reference_edits(allocation, &edit);
+	}
+	if (error == EXT4_OK) {
+		error = ext4_xattr_external_edit(allocation, &edit, disk);
+	}
+	ext4_xattr_close(&edit.snapshot);
+	return error;
+}
+
+enum ext4_result
 ext4_xattr_drop(struct ext4_allocation *allocation, struct ext4_inode *inode,
     struct ext4_inode_disk *disk, bool *done)
 {

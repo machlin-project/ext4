@@ -142,6 +142,15 @@ Generation reuse removes any old modern slot within the conversion transaction;
 the in-memory pending count changes only after commit. Remaining orphans use the
 ordinary restartable cleaner after fast replay.
 
+Generation replacement detaches every old attribute reference in the same private
+transaction. Private value inodes lose their backing when their last reference
+is released; shared values and shared external blocks retain surviving owners.
+The external-block snapshot reads the transaction's current reference count, so
+multiple old generations can detach the same block in one conversion. Legacy
+orphan linkage is removed before changing the old inode's checksummed contents.
+Per-inode allocation and attribute charges reset at each replay-record boundary.
+Ordinary orphan cleanup retains its incremental, restartable attribute removal.
+
 Embedded short-symlink targets and special-device identities are copied from the
 logged inode payload. Mapped symlinks retain their logged block count while their
 new, private extent root awaits its range records, so that intermediate state is
@@ -150,8 +159,8 @@ charges from actual ownership; a missing required range cannot be committed.
 
 This implementation bounds the fast area to 4,096 blocks, the prefix to 65,536
 records, and the complete conversion to the ordinary 256-snapshot transaction
-limit. Capacity exhaustion returns unsupported. Generation reuse requiring staged
-private-value reclamation is not yet supported.
+limit. Capacity exhaustion returns unsupported, including an old generation whose
+complete attribute reclamation cannot fit the private conversion transaction.
 Indirect records, partially completed foreign replay and broader
 ownership-corruption cases still require acceptance. The writer continues to
 emit ordinary full transactions; it does not emit fast commits.

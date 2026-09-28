@@ -28,6 +28,9 @@ PROFILES = (
     ("orphan-4k", 4096, {"orphan_file"}, set()),
     ("special-1k", 1024, set(), set()),
     ("special-4k", 4096, set(), set()),
+    ("xattr-reuse-1k", 1024, {"orphan_file", "ea_inode"}, set()),
+    ("xattr-reuse-4k", 4096, {"orphan_file", "ea_inode"}, set()),
+    ("xattr-reuse-legacy-1k", 1024, {"ea_inode"}, set()),
 )
 
 SPECIAL_NODES = {
@@ -52,6 +55,11 @@ def long_name(index):
     return prefix + chr(ord("a") + index) * (LONG_NAME_BYTES - len(prefix))
 
 
+def attribute_value(index, block_size):
+    size = 65536 if index == 0 else 3 * block_size + 7
+    return bytes((position * 17 + index * 31) & 255 for position in range(size))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tools-root", type=Path, required=True)
@@ -64,6 +72,7 @@ def main():
     build = args.tools_root.resolve()
     tools = resolve_tools(build)
     helper = output / "fast-commit-fixture"
+    attribute_helper = output / "ea-inode-fixture"
     rows = []
 
     def save():
@@ -87,6 +96,12 @@ def main():
         Path(__file__).with_name("fast_commit_fixture.c"),
         build / "lib/libext2fs.a", build / "lib/libcom_err.a", "-lpthread", "-o", helper,
     ])
+    run(row, shlex.split(os.environ.get("CC", "cc")) + [
+        "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-Wdeclaration-after-statement",
+        f"-I{build / 'lib'}", f"-I{build.parent / 'lib'}",
+        Path(__file__).with_name("ea_inode_fixture.c"),
+        build / "lib/libext2fs.a", build / "lib/libcom_err.a", "-lpthread", "-o", attribute_helper,
+    ])
     row.update(passed=True, helper_sha256=digest(helper))
     for name, block, added, removed in PROFILES:
         directory = output / name
@@ -98,7 +113,13 @@ def main():
         (root / "hello.txt").chmod(0o640)
         modern_orphans = "orphan_file" in added
         special_files = name.startswith("special-")
-        if modern_orphans:
+        xattr_reuse = "ea_inode" in added
+        if xattr_reuse:
+            (root / "keep-xattrs").write_bytes(b"surviving attribute owner")
+            (root / "keep-xattrs").chmod(0o640)
+            (root / "victim-shared").write_bytes(b"second attribute owner")
+            (root / "victim-shared").chmod(0o640)
+        if modern_orphans or xattr_reuse:
             for filename in ("victim", "final-delete", "orphan-held", "legacy", "orphan-truncate"):
                 (root / filename).write_bytes(b"O" * (SOURCE_BLOCKS * block))
                 (root / filename).chmod(0o640)
@@ -115,9 +136,21 @@ def main():
                   "-I", 256, "-m", 0, "-O", "none," + ",".join(sorted(features)),
                   "-U", UUID, "-J", "size=8,fast_commit_size=256",
                   "-E", "lazy_itable_init=0,nodiscard", "-d", root, before, IMAGE_BYTES // block])
+        if xattr_reuse:
+            for index in range(8):
+                payload = directory / f"attribute-{index}.value"
+                payload.write_bytes(attribute_value(index, block))
+                run(row, [attribute_helper, before, "/victim", f"user.value{index}", payload])
+            for target in ("/keep-xattrs", "/victim-shared"):
+                shared = run(row, [helper, "--share-xattrs", before, target])
+                if shared.strip() != "shared-body=1 private-body=2 shared-external=5":
+                    raise RuntimeError("Unexpected attribute-sharing fixture layout")
         run(row, [tools["e2fsck"], "-fn", before])
         shutil.copyfile(before, expected)
         shutil.copyfile(before, pending)
+        if xattr_reuse:
+            for owner in ("/victim", "/victim-shared"):
+                run(row, [helper, "--detach-shared-xattrs", expected, owner])
         commands = ["punch /hello.txt 1 1", "mkdir /new-dir"]
         # Reserve exactly the blocks needed by the long-name directory.
         entry_bytes = 8 + ((LONG_NAME_BYTES + 3) // 4) * 4
@@ -145,15 +178,24 @@ def main():
         symlinks = ({"link-short": "renamed", "link-59": "a" * 59, "link-60": "b" * 60}
                     if special_files else {})
         commands += [f"symlink /{path} {target}" for path, target in symlinks.items()]
-        if modern_orphans:
-            # Allocate all other new names before releasing inode numbers: only
-            # victim's old generation may be reused by this fast-commit stream.
+        if modern_orphans or xattr_reuse:
+            # Allocate unrelated new names before releasing inode numbers. Each
+            # replacement must reuse its intended old attribute owner.
             replacement = directory / "replacement-data"
             replacement_data = b"R" * (block + 37)
             replacement.write_bytes(replacement_data)
+            if xattr_reuse:
+                commands += [f"ea_rm /victim user.value{index}" for index in range(3)]
+                final_files["keep-xattrs"] = (root / "keep-xattrs").read_bytes()
             commands += ["rm /victim", f'write "{replacement}" /reused',
-                         "sif /reused mode 0100640", "sif /reused generation 123456789",
-                         "rm /final-delete", "rm /orphan-held", "rm /legacy",
+                         "sif /reused mode 0100640", "sif /reused generation 123456789"]
+            if xattr_reuse:
+                commands += ["ea_rm /victim-shared user.value0", "rm /victim-shared",
+                             f'write "{replacement}" /reused-shared',
+                             "sif /reused-shared mode 0100640",
+                             "sif /reused-shared generation 987654321"]
+                final_files["reused-shared"] = replacement_data
+            commands += ["rm /final-delete", "rm /orphan-held", "rm /legacy",
                          "punch /orphan-truncate 2 4",
                          f"sif /orphan-truncate size {block + 13}"]
             final_files.update(reused=replacement_data,
@@ -180,6 +222,9 @@ def main():
                              for path, contents in final_files.items()},
                       directories=["lost+found", "new-dir"],
                       symlinks={path: value.encode().hex() for path, value in symlinks.items()},
+                      xattrs={"keep-xattrs": {f"user.value{index}":
+                              hashlib.sha256(attribute_value(index, block)).hexdigest()
+                              for index in (0, 3, 4, 5, 6, 7)}} if xattr_reuse else {},
                       special={path: dict(type=kind, mode=0o640, uid=0, gid=0, links=1,
                                           device_major=major, device_minor=minor)
                                for path, (kind, major, minor) in SPECIAL_NODES.items()}

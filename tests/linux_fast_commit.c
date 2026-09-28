@@ -13,6 +13,7 @@
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/utsname.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #define CREATED_FILES 32U
@@ -28,6 +29,10 @@
 #define INITIALIZED_BLOCK 102U
 #define INITIALIZED_OFFSET 7U
 #define SYMLINK_INLINE_BYTES 60U
+#define ATTRIBUTE_VALUE_MAX 65536U
+#define ATTRIBUTE_COUNT 8U
+#define ATTRIBUTE_SURVIVORS 6U
+#define PHASE_PROTOCOL_READBACK 2U
 
 static const struct {
 	const char *path;
@@ -429,6 +434,70 @@ mutate(unsigned int block_size, unsigned int modern_orphans, unsigned int specia
 	power_off(1);
 }
 
+static void
+verify_xattr_reuse(unsigned int block_size)
+{
+	const char *replacements[] = { "/mnt/reused", "/mnt/reused-shared" };
+	const char *removed[] = { "/mnt/victim", "/mnt/victim-shared", "/mnt/final-delete",
+		"/mnt/orphan-held", "/mnt/legacy" };
+	const char survivor_data[] = "surviving attribute owner";
+	struct stat metadata;
+	uint8_t *bytes;
+	char key[32];
+	size_t size;
+	size_t position;
+	unsigned int index;
+	int fd;
+
+	bytes = malloc(ATTRIBUTE_VALUE_MAX);
+	require(bytes != NULL, "allocate native attribute comparison");
+	for (index = 0; index < sizeof(removed) / sizeof(removed[0]); index++) {
+		require(access(removed[index], F_OK) < 0 && errno == ENOENT,
+		    "verify old generation and orphan names are absent");
+	}
+	for (index = 0; index < sizeof(replacements) / sizeof(replacements[0]); index++) {
+		fd = open(replacements[index], O_RDONLY | O_CLOEXEC);
+		size = block_size + 37U;
+		require(fd >= 0 && fstat(fd, &metadata) == 0 &&
+			metadata.st_mode == (S_IFREG | 0640) && metadata.st_nlink == 1 &&
+			metadata.st_size == (off_t)size && flistxattr(fd, NULL, 0) == 0 &&
+			read(fd, bytes, size + 1U) == (ssize_t)size,
+		    "verify reused inode metadata and absence of old attributes");
+		for (position = 0; position < size; position++) {
+			require(bytes[position] == 'R', "verify reused inode data");
+		}
+		require(close(fd) == 0, "close reused inode");
+	}
+	fd = open("/mnt/keep-xattrs", O_RDONLY | O_CLOEXEC);
+	require(fd >= 0 && fstat(fd, &metadata) == 0 && metadata.st_mode == (S_IFREG | 0640) &&
+		metadata.st_nlink == 1 && metadata.st_size == (off_t)sizeof(survivor_data) - 1 &&
+		read(fd, bytes, sizeof(survivor_data)) == (ssize_t)sizeof(survivor_data) - 1 &&
+		memcmp(bytes, survivor_data, sizeof(survivor_data) - 1U) == 0,
+	    "verify surviving attribute owner");
+	require(flistxattr(fd, NULL, 0) == (ssize_t)(ATTRIBUTE_SURVIVORS * sizeof("user.value0")),
+	    "verify exact surviving attribute name-list size");
+	for (index = 0; index < ATTRIBUTE_COUNT; index++) {
+		require(snprintf(key, sizeof(key), "user.value%u", index) > 0,
+		    "form attribute fixture key");
+		if (index == 1 || index == 2) {
+			require(
+			    fgetxattr(fd, key, bytes, ATTRIBUTE_VALUE_MAX) < 0 && errno == ENODATA,
+			    "verify private values were not transferred to the survivor");
+			continue;
+		}
+		size = index == 0 ? ATTRIBUTE_VALUE_MAX : 3U * block_size + 7U;
+		require(fgetxattr(fd, key, bytes, ATTRIBUTE_VALUE_MAX) == (ssize_t)size,
+		    "read surviving shared value through Linux");
+		for (position = 0; position < size; position++) {
+			require(bytes[position] == (uint8_t)(position * 17U + index * 31U),
+			    "verify every surviving attribute byte");
+		}
+	}
+	require(close(fd) == 0, "close surviving attribute owner");
+	free(bytes);
+	puts("LINUX_FAST_COMMIT_XATTR_REUSE_PASS");
+}
+
 int
 main(void)
 {
@@ -465,7 +534,7 @@ main(void)
 	}
 	config = fopen("/phase", "r");
 	require(config != NULL && fscanf(config, "%u", &phase) == 1, "read fixture phase");
-	require(fclose(config) == 0 && phase <= 1, "validate fixture phase");
+	require(fclose(config) == 0 && phase <= PHASE_PROTOCOL_READBACK, "validate fixture phase");
 	config = fopen("/modern-orphans", "r");
 	require(config != NULL && fscanf(config, "%u", &modern_orphans) == 1,
 	    "read orphan fixture mode");
@@ -483,12 +552,17 @@ main(void)
 	if (phase == 0) {
 		mutate((unsigned int)geometry.f_bsize, modern_orphans, special_files);
 	}
-	verify((unsigned int)geometry.f_bsize);
-	if (special_files) {
-		verify_specials();
+	if (phase == PHASE_PROTOCOL_READBACK) {
+		verify_xattr_reuse((unsigned int)geometry.f_bsize);
+	} else {
+		verify((unsigned int)geometry.f_bsize);
+		if (special_files) {
+			verify_specials();
+		}
 	}
 	require(umount("/mnt") == 0, "cleanly unmount recovered filesystem");
-	puts("LINUX_FAST_COMMIT_REPLAY_PASS");
+	puts(phase == PHASE_PROTOCOL_READBACK ? "LINUX_FAST_COMMIT_FIXTURE_READBACK_PASS"
+					      : "LINUX_FAST_COMMIT_REPLAY_PASS");
 	power_off(1);
 	return 0;
 }

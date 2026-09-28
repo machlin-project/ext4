@@ -13,11 +13,73 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tests'))
 from generate_fixtures import EXPECTED_FEATURES, UUID, resolve_tools
+from fast_commit_reference import read_namespace
+
+PROTOCOL_READBACK_PHASE = 2
 
 
 def digest(path):
     with Path(path).open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def readback_fixtures(args, output, tools, recover, prep, runner, kernel, archive, rows, run):
+    fixtures = args.xattr_fixtures.resolve()
+    source_rows = json.loads((fixtures / 'report.json').read_text())
+    if not source_rows or not all(row.get('passed') for row in source_rows):
+        raise RuntimeError('Protocol fixture generation is not accepted')
+    cases = {row['profile']: row for row in source_rows if 'profile' in row}
+    for profile in ('xattr-reuse-1k', 'xattr-reuse-4k', 'xattr-reuse-legacy-1k'):
+        expected = cases[profile]
+        if args.block_size and expected['block_size'] not in args.block_size:
+            continue
+        source = fixtures / profile / 'pending.img'
+        if digest(source) != expected['pending_sha256']:
+            raise RuntimeError('Protected protocol fixture changed')
+        directory = output / profile
+        directory.mkdir()
+        image = directory / 'native-verified.img'
+        shutil.copyfile(source, image)
+        row = dict(profile=profile, commands=[], passed=False,
+                   recovery='protocol fixture: core recovery followed by Linux readback',
+                   expected_commit_path='fast commit', pending_sha256=digest(source))
+        rows.append(row)
+        if digest(recover) != prep['recover_sha256']:
+            raise RuntimeError('Recovery executable changed during fixture readback')
+        row['core_recovery'] = run(row, [recover, '--write', image])
+        fast = re.search(r'\bfast_commits=(\d+)\b', row['core_recovery'])
+        if not fast or int(fast[1]) != expected['commits']:
+            raise RuntimeError('Core did not replay the complete protocol fixture')
+        row['core_fast_commits'] = int(fast[1])
+        run(row, [tools['e2fsck'], '-fn', image])
+        row['core_recovered_sha256'] = digest(image)
+        console = run(row, [runner, kernel, archive, 2, 512,
+                           'console=hvc0 rdinit=/init panic=-1 loglevel=4', image])
+        (directory / 'readback.console.log').write_text(console)
+        for required in ('LINUX_FAST_COMMIT_KERNEL=Linux 6.12.94-0-virt aarch64',
+                         'LINUX_FAST_COMMIT_MOUNT_OPTIONS=data=ordered,commit=600',
+                         'LINUX_FAST_COMMIT_XATTR_REUSE_PASS',
+                         'LINUX_FAST_COMMIT_FIXTURE_READBACK_PASS',
+                         'LINUX_FAST_COMMIT_RESULT=PASS'):
+            if required not in console:
+                raise RuntimeError(f'Missing native protocol readback evidence: {required}')
+        for forbidden in ('EXT4-fs error', 'Aborting journal', 'Data will be lost'):
+            if forbidden in console:
+                raise RuntimeError(f'Guest filesystem error: {forbidden}')
+        run(row, [tools['e2fsck'], '-fn', image])
+        exported = directory / 'files'
+        exported.mkdir()
+        actual = read_namespace(image, exported, expected['block_size'], tools['debugfs'],
+                                lambda command: run(row, command))
+        if any(actual[key] != expected[key]
+               for key in ('files', 'directories', 'symlinks', 'special', 'xattrs')):
+            raise RuntimeError('Namespace, data or attributes changed during Linux readback')
+        if digest(source) != row['pending_sha256']:
+            raise RuntimeError('Protected protocol fixture changed during native readback')
+        row.update(passed=True, native_sha256=digest(image),
+                   xattrs=sum(len(values) for values in actual['xattrs'].values()))
+        (output / 'report.json').write_text(json.dumps(rows, indent=2) + '\n')
+        print(f'PASS {profile}: {row["recovery"]}', flush=True)
 
 
 def main():
@@ -34,7 +96,11 @@ def main():
                    help='capture fast commits with the modern orphan-file feature enabled')
     p.add_argument('--special-files', action='store_true',
                    help='verify Linux full-commit fallback after symlinks and special inodes')
+    p.add_argument('--xattr-fixtures', type=Path,
+                   help='verify core-recovered xattr protocol fixtures in Linux instead of capture')
     a = p.parse_args()
+    if a.xattr_fixtures and (not a.recover or a.orphan_file or a.special_files):
+        p.error('--xattr-fixtures requires --recover and excludes native capture options')
     lab, prepared, runner, output = (v.resolve() for v in (a.lab, a.prepared, a.runner, a.output))
     if Path.cwd() != lab:
         p.error('run with explicit lab working directory')
@@ -73,8 +139,9 @@ def main():
     compile_command[source_index] = str(source)
     compile_command[-1] = str(output / 'init')
     run(prep, compile_command)
-    archives = []
-    for phase in range(2):
+    archives = {}
+    phases = (PROTOCOL_READBACK_PHASE,) if a.xattr_fixtures else range(2)
+    for phase in phases:
         tree = output / f'root-{phase}'
         shutil.copytree(prepared / 'root-0', tree)
         (tree / 'proc').mkdir(exist_ok=True)
@@ -87,8 +154,12 @@ def main():
         with archive.open('wb') as stream:
             subprocess.run(['/usr/bin/cpio', '-o', '-H', 'newc'], cwd=tree,
                            input=listing.encode(), stdout=stream, check=True)
-        archives.append(archive)
+        archives[phase] = archive
     prep.update(passed=True, probe_sha256=digest(output / 'init'))
+    if a.xattr_fixtures:
+        readback_fixtures(a, output, tools, recover, prep, runner, kernel,
+                          archives[PROTOCOL_READBACK_PHASE], rows, run)
+        return
     for block in a.block_size or (1024, 4096):
         name = f'fast-commit-{block // 1024}k'
         directory = output / name

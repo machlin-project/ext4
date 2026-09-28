@@ -170,7 +170,6 @@ static enum ext4_result
 ext4_fc_inode_reuse(struct ext4_fc_replay *replay, struct ext4_fc_inode_state *state,
     struct ext4_inode_disk *disk, struct ext4_inode *inode, uint16_t mode)
 {
-	bool done = true;
 	bool created;
 	enum ext4_result error;
 
@@ -179,20 +178,19 @@ ext4_fc_inode_reuse(struct ext4_fc_replay *replay, struct ext4_fc_inode_state *s
 	if (!state->unlinked || inode->links != 0) {
 		return EXT4_CORRUPT;
 	}
-	error = ext4_write_map_validate(&replay->allocation, inode, disk);
+	/* Remove the old orphan linkage while its inode checksum still describes
+	 * the checkpointed generation. All later reclamation remains private. */
+	error = ext4_fc_forget_orphan(replay, inode->number);
+	if (error == EXT4_OK) {
+		error = ext4_write_map_validate(&replay->allocation, inode, disk);
+	}
 	if (error == EXT4_OK && (inode->flags & EXT4_INODE_EXTENTS)) {
 		error = ext4_write_map_truncate(&replay->allocation, inode, disk, 0);
 	}
 	if (error == EXT4_OK && ext4_inode_has_xattrs(replay->allocation.fs, disk)) {
-		error = ext4_xattr_drop(&replay->allocation, inode, disk, &done);
-		if (error == EXT4_OK && !done) {
-			/* Reclaiming private value inodes needs its own durable orphan
-			 * steps, which cannot precede this conversion transaction. */
-			error = EXT4_UNSUPPORTED;
-		}
-	}
-	if (error == EXT4_OK) {
-		error = ext4_fc_forget_orphan(replay, inode->number);
+		/* The old generation cannot retain attribute cleanup across this
+		 * replacement. Release its references in the same private transaction. */
+		error = ext4_xattr_drop_all(&replay->allocation, inode, disk);
 	}
 	if (error == EXT4_OK) {
 		error = ext4_free_inode(&replay->allocation, disk, inode);
@@ -750,6 +748,10 @@ ext4_fast_commit_replay(struct ext4_fast_commit *log)
 		replay->allocation.allocated = 0;
 		replay->allocation.freed = 0;
 		replay->allocation.unmapped = 0;
+		replay->allocation.detached_shared_blocks = 0;
+		replay->allocation.attribute_blocks_added = 0;
+		replay->allocation.attribute_blocks_removed = 0;
+		replay->allocation.mapping_size = 0;
 		replay->allocation.bitmap = NULL;
 		type = log->records[index].type;
 		switch (type) {

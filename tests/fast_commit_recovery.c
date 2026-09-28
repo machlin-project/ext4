@@ -213,6 +213,62 @@ same_time(struct ext4_timestamp a, struct ext4_timestamp b)
 }
 
 static void
+compare_xattrs(struct ext4_fs *fs, struct ext4_fs *reference, const struct ext4_inode *inode,
+    const struct ext4_inode *expected)
+{
+	struct ext4_xattr_key *keys;
+	struct ext4_xattr_key *wanted;
+	uint8_t *value;
+	uint8_t *expected_value;
+	size_t count;
+	size_t expected_count;
+	size_t size;
+	size_t expected_size;
+	size_t index;
+
+	EXPECT(ext4_list_xattrs(fs, inode->number, inode->generation, NULL, 0, &count), EXT4_OK);
+	EXPECT(ext4_list_xattrs(
+		   reference, expected->number, expected->generation, NULL, 0, &expected_count),
+	    EXT4_OK);
+	CHECK(count == expected_count && count <= EXT4_XATTR_MAX_CHANGES);
+	if (count == 0) {
+		return;
+	}
+	keys = calloc(count, sizeof(*keys));
+	wanted = calloc(count, sizeof(*wanted));
+	CHECK(keys != NULL && wanted != NULL);
+	EXPECT(
+	    ext4_list_xattrs(fs, inode->number, inode->generation, keys, count, &count), EXT4_OK);
+	EXPECT(ext4_list_xattrs(reference, expected->number, expected->generation, wanted,
+		   expected_count, &expected_count),
+	    EXT4_OK);
+	CHECK(count == expected_count);
+	for (index = 0; index < count; index++) {
+		CHECK(keys[index].name_index == wanted[index].name_index &&
+		    keys[index].name_length == wanted[index].name_length &&
+		    keys[index].value_size == wanted[index].value_size &&
+		    memcmp(keys[index].name, wanted[index].name, keys[index].name_length) == 0);
+		size = keys[index].value_size;
+		value = malloc(size == 0 ? 1U : size);
+		expected_value = malloc(size == 0 ? 1U : size);
+		CHECK(value != NULL && expected_value != NULL);
+		EXPECT(ext4_get_xattr(fs, inode->number, inode->generation, keys[index].name_index,
+			   keys[index].name, keys[index].name_length, value, size, &size),
+		    EXT4_OK);
+		EXPECT(ext4_get_xattr(reference, expected->number, expected->generation,
+			   wanted[index].name_index, wanted[index].name, wanted[index].name_length,
+			   expected_value, size, &expected_size),
+		    EXT4_OK);
+		CHECK(size == keys[index].value_size && size == expected_size &&
+		    memcmp(value, expected_value, size) == 0);
+		free(expected_value);
+		free(value);
+	}
+	free(wanted);
+	free(keys);
+}
+
+static void
 compare_inode(struct ext4_fs *fs, struct ext4_fs *reference, const struct ext4_inode *inode,
     const struct ext4_inode *expected, unsigned int depth, uint64_t *directory_blocks,
     uint64_t *expected_directory_blocks)
@@ -236,6 +292,7 @@ compare_inode(struct ext4_fs *fs, struct ext4_fs *reference, const struct ext4_i
 	CHECK(inode->number == expected->number && inode->generation == expected->generation);
 	CHECK(inode->mode == expected->mode && inode->links == expected->links);
 	CHECK(inode->uid == expected->uid && inode->gid == expected->gid);
+	compare_xattrs(fs, reference, inode, expected);
 	if ((inode->mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY) {
 		CHECK(inode->blocks_512 % sectors_per_block == 0 &&
 		    expected->blocks_512 % sectors_per_block == 0);

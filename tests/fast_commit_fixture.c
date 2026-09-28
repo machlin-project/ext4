@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <ext2fs/ext2fs.h>
+#include <ext2fs/ext2_ext_attr.h>
 #include <ext2fs/kernel-jbd.h>
 #include <ext2fs/fast_commit.h>
 
@@ -17,6 +18,8 @@
 #define DEVICE_LEGACY_MASK 0xffU
 #define DEVICE_MAJOR_SHIFT 8U
 #define DEVICE_MINOR_HIGH_SHIFT 12U
+#define ATTRIBUTE_BODY_VALUES 3U
+#define ATTRIBUTE_EXTERNAL_VALUES 5U
 
 static const struct {
 	const char *name;
@@ -316,31 +319,54 @@ static void
 prepare_orphans(struct fixture *fixture)
 {
 	ext2_filsys fs = fixture->pending;
-	ext2_ino_t numbers[4];
+	ext2_ino_t numbers[5];
 	ext2_ino_t orphan_file = fs->super->s_orphan_file_inum;
 	ext2_ino_t legacy;
+	struct ext2_inode inode;
 	__le32 *entries = (__le32 *)fixture->block;
 	blk64_t physical;
+	unsigned int count = 4;
 	unsigned int index;
 	int flags;
 
-	if (!ext2fs_has_feature_orphan_file(fs->super)) {
+	if (!ext2fs_has_feature_orphan_file(fs->super) && !ext2fs_has_feature_ea_inode(fs->super)) {
 		return;
 	}
 	numbers[0] = pending_lookup(fixture, "victim");
 	numbers[1] = pending_lookup(fixture, "final-delete");
 	numbers[2] = pending_lookup(fixture, "orphan-held");
 	numbers[3] = pending_lookup(fixture, "orphan-truncate");
+	if (ext2fs_has_feature_ea_inode(fs->super)) {
+		numbers[count++] = pending_lookup(fixture, "victim-shared");
+		require(numbers[count - 1] == lookup(fixture, EXT2_ROOT_INO, "reused-shared"),
+		    "require second attribute owner's inode-number reuse");
+	}
 	legacy = pending_lookup(fixture, "legacy");
 	require(numbers[0] == lookup(fixture, EXT2_ROOT_INO, "reused"),
 	    "require actual inode-number reuse in fixture");
 	pending_orphan(fixture, "orphan-held", 1, 0);
 	pending_orphan(fixture, "legacy", 1, 0);
 	pending_orphan(fixture, "orphan-truncate", 0, fs->blocksize + 13U);
+	if (!ext2fs_has_feature_orphan_file(fs->super)) {
+		for (index = 0; index < count; index++) {
+			check(ext2fs_read_inode(fs, numbers[index], &inode),
+			    "read legacy orphan member");
+			inode.i_dtime = index + 1U < count ? numbers[index + 1U] : 0;
+			check(ext2fs_write_inode(fs, numbers[index], &inode),
+			    "link independent legacy orphan member");
+		}
+		check(ext2fs_read_inode(fs, legacy, &inode), "read legacy orphan head");
+		inode.i_dtime = numbers[0];
+		check(
+		    ext2fs_write_inode(fs, legacy, &inode), "link independent legacy orphan head");
+		fs->super->s_last_orphan = legacy;
+		ext2fs_mark_super_dirty(fs);
+		return;
+	}
 	physical = mapped_block(fs, orphan_file, 0, &flags);
 	require(physical != 0 && flags == 0, "require mapped orphan slots");
 	check(io_channel_read_blk64(fs->io, physical, 1, entries), "read initial orphan slots");
-	for (index = 0; index < sizeof(numbers) / sizeof(numbers[0]); index++) {
+	for (index = 0; index < count; index++) {
 		require(entries[index] == 0, "require empty initial orphan slot");
 		entries[index] = ext2fs_cpu_to_le32(numbers[index]);
 	}
@@ -358,7 +384,8 @@ orphan_records(struct fixture *fixture)
 	ext2_ino_t victim;
 	ext2_ino_t final;
 
-	if (!ext2fs_has_feature_orphan_file(fixture->pending->super)) {
+	if (!ext2fs_has_feature_orphan_file(fixture->pending->super) &&
+	    !ext2fs_has_feature_ea_inode(fixture->pending->super)) {
 		return;
 	}
 	victim = pending_lookup(fixture, "victim");
@@ -367,7 +394,131 @@ orphan_records(struct fixture *fixture)
 	inode_record(fixture, victim, 0);
 	data_records(fixture, victim);
 	name_record(fixture, EXT4_FC_TAG_CREAT, EXT2_ROOT_INO, victim, "reused");
+	if (ext2fs_has_feature_ea_inode(fixture->pending->super)) {
+		victim = pending_lookup(fixture, "victim-shared");
+		name_record(fixture, EXT4_FC_TAG_UNLINK, EXT2_ROOT_INO, victim, "victim-shared");
+		inode_record(fixture, victim, 0);
+		data_records(fixture, victim);
+		name_record(fixture, EXT4_FC_TAG_CREAT, EXT2_ROOT_INO, victim, "reused-shared");
+	}
 	name_record(fixture, EXT4_FC_TAG_UNLINK, EXT2_ROOT_INO, final, "final-delete");
+}
+
+static void
+detach_shared_xattrs(const char *path, const char *owner)
+{
+	ext2_filsys fs;
+	ext2_ino_t number;
+
+	check(ext2fs_open(path, EXT2_FLAG_RW | EXT2_FLAG_64BITS, 0, 0, unix_io_manager, &fs),
+	    "open independent expected attribute owner");
+	check(ext2fs_read_bitmaps(fs), "read independent attribute allocation bitmaps");
+	check(ext2fs_namei(fs, EXT2_ROOT_INO, EXT2_ROOT_INO, owner, &number),
+	    "lookup expected old generation");
+	/* Use the library's whole-block detach operation. Removing each key from
+	 * a shared block with debugfs incorrectly frees its surviving value inodes. */
+	check(ext2fs_free_ext_attr(fs, number, NULL), "detach expected shared attribute block");
+	check(ext2fs_close(fs), "close expected attribute detachment");
+}
+
+static void
+share_xattrs(const char *path, const char *target_path)
+{
+	ext2_filsys fs;
+	struct ext2_inode_large *owner;
+	struct ext2_inode_large *survivor;
+	struct ext2_inode value;
+	struct ext2_ext_attr_header *header;
+	struct ext2_ext_attr_entry *entry;
+	struct ext2_ext_attr_entry *first;
+	ext2_ino_t source;
+	ext2_ino_t target;
+	blk64_t block;
+	unsigned char *bytes;
+	unsigned int inode_size;
+	unsigned int body;
+	unsigned int count;
+	unsigned int charge;
+	unsigned int value_size;
+	__u64 references;
+
+	check(ext2fs_open(path, EXT2_FLAG_RW | EXT2_FLAG_64BITS, 0, 0, unix_io_manager, &fs),
+	    "open attribute-sharing fixture");
+	check(ext2fs_namei(fs, EXT2_ROOT_INO, EXT2_ROOT_INO, "/victim", &source),
+	    "lookup old attribute owner");
+	check(ext2fs_namei(fs, EXT2_ROOT_INO, EXT2_ROOT_INO, target_path, &target),
+	    "lookup surviving attribute owner");
+	inode_size = EXT2_INODE_SIZE(fs->super);
+	owner = calloc(1, inode_size);
+	survivor = calloc(1, inode_size);
+	bytes = malloc(fs->blocksize);
+	require(owner != NULL && survivor != NULL && bytes != NULL,
+	    "allocate independent sharing buffers");
+	check(ext2fs_read_inode_full(fs, source, (struct ext2_inode *)owner, inode_size),
+	    "read old attribute owner");
+	check(ext2fs_read_inode_full(fs, target, (struct ext2_inode *)survivor, inode_size),
+	    "read surviving attribute owner");
+	body = EXT2_GOOD_OLD_INODE_SIZE + owner->i_extra_isize;
+	require(owner->i_extra_isize == survivor->i_extra_isize &&
+		body + sizeof(__le32) + sizeof(*entry) < inode_size,
+	    "require matching extended inode bodies");
+	first = (struct ext2_ext_attr_entry *)((unsigned char *)owner + body + sizeof(__le32));
+	entry = first;
+	count = 0;
+	while ((unsigned char *)entry + sizeof(*entry) <= (unsigned char *)owner + inode_size &&
+	    !EXT2_EXT_IS_LAST_ENTRY(entry)) {
+		require(entry->e_value_inum != 0 && entry->e_value_offs == 0,
+		    "require body entries backed by value inodes");
+		count++;
+		entry = EXT2_EXT_ATTR_NEXT(entry);
+	}
+	require(count == ATTRIBUTE_BODY_VALUES, "require two private and one shared body value");
+	require(first->e_name_len == strlen("value0") &&
+		memcmp(EXT2_EXT_ATTR_NAME(first), "value0", first->e_name_len) == 0,
+	    "require maximum-size value as first body entry");
+	check(ext2fs_read_inode(fs, ext2fs_le32_to_cpu(first->e_value_inum), &value),
+	    "read shared value inode");
+	references = ext2fs_get_ea_inode_ref(&value);
+	require((value.i_flags & EXT4_EA_INODE_FL) && references > 0 && references < 3,
+	    "require one or two value owners before adding another");
+	ext2fs_set_ea_inode_ref(&value, references + 1);
+	check(ext2fs_write_inode(fs, ext2fs_le32_to_cpu(first->e_value_inum), &value),
+	    "persist shared value reference");
+	memset((unsigned char *)survivor + body, 0, inode_size - body);
+	memcpy((unsigned char *)survivor + body, (unsigned char *)owner + body,
+	    sizeof(__le32) + EXT2_EXT_ATTR_LEN(first->e_name_len));
+	value_size = ext2fs_le32_to_cpu(first->e_value_size);
+	charge = (value_size + fs->blocksize - 1U) / fs->blocksize;
+	block = ext2fs_file_acl_block(fs, (struct ext2_inode *)owner);
+	require(block != 0 && ext2fs_file_acl_block(fs, (struct ext2_inode *)survivor) == 0,
+	    "require one existing attribute block and a fresh survivor");
+	check(ext2fs_read_ext_attr3(fs, block, bytes, source), "read independent attribute block");
+	header = (struct ext2_ext_attr_header *)bytes;
+	require(header->h_refcount > 0 && header->h_refcount < 3,
+	    "require one or two block owners before adding another");
+	entry = (struct ext2_ext_attr_entry *)(header + 1);
+	count = 0;
+	while ((unsigned char *)entry + sizeof(*entry) <= bytes + fs->blocksize &&
+	    !EXT2_EXT_IS_LAST_ENTRY(entry)) {
+		require(entry->e_value_inum != 0 && entry->e_value_offs == 0,
+		    "require external entries backed by value inodes");
+		charge += (entry->e_value_size + fs->blocksize - 1U) / fs->blocksize;
+		count++;
+		entry = EXT2_EXT_ATTR_NEXT(entry);
+	}
+	require(count == ATTRIBUTE_EXTERNAL_VALUES, "require five shared external values");
+	header->h_refcount++;
+	check(ext2fs_write_ext_attr3(fs, block, bytes, source), "persist shared attribute block");
+	ext2fs_file_acl_block_set(fs, (struct ext2_inode *)survivor, block);
+	check(ext2fs_iblk_add_blocks(fs, (struct ext2_inode *)survivor, charge + 1U),
+	    "charge shared logical values and attribute block");
+	check(ext2fs_write_inode_full(fs, target, (struct ext2_inode *)survivor, inode_size),
+	    "persist surviving attribute owner");
+	check(ext2fs_close(fs), "close independent sharing fixture");
+	free(bytes);
+	free(survivor);
+	free(owner);
+	puts("shared-body=1 private-body=2 shared-external=5");
 }
 
 static void
@@ -448,6 +599,14 @@ main(int argc, char **argv)
 
 	if (argc == 3 && strcmp(argv[1], "--create-specials") == 0) {
 		create_specials(argv[2]);
+		return 0;
+	}
+	if (argc == 4 && strcmp(argv[1], "--share-xattrs") == 0) {
+		share_xattrs(argv[2], argv[3]);
+		return 0;
+	}
+	if (argc == 4 && strcmp(argv[1], "--detach-shared-xattrs") == 0) {
+		detach_shared_xattrs(argv[2], argv[3]);
 		return 0;
 	}
 	if (argc != 3 && argc != 4) {

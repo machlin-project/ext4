@@ -64,7 +64,7 @@ def main():
         actual = read_namespace(image, exported, expected["block_size"], tools["debugfs"],
                                 lambda command: run(row, command))
         if any(actual[key] != expected[key]
-               for key in ("files", "directories", "symlinks", "special")):
+               for key in ("files", "directories", "symlinks", "special", "xattrs")):
             raise RuntimeError(f"{profile}: independently read namespace or data differs")
         recovered_digest = digest(image)
         run(row, [recover, "--write", image])
@@ -72,6 +72,7 @@ def main():
             raise RuntimeError("Clean recovery changed the image or protected input changed")
         row.update(passed=True, recovered_sha256=recovered_digest, files=len(actual["files"]),
                    symlinks=len(actual["symlinks"]), special=len(actual["special"]),
+                   xattrs=sum(len(values) for values in actual["xattrs"].values()),
                    clean_recovery_unchanged=True)
         (output / "report.json").write_text(json.dumps(rows, indent=2) + "\n")
         print(f"PASS fast commit {profile}: core replay, strict e2fsck, independent namespace/data",

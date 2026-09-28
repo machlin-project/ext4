@@ -18,6 +18,7 @@ struct ext4_xattr_record {
 
 struct ext4_xattr_snapshot {
 	struct ext4_fs *fs;
+	struct ext4_transaction *transaction;
 	uint8_t *inode;
 	uint8_t *block;
 	struct ext4_xattr_record *records;
@@ -34,6 +35,12 @@ enum ext4_result ext4_xattr_open(
  * be stale inside a private transaction; external storage is still validated. */
 enum ext4_result ext4_xattr_open_inode(struct ext4_fs *fs, const struct ext4_inode *inode,
     const struct ext4_inode_disk *disk, struct ext4_xattr_snapshot *snapshot);
+/* Read shared-block references from the private transaction, including earlier
+ * detachments by other owners. Value-reference mutations validate their own
+ * transaction buffers before changing them. */
+enum ext4_result ext4_xattr_open_transaction(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, const struct ext4_inode_disk *disk,
+    struct ext4_xattr_snapshot *snapshot);
 void ext4_xattr_close(struct ext4_xattr_snapshot *snapshot);
 int ext4_xattr_compare(
     const struct ext4_xattr_entry_disk *left, const struct ext4_xattr_entry_disk *right);
@@ -59,5 +66,9 @@ enum ext4_result ext4_xattr_apply(struct ext4_allocation *allocation, struct ext
     struct ext4_inode_disk *disk, const struct ext4_xattr_change *changes, size_t count);
 enum ext4_result ext4_xattr_drop(struct ext4_allocation *allocation, struct ext4_inode *inode,
     struct ext4_inode_disk *disk, bool *done);
+/* Detach every attribute before freeing or replacing the owning inode. All
+ * reference changes remain private; the caller cancels on credit exhaustion. */
+enum ext4_result ext4_xattr_drop_all(
+    struct ext4_allocation *allocation, struct ext4_inode *inode, struct ext4_inode_disk *disk);
 
 #endif

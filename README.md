@@ -18,7 +18,7 @@ DIR_NLINK. Raw inode-body and external xattrs follow metadata, data and namespac
 transactions. Internal and single-user external journal recovery handles legacy
 and modern orphan records.
 
-The completed 476-test CI regression passes all six jobs, including independent
+The completed 488-test CI regression passes all six jobs, including independent
 image checks, artifact upload and job cleanup. Linux mutation/recovery roundtrips
 provide separate native interoperability evidence. Tests cover malformed media,
 allocation/read failures and interrupted writes under ASan/UBSan; freestanding
@@ -102,13 +102,17 @@ Fast-commit recovery is under development. The decoder validates bounded committ
 records and semantic replay converts them into one ordinary durable transaction.
 Linux-generated 1 and 4 KiB images pass basic replay comparisons and expanded
 core/Linux roundtrips with inode reuse, new directories, long names, sparse maps
-and unwritten extents. Forty automated cases on eight independently authored
+and unwritten extents. Fifty-two automated cases on eleven independently authored
 profiles cover decode/replay, resource failures and interrupted recovery; independent
-output checks pass, with the expanded CI regression pending. Modern orphan slots
+output checks pass. The initial fast-commit batch passes the 488-test CI regression;
+full regression of subsequent extensions is pending. Modern orphan slots
 are coordinated with inode-generation reuse, final deletion and linked truncation.
 Protocol fixtures also exercise short and mapped symlinks, device identities,
 FIFOs and sockets. The pinned Linux writer falls back to ordinary commits for
 these inode types; that native roundtrip is separate from protocol-fixture replay.
+Generation reuse atomically releases private attributes and preserves shared values,
+including multiple old owners detaching the same external block in one conversion.
+Three recovered attribute-reuse profiles also pass native Linux reads and strict fsck.
 Wider format combinations and broader semantic-corruption acceptance remain open.
 See the fast-commit development
 evidence and the recorded native-reference failure in the acceptance matrix;
