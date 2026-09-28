@@ -25,10 +25,7 @@ def expected_spans(fixture, seed):
             for index in range(0 if seed else 1, 5)]
 
 
-def file_state(image, name, fixture, state, tools, run, output):
-    path = f"/upper/{name}"
-    raw = run([tools["debugfs"], "-R", f"stat {path}", image])
-    inode = inode_fields(raw)
+def file_contents(fixture, name, state):
     block, ratio = fixture["block_size"], fixture["cluster_blocks"]
     cluster = block * ratio
     spans = expected_spans(fixture, name == "seed")
@@ -41,18 +38,45 @@ def file_state(image, name, fixture, state, tools, run, output):
         else:
             spans.append((2 * cluster + block + 13, b"Z" * 17))
             reserved = {12 * ratio + 1}
+            if state == "linux":
+                spans[1] = (4 * cluster + 7, b"P" * 32)
+    elif name == "native":
+        spans = [(0, b"n" * 61), (3 * cluster + 11, b"v" * 31)]
+        size, value = 3 * cluster + 42, b"m" * 300
+        if state == "returned":
+            spans = [(0, b"u" * 61), (5 * cluster + 19, b"Q" * 41)]
+            size = 5 * cluster + 60
+    return spans, size, reserved, value
+
+
+def file_state(image, name, fixture, state, tools, run, output):
+    path = f"/upper/{name}"
+    raw = run([tools["debugfs"], "-R", f"stat {path}", image])
+    inode = inode_fields(raw)
+    block, ratio = fixture["block_size"], fixture["cluster_blocks"]
+    cluster = block * ratio
+    spans, size, reserved, value = file_contents(fixture, name, state)
+    if name == "created":
         if (inode["mode"], inode["uid"], inode["gid"], inode["generation"]) != (0o640, 70000, 80000, 1):
             raise RuntimeError("High-address creation changed admitted attributes")
-        if any(inode[key] != (SECONDS, 0) for key in ("atime", "mtime", "ctime")):
+        if state != "linux" and any(inode[key] != (SECONDS, 0) for key in ("atime", "mtime", "ctime")):
             raise RuntimeError("High-address file timestamp differs")
+    if name == "native" and (inode["mode"], inode["uid"], inode["gid"]) != (0o640, 0, 0):
+        raise RuntimeError("Linux high-address creation changed ownership or permissions")
     if inode["type"] != "regular" or inode["size"] != size or inode["links"] != 1:
         raise RuntimeError("High-address regular file identity or size differs")
     data, metadata = mapped_blocks(image, path, inode, raw, tools, run)
     wanted = span_blocks(spans, block) | reserved
-    if set(data) != wanted or {logical for logical, (_, unwritten) in data.items() if unwritten} != reserved:
+    if name == "native":
+        # Linux can retain preallocation within an allocated data cluster.
+        # Bound it to the touched clusters and still check every written byte.
+        if not wanted <= set(data) or any(data[logical][1] for logical in wanted) or {
+                logical // ratio for logical in data} != {logical // ratio for logical in wanted}:
+            raise RuntimeError("Native high-address maps escaped their required data clusters")
+    elif set(data) != wanted or {logical for logical, (_, unwritten) in data.items() if unwritten} != reserved:
         raise RuntimeError("High-address initialized/unwritten maps differ")
     acl = re.search(r"File ACL:\s+(\d+)", raw)
-    if acl is None or int(acl[1]) < fixture["first_high_block"]:
+    if acl is None or int(acl[1]) == 0 or (name != "native" and int(acl[1]) < fixture["first_high_block"]):
         raise RuntimeError("External attribute lost its high physical address")
     data_clusters = {physical // ratio for physical, _ in data.values()}
     nodes = {physical // ratio for physical in metadata}
@@ -61,8 +85,11 @@ def file_state(image, name, fixture, state, tools, run, output):
         raise RuntimeError("High-address data/metadata ownership aliases")
     if inode["blocks"] != (len(data_clusters) + len(nodes) + 1) * cluster // SECTOR_BYTES:
         raise RuntimeError("High-address inode sector charge differs")
-    if any(physical < fixture["first_high_block"] for physical, _ in data.values()) or any(
-            physical < fixture["first_high_block"] for physical in metadata):
+    # Linux's allocation policy can put a new file's data and xattr into low
+    # groups even though its inode is in the last group. Existing high-address
+    # seeds and overwritten core data must retain their high mappings.
+    if name != "native" and (any(physical < fixture["first_high_block"] for physical, _ in data.values()) or any(
+            physical < fixture["first_high_block"] for physical in metadata)):
         raise RuntimeError("An operation escaped to a lower physical block group")
     with image.open("rb") as stream:
         for logical, (physical, unwritten) in data.items():
@@ -77,7 +104,8 @@ def file_state(image, name, fixture, state, tools, run, output):
             if stream.read(block) != expected:
                 raise RuntimeError("High-address block data or zero padding differs")
     attr = output / f"{name}.xattr"
-    run([tools["debugfs"], "-R", f'ea_get -r -f "{attr}" {path} user.large', image])
+    attribute = "user.native" if name == "native" else "user.large"
+    run([tools["debugfs"], "-R", f'ea_get -r -f "{attr}" {path} {attribute}', image])
     if attr.read_bytes() != value:
         raise RuntimeError("High-address external attribute bytes differ")
     location = run([tools["debugfs"], "-R", f"imap {path}", image])
@@ -100,7 +128,9 @@ def snapshot(image, fixture, state, tools, run, output):
     for key, path in (("root", "/"), ("directory", "/upper")):
         result[key] = inode_fields(run([tools["debugfs"], "-R", f"stat {path}", image]))
     names = entries(run([tools["debugfs"], "-R", "ls -p /upper", image]))
-    expected = {".", "..", "seed"} | ({"created"} if state in ("mutated", "committed") else set())
+    expected = {".", "..", "seed"} | ({"created"} if state in ("mutated", "committed", "linux") else set())
+    if state in ("linux", "returned"):
+        expected.add("native")
     if set(names) != expected or names["."] != fixture["directory_inode"] or names["seed"] != fixture["seed_inode"]:
         raise RuntimeError("High-address directory names or inode identities differ")
     result["names"] = names

@@ -96,7 +96,7 @@ high_first(const struct ext4_fs *fs)
 
 static void
 read_span(struct ext4_fs *fs, struct ext4_posix_image *image, const struct ext4_inode *inode,
-    uint64_t offset, uint8_t value, size_t length)
+    uint64_t offset, uint8_t value, size_t length, bool require_high)
 {
 	struct ext4_mapping mapping;
 	uint8_t bytes[64];
@@ -112,8 +112,9 @@ read_span(struct ext4_fs *fs, struct ext4_posix_image *image, const struct ext4_
 	}
 	if (value != 0) {
 		EXPECT(ext4_map_read(fs, inode, offset, length, &mapping), EXT4_OK);
-		CHECK(!mapping.hole && mapping.length == length &&
-		    mapping.device_offset / fs->info.block_size >= high_first(fs));
+		CHECK(!mapping.hole && mapping.length == length);
+		CHECK(
+		    !require_high || mapping.device_offset / fs->info.block_size >= high_first(fs));
 		EXPECT(image->environment.read(image, mapping.device_offset, raw, length), EXT4_OK);
 		CHECK(memcmp(raw, bytes, length) == 0);
 	}
@@ -131,9 +132,9 @@ seed_checks(struct ext4_fs *fs, struct ext4_posix_image *image, const struct ext
 	CHECK(seed.size == 8U * cluster_bytes + 7U + SPAN_BYTES && seed.generation == 123);
 	for (index = 0; index < SEED_SPANS; index++) {
 		read_span(fs, image, &seed, 2U * index * cluster_bytes + 7U, (uint8_t)('A' + index),
-		    SPAN_BYTES);
+		    SPAN_BYTES, true);
 	}
-	read_span(fs, image, &seed, cluster_bytes + 13U, 0, SPAN_BYTES);
+	read_span(fs, image, &seed, cluster_bytes + 13U, 0, SPAN_BYTES, true);
 	EXPECT(ext4_get_xattr(fs, seed.number, seed.generation, EXT4_XATTR_USER,
 		   (const uint8_t *)"large", 5, value, sizeof(value), &size),
 	    EXT4_OK);
@@ -220,10 +221,10 @@ mutate(struct ext4_fs *fs, struct ext4_posix_image *image, const struct ext4_ino
 	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &inode), EXT4_OK);
 	for (index = 1; index < SEED_SPANS; index++) {
 		read_span(fs, image, &inode, 2U * index * cluster_bytes + 7U,
-		    (uint8_t)('K' + index), SPAN_BYTES);
+		    (uint8_t)('K' + index), SPAN_BYTES, true);
 	}
-	read_span(fs, image, &inode, 0, 0, SPAN_BYTES);
-	read_span(fs, image, &inode, 2U * cluster_bytes + fs->info.block_size + 13U, 'Z', 17);
+	read_span(fs, image, &inode, 0, 0, SPAN_BYTES, true);
+	read_span(fs, image, &inode, 2U * cluster_bytes + fs->info.block_size + 13U, 'Z', 17, true);
 }
 
 static void
@@ -247,6 +248,38 @@ reclaim(struct ext4_fs *fs, const struct ext4_inode *directory)
 	EXPECT(ext4_release_inode(hold), EXT4_OK);
 	CHECK(fs->info.free_blocks == free_before + charged &&
 	    fs->info.free_inodes == free_inodes + 1U);
+}
+
+static void
+linux_return(struct ext4_fs *fs, struct ext4_posix_image *image, const struct ext4_inode *directory)
+{
+	struct ext4_inode inode = find(fs, directory, "native");
+	struct ext4_inode created = find(fs, directory, "created");
+	struct ext4_inode_update update = attributes(false);
+	uint64_t cluster_bytes = (uint64_t)fs->cluster_blocks * fs->info.block_size;
+	uint8_t value[VALUE_BYTES];
+	size_t length;
+	size_t index;
+
+	CHECK(inode.size == 3U * cluster_bytes + 42U && inode.uid == 0 && inode.gid == 0);
+	read_span(fs, image, &inode, 0, 'n', 61, false);
+	read_span(fs, image, &inode, 3U * cluster_bytes + 11U, 'v', 31, false);
+	read_span(fs, image, &created, 4U * cluster_bytes + 7U, 'P', SPAN_BYTES, true);
+	EXPECT(ext4_get_xattr(fs, inode.number, inode.generation, EXT4_XATTR_USER,
+		   (const uint8_t *)"native", 6, value, sizeof(value), &length),
+	    EXT4_OK);
+	CHECK(length == sizeof(value));
+	for (index = 0; index < sizeof(value); index++) {
+		CHECK(value[index] == 'm');
+	}
+	write_bytes(fs, &inode, 0, 'u', 61);
+	EXPECT(
+	    ext4_truncate(fs, inode.number, inode.generation, cluster_bytes + 3U, &update, &inode),
+	    EXT4_OK);
+	write_bytes(fs, &inode, 5U * cluster_bytes + 19U, 'Q', 41);
+	read_span(fs, image, &inode, 3U * cluster_bytes + 11U, 0, 31, false);
+	read_span(fs, image, &inode, 5U * cluster_bytes + 19U, 'Q', 41, false);
+	reclaim(fs, directory);
 }
 
 int
@@ -287,6 +320,8 @@ main(int argc, char **argv)
 	} else if (!read_only) {
 		if (strcmp(argv[1], "--mutate") == 0) {
 			mutate(fs, &image, &directory);
+		} else if (strcmp(argv[1], "--linux-return") == 0) {
+			linux_return(fs, &image, &directory);
 		} else {
 			CHECK(strcmp(argv[1], "--reclaim") == 0);
 			reclaim(fs, &directory);

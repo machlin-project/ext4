@@ -14,11 +14,23 @@ import subprocess
 from check_allocation import expected_contents
 import linux_namespace
 import linux_xattrs
+from sparse_image import sparse_copy, sparse_digest
 
 
 def digest(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def image_digest(case, path):
+    return sparse_digest(path) if case.get("large_volume") else digest(path)
+
+
+def copy_image(case, source, target):
+    if case.get("large_volume"):
+        sparse_copy(source, target)
+    else:
+        shutil.copyfile(source, target)
 
 
 def main():
@@ -165,6 +177,9 @@ def main():
                            input=listing.encode(), stdout=stream, check=True)
 
     for case in exports:
+        if case.get("large_volume") and (not args.xattrs or
+                case.get("image_digest_format") != "ext4-test-sparse-pages-v1"):
+            raise RuntimeError("High-address volumes require sparse attribute-roundtrip input records")
         if args.namespace:
             if "accounting_after" in case:
                 case["accounting"] = case["accounting_after"]
@@ -218,12 +233,14 @@ def main():
     for case in exports:
         source = Path(case["pending"] if args.pending else case["image"])
         expected_sha = case["pending_sha256"] if args.pending else case.get("input_sha256")
-        if clean_exports and digest(source) != expected_sha:
+        if clean_exports and image_digest(case, source) != expected_sha:
             raise RuntimeError(f"file-write export changed: {source}")
         scratch = output / source.name
-        shutil.copyfile(source, scratch)
-        record = {"case": source.name, "input_sha256": digest(source), "commands": [],
+        copy_image(case, source, scratch)
+        record = {"case": source.name, "input_sha256": image_digest(case, source), "commands": [],
                   "linux_no_delalloc": args.no_delalloc}
+        if case.get("large_volume"):
+            record["image_digest_format"] = case["image_digest_format"]
         if not args.orphans:
             record.update(recover=str(recover), recover_sha256=recover_sha)
         if args.xattrs:
@@ -304,6 +321,8 @@ def main():
             raise RuntimeError("Missing Linux clustered allocation evidence")
         if case.get("large_files") and "LINUX_EXT4_LARGE_FILE_PASS" not in console:
             raise RuntimeError("Missing Linux high-offset mutation evidence")
+        if case.get("large_volume") and "LINUX_EXT4_LARGE_VOLUME_PASS" not in console:
+            raise RuntimeError("Missing Linux high physical-address mutation evidence")
         if case.get("large_files", {}).get("profile") in ("inline", "cluster-inline"):
             if "LINUX_EXT4_INLINE_HIGH_OFFSET_REJECTED_BEFORE_CONVERSION" not in console:
                 raise RuntimeError("Missing pinned Linux inline-conversion boundary evidence")
@@ -345,10 +364,14 @@ def main():
                 original_tree = output / f"root-{archive_key(case)}"
                 shutil.copytree(original_tree, tree)
                 shutil.rmtree(tree / "expected")
-                expected_case = dict(image=str(expected), input_sha256=digest(expected))
+                expected_case = dict(image=str(expected), input_sha256=image_digest(case, expected))
                 if case.get("large_files"):
                     expected_case.update(large_files=case["large_files"],
                                          large_phase="linux" if label == "replay" else "returned")
+                if case.get("large_volume"):
+                    expected_case.update(large_volume=case["large_volume"],
+                                         volume_phase={"replay": "linux", "returned": "returned",
+                                                       "core-journal": "committed"}[label])
                 linux_xattrs.prepare(expected_case, tree, tools, verify_only=True)
                 archive = output / f"initramfs-{tree.name}.cpio"
                 archive_tree(tree, archive)
@@ -361,6 +384,8 @@ def main():
                                f"Linux {module_report['kernel_release']} aarch64"):
                     if marker not in text:
                         raise RuntimeError(f"Missing Linux {label} attribute evidence: {marker}")
+                if case.get("large_volume") and "LINUX_EXT4_LARGE_VOLUME_RETURN_PASS" not in text:
+                    raise RuntimeError(f"Missing Linux {label} high-address evidence")
                 if any(message in text for message in ("EXT4-fs error", "Aborting journal",
                                                        "JBD2: Detected IO errors")):
                     raise RuntimeError(f"Linux {label} reported a filesystem failure")
@@ -370,12 +395,13 @@ def main():
             returned = Path(checked["returned_image"])
             verify_native_attributes(returned, returned, "returned")
             final = linux_xattrs.snapshot(returned, output / f"final-{source.stem}-checked", tools, run,
-                                         large_file_case=dict(case, large_phase="returned") if case.get("large_files") else None)
+                                         large_file_case=dict(case, large_phase="returned") if case.get("large_files") else None,
+                                         large_volume_case=dict(case, volume_phase="returned") if case.get("large_volume") else None)
             if final != checked["returned_state"]:
                 raise RuntimeError("Linux verification changed the returned inode/attribute state")
-            if digest(source) != expected_sha or digest(reader) != reader_sha or digest(recover) != recover_sha:
+            if image_digest(case, source) != expected_sha or digest(reader) != reader_sha or digest(recover) != recover_sha:
                 raise RuntimeError("Attribute roundtrip changed a protected source or executable")
-            record.update(checked, returned_sha256=digest(returned), linux_return_verified=True, passed=True)
+            record.update(checked, returned_sha256=image_digest(case, returned), linux_return_verified=True, passed=True)
             (output / "report.json").write_text(json.dumps(results, indent=2) + "\n")
             print(f"PASS {source.name}: Linux attributes/ACLs, core/oracle replay, core mutation and Linux return", flush=True)
             continue

@@ -267,6 +267,7 @@ xattr_check_acl_access(void)
 #include "linux_inline.h"
 #include "linux_cluster.h"
 #include "linux_large_file.h"
+#include "linux_large_volume.h"
 
 static void
 check_xattrs(void)
@@ -282,6 +283,9 @@ check_xattrs(void)
 	int fd;
 	int result;
 
+	if (access("/large-volume-geometry", F_OK) == 0) {
+		check_large_volumes();
+	}
 	if (access("/large-file-geometry", F_OK) == 0) {
 		check_large_files();
 	}

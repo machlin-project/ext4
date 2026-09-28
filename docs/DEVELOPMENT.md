@@ -347,6 +347,17 @@ The checker preserves pending images and compares core recovery with independent
 raw journal replay followed by strict nonrepairing fsck. Its output directory must
 be new so a failed attempt cannot be overwritten.
 
+`prepare_large_volume_linux.py --fixtures FIXTURE_REPORT --report CHECKED_REPORT
+--output NEW_DIRECTORY` selects the checked mutation states and committed journals
+using sparse copies. From the explicit lab directory, give its `selection.json`
+to `run_linux_journal.py --xattrs --xattr-reader /absolute/path/ext4-large-volume-test`
+with the prepared `--recover`, `--module-report`, `--lab` and a new `--output`.
+Each profile exercises Linux mutation, core/Linux recovery and orphan cleanup,
+direct Linux replay of the core's committed journal, then core mutation and Linux
+verification. Image identities use the explicitly recorded sparse digest format;
+executable identities remain ordinary SHA-256. Preserve executable permissions
+when freezing the two binaries for a run.
+
 ## Extended-attribute mutation tests
 
 The same ten fixtures drive `xattr-mutation-*` and `xattr-packing-*`. The first

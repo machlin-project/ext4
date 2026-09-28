@@ -84,8 +84,9 @@ this does not establish large-volume scale.
 Sparse multi-terabyte volumes now exercise last-group inode tables, directories,
 data, extent nodes and xattrs, including physical block numbers above 32 bits.
 The writer promotes an empty 32-bit journal to wide tags at its first transaction.
-Three profiles pass 21 independent read/mutation/reclamation/recovery states;
-native Linux acceptance and the expanded regression for this change remain pending.
+Three profiles pass 21 independent read/mutation/reclamation/recovery states and
+native Linux/core/Linux roundtrips, including direct Linux replay of the core's
+high-address journal. The expanded regression for this change remains pending.
 
 Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.
 Both native adapters remain read-only. The FSKit adapter builds for macOS 26.4,

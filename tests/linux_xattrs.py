@@ -93,7 +93,11 @@ def tool(root, name):
     return root / ("misc" if name == "dumpe2fs" else name) / name
 
 
-def snapshot(image, output, tools, run, *, allow_summary_lag=False, large_file_case=None):
+def snapshot(image, output, tools, run, *, allow_summary_lag=False, large_file_case=None,
+             large_volume_case=None):
+    if large_volume_case is not None:
+        from linux_large_volume import snapshot as volume_snapshot
+        return volume_snapshot(large_volume_case, image, output, tools, run)
     if large_file_case is not None:
         from linux_large_file import snapshot as large_snapshot
         return large_snapshot(large_file_case, image, output, tools, run)
@@ -200,6 +204,9 @@ def snapshot(image, output, tools, run, *, allow_summary_lag=False, large_file_c
 
 
 def prepare(case, tree, tools, *, verify_only=False):
+    if case.get("large_volume"):
+        from linux_large_volume import prepare as volume_prepare
+        return volume_prepare(case, tree, tools, verify_only)
     if case.get("large_files"):
         from linux_large_file import prepare as large_prepare
         return large_prepare(case, tree, tools, verify_only)
@@ -338,6 +345,9 @@ def write_core_expectations(state, output):
 
 
 def verify(case, image, output, tools, recover, reader, run, *, native_replay=None):
+    if case.get("large_volume"):
+        from linux_large_volume import verify as volume_verify
+        return volume_verify(case, image, output, tools, recover, reader, run, native_replay)
     if case.get("large_files"):
         from linux_large_file import verify as large_verify
         return large_verify(case, image, output, tools, recover, reader, run, native_replay)

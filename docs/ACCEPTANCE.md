@@ -41,7 +41,7 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Finish large-volume native/regression acceptance and wider geometry coverage; retain the Linux delayed-allocation maximum-offset exception | Open; BIGALLOC and large logical files pass the 466-test regression; high physical addresses pass three focused profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
+| Format compatibility | Finish large-volume regression acceptance and wider geometry coverage; retain the Linux delayed-allocation maximum-offset exception | Open; BIGALLOC and large logical files pass the 466-test regression; high physical addresses pass three focused/native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | Fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; v1 and async compatibility pass focused faults, independent replay, eight Linux roundtrips and their combined full regression |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
@@ -84,8 +84,29 @@ reclamation, and core/oracle recovery of both uncommitted and committed journals
 All 258 commands and 21 strict nonrepairing fsck checks pass. Exact mappings, data
 and zero padding, inode/cluster charges, free totals, unchanged seeds and replay
 idempotence agree. This is selected large-volume geometry evidence, not a sustained
-throughput result or coverage of every group layout. Native Linux and the expanded
-full regression remain pending for the journal-width change.
+throughput result or coverage of every group layout. The expanded full regression
+remains pending for the journal-width change.
+
+All three profiles also pass four native Linux boots each with ordinary ordered
+mounts and delayed allocation enabled. Linux reads and overwrites high-address
+core data, creates a file and leaves an open-unlinked inode. Core recovery agrees
+exactly with native Linux recovery, including orphan reclamation. The core then
+shrinks and regrows the Linux-authored file and releases its own held file; Linux
+verifies the returned state. A separate boot directly replays the core's committed
+high-address journal. All 282 recorded commands and 18 strict nonrepairing fsck
+checks return zero, covering 12 Linux transactions and three orphans.
+
+Linux may place a new file's data and xattr in lower groups despite its high inode
+number. The native checker permits that allocator policy while retaining exact
+bytes, mappings, charges, high inode-table locations and the existing high-address
+data/extent-node/xattr checks. The first native attempt stopped after its mutation
+boot because frozen binaries had lost executable permissions; the next exposed
+the overly restrictive placement expectation after successful core recovery and
+fsck. Those harness corrections did not change the core.
+
+Native evidence is `lab/artifacts/ext4-journal/large-volume-native-retry2/report.json`
+and main review is `artifacts/checks/large-volume-linux-accepted.json`. This adds
+selected large-volume interoperability, not sustained-load or adapter acceptance.
 
 Reports: `artifacts/large-volume-fixtures-high/report.json`,
 `artifacts/large-volume-independent/report.json` and
