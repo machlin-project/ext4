@@ -57,6 +57,9 @@ if paths['space_fixtures'] != ''
       test('preallocation-full-space-' + profile, programs['file-range'],
         args: ['--capacity-full', paths['space_fixtures'] / ('space-' + profile + '.img')],
         timeout: 300, suite: 'namespace')
+      test('preallocation-keep-size-' + profile, programs['file-range'],
+        args: ['--capacity-keep', paths['space_fixtures'] / ('space-' + profile + '.img')],
+        timeout: 300, suite: 'namespace')
     endif
   endforeach
 endif
@@ -68,8 +71,14 @@ if paths['space_fixtures'] != ''
     args: ['--capacity-faults', paths['space_fixtures'] / 'space-1k.img'], timeout: 600, suite: 'namespace')
   test('preallocation-full-space-tree', programs['file-range'],
     args: ['--capacity-tree', paths['space_fixtures'] / 'space-1k.img'], timeout: 300, suite: 'namespace')
-  test('preallocation-keep-size-exhaustion', programs['file-range'],
-    args: ['--capacity-keep', paths['space_fixtures'] / 'space-1k.img'], timeout: 300, suite: 'namespace')
+  test('preallocation-keep-size-large', programs['file-range'],
+    args: ['--capacity-keep-large', paths['space_fixtures'] / 'space-1k.img'], timeout: 300, suite: 'namespace')
+  test('preallocation-keep-size-tree', programs['file-range'],
+    args: ['--capacity-keep-tree', paths['space_fixtures'] / 'space-1k.img'], timeout: 300, suite: 'namespace')
+  test('preallocation-keep-size-faults', programs['file-range'],
+    args: ['--capacity-keep-faults', paths['space_fixtures'] / 'space-1k.img'], timeout: 600, suite: 'namespace')
+  test('preallocation-keep-size-prefix', programs['file-range'],
+    args: ['--capacity-keep-prefix', paths['space_fixtures'] / 'space-1k.img'], timeout: 300, suite: 'namespace')
 endif
 
 test('directory-hash', programs['directory-hash'], suite: 'indexed')

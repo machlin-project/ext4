@@ -177,18 +177,23 @@ on allocation or credit exhaustion. Attributes accompany each checkpoint, while
 the xattr batch applies only to the first successful prefix. Uncertain commits
 poison the owner. The exclusive owner and orphan holds remain in force throughout.
 If conversion of an existing unwritten extent cannot allocate a mapping node,
-`ext4_write_partial` first requires that the extent contain no whole blocks beyond
-the current EOF, then validates its complete ownership map and admitted attributes,
-then zeros the entire backing extent in bounded transactions. Only the final
-zeroing transaction initializes the existing record; it needs no new mapping
-space. The following data transaction publishes the requested bytes and attributes.
+`ext4_write_partial` validates its complete ownership map and admitted attributes,
+then zeros the entire backing extent in bounded transactions. For a range inside
+current EOF, the final zeroing transaction initializes the existing record without
+new mapping space. For growth reaching the extent's last block, all preparation
+keeps the range unwritten; the subsequent transaction initializes the record and
+publishes data, new EOF and attributes together. A retry stops at this prepared
+extent so a later allocation failure cannot discard that checkpoint's conversion.
+Recovery never exposes initialized
+whole blocks beyond the committed size.
+
 Interrupted preparation preserves visible zeros, EOF, attributes and allocation
-counts. Recovery may retain an initialized zero extent even with no reported data
-prefix. The atomic write API retains its unchanged-media rejection on exhaustion.
-KEEP_SIZE reservations extending beyond EOF still require mapping space when a
-partial write splits the extent. The fallback rejects that boundary before writes;
-publishing initialized blocks wholly beyond EOF would produce an invalid inode.
-Reserving sufficient metadata for this future-growth contract remains open.
+counts. Inside current EOF, recovery may retain an initialized zero extent even
+with no reported data prefix. Growth preparation may retain only hidden zeroing
+until the data/EOF transaction commits. The atomic write API retains its
+unchanged-media rejection on exhaustion. Growth ending before the extent's last
+block still needs a split and rejects without writes when no mapping space remains.
+Reserving sufficient metadata for that future-growth contract remains open.
 
 `ext4_truncate_atomic` performs the size, tail-zeroing, data/mapping removal, bitmap,
 group/superblock accounting and admitted attribute transition in one journal

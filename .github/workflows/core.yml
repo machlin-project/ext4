@@ -551,6 +551,41 @@ jobs:
               2>&1 | tee "artifacts/checks/preallocation-capacity-$mode-independent.log"
             find "$exports" "$checked" -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           done
+      - name: Independently verify KEEP_SIZE growth on full filesystems
+        if: matrix.suite == 'namespace'
+        run: |
+          for mode in full large tree fault; do
+            exports="artifacts/preallocation-growth-$mode-exports"
+            checked="artifacts/preallocation-growth-$mode-independent"
+            mkdir "$exports"
+            profiles=(1k)
+            options=()
+            case "$mode" in
+              full)
+                flag=--capacity-keep
+                profiles=(1k 4k inode128)
+                options=(--full)
+                ;;
+              large) flag=--capacity-keep-large ;;
+              tree)
+                flag=--capacity-keep-tree
+                options=(--full --external)
+                ;;
+              fault)
+                flag=--capacity-keep-faults
+                profiles=(1k inode128)
+                options=(--faults --recover .build/ext4-recover)
+                ;;
+            esac
+            for profile in "${profiles[@]}"; do
+              .build/ext4-file-range-test "$flag" --export "$exports" \
+                "artifacts/space-fixtures/space-$profile.img"
+            done 2>&1 | tee "artifacts/checks/preallocation-growth-$mode-exports.log"
+            python3 tests/check_range_capacity.py --keep-size "${options[@]}" \
+              --fixtures artifacts/space-fixtures --exports "$exports" --output "$checked" \
+              2>&1 | tee "artifacts/checks/preallocation-growth-$mode-independent.log"
+            find "$exports" "$checked" -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+          done
       - name: Independently verify unlink and rmdir transactions
         if: matrix.suite == 'removal'
         run: |

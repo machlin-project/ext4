@@ -390,9 +390,17 @@ transactions, and `--capacity-tree` fills an external extent leaf. Each accepts
 for small roots, or `--full --external` for external leaves. `--tools-root` selects
 e2fsprogs as above. `ext4-file-range-test --capacity-faults` injects resource and
 storage failures across preparation and the final data commit, including deliberately
-nonzero inaccessible backing. `--capacity-keep` verifies unchanged-media rejection
-of KEEP_SIZE growth when a split needs unavailable metadata space. No new capacity
-fixtures need to be generated. Linux capacity checks change a byte while free blocks
+nonzero inaccessible backing. KEEP_SIZE variants `--capacity-keep`,
+`--capacity-keep-large` and `--capacity-keep-tree` test growth reaching the extent's
+last block; add `--keep-size` to the independent checker with the corresponding
+geometry options above. They also retain unchanged-media rejection when growth
+ends earlier and still needs a split. `--capacity-keep-faults` covers interrupted
+preparation/data/EOF transitions; its `--export DIRECTORY` mode emits before/after
+and two journal cuts. Check those using `--keep-size --faults --recover
+.build/ext4-recover`, then use its checked after records with the Linux harness's
+`--pending` mode. `--capacity-keep-prefix` checks durable progress followed by a
+hole that cannot be allocated. No new capacity fixtures need to be generated.
+Linux capacity checks change a byte while free blocks
 remain zero and require that exact change after independent and core journal replay;
 a same-byte write cannot establish that the write survived.
 

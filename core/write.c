@@ -278,6 +278,7 @@ struct ext4_write_target {
  * No position or validation result survives the public call. */
 struct ext4_growth {
 	uint64_t zeroed;
+	struct ext4_unwritten_extent deferred;
 	uint32_t allocation_logical;
 	bool capacity_failed;
 	bool zeroing;
@@ -618,8 +619,8 @@ ext4_write_validate(struct ext4_fs *fs, uint64_t offset, const void *buffer, siz
 
 static enum ext4_result
 ext4_unwritten_zero(struct ext4_fs *fs, uint32_t number, uint32_t generation,
-    const struct ext4_unwritten_extent *range, uint32_t position, uint32_t budget, uint32_t *next,
-    bool *capacity_failed)
+    const struct ext4_unwritten_extent *range, uint32_t position, uint32_t budget, bool initialize,
+    uint32_t *next, bool *capacity_failed)
 {
 	struct ext4_transaction *transaction;
 	struct ext4_inode_disk *disk;
@@ -658,7 +659,7 @@ ext4_unwritten_zero(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 			ext4_zero(buffer, fs->info.block_size);
 		}
 	}
-	if (error == EXT4_OK && end == range->length) {
+	if (error == EXT4_OK && initialize && end == range->length) {
 		error = ext4_write_map_initialize(&allocation, &inode, disk, range);
 		if (error == EXT4_OK) {
 			ext4_inode_checksum_set(fs, number, disk);
@@ -672,8 +673,8 @@ ext4_unwritten_zero(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 		ext4_transaction_cancel(transaction);
 		return error;
 	}
-	/* No mapping, allocation, size or attribute changes precede the last zeroed
-	 * block. Publishing a fully zeroed extent needs no additional disk space. */
+	/* A range crossing EOF stays unwritten even after its final zeroing commit.
+	 * Only the subsequent data/size transaction can publish that conversion. */
 	error = ext4_edit_commit(fs, transaction);
 	if (error == EXT4_OK) {
 		*next = end;
@@ -683,17 +684,20 @@ ext4_unwritten_zero(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 
 static enum ext4_result
 ext4_unwritten_prepare(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint32_t logical,
-    uint64_t end, const struct ext4_inode_update *update, bool *prepared)
+    uint64_t end, const struct ext4_inode_update *update, struct ext4_unwritten_extent *deferred,
+    bool *prepared)
 {
 	struct ext4_transaction *transaction;
 	struct ext4_inode_disk *disk;
 	struct ext4_inode inode;
 	struct ext4_allocation allocation;
 	struct ext4_unwritten_extent range;
+	uint64_t last;
 	uint32_t position = 0;
 	uint32_t budget = EXT4_ORPHAN_BATCH_BLOCKS;
 	bool allocation_ready = false;
 	bool capacity_failed;
+	bool initialize;
 	enum ext4_result error;
 
 	*prepared = false;
@@ -717,10 +721,11 @@ ext4_unwritten_prepare(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	if (error != EXT4_OK || range.length == 0) {
 		return error;
 	}
-	/* Initialized blocks wholly beyond EOF are not a valid ext4 representation.
-	 * KEEP_SIZE reservations crossing that boundary still require mapping space;
-	 * do not publish an invalid intermediate inode while preparing a write. */
-	if (((uint64_t)range.logical + range.length - 1U) * fs->info.block_size >= inode.size) {
+	last = (uint64_t)range.logical + range.length - 1U;
+	initialize = last * fs->info.block_size < inode.size;
+	/* Growth may initialize the whole extent only when this data transaction
+	 * reaches its last block. A shorter request would still need a split. */
+	if (!initialize && last * fs->info.block_size >= end) {
 		return EXT4_OK;
 	}
 	/* Validate all physical ownership and the admitted attribute transition
@@ -731,8 +736,8 @@ ext4_unwritten_prepare(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 		return error;
 	}
 	while (position < range.length) {
-		error = ext4_unwritten_zero(
-		    fs, number, generation, &range, position, budget, &position, &capacity_failed);
+		error = ext4_unwritten_zero(fs, number, generation, &range, position, budget,
+		    initialize, &position, &capacity_failed);
 		if (error == EXT4_RANGE && capacity_failed && !fs->aborted && budget > 1) {
 			budget /= 2;
 			continue;
@@ -740,6 +745,9 @@ ext4_unwritten_prepare(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 		if (error != EXT4_OK) {
 			return error;
 		}
+	}
+	if (!initialize) {
+		*deferred = range;
 	}
 	*prepared = true;
 	return EXT4_OK;
@@ -857,6 +865,18 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 		if (growth != NULL) {
 			growth->zeroing = target_count != 0;
 		}
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
+	}
+	if (growth != NULL && growth->deferred.length != 0 &&
+	    ((uint64_t)growth->deferred.logical + growth->deferred.length - 1U) *
+		    fs->info.block_size <
+		(offset + length > inode.size ? offset + length : inode.size)) {
+		/* Zeroing was durable while the map still returned zeros. Initialize the
+		 * unchanged extent privately, after gap handling and before copying data;
+		 * its new EOF and admitted attributes must commit in this transaction. */
+		error = ext4_write_map_initialize(&allocation, &inode, disk, &growth->deferred);
 		if (error != EXT4_OK) {
 			goto cancel;
 		}
@@ -984,6 +1004,7 @@ ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation, uin
 		    (const uint8_t *)buffer + *completed, chunk, &remaining, &written, &growth);
 		if (error == EXT4_OK) {
 			*completed += written;
+			growth.deferred.length = 0;
 			/* The first durable data prefix owns the admitted attribute change.
 			 * Later transactions preserve that result, including non-idempotent
 			 * CREATE/REMOVE operations and security attribute removal. */
@@ -1005,11 +1026,19 @@ ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation, uin
 		}
 		if (error == EXT4_NO_SPACE && growth.mapping_no_space) {
 			error = ext4_unwritten_prepare(fs, number, generation,
-			    growth.allocation_logical, offset + length, &remaining, &prepared);
+			    growth.allocation_logical, offset + *completed + chunk, &remaining,
+			    &growth.deferred, &prepared);
 			if (error != EXT4_OK) {
 				return error;
 			}
 			if (prepared) {
+				if (growth.deferred.length != 0) {
+					/* Stop at the prepared extent so a later allocation
+					 * shortage cannot discard this checkpoint's conversion. */
+					blocks = growth.deferred.logical + growth.deferred.length -
+					    (uint32_t)((offset + *completed) / fs->info.block_size);
+					limit = (size_t)blocks * fs->info.block_size;
+				}
 				continue;
 			}
 			error = EXT4_NO_SPACE;

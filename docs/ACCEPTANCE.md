@@ -126,7 +126,7 @@ and independent replay agree. All ten nonrepairing checks and five journal-only
 replays return zero, and the portable reader verifies all five returned images.
 Reports are in `artifacts/checks/file-range-linux-summary.json` and the lab's
 `artifacts/ext4-journal/linux-reference/file-range-{pending,functional}-linux/`.
-The expanded full CI regression is pending. This accepts bounded range behavior;
+The combined 361-test CI regression passes. This accepts bounded range behavior;
 the future-write space guarantee under exhaustion remains open above.
 
 ## Preallocated writes without free mapping space
@@ -147,11 +147,11 @@ states pass exact byte, physical-map, inode and allocation comparison plus
 nonrepairing e2fsck. Evidence is in `artifacts/checks/preallocation-capacity-*-summary.json`
 and `artifacts/preallocation-capacity-{full,large,tree}-independent*/report.json`.
 
-Initialization refuses extents containing whole blocks beyond current EOF.
-A dedicated KEEP_SIZE exhaustion test proves rejection before device writes,
-with no reported data prefix or aborted owner; its exported image also passes
-nonrepairing e2fsck. The future-growth metadata reservation contract remains open.
-The combined 361-test CI regression is pending.
+The combined 361-test CI regression passes all six jobs with exact inventory
+coverage and no skipped tests. The independent steps also pass; ten previously
+documented reader-only shared-value e2fsck exit-4 cases remain explicit exceptions,
+not accepted writable images. Evidence is in
+`artifacts/checks/preallocation-ci-36358407253/summary.json`.
 
 Three Linux roundtrips of core-converted full-disk images pass: full inode root,
 multi-transaction extent and full external leaf. Linux changes a byte before any
@@ -166,6 +166,38 @@ write could not detect a lost write, so that report is not accepted. The harness
 now changes the byte, compares exact post-replay contents and rejects those kernel
 diagnostics. The initial evidence remains in
 `artifacts/checks/preallocation-capacity-linux-summary.json`.
+
+## KEEP_SIZE growth without free mapping space
+
+A write reaching the last block of a reserved extent can zero its backing in
+bounded transactions, retain the unwritten mapping through preparation, then
+commit initialization, bytes, EOF and attributes together. It requires no new
+block or relocation. Growth ending earlier in the extent still requires splitting
+space and rejects unchanged when exhausted; that metadata guarantee remains open.
+
+Eleven focused cases pass: seven full-root profiles, a large extent, a full external
+leaf, interrupted growth and a durable prefix preceding an unallocated hole.
+Six existing range, full-space and flag controls also
+pass. The new fault matrix covers 128 allocation failures, 115 read failures and
+1,116 write/flush cuts: 1,114 recover complete allowed states, and two torn primary
+superblocks reject explicitly. EOF remains zero throughout preparation, even with
+deliberately nonzero backing, and appears with the committed byte and timestamps.
+Sanitized and freestanding builds pass. Evidence is under
+`artifacts/checks/preallocation-growth-development-evidence/`.
+Twenty-two independent states pass across small roots, large extents, external
+leaves and committed/uncommitted journals. Exact bytes, physical mappings,
+allocation counts, inode attributes and neighboring objects agree; 22 nonrepairing
+e2fsck checks and four journal-only oracle replays return zero. Both recovery
+engines preserve old EOF for uncommitted data and publish new EOF only with its
+byte; repeated core recovery changes nothing. Evidence is in
+`artifacts/checks/preallocation-growth-independent-summary.json`.
+Six Linux roundtrips pass, including pending data/EOF journals on checksummed and
+128-byte-inode profiles. Linux reads the grown data, changes a distinct byte while
+the disk remains full, then authors new ranges and a reverse journal. Core and
+oracle replay agree on retained bytes, metadata and allocation; twelve nonrepairing
+checks, six journal-only replays and six portable reads pass. No guest warnings
+occur. Evidence is in `artifacts/checks/preallocation-growth-linux-summary.json`.
+The expanded 383-test full regression is pending.
 
 ## Legacy group checksum evidence
 
@@ -365,7 +397,8 @@ expectation in the independent full-space mkdir checker. The corrected checker
 accepts only the bounded one-block linear-to-indexed transition; exact identity,
 names, bytes, counters and e2fsck remain required. All eight profiles and 32 states
 pass locally, with forty successful nonrepairing checks. Evidence is in
-`artifacts/checks/space-autoindex-summary.json`; full CI acceptance remains pending.
+`artifacts/checks/space-autoindex-summary.json`; the combined 361-test CI regression
+now passes with both independent checker corrections.
 
 ## Meson build acceptance
 

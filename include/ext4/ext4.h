@@ -321,9 +321,11 @@ enum ext4_result ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t genera
  * writes. Zero length follows ext4_write. Written preallocation in an EOF gap
  * can be zeroed in preparatory transactions without changing size or attributes.
  * If unwritten conversion needs unavailable mapping space, the complete existing
- * extent, without whole blocks beyond EOF, can first be zeroed and initialized
- * without allocation. Visible bytes, size and attributes remain unchanged until
- * the data transaction commits.
+ * extent can first be zeroed without allocation. Inside current EOF it can also
+ * be initialized during preparation. Growth reaching its last block keeps the
+ * extent unwritten until initialization, data, EOF and attributes commit together.
+ * Growth ending earlier still needs splitting space. Visible bytes, size and
+ * attributes remain unchanged until the data transaction commits.
  * An error may retain either preparation even when completed is zero. */
 enum ext4_result ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint64_t offset, const void *buffer, size_t length, const struct ext4_inode_update *update,
