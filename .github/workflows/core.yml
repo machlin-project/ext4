@@ -173,6 +173,11 @@ jobs:
             --output artifacts/casefold-vectors 2>&1 | tee artifacts/checks/casefold-vectors.log
           python3 tests/generate_casefold_fixtures.py --tools-root vendor/e2fsprogs/build \
             --output artifacts/casefold-fixtures 2>&1 | tee artifacts/checks/casefold-fixtures.log
+      - name: Generate quota-tracking images
+        if: matrix.suite == 'format' || matrix.suite == 'sustained'
+        run: |
+          python3 tests/generate_quota_fixtures.py --tools-root vendor/e2fsprogs/build \
+            --output artifacts/quota-fixtures 2>&1 | tee artifacts/checks/quota-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
@@ -200,7 +205,11 @@ jobs:
             format_options=(-Dmmp_fixtures="$PWD/artifacts/mmp-fixtures" \
               -Dverity_fixtures="$PWD/artifacts/verity-fixtures" \
               -Dcasefold_vectors="$PWD/artifacts/casefold-vectors/vectors.txt" \
-              -Dcasefold_fixtures="$PWD/artifacts/casefold-fixtures")
+              -Dcasefold_fixtures="$PWD/artifacts/casefold-fixtures" \
+              -Dquota_fixtures="$PWD/artifacts/quota-fixtures")
+          fi
+          if [[ '${{ matrix.suite }}' == sustained ]]; then
+            format_options=(-Dquota_fixtures="$PWD/artifacts/quota-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == core ]]; then
             group_options=(-Dgroup_checksum_fixtures="$PWD/artifacts/group-checksum-fixtures" \
@@ -1010,6 +1019,12 @@ jobs:
             exports+=(--exports "$directory")
             seed=$((seed + 1))
           done
+          directory=artifacts/sustained-exports/quota-1k-ea-inode
+          mkdir -p "$directory"
+          .build/ext4-sustained-test artifacts/quota-fixtures/quota-1k-ea-inode.img "$seed" 1500 \
+            --export "$directory" 2>&1 | tee artifacts/checks/sustained-export-quota-1k-ea-inode.log
+          exports+=(--exports "$directory")
+          seed=$((seed + 1))
           directory=artifacts/sustained-exports/ext4-4k-wide
           mkdir -p "$directory"
           .build/ext4-sustained-test artifacts/fixtures/ext4-4k.img "$seed" 3000 --objects 1000 \
@@ -1066,6 +1081,23 @@ jobs:
             --output artifacts/casefold-independent 2>&1 | tee artifacts/checks/casefold-independent.log
           find artifacts/casefold-exports artifacts/casefold-independent artifacts/casefold-vectors \
             -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Independently verify quota usage after writable changes
+        if: matrix.suite == 'format'
+        run: |
+          exports=()
+          for profile in 4k 1k-ea-inode bigalloc; do
+            directory="artifacts/quota-exports/$profile"
+            mkdir -p "$directory"
+            .build/ext4-quota-test "artifacts/quota-fixtures/quota-$profile.img" "$directory" \
+              2>&1 | tee "artifacts/checks/quota-export-$profile.log"
+            .build/ext4-quota-test --faults "artifacts/quota-fixtures/quota-$profile.img" \
+              "$directory" 2>&1 | tee "artifacts/checks/quota-fault-export-$profile.log"
+            exports+=(--exports "$directory")
+          done
+          python3 tests/check_quota.py --tools-root vendor/e2fsprogs/build "${exports[@]}" \
+            --output artifacts/quota-independent 2>&1 | tee artifacts/checks/quota-independent.log
+          find artifacts/quota-exports artifacts/quota-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Remove fixture-host symlinks before artifact discovery
         if: always()
         run: |

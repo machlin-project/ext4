@@ -94,12 +94,15 @@
 #define EXT4_FEATURE_RO_METADATA_CSUM 0x0400U
 #define EXT4_FEATURE_RO_VERITY 0x8000U
 #define EXT4_FEATURE_RO_ORPHAN_PRESENT 0x10000U
+#define EXT4_FEATURE_RO_QUOTA 0x0100U
+#define EXT4_FEATURE_RO_PROJECT 0x2000U
 #define EXT4_GROUP_CHECKSUM_FEATURES (EXT4_FEATURE_RO_GDT_CSUM | EXT4_FEATURE_RO_METADATA_CSUM)
 #define EXT4_WRITABLE_RO_COMPAT                                                                    \
 	(EXT4_FEATURE_RO_SPARSE_SUPER | EXT4_FEATURE_RO_LARGE_FILE | EXT4_FEATURE_RO_HUGE_FILE |   \
 	    EXT4_FEATURE_RO_DIR_NLINK | EXT4_FEATURE_RO_EXTRA_ISIZE |                              \
 	    EXT4_GROUP_CHECKSUM_FEATURES | EXT4_FEATURE_RO_ORPHAN_PRESENT |                        \
-	    EXT4_FEATURE_RO_BIGALLOC | EXT4_FEATURE_RO_VERITY)
+	    EXT4_FEATURE_RO_BIGALLOC | EXT4_FEATURE_RO_VERITY | EXT4_FEATURE_RO_QUOTA |            \
+	    EXT4_FEATURE_RO_PROJECT)
 #define EXT4_INODE_HUGE_FILE 0x00040000U
 #define EXT4_INODE_INDEX 0x00001000U
 #define EXT4_INODE_EXTENTS 0x00080000U
@@ -160,6 +163,61 @@ struct ext4_xattr_entry_disk {
 	struct ext4_le32 value_size;
 	struct ext4_le32 hash;
 };
+
+/* Quota files use the Linux v2 (vfsv1) tree format in 1 KiB blocks: block 0 holds
+ * the header and information, block 1 the tree root. Four index levels select one
+ * byte of the ID each; leaves hold 64-bit usage and limit entries. */
+#define EXT4_USER_QUOTA_INODE 3U
+#define EXT4_GROUP_QUOTA_INODE 4U
+#define EXT4_QUOTA_BLOCK_SIZE 1024U
+#define EXT4_QUOTA_BLOCK_BITS 10U
+#define EXT4_QUOTA_TREE_ROOT 1U
+#define EXT4_QUOTA_TREE_DEPTH 4U
+#define EXT4_QUOTA_TREE_FANOUT 256U
+#define EXT4_QUOTA_ID_BITS_PER_LEVEL 8U
+#define EXT4_QUOTA_VERSION 1U
+#define EXT4_QUOTA_USER_MAGIC 0xd9c01f11U
+#define EXT4_QUOTA_GROUP_MAGIC 0xd9c01927U
+#define EXT4_QUOTA_PROJECT_MAGIC 0xd9c03f14U
+/* An entry whose bytes are all zero is free; a used all-zero entry marks itself
+ * with this inode grace time, as Linux and e2fsprogs do. */
+#define EXT4_QUOTA_EMPTY_MARKER 1U
+
+struct ext4_quota_header_disk {
+	struct ext4_le32 magic;
+	struct ext4_le32 version;
+	struct ext4_le32 block_grace;
+	struct ext4_le32 inode_grace;
+	struct ext4_le32 flags;
+	struct ext4_le32 blocks;
+	struct ext4_le32 free_block;
+	struct ext4_le32 free_entry;
+};
+
+struct ext4_quota_leaf_disk {
+	struct ext4_le32 next_free;
+	struct ext4_le32 previous_free;
+	struct ext4_le16 entries;
+	struct ext4_le16 reserved16;
+	struct ext4_le32 reserved32;
+};
+
+struct ext4_quota_entry_disk {
+	struct ext4_le32 id;
+	struct ext4_le32 padding;
+	struct ext4_le32 inode_hard[2];
+	struct ext4_le32 inode_soft[2];
+	struct ext4_le32 inodes[2];
+	struct ext4_le32 space_hard[2];
+	struct ext4_le32 space_soft[2];
+	struct ext4_le32 space[2];
+	struct ext4_le32 space_time[2];
+	struct ext4_le32 inode_time[2];
+};
+
+#define EXT4_QUOTA_LEAF_ENTRIES                                                                    \
+	((EXT4_QUOTA_BLOCK_SIZE - sizeof(struct ext4_quota_leaf_disk)) /                           \
+	    sizeof(struct ext4_quota_entry_disk))
 
 struct ext4_orphan_tail_disk {
 	struct ext4_le32 magic;
@@ -454,6 +512,9 @@ _Static_assert(sizeof(struct ext4_block_number_disk) == 8, "block number wire si
 _Static_assert(sizeof(struct ext4_xattr_header_disk) == 32, "xattr block header wire size");
 _Static_assert(sizeof(struct ext4_xattr_entry_disk) == 16, "xattr entry wire size");
 _Static_assert(sizeof(struct ext4_mmp_disk) == 1024, "MMP block wire size");
+_Static_assert(sizeof(struct ext4_quota_header_disk) == 32, "quota header wire size");
+_Static_assert(sizeof(struct ext4_quota_leaf_disk) == 16, "quota leaf header wire size");
+_Static_assert(sizeof(struct ext4_quota_entry_disk) == 72, "quota entry wire size");
 _Static_assert(offsetof(struct ext4_mmp_disk, checksum) == 0x3fc, "MMP checksum position");
 
 #endif

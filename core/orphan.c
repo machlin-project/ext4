@@ -729,7 +729,6 @@ ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool re
 	struct ext4_inode previous_inode;
 	void *buffer = NULL;
 	uint64_t offset;
-	uint64_t free_blocks;
 	uint32_t next = 0;
 	uint32_t first;
 	bool ready = false;
@@ -837,14 +836,12 @@ ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool re
 		goto cancel;
 	}
 	ext4_inode_checksum_set(fs, number, disk);
-	free_blocks = allocation.free_blocks;
 	ext4_allocation_destroy(&allocation);
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
 		fs->aborted = true;
 		return error;
 	}
-	fs->info.free_blocks = free_blocks;
 	report->orphan_transactions++;
 	if (done && !retained) {
 		if (previous == 0) {

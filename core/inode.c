@@ -107,6 +107,11 @@ ext4_inode_decode_record(
 	decoded.links = ext4_le16(&disk->links);
 	decoded.uid = ext4_le16(&disk->uid_lo) | ((uint32_t)ext4_le16(&disk->uid_hi) << 16);
 	decoded.gid = ext4_le16(&disk->gid_lo) | ((uint32_t)ext4_le16(&disk->gid_hi) << 16);
+	/* Like Linux and e2fsck, a record too short for i_projid is in project zero. */
+	if ((fs->info.feature_ro_compat & EXT4_FEATURE_RO_PROJECT) &&
+	    EXT4_INODE_HAS_FIELD(extra_size, project_id)) {
+		decoded.project = ext4_le32(&disk->project_id);
+	}
 	decoded.flags = ext4_le32(&disk->flags);
 	decoded.size = ext4_le32(&disk->size_lo) | ((uint64_t)ext4_le32(&disk->size_hi) << 32);
 	decoded.blocks_512 = ext4_le32(&disk->blocks_lo);

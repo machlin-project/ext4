@@ -241,6 +241,46 @@ requires strict fsck, which recomputes every casefolded hash in the index, and c
 the stored names, removals and inherited and enabled flags with debugfs. The Linux reference
 kernel lacks `CONFIG_UNICODE`, so no Linux mount check exists for these images.
 
+## Quota tests
+
+`tests/generate_quota_fixtures.py --tools-root E2FSPROGS_BUILD --output NEW` makes a 4 KiB
+volume with user, group and project quotas, a 1 KiB one that also has EA_INODE, and
+a 4 KiB BIGALLOC volume with 16 KiB clusters and user and group quotas. debugfs writes
+files for three owners, groups and projects; `e2fsck -fy` computes the quota files and
+strict fsck must then pass. Configure `-Dquota_fixtures=NEW` to add three
+`ext4-quota-test` scenarios and three `--faults` cases to the `format` suite and three
+4,000-operation profiles to the `sustained` suite.
+
+The scenario creates files for 40 new owners and three IDs whose index paths diverge
+at every level, then changes ownership, truncates, adds an external attribute block
+and, with EA_INODE, a value inode, removes a held file and replaces another by rename,
+creates a directory and a symlink and removes a distant owner's only file. On PROJECT
+volumes it moves a file to another project and checks PROJINHERIT inheritance and
+cross-project link and rename refusal. An unlinked file held at unmount must stay
+charged until offline recovery reclaims it. A reader in the test walks the quota
+trees through ordinary reads and compares each changed ID with the charged inodes.
+`--faults` fails every allocation and read and cuts power at every event, with torn
+and partially surviving writes, while creating a directory for new IDs and while
+moving a file to a new owner; recovery must reach the unchanged or the committed image.
+An export directory receives the scenario image and both committed fault images;
+`tests/check_quota.py --tools-root E2FSPROGS_BUILD --exports DIRECTORY --output NEW`
+requires strict fsck, which recomputes all usage and fails on any difference, and
+checks the moved, released and new IDs with debugfs.
+
+`tests/run_linux_quota.py` runs from the lab with `--lab`, `--prepared`, `--runner`,
+`--modloop`, `--core-test` (an `ext4-quota-test` from the core under test), one
+`--exports` directory per scenario export and a fresh `--output`. The pinned kernel
+builds the quota tree and v2 format as modules, so the runner extracts `quota_tree.ko`
+and `quota_v2.ko` with `tests/squashfs_extract.py` from the Alpine 3.22.5 netboot
+`modloop-virt` whose kernel and initramfs match the pinned inputs; the runner checks
+the modloop digest. For each export Linux reports every used ID through quotactl,
+which must equal the e2fsprogs reading. Linux then removes ten owners' files, moves a
+file to a distant owner and back, creates files for five new owners and changes a
+project; strict fsck and the e2fsprogs reading must agree with Linux, and a quota
+file must record a freed block or entry. `ext4-quota-test --continue IMAGE EXPORT`
+adds 30 owners that reuse those freed entries, restores the distant ID, removes a
+Linux-created file and changes a project; strict fsck and Linux must then agree again.
+
 ## Metadata fuzzing
 
 `-Dfuzzer=true` builds `ext4-image-fuzzer` using Clang's libFuzzer runtime,

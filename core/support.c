@@ -509,6 +509,8 @@ ext4_result_string(enum ext4_result result)
 		return "device is in use by another host";
 	case EXT4_ENCRYPTED:
 		return "encrypted object requires an unavailable key";
+	case EXT4_CROSS_PROJECT:
+		return "destination directory inherits a different project";
 	case EXT4_PERMISSION_DENIED:
 		return "inode policy forbids this operation";
 	}

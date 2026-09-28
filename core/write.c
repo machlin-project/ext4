@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "allocate.h"
-#include "xattr.h"
 #include "inline.h"
+#include "quota.h"
+#include "xattr.h"
 
 #define EXT4_ATTRIBUTE_FIELDS                                                                      \
 	((uint32_t)(EXT4_ATTR_PERMISSIONS | EXT4_ATTR_UID | EXT4_ATTR_GID |                        \
@@ -48,6 +49,9 @@ ext4_mount_writable_with_journal(const struct ext4_environment *environment,
 	}
 	if (error == EXT4_OK) {
 		error = ext4_system_ranges_build(fs);
+	}
+	if (error == EXT4_OK) {
+		error = ext4_quota_open(fs);
 	}
 	if (error != EXT4_OK) {
 		ext4_unmount(fs);
@@ -133,7 +137,8 @@ ext4_edit_inode_record(struct ext4_fs *fs, struct ext4_transaction *transaction,
 		return EXT4_INVALID_ARGUMENT;
 	}
 	if ((number < fs->first_inode && number != EXT4_ROOT_INODE) ||
-	    number == fs->journal_inode || number == fs->orphan_file_inode) {
+	    number == fs->journal_inode || number == fs->orphan_file_inode ||
+	    ext4_quota_system_inode(fs, number)) {
 		return EXT4_UNSUPPORTED;
 	}
 	error = ext4_inode_allocated(fs, number);
@@ -206,7 +211,6 @@ ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	struct ext4_inode_disk *disk;
 	struct ext4_inode inode;
 	struct ext4_allocation allocation;
-	uint64_t free_blocks;
 	uint32_t feature_compat;
 	uint32_t credits;
 	bool allocation_ready = false;
@@ -219,7 +223,6 @@ ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	if (error != EXT4_OK) {
 		return error;
 	}
-	free_blocks = fs->info.free_blocks;
 	feature_compat = fs->info.feature_compat;
 	credits = update->fields & EXT4_ATTR_XATTRS ? ext4_journal_credits(fs->journal) : 1;
 	error = ext4_transaction_begin(fs->journal, credits, &transaction);
@@ -267,7 +270,6 @@ ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 		error = ext4_inode_decode_live(fs, number, disk, &inode);
 	}
 	if (allocation_ready) {
-		free_blocks = allocation.free_blocks;
 		if (allocation.super != NULL) {
 			feature_compat = ext4_le32(&allocation.super->feature_compat);
 		}
@@ -279,7 +281,6 @@ ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 		error = ext4_edit_commit(fs, transaction);
 	}
 	if (error == EXT4_OK) {
-		fs->info.free_blocks = free_blocks;
 		fs->info.feature_compat = feature_compat;
 		*result = inode;
 	}
@@ -888,7 +889,6 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 	uint64_t block_count;
 	uint64_t initialized;
 	uint64_t physical;
-	uint64_t free_blocks;
 	uint32_t feature_compat;
 	uint32_t credits;
 	uint32_t index;
@@ -1067,7 +1067,6 @@ attributes:
 		goto cancel;
 	}
 	ext4_inode_checksum_set(fs, number, disk);
-	free_blocks = allocation.free_blocks;
 	feature_compat = allocation.super == NULL ? fs->info.feature_compat
 						  : ext4_le32(&allocation.super->feature_compat);
 	ext4_allocation_destroy(&allocation);
@@ -1075,7 +1074,6 @@ attributes:
 	    fs->environment.context, targets, (size_t)credits * sizeof(*targets));
 	error = ext4_edit_commit(fs, transaction);
 	if (error == EXT4_OK) {
-		fs->info.free_blocks = free_blocks;
 		fs->info.feature_compat = feature_compat;
 		*completed = length;
 	}
@@ -1225,7 +1223,6 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 	struct ext4_allocation allocation;
 	struct ext4_write_target *targets = NULL;
 	uint64_t end;
-	uint64_t free_blocks;
 	uint32_t first;
 	uint32_t target_count = 0;
 	uint32_t credits;
@@ -1380,7 +1377,6 @@ attributes:
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
-	free_blocks = allocation.free_blocks;
 	feature_compat = allocation.super == NULL ? fs->info.feature_compat
 						  : ext4_le32(&allocation.super->feature_compat);
 	ext4_allocation_destroy(&allocation);
@@ -1390,7 +1386,6 @@ attributes:
 	}
 	error = ext4_edit_commit(fs, transaction);
 	if (error == EXT4_OK) {
-		fs->info.free_blocks = free_blocks;
 		fs->info.feature_compat = feature_compat;
 		if (!done && inode.links != 0) {
 			fs->last_orphan = number;
@@ -1493,7 +1488,6 @@ ext4_file_range_step(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 	uint64_t run_end;
 	uint64_t amount;
 	uint64_t size;
-	uint64_t free_blocks;
 	uint32_t feature_compat;
 	uint32_t logical;
 	uint32_t within;
@@ -1623,13 +1617,11 @@ ext4_file_range_step(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 		goto cancel;
 	}
 	ext4_inode_checksum_set(fs, number, disk);
-	free_blocks = allocation.free_blocks;
 	feature_compat = allocation.super == NULL ? fs->info.feature_compat
 						  : ext4_le32(&allocation.super->feature_compat);
 	ext4_allocation_destroy(&allocation);
 	error = ext4_edit_commit(fs, transaction);
 	if (error == EXT4_OK) {
-		fs->info.free_blocks = free_blocks;
 		fs->info.feature_compat = feature_compat;
 		*next = position;
 	}

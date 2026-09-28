@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "journal.h"
+#include "quota.h"
 #include "fast_commit.h"
 
 #define EXT4_RECOVERY_REVOKED 0x80000000U
@@ -774,6 +775,11 @@ ext4_recover_with_journal(const struct ext4_environment *environment,
 	error = ext4_recovery_apply(&replay, &completed);
 	if (error == EXT4_OK) {
 		error = ext4_recovery_validate_home(journal);
+	}
+	/* Replayed blocks already contain their quota changes. Like Linux orphan
+	 * cleanup, later recovery changes account usage. */
+	if (error == EXT4_OK) {
+		error = ext4_quota_open(fs);
 	}
 	if (error == EXT4_OK) {
 		if (fast != NULL && fast->count != 0) {

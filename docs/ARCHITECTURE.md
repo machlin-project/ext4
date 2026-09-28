@@ -609,15 +609,67 @@ entries `EXT4_NOT_EMPTY`. Encrypted casefolded
 directories store an extra hash in each name record; since every name operation in
 an encrypted directory returns `EXT4_ENCRYPTED`, the core never parses those records.
 
+## Quota and project accounting
+
+Volumes with the QUOTA read-only-compatible feature are writable when their user
+quota inode is 3 or absent, the group quota inode 4 or absent, and a project quota
+inode, if present, is an ordinary inode on a PROJECT volume. Each quota file must use
+the Linux v2 (vfsv1) format: a header block, a four-level index tree of 1 KiB blocks
+keyed by one ID byte per level, and leaves of 72-byte entries with 64-bit usage and
+limits. Quota files are system inodes: public operations on them return
+`EXT4_UNSUPPORTED`.
+
+Usage follows Linux and e2fsck exactly. Every in-use inode other than reserved,
+journal, orphan-file, quota and private attribute-value inodes charges its i_blocks
+in bytes, which already include attribute-value charges, and one inode plus one per
+attribute-value inode it references. An unlinked inode stays charged until final
+deletion clears its allocation bit. The charged IDs are the 32-bit user and group
+and, on PROJECT volumes, i_projid, or project zero when the record lacks the field.
+
+The core does not track charges operation by operation. At commit, before the
+superblock is sealed, it compares every inode-table block in the transaction with
+the committed block on the device, derives each changed record's charge before and
+after, and applies the per-ID differences to the quota files inside the same
+transaction. Every mutation path, including offline orphan cleanup and fast-commit
+conversion, therefore stays consistent with the records it commits, and a power cut
+keeps usage and inodes atomic. A slot whose generation changed is also checked
+against the previous allocation bitmap, so stale inode-table contents are never
+charged. Usage saturates at zero, as in Linux, instead of wrapping.
+
+A missing entry is inserted only for a positive charge. Insertion follows the Linux
+tree algorithm: index blocks and leaves come from the free-block list or extend the
+file, and entries fill the first leaf on the free-entry list. Growth allocates in a
+second allocation context of the same transaction, which may use the reserved pool
+as Linux quota writes do. That context continues from the transaction's superblock
+counters, whose checksum is validated when the superblock first joins the
+transaction; commit publishes free-block and free-inode counts from the committed
+superblock. Ordinary transactions carry 48 extra snapshot credits reserved for
+quota blocks, and `ext4_journal_credits` leaves room for that reserve. Entries
+whose usage returns to zero remain, as e2fsck accepts; a used entry that would be
+all zero carries the Linux inode-grace marker. Limits and grace times are
+preserved but not enforced: Linux enforces them only with quota mount options, and
+enforcement belongs to the adapter's policy. Linux's fast-commit replay runs before
+quotas are enabled and leaves usage to fsck; the core's conversion accounts it.
+
+`ext4_inode.project` exposes the project ID. New objects take the directory's
+project only when the directory has PROJINHERIT, and only directories inherit
+that flag, as in Linux. A link or rename into a PROJINHERIT directory of another
+project returns `EXT4_CROSS_PROJECT`, which adapters report as EXDEV.
+`ext4_set_project` changes the ID and ctime in one transaction, moving the usage;
+without the feature only project zero is accepted. Linux would first enlarge a
+record's extra space; the core returns `EXT4_UNSUPPORTED` for records too short
+for the field rather than moving in-inode attributes.
+
 ## Persistent inode flags
 
 `ext4_set_inode_flags` changes selected policy bits and captured ctime in one
 inode transaction. It preserves mapping flags, data, allocation and xattrs.
 The admitted bits are SYNC, IMMUTABLE, APPEND, NODUMP, NOATIME, JOURNAL_DATA,
-NOTAIL, DIRSYNC and TOPDIR. The last two require directories; symlinks and special
-inodes accept only NODUMP and NOATIME. CASEFOLD is also admitted under the rules of
-"Casefolded directories". Changing other flags while retaining an existing
-IMMUTABLE bit is rejected. The separate flag operation can clear protection.
+NOTAIL, DIRSYNC, TOPDIR and PROJINHERIT. The last three require directories;
+symlinks and special inodes accept only NODUMP and NOATIME. CASEFOLD is admitted
+under the rules of "Casefolded directories". Changing other flags while retaining
+an existing IMMUTABLE bit is rejected. The separate flag operation can clear
+protection.
 
 Mutation boundaries resolve the current flags under the exclusive owner.
 Immutable inodes reject data and attribute changes. Append-only regular files

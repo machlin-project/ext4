@@ -38,6 +38,16 @@ struct ext4_orphan_file {
 	uint32_t pending;
 };
 
+#define EXT4_QUOTA_TYPES 3U
+
+/* Consecutive inode tables: groups first_group through first_group + groups - 1
+ * each occupy the filesystem's inode_table_blocks, starting at block. */
+struct ext4_inode_table_run {
+	uint64_t block;
+	uint32_t first_group;
+	uint32_t groups;
+};
+
 struct ext4_inode_hold {
 	struct ext4_fs *fs;
 	struct ext4_inode_hold *next;
@@ -84,6 +94,13 @@ struct ext4_fs {
 	bool mmp_released;
 	/* The utf8-12.1 encoding rejects names that are not well-formed UTF-8. */
 	bool casefold_strict;
+	/* User, group and project quota inodes; zero when a type is not tracked.
+	 * Writable owners account usage while quota_active is set. */
+	uint32_t quota_inodes[EXT4_QUOTA_TYPES];
+	bool quota_active;
+	struct ext4_inode_table_run *inode_table_runs;
+	size_t inode_table_run_count;
+	uint32_t inode_table_blocks;
 	struct ext4_journal *journal;
 	struct ext4_orphan_file *orphan_file;
 	struct ext4_inode_hold *holds;

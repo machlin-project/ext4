@@ -83,3 +83,6 @@ option('casefold_vectors', type: 'string', value: '',
 
 option('casefold_fixtures', type: 'string', value: '',
   description: 'Path to e2fsprogs-authored casefolded directory images and manifests')
+
+option('quota_fixtures', type: 'string', value: '',
+  description: 'Path to e2fsprogs-authored quota-tracking images')

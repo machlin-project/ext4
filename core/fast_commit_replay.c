@@ -836,7 +836,6 @@ ext4_fast_commit_replay(struct ext4_fast_commit *log)
 	if (free_blocks > fs->info.blocks || free_inodes > fs->info.inodes) {
 		return EXT4_CORRUPT;
 	}
-	fs->info.free_blocks = free_blocks;
 	fs->info.free_inodes = (uint32_t)free_inodes;
 	error = ext4_system_ranges_build(fs);
 	if (error == EXT4_OK) {
@@ -941,8 +940,6 @@ ext4_fast_commit_replay(struct ext4_fast_commit *log)
 		error = ext4_transaction_commit(transaction);
 		transaction = NULL;
 		if (error == EXT4_OK) {
-			fs->info.free_blocks = replay->allocation.free_blocks;
-			fs->info.free_inodes = replay->allocation.free_inodes;
 			fs->last_orphan = orphan_head;
 			if (fs->orphan_file != NULL) {
 				fs->orphan_file->pending -= replay->orphan_slots_removed;

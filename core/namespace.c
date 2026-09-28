@@ -167,12 +167,21 @@ ext4_namespace_new(struct ext4_allocation *allocation, const struct ext4_inode *
 	}
 	flags = parent->flags & EXT4_INHERITED_FILE_FLAGS;
 	if (mode == EXT4_MODE_DIRECTORY) {
-		/* Like Linux, only directories inherit casefolding. */
-		flags |= parent->flags & (EXT4_INODE_DIRSYNC | EXT4_INODE_CASEFOLD);
+		/* Like Linux, only directories inherit casefolding and project inheritance. */
+		flags |= parent->flags &
+		    (EXT4_INODE_DIRSYNC | EXT4_INODE_CASEFOLD | EXT4_INODE_PROJINHERIT);
 	} else if (mode != EXT4_MODE_REGULAR) {
 		flags &= EXT4_INODE_NODUMP | EXT4_INODE_NOATIME;
 	}
 	ext4_encode32(&(*disk)->flags, flags | child->flags);
+	/* Every new object joins the directory's project only when it inherits one. */
+	if ((fs->info.feature_ro_compat & EXT4_FEATURE_RO_PROJECT) &&
+	    (parent->flags & EXT4_INODE_PROJINHERIT)) {
+		if (!EXT4_INODE_HAS_FIELD(ext4_le16(&(*disk)->extra_size), project_id)) {
+			return EXT4_UNSUPPORTED;
+		}
+		ext4_encode32(&(*disk)->project_id, parent->project);
+	}
 	error = ext4_inode_apply(fs, *disk, attributes);
 	if (error == EXT4_OK) {
 		ext4_inode_checksum_set(fs, child->number, *disk);
@@ -219,7 +228,6 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	struct ext4_inode_update times;
 	struct ext4_directory_slot slot;
 	struct ext4_allocation allocation;
-	uint64_t free_blocks;
 	uint32_t feature_compat;
 	uint32_t feature_ro_compat;
 	size_t index;
@@ -320,6 +328,10 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 			error = EXT4_TOO_MANY_LINKS;
 			goto cancel;
 		}
+		if ((parent.flags & EXT4_INODE_PROJINHERIT) && parent.project != child.project) {
+			error = EXT4_CROSS_PROJECT;
+			goto cancel;
+		}
 		times.fields = EXT4_ATTR_CHANGE_TIME;
 		error = ext4_inode_apply(fs, child_disk, &times);
 		if (error != EXT4_OK) {
@@ -386,7 +398,6 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
-	free_blocks = allocation.free_blocks;
 	feature_compat = allocation.super == NULL ? fs->info.feature_compat
 						  : ext4_le32(&allocation.super->feature_compat);
 	feature_ro_compat = allocation.super == NULL
@@ -398,7 +409,6 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		fs->aborted = true;
 		return error;
 	}
-	fs->info.free_blocks = free_blocks;
 	fs->info.feature_compat = feature_compat;
 	fs->info.feature_ro_compat |= feature_ro_compat & EXT4_FEATURE_RO_DIR_NLINK;
 	*result = child;
@@ -833,7 +843,6 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 	struct ext4_transaction *transaction;
 	struct ext4_inode_update times;
 	struct ext4_directory_slot space;
-	uint64_t free_blocks;
 	uint32_t feature_compat;
 	uint32_t feature_ro_compat;
 	unsigned int index;
@@ -936,6 +945,14 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 	}
 	if (state->objects[0].number == state->objects[1].number) {
 		*result = state->objects[0];
+		goto cancel;
+	}
+	/* Like Linux, an object may not enter a directory of another inherited project. */
+	if (((state->parents[1].flags & EXT4_INODE_PROJINHERIT) &&
+		state->parents[1].project != state->objects[0].project) ||
+	    (exchange && (state->parents[0].flags & EXT4_INODE_PROJINHERIT) &&
+		state->parents[0].project != state->objects[1].project)) {
+		error = EXT4_CROSS_PROJECT;
 		goto cancel;
 	}
 	/* Moving out removes a name; an absent destination only adds one. An
@@ -1107,7 +1124,6 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
-	free_blocks = state->allocation.free_blocks;
 	feature_compat = state->allocation.super == NULL
 	    ? fs->info.feature_compat
 	    : ext4_le32(&state->allocation.super->feature_compat);
@@ -1121,7 +1137,6 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 		fs->aborted = true;
 		goto out;
 	}
-	fs->info.free_blocks = free_blocks;
 	fs->info.feature_compat = feature_compat;
 	fs->info.feature_ro_compat |= feature_ro_compat & EXT4_FEATURE_RO_DIR_NLINK;
 	if (last) {

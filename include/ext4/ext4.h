@@ -37,7 +37,10 @@ enum ext4_result {
 	EXT4_NOT_EMPTY,
 	EXT4_PERMISSION_DENIED,
 	EXT4_BUSY,
-	EXT4_ENCRYPTED
+	EXT4_ENCRYPTED,
+	/* A link or rename would place an object in a project-inheriting directory
+	 * of another project; Linux reports EXDEV. */
+	EXT4_CROSS_PROJECT
 };
 
 enum ext4_file_type {
@@ -74,6 +77,8 @@ enum ext4_inode_flag {
 	EXT4_INODE_NOTAIL = 0x00008000U,
 	EXT4_INODE_DIRSYNC = 0x00010000U,
 	EXT4_INODE_TOPDIR = 0x00020000U,
+	/* New objects take the directory's project ID. */
+	EXT4_INODE_PROJINHERIT = 0x20000000U,
 	/* Names in the directory compare and hash through the volume's encoding. */
 	EXT4_INODE_CASEFOLD = 0x40000000U
 };
@@ -81,7 +86,7 @@ enum ext4_inode_flag {
 #define EXT4_INODE_MODIFIABLE_FLAGS                                                                \
 	((uint32_t)(EXT4_INODE_SYNC | EXT4_INODE_IMMUTABLE | EXT4_INODE_APPEND |                   \
 	    EXT4_INODE_NODUMP | EXT4_INODE_NOATIME | EXT4_INODE_JOURNAL_DATA | EXT4_INODE_NOTAIL | \
-	    EXT4_INODE_DIRSYNC | EXT4_INODE_TOPDIR))
+	    EXT4_INODE_DIRSYNC | EXT4_INODE_TOPDIR | EXT4_INODE_PROJINHERIT))
 
 struct ext4_fs;
 struct ext4_inode_hold;
@@ -211,6 +216,8 @@ struct ext4_inode {
 	uint32_t generation;
 	uint32_t uid;
 	uint32_t gid;
+	/* Project ID on PROJECT volumes; zero otherwise or without room in the record. */
+	uint32_t project;
 	uint32_t flags;
 	/* Device identity is meaningful only for character/block special files. */
 	uint32_t device_major;
@@ -331,8 +338,8 @@ enum ext4_result ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32
 
 /* Atomically replace selected policy bits and ctime, preserving every other
  * field. mask must be nonzero and contain only MODIFIABLE_FLAGS; flags must be
- * a subset of mask. DIRSYNC/TOPDIR require a directory; other nonregular types
- * admit only NODUMP/NOATIME. The exclusive owner authorizes the flag transition
+ * a subset of mask. DIRSYNC/TOPDIR/PROJINHERIT require a directory; other
+ * nonregular types admit only NODUMP/NOATIME. The exclusive owner authorizes the flag transition
  * (including protected-bit and journal-mode privileges), drains pending writes
  * and revokes incompatible mappings before calling. This operation can clear
  * IMMUTABLE/APPEND; changing other flags on an immutable inode must also clear
@@ -345,6 +352,13 @@ enum ext4_result ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32
 enum ext4_result ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint32_t mask, uint32_t flags, const struct ext4_timestamp *change_time,
     struct ext4_inode *result);
+/* Change an inode's project ID and ctime in one transaction, moving its quota
+ * usage to the new project, as Linux's FS_IOC_FSSETXATTR does. Volumes without
+ * the PROJECT feature admit only project zero as a no-op; records without room for
+ * the field return UNSUPPORTED, and immutable inodes PERMISSION_DENIED. An
+ * unchanged ID changes nothing. The owner authorizes the transition. */
+enum ext4_result ext4_set_project(struct ext4_fs *fs, uint32_t number, uint32_t generation,
+    uint32_t project, const struct ext4_timestamp *change_time, struct ext4_inode *result);
 /* Writes regular files, allocating holes, converting unwritten extents and
  * extending EOF in a bounded atomic transaction. Newly exposed bytes are zeroed.
  * Requests exceeding transaction capacity reject without writes. Ordinary

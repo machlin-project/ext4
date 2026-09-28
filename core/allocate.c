@@ -56,11 +56,26 @@ enum ext4_result
 ext4_allocation_init(struct ext4_allocation *allocation, struct ext4_fs *fs,
     struct ext4_transaction *transaction, const struct ext4_inode *inode)
 {
+	const struct ext4_super_disk *super;
+	const uint8_t *buffer;
+
 	ext4_zero(allocation, sizeof(*allocation));
 	allocation->fs = fs;
 	allocation->transaction = transaction;
 	allocation->free_blocks = fs->info.free_blocks;
 	allocation->free_inodes = fs->info.free_inodes;
+	/* A later context in the same transaction continues from its counters. */
+	buffer = ext4_transaction_peek(transaction, EXT4_SUPER_OFFSET / fs->info.block_size);
+	if (buffer != NULL) {
+		super = (const struct ext4_super_disk *)(buffer +
+		    EXT4_SUPER_OFFSET % fs->info.block_size);
+		allocation->free_blocks = ext4_le32(&super->free_blocks_lo);
+		if (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
+			allocation->free_blocks |= (uint64_t)ext4_le32(&super->free_blocks_hi)
+			    << 32;
+		}
+		allocation->free_inodes = ext4_le32(&super->free_inodes);
+	}
 	allocation->maximum_block =
 	    (inode->flags & EXT4_INODE_EXTENTS) ? EXT4_PHYSICAL_BLOCK_MAX : UINT32_MAX;
 	if (!(fs->journal->features & EXT4_JBD_64BIT)) {

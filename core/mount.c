@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "journal.h"
+#include "quota.h"
 
 static enum ext4_result
 ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, bool recovery)
@@ -19,6 +20,7 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	uint16_t minimum_descriptor_size;
 	uint16_t state;
 	unsigned int word;
+	enum ext4_result error;
 
 	if (ext4_le16(&super->magic) != EXT4_SUPER_MAGIC) {
 		return EXT4_NOT_EXT4;
@@ -169,6 +171,10 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	if ((fs->inode_size & (fs->inode_size - 1)) != 0) {
 		return EXT4_CORRUPT;
 	}
+	error = ext4_quota_super_validate(fs, super);
+	if (error != EXT4_OK) {
+		return error;
+	}
 
 	/* Group descriptors must accommodate the enabled address width. */
 	minimum_descriptor_size =
@@ -280,6 +286,7 @@ ext4_unmount(struct ext4_fs *fs)
 	}
 	environment = fs->environment;
 	ext4_inode_holds_destroy(fs);
+	ext4_quota_close(fs);
 	ext4_journal_close(fs->journal);
 	ext4_orphan_file_close(fs);
 	if (fs->system_ranges != NULL) {

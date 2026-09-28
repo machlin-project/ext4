@@ -41,14 +41,14 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Wider geometry and format coverage; quota/project accounting; key-based encryption awaits a product decision; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity, keyless encryption and casefolded directories are implemented with their own evidence below, pending the complete CI regressions that include them. BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
+| Format compatibility | Wider geometry and format coverage; quota limit enforcement and key-based encryption await product decisions; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, pending the complete CI regressions that include them. BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | Fast commit format combinations, broader ownership corruption and interrupted foreign replay | Open; fast-commit conversions may now exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; larger live transactions; broader fuzz targets | Open; indexed namespace operations now validate only hash-eligible leaves, and the sustained suite plus operations fuzzing are in place (see "Sustained operation and fuzzing evidence") |
 
-Quota/project accounting remains an unsupported compatibility requirement awaiting
-implementation or an explicit product scope decision. MMP, fs-verity reading with
-protected writable metadata, encrypted volumes without keys and casefolded
-directories are implemented.
+MMP, fs-verity reading with protected writable metadata, encrypted volumes without
+keys, casefolded directories and quota/project accounting are implemented. Quota
+limits and grace times are preserved but not enforced; Linux enforces them only with
+quota mount options, so enforcement needs an adapter policy decision.
 Enabling verity, measurement, built-in signatures and any key-based decryption need
 product decisions: the core has no key source and performs no cryptography. They are not accepted merely because mounting rejects
 them safely. They must not disappear from a future readiness claim. The core
@@ -147,6 +147,26 @@ additionally enables casefolding on a new directory only once it is empty and tr
 names of ignorable code points as one empty name; strict e2fsck and debugfs accept
 both exported images. The complete 591-test regression passes
 (`artifacts/checks/casefold-toggle/`, `artifacts/checks/scale-regression-7/`).
+
+## Quota and project accounting evidence
+
+On e2fsprogs-authored 4 KiB, 1 KiB EA_INODE and 16 KiB-cluster BIGALLOC volumes, the
+writable core keeps user, group and project quota files exact through creation of 40
+new owners and three IDs that diverge at every index level, ownership changes,
+truncation, an external attribute block, a value inode, held and final removal,
+replacement by rename, project changes and PROJINHERIT inheritance, cross-project
+link and rename refusal and offline reclamation of a held orphan. A reader in the
+test and strict e2fsck, which recomputes all usage, agree; a patched entry makes
+strict e2fsck exit 4. Every allocation and read failure and 1,452 power cuts during
+operations that grow the quota trees recover to the unchanged or committed image,
+whose committed forms also pass strict fsck. Twelve 2,000-operation sustained runs
+with 1,753 power cuts end with exact usage. In the reference VM, Linux 6.12 with its
+matching quota modules reads usage equal to e2fsprogs from every core image; after
+Linux removes, creates and moves files, which leaves freed quota blocks and entries,
+strict fsck and e2fsprogs agree with Linux; the core then reuses those entries and
+blocks, and Linux and strict fsck agree again. The complete 600-test regression
+passes. Evidence is in `artifacts/checks/quota-first/`,
+`artifacts/checks/scale-regression-8/` and the lab's `artifacts/ext4-quota/exchange/`.
 
 ## Fast-commit development evidence
 
