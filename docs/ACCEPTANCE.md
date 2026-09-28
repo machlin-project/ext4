@@ -16,7 +16,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir/rename and bounded indexed mutation pass portable, independent and Linux checks; core holds retain open-unlinked or replaced objects; platform writes and broader capacity/concurrency acceptance pending |
-| Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal and single-user external journals, legacy lists and modern orphan files pass portable faults, independent recovery and Linux reuse; external-journal full regression, fast commit and platform write integration remain pending |
+| Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal and single-user external journals, legacy lists and modern orphan files pass portable faults, independent recovery, Linux reuse and the full regression; fast commit and platform write integration remain pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list, atomic attribute batches and mutation lifetime integration pass portable tests and targeted independent checks; bidirectional Linux attribute/ACL/security checks and direct replay of core attribute transactions pass eight profiles; the linked-truncate e2fsck defect remains explicit below; ACL enforcement and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
@@ -42,7 +42,7 @@ counted as portable-core implementation.
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
 | Format compatibility | Wider geometry and format coverage; retain the Linux delayed-allocation maximum-offset exception | Open; BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
-| Journal compatibility | Fast commit; finish external-journal regression after interrupted replay and cross-implementation recovery | Open; external journals pass focused faults, 30 independent states and four native Linux roundtrips; their expanded regression is pending. V1 and async compatibility retain their accepted evidence |
+| Journal compatibility | Fast commit, including interrupted semantic replay and cross-implementation recovery | Open; external journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
 MMP, quota/project accounting, casefold, encryption and verity also remain
@@ -103,8 +103,16 @@ device control prefix. Correcting the fixture required no core change.
 Evidence is in `artifacts/checks/external-journal-focused-ring/`,
 `artifacts/external-journal-independent-ring/` and the lab's
 `artifacts/ext4-journal/external-journal-native-retry2/`. The main review is
-`artifacts/checks/external-journal-accepted.json`. The expanded 476-test full
-regression is pending.
+`artifacts/checks/external-journal-accepted.json`. The expanded full regression
+passes all six jobs and all 476 registered tests, with no Meson failures or skips.
+All applicable independent stages, artifact uploads and job cleanup succeed.
+The 291 report files contain no unexpected failures; the ten existing shared-value
+reader-only fsck limitations and ten fixture refcount normalization commands remain
+explicitly classified. The new external-journal CI checks independently repeat all
+30 states, 165 commands and 30 strict nonrepairing fsck checks, including exact
+state agreement between core recovery and journal-only oracle replay. Raw evidence
+is in `artifacts/checks/external-journal-ci/`; the main review is
+`artifacts/checks/external-journal-ci-accepted.json`.
 
 ## Large physical addresses and volume geometry
 

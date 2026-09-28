@@ -18,10 +18,9 @@ DIR_NLINK. Raw inode-body and external xattrs follow metadata, data and namespac
 transactions. Internal and single-user external journal recovery handles legacy
 and modern orphan records.
 
-The completed 469-test CI regression passes all six suites, alongside independent
-image checks and Linux mutation/recovery roundtrips. The namespace job's timeout
-was raised after its checks finished at the old limit; its targeted rerun passes,
-including artifact upload and job cleanup. Tests cover malformed media,
+The completed 476-test CI regression passes all six jobs, including independent
+image checks, artifact upload and job cleanup. Linux mutation/recovery roundtrips
+provide separate native interoperability evidence. Tests cover malformed media,
 allocation/read failures and interrupted writes under ASan/UBSan; freestanding
 compilation enforces a 2 KiB stack-frame budget. Read profiles span 1–64 KiB blocks,
 checksummed and legacy formats. Detailed evidence and known exceptions are in
@@ -96,7 +95,7 @@ checks and separate durability barriers. Five format profiles pass 30 independen
 states. Fault tests cover 936 interrupted transactions and 396 interrupted recoveries
 with independently surviving device caches. Four native Linux profiles pass all
 16 boots, including recovery in both directions and open-unlinked cleanup. The
-expanded 476-test regression is pending; this support is not yet exposed by either
+expanded 476-test regression passes; this support is not yet exposed by either
 native adapter.
 
 Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.
