@@ -65,11 +65,13 @@ the remaining blocks have equal size or that the full core is accepted.
 Fast-commit recovery is a development checkpoint, not completed journal
 compatibility. The decoder checks record bounds, expected transaction ID, committed
 CRC prefixes and reread identity. Semantic replay stages inode metadata, exact
-extent ranges and namespace changes in one ordinary conversion transaction. The
+mapping ranges and namespace changes in one ordinary conversion transaction. The
 original fast prefix remains authoritative until its replacement commit is durable.
 Recovery reports fast commits separately from ordinary transactions.
 
-All 52 focused sanitized cases and eleven independent output profiles pass.
+All 76 focused sanitized fast-commit cases and thirteen independent output profiles pass.
+The affected regression also passes eight ordinary indirect cases, eight ordinary
+journal cases, malformed-image checks and orphan recovery: 94 cases in total.
 The complete freestanding build and source-format checks also pass. The bounded
 32 MiB protocol fixtures are authored with e2fsprogs, without linking this core;
 expected filesystems pass strict nonrepairing fsck before use as references.
@@ -80,17 +82,18 @@ expected filesystems pass strict nonrepairing fsck before use as references.
 | Modern orphan file at 1/4 KiB | Generation reuse, final unlink, checkpointed unlinked allocation, linked truncate and a simultaneous legacy orphan |
 | Special inodes at 1/4 KiB | Symlink targets of 7/59/60 bytes, legacy/extended/zero device identities, FIFO and socket |
 | Attribute reuse at 1/4 KiB plus legacy orphan chain at 1 KiB | Two reused inode numbers sharing a 64 KiB value and an external attribute block with a surviving third owner; two private values reclaimed |
+| Indirect maps at 1/4 KiB | Sparse direct/single/double boundaries, new indirect allocation, old triple-indirect reclamation during generation reuse, legacy orphans and mapped symlinks |
 
 Comparisons require exact namespace, file bytes, inode metadata, link targets,
 device identities and attribute values. Free-inode counts must match; any free-block
 difference must be charged exactly to the reconstructed directory/index layout.
-All eleven core-recovered outputs pass strict nonrepairing e2fsck and independent
+All thirteen core-recovered outputs pass strict nonrepairing e2fsck and independent
 namespace/value hashes. A second clean recovery leaves the image unchanged.
 Special objects are inspected inside the image, never materialized on the host.
 
 Malformed tests reject record lengths, CRCs, stale IDs and changed reread data.
 Twelve orphan states reject duplicate slots, overlap with the legacy chain,
-reserved/out-of-range numbers and damaged tails before conversion writes. Ten
+reserved/out-of-range numbers and damaged tails before conversion writes. Twenty
 valid-CRC special-inode logs reject bad link size, embedded NUL, missing terminator,
 nonzero special-inode size and missing mapped-link data without home or journal
 writes. Resource failures and modeled partial writes/cache loss retain durable
@@ -107,7 +110,7 @@ and 2,724 interrupted recoveries across 454 write/barrier cut points. Thirty-nin
 deliberately torn primary superblocks reject for offline repair; all other
 interrupted states converge to the expected filesystem.
 
-Current portable evidence is under
+Attribute-reuse evidence is under
 `artifacts/checks/fast-commit-xattr-multiple-fixed/` and
 `artifacts/fast-commit-xattr-multiple-independent/`. The reproducible stale-reference
 failure is preserved under `artifacts/checks/fast-commit-xattr-multiple/`.
@@ -115,10 +118,10 @@ Expected-image construction detaches shared external blocks with the public
 whole-block e2fsprogs operation: pinned debugfs per-key removal freed surviving
 value inodes and failed strict fsck. That failed image was never used as an oracle.
 
-The completed 488-test GitHub CI regression passes all six jobs with no test
+The completed 516-test GitHub CI regression passes all six jobs with no test
 failures, errors or skips, including independent checks and artifact upload. It
-covers the initial twelve fast-commit cases; full-regression acceptance for the
-subsequent modern-orphan, special-inode and attribute extensions remains pending.
+covers forty fast-commit cases including modern-orphan and special-inode replay;
+full-regression acceptance for subsequent attribute and indirect extensions remains pending.
 The existing declared reader-only xattr fsck exceptions and fixture-normalization
 steps remain separate from unexpected command failures. CI identities and complete
 artifact inventories are in the generated `artifacts/checks/fast-commit-ci-*/` reports.
@@ -157,7 +160,43 @@ fixtures and the core executable remain unchanged. Evidence is in
 `artifacts/ext4-journal/fast-commit-xattr-readback/`. This is protocol replay followed
 by Linux consumption, not proof that the Linux writer emits this combination or
 that Linux directly replays the pending protocol image.
-Open work includes indirect records, larger prefixes, additional format combinations,
+
+Both indirect profiles pass 1,451 allocation failures, 1,044 read failures and 1,644
+interrupted recoveries over 274 write/barrier cut points. Eighteen torn primary
+superblocks reject for offline repair. Four additional valid-CRC logs reject
+unwritten indirect data and logical addresses outside the format; ten damaged
+journal maps reject holes, duplicate data, data/node overlap, reused nodes and
+pointer cycles without writes. Mapped symlink targets are read and validated before
+the private conversion commits. The initial combined fixture incorrectly reused a
+deleted regular inode for a device with unchanged generation; the core rejected it,
+and expected-image construction now allocates special inodes before releasing those
+numbers.
+
+The first indirect resource runs exceeded their 600-second case limits. Journal
+freezing had reopened a mapping path for every journal data block. It now consumes
+the existing validated contiguous mapping runs and retains path/overlap checks;
+indirect mutation lookup also coalesces adjacent empty pointers. On the unchanged
+1 KiB fixture, successful recovery drops from 9,458 allocations and 17,141 read
+callbacks to 795 and 592, with the same 148 durability events. The 4 KiB profile
+uses 656 allocations, 452 reads and 126 durability events. Exhaustive resource
+tests now finish in 47 and 80 seconds under the original limits. These are fixture
+operation counts and test durations, not a general filesystem throughput benchmark.
+All 838 independent-check commands pass, and clean second recovery leaves every
+image unchanged. Current evidence is in `artifacts/checks/fast-commit-indirect-accepted/`
+and `artifacts/fast-commit-indirect-independent/`; initial timeouts and the deliberately
+stopped intermediate run remain under `artifacts/checks/fast-commit-indirect-final/`.
+Both indirect outputs also pass actual Linux readback with ordered mounts. Each
+reports three core fast commits and four legacy-orphan cleanup transactions before
+Linux verifies sparse data, created files, hardlink identity, replacement/truncated
+inodes, symlinks and special devices. All 162 commands and four strict fsck checks
+pass; subsequent independent reads preserve the namespace and contents. Source
+fixtures and the frozen recovery executable remain unchanged. Evidence is in
+`artifacts/checks/fast-commit-indirect-native-readback/` and the lab's
+`artifacts/ext4-journal/fast-commit-indirect-readback/`. This establishes Linux
+consumption of core output, not Linux generation or direct fast replay of the
+pending indirect protocol images.
+
+Open work includes larger prefixes, additional format combinations,
 broader ownership-corruption coverage and interrupted foreign replay. Native fixture
 capture remains separate from ordinary CI. The writer emits ordinary full commits.
 

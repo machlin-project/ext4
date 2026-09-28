@@ -15,6 +15,8 @@ from fast_commit_reference import read_namespace
 
 IMAGE_BYTES = 32 * 1024 * 1024
 SOURCE_BLOCKS = 5
+DIRECT_BLOCKS = 12
+POINTER_BYTES = 4
 CREATED_FILES = 12
 LONG_NAME_BYTES = 230
 SEQUENCE = 7
@@ -31,6 +33,8 @@ PROFILES = (
     ("xattr-reuse-1k", 1024, {"orphan_file", "ea_inode"}, set()),
     ("xattr-reuse-4k", 4096, {"orphan_file", "ea_inode"}, set()),
     ("xattr-reuse-legacy-1k", 1024, {"ea_inode"}, set()),
+    ("indirect-1k", 1024, set(), {"extent", "64bit"}),
+    ("indirect-4k", 4096, set(), {"extent", "64bit"}),
 )
 
 SPECIAL_NODES = {
@@ -43,6 +47,7 @@ SPECIAL_NODES = {
 }
 MALFORMED = ("bad-link-size", "bad-link-nul", "bad-link-terminator", "bad-special-size",
              "missing-link-range")
+INDIRECT_MALFORMED = ("indirect-unwritten", "indirect-logical-limit")
 
 
 def digest(path):
@@ -58,6 +63,16 @@ def long_name(index):
 def attribute_value(index, block_size):
     size = 65536 if index == 0 else 3 * block_size + 7
     return bytes((position * 17 + index * 31) & 255 for position in range(size))
+
+
+def indirect_data(block_size):
+    per_block = block_size // POINTER_BYTES
+    blocks = DIRECT_BLOCKS + per_block + 2
+    contents = bytearray(blocks * block_size)
+    for logical in (0, 1, DIRECT_BLOCKS - 1, DIRECT_BLOCKS,
+                    DIRECT_BLOCKS + per_block - 1, blocks - 2, blocks - 1):
+        contents[logical * block_size:(logical + 1) * block_size] = b"A" * block_size
+    return bytes(contents)
 
 
 def main():
@@ -108,18 +123,20 @@ def main():
         directory.mkdir()
         root = directory / "root"
         root.mkdir()
-        original_data = b"A" * (SOURCE_BLOCKS * block)
+        indirect = "extent" in removed
+        original_data = indirect_data(block) if indirect else b"A" * (SOURCE_BLOCKS * block)
         (root / "hello.txt").write_bytes(original_data)
         (root / "hello.txt").chmod(0o640)
         modern_orphans = "orphan_file" in added
-        special_files = name.startswith("special-")
+        special_files = name.startswith("special-") or indirect
         xattr_reuse = "ea_inode" in added
+        orphans = modern_orphans or xattr_reuse or indirect
         if xattr_reuse:
             (root / "keep-xattrs").write_bytes(b"surviving attribute owner")
             (root / "keep-xattrs").chmod(0o640)
             (root / "victim-shared").write_bytes(b"second attribute owner")
             (root / "victim-shared").chmod(0o640)
-        if modern_orphans or xattr_reuse:
+        if orphans:
             for filename in ("victim", "final-delete", "orphan-held", "legacy", "orphan-truncate"):
                 (root / filename).write_bytes(b"O" * (SOURCE_BLOCKS * block))
                 (root / filename).chmod(0o640)
@@ -136,6 +153,8 @@ def main():
                   "-I", 256, "-m", 0, "-O", "none," + ",".join(sorted(features)),
                   "-U", UUID, "-J", "size=8,fast_commit_size=256",
                   "-E", "lazy_itable_init=0,nodiscard", "-d", root, before, IMAGE_BYTES // block])
+        if indirect:
+            row["old_mapping"] = run(row, [helper, "--prepare-indirect", before])
         if xattr_reuse:
             for index in range(8):
                 payload = directory / f"attribute-{index}.value"
@@ -148,6 +167,10 @@ def main():
         run(row, [tools["e2fsck"], "-fn", before])
         shutil.copyfile(before, expected)
         shutil.copyfile(before, pending)
+        if special_files and orphans:
+            # Keep special inodes out of the numbers released by orphan cleanup;
+            # only the explicitly logged victim replacement changes generation.
+            run(row, [helper, "--create-specials", expected])
         if xattr_reuse:
             for owner in ("/victim", "/victim-shared"):
                 run(row, [helper, "--detach-shared-xattrs", expected, owner])
@@ -169,6 +192,8 @@ def main():
             filename = long_name(index)
             payload = directory / f"data-{index:02d}"
             contents = bytes([ord("a") + index]) * (block + 17 + index)
+            if indirect and index == 0:
+                contents = b"a" * ((DIRECT_BLOCKS + 1) * block + 17)
             payload.write_bytes(contents)
             commands += [f'write "{payload}" /new-dir/{filename}',
                          f"sif /new-dir/{filename} mode 0100604"]
@@ -178,7 +203,7 @@ def main():
         symlinks = ({"link-short": "renamed", "link-59": "a" * 59, "link-60": "b" * 60}
                     if special_files else {})
         commands += [f"symlink /{path} {target}" for path, target in symlinks.items()]
-        if modern_orphans or xattr_reuse:
+        if orphans:
             # Allocate unrelated new names before releasing inode numbers. Each
             # replacement must reuse its intended old attribute owner.
             replacement = directory / "replacement-data"
@@ -203,7 +228,7 @@ def main():
         script = directory / "expected.debugfs"
         script.write_text("\n".join(commands) + "\n")
         run(row, [tools["debugfs"], "-w", "-f", script, expected])
-        if special_files:
+        if special_files and not orphans:
             run(row, [helper, "--create-specials", expected])
         run(row, [tools["e2fsck"], "-fn", expected])
         row["serialization"] = run(row, [helper, pending, expected] +
@@ -240,7 +265,7 @@ def main():
             raise RuntimeError("Protected pending input changed")
         if special_files:
             row["malformed"] = {}
-            for damage in MALFORMED:
+            for damage in MALFORMED + (INDIRECT_MALFORMED if indirect else ()):
                 candidate = directory / (damage + ".img")
                 shutil.copyfile(before, candidate)
                 run(row, [helper, candidate, expected, "--" + damage])

@@ -170,5 +170,8 @@ enum ext4_result ext4_map_block(
     struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical, uint64_t *physical);
 enum ext4_result ext4_map_block_path(struct ext4_fs *fs, const struct ext4_inode *inode,
     uint32_t logical, uint64_t *physical, struct ext4_block_path *path);
+/* Return a contiguous data or hole run confined to the reported mapping path. */
+enum ext4_result ext4_map_blocks_path(struct ext4_fs *fs, const struct ext4_inode *inode,
+    uint32_t logical, uint64_t *physical, uint64_t *blocks, struct ext4_block_path *path);
 
 #endif

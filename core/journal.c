@@ -274,7 +274,9 @@ ext4_journal_map(struct ext4_journal *journal, const struct ext4_inode *inode)
 	struct ext4_block_path path;
 	struct ext4_block_path previous;
 	uint64_t physical;
+	uint64_t blocks;
 	uint32_t logical;
+	uint32_t length;
 	uint32_t left;
 	uint32_t right;
 	uint32_t index;
@@ -282,15 +284,19 @@ ext4_journal_map(struct ext4_journal *journal, const struct ext4_inode *inode)
 	enum ext4_result error;
 
 	ext4_zero(&previous, sizeof(previous));
-	for (logical = 0; logical < journal->blocks; logical++) {
-		error = ext4_map_block_path(journal->fs, inode, logical, &physical, &path);
+	for (logical = 0; logical < journal->blocks; logical += length) {
+		error =
+		    ext4_map_blocks_path(journal->fs, inode, logical, &physical, &blocks, &path);
 		if (error != EXT4_OK) {
 			return error;
 		}
 		/* A journal cannot be sparse or overlap the primary control blocks. */
-		if (physical <= EXT4_SUPER_OFFSET / journal->fs->info.block_size + 1U) {
+		if (physical <= EXT4_SUPER_OFFSET / journal->fs->info.block_size + 1U ||
+		    blocks == 0) {
 			return EXT4_CORRUPT;
 		}
+		length = blocks < journal->blocks - logical ? (uint32_t)blocks
+							    : journal->blocks - logical;
 		if (path.count != 0 && journal->mapping_blocks == NULL) {
 			journal->mapping_blocks =
 			    journal->fs->environment.allocate(journal->fs->environment.context,
@@ -320,7 +326,7 @@ ext4_journal_map(struct ext4_journal *journal, const struct ext4_inode *inode)
 		}
 		previous = path;
 		if (run != NULL && physical == run->physical + run->length) {
-			run->length++;
+			run->length += length;
 		} else {
 			if (journal->run_count == EXT4_JOURNAL_MAX_RUNS) {
 				return EXT4_UNSUPPORTED;
@@ -328,7 +334,7 @@ ext4_journal_map(struct ext4_journal *journal, const struct ext4_inode *inode)
 			run = &journal->runs[journal->run_count++];
 			run->physical = physical;
 			run->logical = logical;
-			run->length = 1;
+			run->length = length;
 		}
 	}
 	for (left = 0; left < journal->run_count; left++) {

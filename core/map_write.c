@@ -229,6 +229,8 @@ ext4_indirect_lookup(struct ext4_allocation *allocation, const struct ext4_inode
 	uint64_t remaining;
 	uint64_t span;
 	uint64_t block;
+	uint32_t pointer;
+	uint32_t limit;
 	uint16_t depth;
 	uint16_t level;
 	uint16_t previous;
@@ -238,7 +240,8 @@ ext4_indirect_lookup(struct ext4_allocation *allocation, const struct ext4_inode
 	if (error != EXT4_OK) {
 		return error;
 	}
-	block = ext4_le32(&pointers[depth == 0 ? logical : EXT4_DIRECT_BLOCKS + depth - 1]);
+	pointer = depth == 0 ? logical : EXT4_DIRECT_BLOCKS + depth - 1;
+	block = ext4_le32(&pointers[pointer]);
 	for (level = 0; level < depth && block != 0; level++) {
 		for (previous = 0; previous < level; previous++) {
 			if (block == ancestors[previous]) {
@@ -255,7 +258,8 @@ ext4_indirect_lookup(struct ext4_allocation *allocation, const struct ext4_inode
 		}
 		span /= fs->info.block_size / sizeof(*pointers);
 		pointers = (const struct ext4_le32 *)scratch;
-		block = ext4_le32(&pointers[remaining / span]);
+		pointer = (uint32_t)(remaining / span);
+		block = ext4_le32(&pointers[pointer]);
 		remaining %= span;
 	}
 	if (block != 0) {
@@ -270,6 +274,14 @@ ext4_indirect_lookup(struct ext4_allocation *allocation, const struct ext4_inode
 	}
 	run->physical = block;
 	run->length = depth == 0 ? 1 : span - remaining;
+	if (block == 0 && (depth == 0 || level != 0)) {
+		/* Adjacent empty slots cover equal-sized spans in this node. Return
+		 * them together so range operations do not reread it for every hole. */
+		limit = depth == 0 ? EXT4_DIRECT_BLOCKS : fs->info.block_size / sizeof(*pointers);
+		for (pointer++; pointer < limit && ext4_le32(&pointers[pointer]) == 0; pointer++) {
+			run->length += span;
+		}
+	}
 	return EXT4_OK;
 }
 
@@ -852,8 +864,23 @@ out:
 }
 
 static enum ext4_result
-ext4_indirect_allocate(struct ext4_allocation *allocation, struct ext4_inode_disk *disk,
-    uint32_t logical, uint64_t *physical)
+ext4_indirect_new_block(struct ext4_allocation *allocation, uint64_t *block)
+{
+	uint64_t maximum = allocation->maximum_block;
+	enum ext4_result error;
+
+	/* Replay can share an allocator with an extent-mapped root directory. */
+	if (allocation->maximum_block > UINT32_MAX) {
+		allocation->maximum_block = UINT32_MAX;
+	}
+	error = ext4_allocate_block(allocation, block);
+	allocation->maximum_block = maximum;
+	return error;
+}
+
+static enum ext4_result
+ext4_indirect_empty_slot(struct ext4_allocation *allocation, struct ext4_inode_disk *disk,
+    uint32_t logical, uint64_t data, struct ext4_le32 **result)
 {
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_le32 *pointers = (struct ext4_le32 *)disk->block_data;
@@ -874,11 +901,11 @@ ext4_indirect_allocate(struct ext4_allocation *allocation, struct ext4_inode_dis
 		return error;
 	}
 	slot = &pointers[depth == 0 ? logical : EXT4_DIRECT_BLOCKS + depth - 1];
-	for (level = 0; level <= depth; level++) {
+	for (level = 0; level < depth; level++) {
 		block = ext4_le32(slot);
 		created = block == 0;
 		if (created) {
-			error = ext4_allocate_block(allocation, &block);
+			error = ext4_indirect_new_block(allocation, &block);
 			if (error != EXT4_OK) {
 				return error;
 			}
@@ -894,12 +921,8 @@ ext4_indirect_allocate(struct ext4_allocation *allocation, struct ext4_inode_dis
 				return EXT4_CORRUPT;
 			}
 		}
-		if (level == depth) {
-			if (!created) {
-				return EXT4_CORRUPT;
-			}
-			*physical = block;
-			return EXT4_OK;
+		if (block == data) {
+			return EXT4_CORRUPT;
 		}
 		ancestors[level] = block;
 		error = ext4_transaction_buffer(allocation->transaction, block, &buffer);
@@ -914,7 +937,42 @@ ext4_indirect_allocate(struct ext4_allocation *allocation, struct ext4_inode_dis
 		slot = &pointers[remaining / span];
 		remaining %= span;
 	}
-	return EXT4_CORRUPT;
+	if (ext4_le32(slot) != 0) {
+		return EXT4_CORRUPT;
+	}
+	*result = slot;
+	return EXT4_OK;
+}
+
+static enum ext4_result
+ext4_indirect_allocate(struct ext4_allocation *allocation, struct ext4_inode_disk *disk,
+    uint32_t logical, uint64_t *physical)
+{
+	struct ext4_le32 *slot;
+	enum ext4_result error;
+
+	error = ext4_indirect_empty_slot(allocation, disk, logical, 0, &slot);
+	if (error == EXT4_OK) {
+		error = ext4_indirect_new_block(allocation, physical);
+	}
+	if (error == EXT4_OK) {
+		ext4_encode32(slot, (uint32_t)*physical);
+	}
+	return error;
+}
+
+static enum ext4_result
+ext4_indirect_insert(struct ext4_allocation *allocation, struct ext4_inode_disk *disk,
+    uint32_t logical, uint64_t physical)
+{
+	struct ext4_le32 *slot;
+	enum ext4_result error;
+
+	error = ext4_indirect_empty_slot(allocation, disk, logical, physical, &slot);
+	if (error == EXT4_OK) {
+		ext4_encode32(slot, (uint32_t)physical);
+	}
+	return error;
 }
 
 enum ext4_result
@@ -1670,10 +1728,14 @@ ext4_write_map_replay(struct ext4_allocation *allocation, const struct ext4_inod
 	uint64_t end = position + length;
 	uint32_t chunk;
 	uint32_t maximum = EXT4_EXTENT_UNWRITTEN_LIMIT - (unwritten ? 1U : 0U);
+	uint16_t type = inode->mode & EXT4_MODE_TYPE;
+	bool extents = (inode->flags & EXT4_INODE_EXTENTS) != 0;
 	enum ext4_result error;
 
-	if (!(inode->flags & EXT4_INODE_EXTENTS)) {
-		return EXT4_UNSUPPORTED;
+	if ((inode->flags & EXT4_INODE_INLINE_DATA) || inode->fast_symlink ||
+	    (type != EXT4_MODE_REGULAR && type != EXT4_MODE_DIRECTORY &&
+		type != EXT4_MODE_SYMLINK)) {
+		return EXT4_CORRUPT;
 	}
 	if (length == 0 || end > (uint64_t)UINT32_MAX + 1U ||
 	    (physical != 0 &&
@@ -1681,6 +1743,19 @@ ext4_write_map_replay(struct ext4_allocation *allocation, const struct ext4_inod
 		    physical % fs->cluster_blocks != logical % fs->cluster_blocks ||
 		    ext4_system_overlaps(fs, physical, length)))) {
 		return EXT4_CORRUPT;
+	}
+	if (!extents) {
+		uint64_t remaining;
+		uint64_t span;
+		uint16_t depth;
+
+		if (unwritten || fs->cluster_blocks != 1 ||
+		    (physical != 0 && physical + length - 1U > UINT32_MAX) ||
+		    ext4_indirect_position(fs, (uint32_t)(end - 1U), &depth, &remaining, &span) !=
+			EXT4_OK) {
+			return EXT4_CORRUPT;
+		}
+		maximum = 1;
 	}
 	while (position < end) {
 		error = ext4_write_map_lookup(allocation, inode, disk, (uint32_t)position, &run);
@@ -1705,9 +1780,14 @@ ext4_write_map_replay(struct ext4_allocation *allocation, const struct ext4_inod
 			if (physical != 0) {
 				error = ext4_allocation_claim(allocation, physical, chunk);
 				if (error == EXT4_OK) {
-					error = ext4_extent_insert(allocation, inode, disk,
-					    (uint32_t)position, physical, (uint16_t)chunk,
-					    unwritten);
+					if (extents) {
+						error = ext4_extent_insert(allocation, inode, disk,
+						    (uint32_t)position, physical, (uint16_t)chunk,
+						    unwritten);
+					} else {
+						error = ext4_indirect_insert(
+						    allocation, disk, (uint32_t)position, physical);
+					}
 				}
 				if (error != EXT4_OK) {
 					return error;

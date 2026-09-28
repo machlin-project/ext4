@@ -18,7 +18,7 @@ DIR_NLINK. Raw inode-body and external xattrs follow metadata, data and namespac
 transactions. Internal and single-user external journal recovery handles legacy
 and modern orphan records.
 
-The completed 488-test CI regression passes all six jobs, including independent
+The completed 516-test CI regression passes all six jobs, including independent
 image checks, artifact upload and job cleanup. Linux mutation/recovery roundtrips
 provide separate native interoperability evidence. Tests cover malformed media,
 allocation/read failures and interrupted writes under ASan/UBSan; freestanding
@@ -102,10 +102,11 @@ Fast-commit recovery is under development. The decoder validates bounded committ
 records and semantic replay converts them into one ordinary durable transaction.
 Linux-generated 1 and 4 KiB images pass basic replay comparisons and expanded
 core/Linux roundtrips with inode reuse, new directories, long names, sparse maps
-and unwritten extents. Fifty-two automated cases on eleven independently authored
+and unwritten extents. Seventy-six automated cases on thirteen independently authored
 profiles cover decode/replay, resource failures and interrupted recovery; independent
-output checks pass. The initial fast-commit batch passes the 488-test CI regression;
-full regression of subsequent extensions is pending. Modern orphan slots
+output checks pass. Modern-orphan and special-inode fast replay also pass the
+516-test CI regression; full regression of subsequent extensions is pending.
+Modern orphan slots
 are coordinated with inode-generation reuse, final deletion and linked truncation.
 Protocol fixtures also exercise short and mapped symlinks, device identities,
 FIFOs and sockets. The pinned Linux writer falls back to ordinary commits for
@@ -113,6 +114,11 @@ these inode types; that native roundtrip is separate from protocol-fixture repla
 Generation reuse atomically releases private attributes and preserves shared values,
 including multiple old owners detaching the same external block in one conversion.
 Three recovered attribute-reuse profiles also pass native Linux reads and strict fsck.
+Indirect replay reconstructs sparse maps, releases old trees through triple indirect
+on generation reuse, and handles legacy orphans and mapped symlinks. Journal freezing
+now consumes validated mapping runs, removing repeated reads of the same indirect
+nodes. All 94 affected recovery, mapping and journal tests pass, as do thirteen
+independent output checks and native Linux readback of both indirect profiles.
 Wider format combinations and broader semantic-corruption acceptance remain open.
 See the fast-commit development
 evidence and the recorded native-reference failure in the acceptance matrix;

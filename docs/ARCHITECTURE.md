@@ -110,6 +110,10 @@ logged allocation supersedes it. Journal and transaction-ID wrap are explicit.
 The journal inode's data and mapping blocks are frozen before writes, and replay
 cannot target those blocks or ranges outside the filesystem. Checksummed primary-superblock
 damage remains an offline-repair condition. Recovery does not invent geometry.
+Journal freezing consumes validated contiguous mapping runs while retaining each
+run's metadata path. It reads an indirect leaf once per run instead of reopening
+the same path for every data block; hole, repeated-node and allocation-overlap
+checks still cover the complete journal mapping.
 
 The current journal engine handles internal and single-user external v2-superblock
 journals with legacy, v1, v2 or v3 checksums/tags (legacy means no journal checksums),
@@ -124,7 +128,7 @@ record to that scan. The ordinary ring excludes the fast-commit area. Recovery
 checkpoints the ordinary prefix without clearing its authority, then materializes
 the fast records in private metadata snapshots. Exact logged data ranges are
 excluded from metadata allocation; inode and block claims update their bitmaps
-and allocation summaries. Directory layout and extent-tree shape are rebuilt
+and allocation summaries. Directory layout and extent or indirect trees are rebuilt
 through the core's existing mutation mechanisms, and inode block charges are
 derived from the resulting maps.
 
@@ -153,15 +157,28 @@ Ordinary orphan cleanup retains its incremental, restartable attribute removal.
 
 Embedded short-symlink targets and special-device identities are copied from the
 logged inode payload. Mapped symlinks retain their logged block count while their
-new, private extent root awaits its range records, so that intermediate state is
+new, private mapping root awaits its range records, so that intermediate state is
 not decoded as a short symlink. Range replay and final validation derive block
-charges from actual ownership; a missing required range cannot be committed.
+charges from actual ownership. Final validation reads the target through the private
+mapping, rejects holes and unwritten data, and checks its terminating NUL; a missing
+required range cannot be committed.
+
+Indirect replay preserves checkpointed pointer roots and reconstructs missing paths
+around the exact logged data blocks. Pointer allocation remains within 32-bit
+physical addresses even when the shared replay allocator came from an extent-mapped
+root directory. Indirect records cannot encode unwritten data or addresses outside
+their logical map. Generation replacement releases all three indirect levels before
+installing the new inode. An extent/indirect format change within the same inode
+generation requires an explicit conversion and currently returns unsupported.
+Indirect lookup coalesces adjacent empty slots within a pointer block into one hole
+range, so sparse deletion does not allocate scratch and reread that block for every
+missing logical block. Coalescing stops at an allocated slot or the node boundary.
 
 This implementation bounds the fast area to 4,096 blocks, the prefix to 65,536
 records, and the complete conversion to the ordinary 256-snapshot transaction
 limit. Capacity exhaustion returns unsupported, including an old generation whose
 complete attribute reclamation cannot fit the private conversion transaction.
-Indirect records, partially completed foreign replay and broader
+Additional format combinations, partially completed foreign replay and broader
 ownership-corruption cases still require acceptance. The writer continues to
 emit ordinary full transactions; it does not emit fast commits.
 

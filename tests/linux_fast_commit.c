@@ -33,6 +33,9 @@
 #define ATTRIBUTE_COUNT 8U
 #define ATTRIBUTE_SURVIVORS 6U
 #define PHASE_PROTOCOL_READBACK 2U
+#define PHASE_INDIRECT_READBACK 3U
+#define DIRECT_BLOCKS 12U
+#define INDIRECT_POINTER_BYTES 4U
 
 static const struct {
 	const char *path;
@@ -235,7 +238,7 @@ special_target(char *target, unsigned int index)
 }
 
 static void
-verify_specials(void)
+verify_specials(const char *short_target)
 {
 	struct stat metadata;
 	char target[SYMLINK_INLINE_BYTES + 1U];
@@ -245,6 +248,9 @@ verify_specials(void)
 
 	for (index = 0; index < sizeof(link_names) / sizeof(link_names[0]); index++) {
 		special_target(target, index);
+		if (index == 0) {
+			strcpy(target, short_target);
+		}
 		length = strlen(target);
 		require(lstat(link_names[index], &metadata) == 0 && S_ISLNK(metadata.st_mode) &&
 			metadata.st_size == (off_t)length &&
@@ -285,7 +291,7 @@ mutate_specials(void)
 	fd = open("/mnt/hello.txt", O_RDWR | O_CLOEXEC);
 	require(fd >= 0 && pwrite(fd, "B", 1, 0) == 1 && fsync(fd) == 0 && close(fd) == 0,
 	    "commit queued symlinks and special inodes");
-	verify_specials();
+	verify_specials("hello.txt");
 }
 
 static void
@@ -435,6 +441,85 @@ mutate(unsigned int block_size, unsigned int modern_orphans, unsigned int specia
 }
 
 static void
+verify_uniform_file(const char *path, size_t size, mode_t mode, uint8_t value)
+{
+	struct stat metadata;
+	uint8_t bytes[4096];
+	size_t offset;
+	size_t length;
+	size_t position;
+	int fd;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	require(fd >= 0 && fstat(fd, &metadata) == 0 && metadata.st_mode == (S_IFREG | mode) &&
+		metadata.st_nlink == 1 && metadata.st_size == (off_t)size,
+	    "verify protocol file metadata");
+	for (offset = 0; offset < size; offset += length) {
+		length = size - offset < sizeof(bytes) ? size - offset : sizeof(bytes);
+		require(read(fd, bytes, length) == (ssize_t)length, "read protocol file");
+		for (position = 0; position < length; position++) {
+			require(bytes[position] == value, "verify every protocol file byte");
+		}
+	}
+	require(read(fd, bytes, 1) == 0 && close(fd) == 0, "verify protocol EOF and close");
+}
+
+static void
+verify_indirect(unsigned int block_size)
+{
+	const char *removed[] = { "/mnt/hello.txt", "/mnt/victim", "/mnt/final-delete",
+		"/mnt/orphan-held", "/mnt/legacy" };
+	struct stat metadata;
+	struct stat alias;
+	uint8_t bytes[4096];
+	uint8_t expected;
+	char path[512];
+	unsigned int per_block = block_size / INDIRECT_POINTER_BYTES;
+	unsigned int blocks = DIRECT_BLOCKS + per_block + 2U;
+	unsigned int logical;
+	unsigned int index;
+	size_t size = (size_t)blocks * block_size;
+	size_t position;
+	int fd;
+
+	for (index = 0; index < sizeof(removed) / sizeof(removed[0]); index++) {
+		require(access(removed[index], F_OK) < 0 && errno == ENOENT,
+		    "verify old indirect generation and orphan names are absent");
+	}
+	require(stat("/mnt/new-dir", &metadata) == 0 && S_ISDIR(metadata.st_mode) &&
+		metadata.st_nlink == 2,
+	    "verify indirect directory");
+	fd = open("/mnt/renamed", O_RDONLY | O_CLOEXEC);
+	require(fd >= 0 && fstat(fd, &metadata) == 0 && metadata.st_mode == (S_IFREG | 0640) &&
+		metadata.st_size == (off_t)size && metadata.st_nlink == 2 &&
+		stat("/mnt/alias", &alias) == 0 && metadata.st_ino == alias.st_ino,
+	    "verify indirect sparse inode and hardlink");
+	for (logical = 0; logical < blocks; logical++) {
+		expected = logical == 0 || logical == DIRECT_BLOCKS - 1U ||
+			logical == DIRECT_BLOCKS || logical == DIRECT_BLOCKS + per_block - 1U ||
+			logical >= blocks - 2U
+		    ? 'A'
+		    : 0;
+		require(read(fd, bytes, block_size) == (ssize_t)block_size,
+		    "read direct, single and double-indirect data and holes");
+		for (position = 0; position < block_size; position++) {
+			require(bytes[position] == expected, "verify indirect logical mapping");
+		}
+	}
+	require(read(fd, bytes, 1) == 0 && close(fd) == 0, "verify indirect EOF and close");
+	for (index = 0; index < LONG_FILES; index++) {
+		long_file_name(path, sizeof(path), index);
+		size =
+		    index == 0 ? (DIRECT_BLOCKS + 1U) * block_size + 17U : block_size + 17U + index;
+		verify_uniform_file(path, size, CREATED_MODE, (uint8_t)('a' + index));
+	}
+	verify_uniform_file("/mnt/reused", block_size + 37U, 0640, 'R');
+	verify_uniform_file("/mnt/orphan-truncate", block_size + 13U, 0640, 'O');
+	verify_specials("renamed");
+	puts("LINUX_FAST_COMMIT_INDIRECT_PASS");
+}
+
+static void
 verify_xattr_reuse(unsigned int block_size)
 {
 	const char *replacements[] = { "/mnt/reused", "/mnt/reused-shared" };
@@ -534,7 +619,7 @@ main(void)
 	}
 	config = fopen("/phase", "r");
 	require(config != NULL && fscanf(config, "%u", &phase) == 1, "read fixture phase");
-	require(fclose(config) == 0 && phase <= PHASE_PROTOCOL_READBACK, "validate fixture phase");
+	require(fclose(config) == 0 && phase <= PHASE_INDIRECT_READBACK, "validate fixture phase");
 	config = fopen("/modern-orphans", "r");
 	require(config != NULL && fscanf(config, "%u", &modern_orphans) == 1,
 	    "read orphan fixture mode");
@@ -554,14 +639,16 @@ main(void)
 	}
 	if (phase == PHASE_PROTOCOL_READBACK) {
 		verify_xattr_reuse((unsigned int)geometry.f_bsize);
+	} else if (phase == PHASE_INDIRECT_READBACK) {
+		verify_indirect((unsigned int)geometry.f_bsize);
 	} else {
 		verify((unsigned int)geometry.f_bsize);
 		if (special_files) {
-			verify_specials();
+			verify_specials("hello.txt");
 		}
 	}
 	require(umount("/mnt") == 0, "cleanly unmount recovered filesystem");
-	puts(phase == PHASE_PROTOCOL_READBACK ? "LINUX_FAST_COMMIT_FIXTURE_READBACK_PASS"
+	puts(phase >= PHASE_PROTOCOL_READBACK ? "LINUX_FAST_COMMIT_FIXTURE_READBACK_PASS"
 					      : "LINUX_FAST_COMMIT_REPLAY_PASS");
 	power_off(1);
 	return 0;

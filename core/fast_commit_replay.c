@@ -170,6 +170,7 @@ static enum ext4_result
 ext4_fc_inode_reuse(struct ext4_fc_replay *replay, struct ext4_fc_inode_state *state,
     struct ext4_inode_disk *disk, struct ext4_inode *inode, uint16_t mode)
 {
+	uint16_t type = inode->mode & EXT4_MODE_TYPE;
 	bool created;
 	enum ext4_result error;
 
@@ -184,7 +185,9 @@ ext4_fc_inode_reuse(struct ext4_fc_replay *replay, struct ext4_fc_inode_state *s
 	if (error == EXT4_OK) {
 		error = ext4_write_map_validate(&replay->allocation, inode, disk);
 	}
-	if (error == EXT4_OK && (inode->flags & EXT4_INODE_EXTENTS)) {
+	if (error == EXT4_OK && !(inode->flags & EXT4_INODE_INLINE_DATA) &&
+	    (type == EXT4_MODE_REGULAR || type == EXT4_MODE_DIRECTORY ||
+		(type == EXT4_MODE_SYMLINK && !inode->fast_symlink))) {
 		error = ext4_write_map_truncate(&replay->allocation, inode, disk, 0);
 	}
 	if (error == EXT4_OK && ext4_inode_has_xattrs(replay->allocation.fs, disk)) {
@@ -272,6 +275,11 @@ ext4_fc_apply_inode(
 			created = true;
 		} else if ((inode.mode & EXT4_MODE_TYPE) != (mode & EXT4_MODE_TYPE)) {
 			return EXT4_CORRUPT;
+		} else if (((inode.flags ^ flags) & EXT4_INODE_EXTENTS) &&
+		    !((inode.flags | flags) & EXT4_INODE_INLINE_DATA)) {
+			/* A format transition needs its own conversion; neither root can
+			 * be interpreted as the other mapping representation. */
+			return EXT4_UNSUPPORTED;
 		} else if ((mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY) {
 			directory_size = inode.size;
 			directory_flags = inode.flags & EXT4_INODE_INDEX;
@@ -282,7 +290,7 @@ ext4_fc_apply_inode(
 		ext4_zero(disk, fs->inode_size);
 	}
 	extent_root = !created && (ext4_le32(&disk->flags) & EXT4_INODE_EXTENTS);
-	/* Fast records describe metadata and logical ranges. The logged extent
+	/* Fast records describe metadata and logical ranges. The logged mapping
 	 * root belongs to a different allocation history and is never installed. */
 	ext4_copy(disk, logged, offsetof(struct ext4_inode_disk, block_data));
 	ext4_copy(
@@ -311,12 +319,28 @@ ext4_fc_apply_inode(
 		ext4_copy(disk->block_data, logged->block_data, sizeof(disk->block_data));
 	} else {
 		switch (type) {
+		case EXT4_MODE_REGULAR:
+		case EXT4_MODE_DIRECTORY:
+			/* Retain the checkpointed indirect root, or the empty new root. */
+			break;
 		case EXT4_MODE_SYMLINK:
+			/* The logged charge distinguishes embedded targets from mapped
+			 * links, including mapped targets shorter than the inode payload. */
+			ext4_inode_checksum_set(fs, number, disk);
+			error = ext4_inode_decode_orphan(fs, number, disk, &inode);
+			if (error != EXT4_OK) {
+				return error;
+			}
+			if (inode.fast_symlink) {
+				ext4_copy(
+				    disk->block_data, logged->block_data, sizeof(disk->block_data));
+			}
+			break;
 		case EXT4_MODE_CHARACTER:
 		case EXT4_MODE_BLOCK:
 		case EXT4_MODE_FIFO:
 		case EXT4_MODE_SOCKET:
-			/* These bytes hold a short link target or device identity, not
+			/* These bytes hold device identity, not
 			 * allocation pointers belonging to the pre-crash mapping tree. */
 			ext4_copy(disk->block_data, logged->block_data, sizeof(disk->block_data));
 			break;
@@ -332,9 +356,6 @@ ext4_fc_apply_inode(
 	if (type == EXT4_MODE_SYMLINK) {
 		if (inode.size == 0 || inode.size >= fs->info.block_size) {
 			return EXT4_CORRUPT;
-		}
-		if (!(flags & EXT4_INODE_EXTENTS) && !inode.fast_symlink) {
-			return EXT4_UNSUPPORTED;
 		}
 		if (inode.fast_symlink) {
 			if (disk->block_data[inode.size] != 0) {
@@ -358,6 +379,47 @@ ext4_fc_apply_inode(
 		return EXT4_OK;
 	}
 	return error == EXT4_OK ? ext4_fc_inode_finish(replay, disk, &inode) : error;
+}
+
+static enum ext4_result
+ext4_fc_symlink_validate(struct ext4_fc_replay *replay, const struct ext4_inode_disk *disk,
+    const struct ext4_inode *inode)
+{
+	struct ext4_map_run run;
+	const uint8_t *target = disk->block_data;
+	uint32_t index;
+	enum ext4_result error;
+
+	if ((inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_SYMLINK) {
+		return EXT4_OK;
+	}
+	if (inode->size == 0 || inode->size >= replay->allocation.fs->info.block_size) {
+		return EXT4_CORRUPT;
+	}
+	if (!inode->fast_symlink) {
+		error = ext4_write_map_lookup(&replay->allocation, inode, disk, 0, &run);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		if (run.physical == 0 || run.unwritten) {
+			return EXT4_CORRUPT;
+		}
+		error = ext4_transaction_read(
+		    replay->allocation.transaction, run.physical, replay->buffer);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		target = replay->buffer;
+	}
+	if (target[inode->size] != 0) {
+		return EXT4_CORRUPT;
+	}
+	for (index = 0; index < inode->size; index++) {
+		if (target[index] == 0) {
+			return EXT4_CORRUPT;
+		}
+	}
+	return EXT4_OK;
 }
 
 static enum ext4_result
@@ -773,6 +835,9 @@ ext4_fast_commit_replay(struct ext4_fast_commit *log)
 	}
 	for (index = 0; error == EXT4_OK && index < replay->inode_count; index++) {
 		error = ext4_fc_inode_get(replay, replay->inodes[index].number, &disk, &inode);
+		if (error == EXT4_OK) {
+			error = ext4_fc_symlink_validate(replay, disk, &inode);
+		}
 		if (error == EXT4_OK) {
 			error = ext4_fc_inode_finish(replay, disk, &inode);
 		}

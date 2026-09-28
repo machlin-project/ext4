@@ -12,7 +12,6 @@
 #include <ext2fs/fast_commit.h>
 
 #define FIXTURE_SEQUENCE 7U
-#define SOURCE_BLOCKS 5U
 #define CREATED_FILES 12U
 #define LONG_NAME_BYTES 230U
 #define DEVICE_LEGACY_MASK 0xffU
@@ -44,7 +43,9 @@ enum fixture_damage {
 	DAMAGE_LINK_NUL,
 	DAMAGE_LINK_TERMINATOR,
 	DAMAGE_SPECIAL_SIZE,
-	DAMAGE_MISSING_LINK_RANGE
+	DAMAGE_MISSING_LINK_RANGE,
+	DAMAGE_INDIRECT_UNWRITTEN,
+	DAMAGE_INDIRECT_LOGICAL_LIMIT
 };
 
 struct fixture {
@@ -275,6 +276,17 @@ data_records(struct fixture *fixture, ext2_ino_t number)
 		    ext2fs_cpu_to_le16(1U + ((flags & BMAP_RET_UNINIT) ? EXT_INIT_MAX_LEN : 0));
 		extent.ee_start_hi = ext2fs_cpu_to_le16(physical >> 32);
 		extent.ee_start = ext2fs_cpu_to_le32(physical);
+		if (number == lookup(fixture, EXT2_ROOT_INO, "renamed") && logical == 0) {
+			if (fixture->damage == DAMAGE_INDIRECT_UNWRITTEN) {
+				extent.ee_len = ext2fs_cpu_to_le16(EXT_INIT_MAX_LEN + 1U);
+			} else if (fixture->damage == DAMAGE_INDIRECT_LOGICAL_LIMIT) {
+				__u32 per_block = fixture->expected->blocksize / sizeof(__u32);
+				__u32 limit = EXT2_NDIR_BLOCKS +
+				    per_block * (1U + per_block * (1U + per_block));
+
+				extent.ee_block = ext2fs_cpu_to_le32(limit);
+			}
+		}
 		range.fc_ino = ext2fs_cpu_to_le32(number);
 		memcpy(range.fc_ex, &extent, sizeof(extent));
 		record(fixture, EXT4_FC_TAG_ADD_RANGE, &range, sizeof(range));
@@ -329,7 +341,8 @@ prepare_orphans(struct fixture *fixture)
 	unsigned int index;
 	int flags;
 
-	if (!ext2fs_has_feature_orphan_file(fs->super) && !ext2fs_has_feature_ea_inode(fs->super)) {
+	if (!ext2fs_has_feature_orphan_file(fs->super) && !ext2fs_has_feature_ea_inode(fs->super) &&
+	    ext2fs_has_feature_extents(fs->super)) {
 		return;
 	}
 	numbers[0] = pending_lookup(fixture, "victim");
@@ -385,7 +398,8 @@ orphan_records(struct fixture *fixture)
 	ext2_ino_t final;
 
 	if (!ext2fs_has_feature_orphan_file(fixture->pending->super) &&
-	    !ext2fs_has_feature_ea_inode(fixture->pending->super)) {
+	    !ext2fs_has_feature_ea_inode(fixture->pending->super) &&
+	    ext2fs_has_feature_extents(fixture->pending->super)) {
 		return;
 	}
 	victim = pending_lookup(fixture, "victim");
@@ -560,6 +574,46 @@ create_specials(const char *path)
 }
 
 static void
+prepare_indirect(const char *path)
+{
+	ext2_filsys fs;
+	ext2_file_t file;
+	ext2_ino_t number;
+	struct ext2_inode inode;
+	blk64_t logical = EXT2_NDIR_BLOCKS;
+	blk64_t span = 1;
+	blk64_t per_block;
+	unsigned int written;
+	unsigned int depth;
+	unsigned char marker = 'T';
+
+	check(ext2fs_open(path, EXT2_FLAG_RW | EXT2_FLAG_64BITS, 0, 0, unix_io_manager, &fs),
+	    "open independent indirect filesystem");
+	check(ext2fs_read_bitmaps(fs), "read indirect fixture bitmaps");
+	require(!ext2fs_has_feature_extents(fs->super), "require indirect fixture format");
+	check(ext2fs_namei(fs, EXT2_ROOT_INO, EXT2_ROOT_INO, "/victim", &number),
+	    "find old indirect generation");
+	check(ext2fs_file_open(fs, number, EXT2_FILE_WRITE, &file), "open old indirect file");
+	per_block = fs->blocksize / sizeof(__u32);
+	for (depth = EXT2_IND_BLOCK; depth <= EXT2_TIND_BLOCK; depth++) {
+		check(ext2fs_file_llseek(file, logical * fs->blocksize, EXT2_SEEK_SET, NULL),
+		    "seek indirect boundary");
+		check(ext2fs_file_write(file, &marker, sizeof(marker), &written),
+		    "allocate old indirect branch");
+		require(written == sizeof(marker), "require complete indirect marker");
+		span *= per_block;
+		logical += span;
+	}
+	check(ext2fs_file_close(file), "close old indirect file");
+	check(ext2fs_read_inode(fs, number, &inode), "read old indirect roots");
+	for (depth = EXT2_IND_BLOCK; depth <= EXT2_TIND_BLOCK; depth++) {
+		require(inode.i_block[depth] != 0, "require all three indirect levels");
+	}
+	check(ext2fs_close(fs), "close independent indirect filesystem");
+	printf("old-generation-indirect-depth=3\n");
+}
+
+static void
 special_records(struct fixture *fixture)
 {
 	ext2_ino_t number;
@@ -585,6 +639,7 @@ main(int argc, char **argv)
 	struct fixture fixture = { 0 };
 	struct ext4_fc_head head = { 0 };
 	struct ext4_fc_del_range removed;
+	struct ext2_inode source;
 	journal_superblock_t *journal;
 	ext2_ino_t hello;
 	ext2_ino_t directory;
@@ -599,6 +654,10 @@ main(int argc, char **argv)
 
 	if (argc == 3 && strcmp(argv[1], "--create-specials") == 0) {
 		create_specials(argv[2]);
+		return 0;
+	}
+	if (argc == 3 && strcmp(argv[1], "--prepare-indirect") == 0) {
+		prepare_indirect(argv[2]);
 		return 0;
 	}
 	if (argc == 4 && strcmp(argv[1], "--share-xattrs") == 0) {
@@ -625,6 +684,10 @@ main(int argc, char **argv)
 			fixture.damage = DAMAGE_SPECIAL_SIZE;
 		} else if (strcmp(argv[3], "--missing-link-range") == 0) {
 			fixture.damage = DAMAGE_MISSING_LINK_RANGE;
+		} else if (strcmp(argv[3], "--indirect-unwritten") == 0) {
+			fixture.damage = DAMAGE_INDIRECT_UNWRITTEN;
+		} else if (strcmp(argv[3], "--indirect-logical-limit") == 0) {
+			fixture.damage = DAMAGE_INDIRECT_LOGICAL_LIMIT;
 		} else {
 			require(0, "unknown fixture damage mode");
 		}
@@ -671,9 +734,12 @@ main(int argc, char **argv)
 	record(&fixture, EXT4_FC_TAG_HEAD, &head, sizeof(head));
 	hello = lookup(&fixture, EXT2_ROOT_INO, "renamed");
 	inode_record(&fixture, hello, 1);
+	check(ext2fs_read_inode(fixture.pending, hello, &source), "read source range length");
+	require(source.i_size_high == 0, "bound source range length");
 	removed.fc_ino = ext2fs_cpu_to_le32(hello);
 	removed.fc_lblk = 0;
-	removed.fc_len = ext2fs_cpu_to_le32(SOURCE_BLOCKS);
+	removed.fc_len = ext2fs_cpu_to_le32(
+	    (source.i_size + fixture.pending->blocksize - 1U) / fixture.pending->blocksize);
 	record(&fixture, EXT4_FC_TAG_DEL_RANGE, &removed, sizeof(removed));
 	data_records(&fixture, hello);
 	commit(&fixture);

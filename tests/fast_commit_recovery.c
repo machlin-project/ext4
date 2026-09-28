@@ -56,6 +56,15 @@ enum orphan_damage {
 	ORPHAN_DAMAGE_COUNT
 };
 
+enum journal_map_damage {
+	JOURNAL_MAP_HOLE,
+	JOURNAL_MAP_DUPLICATE_DATA,
+	JOURNAL_MAP_DATA_IS_NODE,
+	JOURNAL_MAP_REUSED_NODE,
+	JOURNAL_MAP_NODE_CYCLE,
+	JOURNAL_MAP_DAMAGE_COUNT
+};
+
 static void
 result_is(enum ext4_result actual, enum ext4_result expected, const char *operation, int line)
 {
@@ -445,6 +454,66 @@ orphan_guards(struct device *device)
 	    ORPHAN_DAMAGE_COUNT);
 }
 
+static void
+journal_map_guards(struct device *device)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode inode;
+	struct ext4_recovery_report report;
+	const struct ext4_le32 *root;
+	struct ext4_le32 *single;
+	struct ext4_le32 *double_root;
+	uint64_t single_block;
+	uint64_t double_block;
+	uint32_t middle = device->block_size / sizeof(*single) / 2U;
+	uint32_t event_index;
+	unsigned int damage;
+
+	reset(device);
+	EXPECT(ext4_load(&device->environment, true, &fs), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, fs->journal_inode, &inode), EXT4_OK);
+	CHECK(!(inode.flags & EXT4_INODE_EXTENTS));
+	root = (const struct ext4_le32 *)inode.block_data;
+	single_block = ext4_le32(&root[EXT4_DIRECT_BLOCKS]);
+	double_block = ext4_le32(&root[EXT4_DIRECT_BLOCKS + 1U]);
+	CHECK(single_block != 0 && single_block < device->blocks && double_block != 0 &&
+	    double_block < device->blocks);
+	ext4_unmount(fs);
+	for (damage = 0; damage < JOURNAL_MAP_DAMAGE_COUNT; damage++) {
+		reset(device);
+		single = (struct ext4_le32 *)(device->cache + single_block * device->block_size);
+		double_root =
+		    (struct ext4_le32 *)(device->cache + double_block * device->block_size);
+		CHECK(ext4_le32(&single[middle]) != 0 && ext4_le32(&double_root[0]) != 0);
+		switch (damage) {
+		case JOURNAL_MAP_HOLE:
+			ext4_encode32(&single[middle], 0);
+			break;
+		case JOURNAL_MAP_DUPLICATE_DATA:
+			ext4_encode32(&single[middle], ext4_le32(&single[middle - 1U]));
+			break;
+		case JOURNAL_MAP_DATA_IS_NODE:
+			ext4_encode32(&single[middle], (uint32_t)single_block);
+			break;
+		case JOURNAL_MAP_REUSED_NODE:
+			ext4_encode32(&double_root[0], (uint32_t)single_block);
+			break;
+		case JOURNAL_MAP_NODE_CYCLE:
+			ext4_encode32(&double_root[0], (uint32_t)double_block);
+			break;
+		}
+		memcpy(device->stable, device->cache, device->size);
+		EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_CORRUPT);
+		CHECK(device->live == 0 && report.fast_commits == 0 && report.replayed_blocks == 0);
+		for (event_index = 0; event_index < device->events; event_index++) {
+			CHECK(device->history[event_index].flush);
+		}
+		CHECK(memcmp(device->stable, device->cache, device->size) == 0);
+	}
+	printf(
+	    "PASS %u corrupt journal mappings rejected without writes\n", JOURNAL_MAP_DAMAGE_COUNT);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -469,21 +538,23 @@ main(int argc, char **argv)
 	bool faults;
 	bool resources;
 	bool orphans;
+	bool journal_map;
 	bool reject;
 	enum ext4_result error;
 
 	if (argc != 3 && argc != 4) {
 		fprintf(stderr,
 		    "usage: %s PENDING_IMAGE VERIFIED_REFERENCE_IMAGE "
-		    "[--faults|--resources|--orphans|--reject]\n",
+		    "[--faults|--resources|--orphans|--journal-map|--reject]\n",
 		    argv[0]);
 		return 2;
 	}
 	faults = argc == 4 && strcmp(argv[3], "--faults") == 0;
 	resources = argc == 4 && strcmp(argv[3], "--resources") == 0;
 	orphans = argc == 4 && strcmp(argv[3], "--orphans") == 0;
+	journal_map = argc == 4 && strcmp(argv[3], "--journal-map") == 0;
 	reject = argc == 4 && strcmp(argv[3], "--reject") == 0;
-	CHECK(argc == 3 || faults || resources || orphans || reject);
+	CHECK(argc == 3 || faults || resources || orphans || journal_map || reject);
 	EXPECT(ext4_posix_open(&source, argv[1]), EXT4_OK);
 	EXPECT(ext4_posix_open(&oracle, argv[2]), EXT4_OK);
 	EXPECT(ext4_mount(&oracle.environment, &reference), EXT4_OK);
@@ -512,6 +583,10 @@ main(int argc, char **argv)
 	device->writer.write = write_device;
 	device->writer.flush = flush_device;
 	reset(device);
+	if (journal_map) {
+		journal_map_guards(device);
+		goto out;
+	}
 	if (reject) {
 		EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_CORRUPT);
 		CHECK(device->live == 0 && report.fast_commits == 0 && report.replayed_blocks == 0);
@@ -529,8 +604,8 @@ main(int argc, char **argv)
 	reads = device->reads;
 	compare(device, reference);
 	printf("PASS %u fast commits match verified namespace, data and accounting; %u durability "
-	       "events\n",
-	    report.fast_commits, operations);
+	       "events; %u allocations, %u reads\n",
+	    report.fast_commits, operations, allocations, reads);
 	if (orphans) {
 		orphan_guards(device);
 	}

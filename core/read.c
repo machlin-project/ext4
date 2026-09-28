@@ -296,10 +296,17 @@ enum ext4_result
 ext4_map_block_path(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
     uint64_t *physical, struct ext4_block_path *path)
 {
+	return ext4_map_blocks_path(fs, inode, logical, physical, NULL, path);
+}
+
+enum ext4_result
+ext4_map_blocks_path(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
+    uint64_t *physical, uint64_t *blocks, struct ext4_block_path *path)
+{
 	uint8_t *scratch = NULL;
 	enum ext4_result error;
 
-	error = ext4_map_blocks(fs, inode, logical, &scratch, physical, NULL, path);
+	error = ext4_map_blocks(fs, inode, logical, &scratch, physical, blocks, path);
 	if (scratch != NULL) {
 		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
 	}

@@ -16,6 +16,7 @@ from generate_fixtures import EXPECTED_FEATURES, UUID, resolve_tools
 from fast_commit_reference import read_namespace
 
 PROTOCOL_READBACK_PHASE = 2
+INDIRECT_READBACK_PHASE = 3
 
 
 def digest(path):
@@ -24,12 +25,16 @@ def digest(path):
 
 
 def readback_fixtures(args, output, tools, recover, prep, runner, kernel, archive, rows, run):
-    fixtures = args.xattr_fixtures.resolve()
+    fixtures = (args.xattr_fixtures or args.indirect_fixtures).resolve()
+    profiles = (('xattr-reuse-1k', 'xattr-reuse-4k', 'xattr-reuse-legacy-1k')
+                if args.xattr_fixtures else ('indirect-1k', 'indirect-4k'))
+    marker = ('LINUX_FAST_COMMIT_XATTR_REUSE_PASS' if args.xattr_fixtures
+              else 'LINUX_FAST_COMMIT_INDIRECT_PASS')
     source_rows = json.loads((fixtures / 'report.json').read_text())
     if not source_rows or not all(row.get('passed') for row in source_rows):
         raise RuntimeError('Protocol fixture generation is not accepted')
     cases = {row['profile']: row for row in source_rows if 'profile' in row}
-    for profile in ('xattr-reuse-1k', 'xattr-reuse-4k', 'xattr-reuse-legacy-1k'):
+    for profile in profiles:
         expected = cases[profile]
         if args.block_size and expected['block_size'] not in args.block_size:
             continue
@@ -58,7 +63,7 @@ def readback_fixtures(args, output, tools, recover, prep, runner, kernel, archiv
         (directory / 'readback.console.log').write_text(console)
         for required in ('LINUX_FAST_COMMIT_KERNEL=Linux 6.12.94-0-virt aarch64',
                          'LINUX_FAST_COMMIT_MOUNT_OPTIONS=data=ordered,commit=600',
-                         'LINUX_FAST_COMMIT_XATTR_REUSE_PASS',
+                         marker,
                          'LINUX_FAST_COMMIT_FIXTURE_READBACK_PASS',
                          'LINUX_FAST_COMMIT_RESULT=PASS'):
             if required not in console:
@@ -96,11 +101,16 @@ def main():
                    help='capture fast commits with the modern orphan-file feature enabled')
     p.add_argument('--special-files', action='store_true',
                    help='verify Linux full-commit fallback after symlinks and special inodes')
-    p.add_argument('--xattr-fixtures', type=Path,
-                   help='verify core-recovered xattr protocol fixtures in Linux instead of capture')
+    fixtures = p.add_mutually_exclusive_group()
+    fixtures.add_argument('--xattr-fixtures', type=Path,
+                          help='verify core-recovered xattr protocol fixtures in Linux')
+    fixtures.add_argument('--indirect-fixtures', type=Path,
+                          help='verify core-recovered indirect protocol fixtures in Linux')
     a = p.parse_args()
-    if a.xattr_fixtures and (not a.recover or a.orphan_file or a.special_files):
-        p.error('--xattr-fixtures requires --recover and excludes native capture options')
+    fixture_phase = (PROTOCOL_READBACK_PHASE if a.xattr_fixtures else
+                     INDIRECT_READBACK_PHASE if a.indirect_fixtures else None)
+    if fixture_phase is not None and (not a.recover or a.orphan_file or a.special_files):
+        p.error('protocol fixtures require --recover and exclude native capture options')
     lab, prepared, runner, output = (v.resolve() for v in (a.lab, a.prepared, a.runner, a.output))
     if Path.cwd() != lab:
         p.error('run with explicit lab working directory')
@@ -140,7 +150,7 @@ def main():
     compile_command[-1] = str(output / 'init')
     run(prep, compile_command)
     archives = {}
-    phases = (PROTOCOL_READBACK_PHASE,) if a.xattr_fixtures else range(2)
+    phases = (fixture_phase,) if fixture_phase is not None else range(2)
     for phase in phases:
         tree = output / f'root-{phase}'
         shutil.copytree(prepared / 'root-0', tree)
@@ -156,9 +166,9 @@ def main():
                            input=listing.encode(), stdout=stream, check=True)
         archives[phase] = archive
     prep.update(passed=True, probe_sha256=digest(output / 'init'))
-    if a.xattr_fixtures:
+    if fixture_phase is not None:
         readback_fixtures(a, output, tools, recover, prep, runner, kernel,
-                          archives[PROTOCOL_READBACK_PHASE], rows, run)
+                          archives[fixture_phase], rows, run)
         return
     for block in a.block_size or (1024, 4096):
         name = f'fast-commit-{block // 1024}k'

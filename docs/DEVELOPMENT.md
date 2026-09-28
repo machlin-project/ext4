@@ -185,6 +185,18 @@ the pinned debugfs per-key removal of a shared external block incorrectly frees
 value inodes still owned by that block. Expected images must pass strict fsck
 without repair before they become references.
 
+Two indirect profiles omit EXTENTS and 64BIT. Their sparse file crosses the direct,
+single-indirect and double-indirect boundaries; a created file needs a new indirect
+path. The replaced old generation owns all three indirect levels. Legacy orphans,
+mapped symlinks and special inodes share the same committed prefix. Special inodes
+are allocated before the expected image releases orphan numbers, so only the
+explicit replacement reuses an old inode number. Malformed logs add unwritten
+indirect data and an address beyond the indirect logical limit.
+The journal-map guards inject a hole, repeated data block, data/node overlap,
+reused mapping node and a pointer cycle. Each must reject before any write.
+Recovery output also records allocation and read counts before result comparison;
+these are operation counts for the fixture, not a throughput benchmark.
+
 For native consumption of these protocol images, pass
 `--xattr-fixtures /absolute/path/to/fast-commit-fixtures` and `--recover` to
 `run_linux_fast_commit.py` with the same lab, prepared reference, runner and fresh
@@ -194,6 +206,11 @@ copies with the core, requires the recorded fast-commit count, boots Linux to re
 both replacements and every surviving attribute, and requires clean unmount plus
 strict fsck and unchanged namespace/value hashes. It proves Linux consumption of
 core output, not Linux generation or direct replay of that pending log.
+The mutually exclusive `--indirect-fixtures` option uses the same procedure for the
+two indirect profiles. Linux reads the complete sparse file, checks its hardlink
+identity, reads created files, the replacement inode, truncated orphan and symlink
+targets, and checks the special-device identities before clean unmount and
+independent verification.
 
 ```sh
 python3 tests/generate_fast_commit_fixtures.py --tools-root E2FSPROGS_BUILD \
