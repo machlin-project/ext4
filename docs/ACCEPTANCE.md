@@ -41,7 +41,7 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Complete EA_INODE regression; INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; EA_INODE focused faults, independent states/replay and six Linux roundtrips pass, expanded regression pending; distributed geometry is accepted |
+| Format compatibility | INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; EA_INODE focused faults, independent states/replay, six Linux roundtrips and the expanded regression pass; distributed geometry is accepted |
 | Journal compatibility | Fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; v1 and async compatibility pass focused faults, independent replay, eight Linux roundtrips and their combined full regression |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
@@ -113,10 +113,17 @@ Evidence is in `artifacts/checks/ea-inode-linux-summary.json`; the successful 4 
 case is retained from the first retry, with the remaining five accepted in the
 next run. Failed cases below remain excluded.
 
-The expanded 432-test CI regression remains pending.
-The initial core CI job failed while compiling its fixture helper because Linux
-requires `sys/types.h` before the e2fsprogs header; other suites are collected
-separately. The initial 1 KiB fixture exposed Linux's journal credit requirement for a 64 KiB
+The expanded CI regression passes all 432 unique registered tests without JUnit
+failures, errors or skips. Five unchanged suites contribute 274 passes from the
+original full run; the corrected core job contributes 158 from its targeted run.
+These are two runs with the same core implementation, not one successful full
+workflow. The core job also repeats all 108 functional/orphan states and 48 fault
+states with 4,410 zero-status independent commands. The historical ten reader-only
+xattr compatibility failures and ten fixture-repair statuses remain separate.
+Main acceptance and raw report references are recorded in
+`artifacts/checks/ea-inode-ci-accepted.json`.
+The initial core job failed while compiling its fixture helper because Linux
+requires `sys/types.h` before the e2fsprogs header; that failed job is excluded. The initial 1 KiB fixture exposed Linux's journal credit requirement for a 64 KiB
 replacement: 341 requested credits exceed the default small journal's 335-credit
 limit. Fixtures now reserve at least 2 MiB and 1,024 journal blocks. This failed
 native invocation is not counted as filesystem acceptance.
