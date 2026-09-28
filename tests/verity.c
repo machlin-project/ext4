@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
+#define _POSIX_C_SOURCE 200809L
 #include "journal.h"
 #include "image.h"
 #include "sha.h"
