@@ -24,6 +24,11 @@ CRC32C uses an immutable 1 KiB byte-remainder table. It retains the raw seeded
 state API used by UUID, inode, group and journal checksum chains, with no implicit
 initial or final complement. Byte loads admit unaligned buffers on every target;
 there is no initialization, allocation, mutable global state or CPU-feature probe.
+When the compilation target guarantees the ARMv8 CRC32 extension, Clang builds
+use its CRC32C instructions for 8-byte words and a byte tail instead. They use
+general registers only and compute the same raw reflected update; the choice is
+fixed at compile time. Other targets, including the x86_64 kernel build, keep the
+table.
 
 Legacy `GDT_CSUM` group descriptors use CRC16 over the UUID, little-endian group
 number and full descriptor with the checksum field omitted. The 32-byte remainder
@@ -145,12 +150,11 @@ that pass. Neither index introduces persistent filesystem state or changes journ
 credit limits, commit ordering or resource ownership.
 
 Creation and link replay combine name lookup with insertion-slot preparation in
-one complete directory validation. An existing name reports its inode identity;
-replay accepts the same identity without changing link counts and rejects a
-conflicting owner. Duplicate entries, checksums and index placement remain checked
-across the directory. This removes the consecutive FIND and INSERT scans, but
-still visits the directory for each name operation; large namespace replay is not
-yet a linear-time algorithm.
+one directory scan. An existing name reports its inode identity; replay accepts
+the same identity without changing link counts and rejects a conflicting owner.
+Indexed parents use the namespace writer's hash-targeted scan described below, so
+each name operation reads the index graph and only the leaves eligible for that
+name. Linear parents still validate every record for each operation.
 
 The complete semantic conversion commits as an ordinary journal transaction with
 the same ID as the fast prefix. Before its commit becomes durable, the original
@@ -323,6 +327,9 @@ checks or initializes each covered cluster interval, and reserves the incomplete
 tail and bitmap padding. A byte population pass then verifies the free count.
 It preserves complete bitmap and checksum validation without searching the system
 range index separately for every cluster. It needs no additional cache or allocation.
+Inode bitmaps use the same byte-wise checks for padding, reserved records, the
+uninitialized tail beyond the group's high-water mark, the free count and the
+lowest free record.
 
 New blocks are fully zeroed before partial writes. Growth skips sparse/unwritten
 runs and zeroes exposed bytes in existing written allocations beyond the old EOF.
@@ -662,10 +669,15 @@ to a symlink. The reader rejects an inline length that leaves no terminator spac
 Adapter readlink operations bound allocation by the filesystem block size and
 preserve target bytes; native path traversal limits remain the platform's policy.
 
-The namespace writer validates the complete directory map and every record before
-mutation, even after finding a candidate slot. Linear directories reuse record
-slack or append a zeroed block. Existing indexed directories validate every index
-edge, hash interval, child ownership and checksum before choosing an eligible leaf.
+The namespace writer validates the complete directory map before mutation. Linear
+directories validate every record, even after finding a candidate slot, then reuse
+record slack or append a zeroed block. Existing indexed directories validate every
+index edge, hash interval, child ownership and checksum, then the root records and
+every record, checksum and hash placement in each leaf whose interval contains the
+name, including collision continuations. A validated index confines the name to
+those leaves, so lookup, duplicate detection and slot selection do not read other
+leaves; emptiness checks still validate every leaf. Unvisited leaves are not
+revalidated by each operation, matching the on-demand validation of other metadata.
 The hash implementation handles legacy, half-MD4 and TEA, each with signed and
 unsigned byte variants. Filename bytes need not be UTF-8.
 

@@ -105,6 +105,13 @@ ext4_crc32_be(uint32_t checksum, const void *buffer, size_t length)
 	return checksum;
 }
 
+#if defined(__clang__) && defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
+/* The compilation target guarantees the ARMv8 CRC32C instructions. They use
+ * general registers and the same raw reflected update as the remainder table;
+ * selection happens at compile time, without a runtime CPU-feature probe. */
+#define EXT4_CRC32C_INSTRUCTIONS 1
+#define EXT4_CRC32C_WORD_BYTES 8U
+#else
 /* Byte remainders for the reflected Castagnoli polynomial. Read-only storage
  * avoids per-mount allocation, initialization races and platform CPU features.
  * The caller owns seed and final-complement conventions. */
@@ -367,17 +374,33 @@ static const uint32_t ext4_crc32c_table[UINT8_MAX + 1U] = {
 	0x5f16d052U,
 	0xad7d5351U,
 };
+#endif
 
 uint32_t
 ext4_crc32c(uint32_t checksum, const void *buffer, size_t length)
 {
 	const uint8_t *bytes = buffer;
-	size_t index;
+	size_t index = 0;
+#ifdef EXT4_CRC32C_INSTRUCTIONS
+	uint64_t word;
+	unsigned int shift;
 
-	for (index = 0; index < length; index++) {
+	for (; length - index >= EXT4_CRC32C_WORD_BYTES; index += EXT4_CRC32C_WORD_BYTES) {
+		word = 0;
+		for (shift = 0; shift < EXT4_CRC32C_WORD_BYTES; shift++) {
+			word |= (uint64_t)bytes[index + shift] << (shift * EXT4_BITS_PER_BYTE);
+		}
+		checksum = __builtin_arm_crc32cd(checksum, word);
+	}
+	for (; index < length; index++) {
+		checksum = __builtin_arm_crc32cb(checksum, bytes[index]);
+	}
+#else
+	for (; index < length; index++) {
 		checksum = ext4_crc32c_table[(uint8_t)(checksum ^ bytes[index])] ^
 		    (checksum >> EXT4_BITS_PER_BYTE);
 	}
+#endif
 	return checksum;
 }
 

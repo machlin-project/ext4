@@ -102,7 +102,7 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 		}
 		blocks = 1;
 	}
-	if (tree != NULL && action == EXT4_DIRECTORY_INSERT) {
+	if (tree != NULL && action != EXT4_DIRECTORY_EMPTY) {
 		error =
 		    ext4_directory_hash(tree->version, tree->seed, name, name_length, &requested);
 		if (error != EXT4_OK) {
@@ -126,6 +126,10 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 						   : ext4_directory_usable(fs);
 		eligible = tree == NULL ||
 		    (logical != 0 && ext4_index_contains(&tree->ranges[logical], requested.major));
+		/* A validated index confines every name to leaves containing its hash. */
+		if (tree != NULL && logical != 0 && !eligible && action != EXT4_DIRECTORY_EMPTY) {
+			continue;
+		}
 		occupied = 0;
 		if (inline_data) {
 			run.physical = 0;

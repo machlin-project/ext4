@@ -22,7 +22,9 @@ struct ext4_directory_slot {
 enum ext4_directory_action { EXT4_DIRECTORY_INSERT, EXT4_DIRECTORY_FIND, EXT4_DIRECTORY_EMPTY };
 
 /* INSERT returning EXT4_EXISTS reports the matching inode in slot->number.
- * Both FIND and INSERT validate the complete directory before returning. */
+ * Linear directories and EMPTY validate every record. Indexed FIND and INSERT
+ * validate the complete map and index graph, then every record in the root and
+ * in each leaf whose hash interval contains the name. */
 enum ext4_result ext4_directory_scan(struct ext4_allocation *allocation, struct ext4_inode *parent,
     struct ext4_inode_disk *disk, const uint8_t *name, size_t name_length,
     enum ext4_directory_action action, uint32_t expected_parent, struct ext4_directory_slot *slot);

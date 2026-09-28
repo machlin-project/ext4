@@ -442,7 +442,8 @@ a read and a streamed directory API. Its focused tests and warm-cache benchmarks
 pass; complete CI acceptance is pending. The compatibility single-entry API still
 reads and validates a block per returned entry, so adapters need to adopt the visitor
 to obtain streamed enumeration's benefit.
-CRC32C now uses an immutable byte-remainder table. Attributed writes can still
+CRC32C uses an immutable byte-remainder table, or compile-time ARMv8 CRC32C
+instructions when the target guarantees them. Attributed writes can still
 validate the complete inode map; each transaction journals data and checkpoints
 synchronously; writable access is serialized by its owner. Measure these costs
 before choosing further optimizations.
@@ -510,7 +511,7 @@ The 14-pair warm-cache comparison is recorded under
 CPU time, device-level operations, writable or concurrent workloads, or mounted
 platform behavior. Representative performance acceptance therefore remains open.
 
-`metadata-checksum` compares the optimized CRC32C with bit-serial polynomial
+`metadata-checksum` compares the selected CRC32C implementation with bit-serial polynomial
 division, a known check value, all 256 byte remainders and 3,648 combinations of
 seeds, alignment, lengths and streamed partitions through 64 KiB. Empty updates
 preserve the seed. Existing reader, malformed-image, journal and mutation cases
