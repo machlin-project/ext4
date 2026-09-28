@@ -1464,7 +1464,7 @@ truncate_guards(struct device *device)
 	struct ext4_inode_update update = write_update(fs);
 	struct ext4_inode_disk *disk;
 	uint64_t inode_offset;
-	uint32_t journal_blocks;
+	uint32_t ring_end;
 	uint32_t saved_blocks;
 	uint32_t sector_units = device->block_size / TEST_SECTOR_SIZE;
 
@@ -1484,11 +1484,11 @@ truncate_guards(struct device *device)
 	EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &after),
 	    EXT4_INVALID_ARGUMENT);
 	update = write_update(fs);
-	journal_blocks = fs->journal->blocks;
-	fs->journal->blocks = fs->journal->first + 6;
+	ring_end = fs->journal->last;
+	fs->journal->last = fs->journal->first + 6;
 	EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation, 1, &update, &after),
 	    EXT4_RANGE);
-	fs->journal->blocks = journal_blocks;
+	fs->journal->last = ring_end;
 	CHECK(device->writes == 0 && memcmp(device->cache, device->base, device->size) == 0);
 	EXPECT(ext4_inode_location(fs, inode.number, &inode_offset), EXT4_OK);
 	disk = (struct ext4_inode_disk *)(device->cache + inode_offset);

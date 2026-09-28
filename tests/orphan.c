@@ -1135,7 +1135,7 @@ live_guards(struct device *device, const char *name)
 	struct ext4_inode inode;
 	struct ext4_inode result;
 	struct ext4_inode_update update;
-	uint32_t blocks;
+	uint32_t ring_end;
 
 	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
 	inode = lookup(fs, name);
@@ -1152,10 +1152,10 @@ live_guards(struct device *device, const char *name)
 	    ext4_truncate(fs, inode.number, inode.generation + 1, 0, &update, &result), EXT4_STALE);
 	EXPECT(ext4_truncate(fs, inode.number, inode.generation, UINT64_MAX, &update, &result),
 	    EXT4_RANGE);
-	blocks = fs->journal->blocks;
-	fs->journal->blocks = fs->journal->first + 6;
+	ring_end = fs->journal->last;
+	fs->journal->last = fs->journal->first + 6;
 	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 0, &update, &result), EXT4_RANGE);
-	fs->journal->blocks = blocks;
+	fs->journal->last = ring_end;
 	CHECK(device->writes == 0 && memcmp(device->cache, device->base, device->size) == 0);
 	ext4_unmount(fs);
 }
