@@ -136,7 +136,8 @@ ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t log
 				if (length == 0 || (position != 0 && start < end) ||
 				    start + length > (uint64_t)UINT32_MAX + 1 || disk_block == 0 ||
 				    disk_block >= fs->info.blocks ||
-				    length > fs->info.blocks - disk_block) {
+				    length > fs->info.blocks - disk_block ||
+				    disk_block % fs->cluster_blocks != start % fs->cluster_blocks) {
 					return EXT4_CORRUPT;
 				}
 				end = start + length;

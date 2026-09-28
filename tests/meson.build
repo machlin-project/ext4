@@ -3,13 +3,25 @@
 # required cases; missing images fail tests instead of silently removing them.
 paths = {}
 foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
-  'namespace_fixtures', 'xattr_fixtures', 'ea_inode_fixtures', 'inline_fixtures', 'inline_space_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
+  'namespace_fixtures', 'xattr_fixtures', 'ea_inode_fixtures', 'inline_fixtures', 'inline_space_fixtures', 'cluster_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
   'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures', 'geometry_fixtures',
   'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
   'directory_index_64k_fixture']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
 endforeach
+
+if paths['cluster_fixtures'] != ''
+  foreach profile : ['1k', '4k', 'wide', 'no-checksum', 'checksum-seed', 'inline', 'ea-inode', 'orphan-file']
+    test('cluster-mutation-' + profile, programs['cluster'],
+      args: paths['cluster_fixtures'] / ('cluster-' + profile + '.img'), timeout: 600, suite: 'core')
+    if profile in ['1k', '4k']
+      test('cluster-faults-' + profile, programs['cluster'],
+        args: ['--faults', paths['cluster_fixtures'] / ('cluster-' + profile + '.img')],
+        timeout: 600, suite: 'core')
+    endif
+  endforeach
+endif
 
 if paths['inline_fixtures'] != ''
   foreach profile : ['1k', '4k', 'no-checksum', 'checksum-seed', 'no-filetype', 'inode512', 'ea-inode', 'orphan-file']

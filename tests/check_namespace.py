@@ -38,13 +38,13 @@ def symlink_target(length, binary=False):
                  for index in range(length))
 
 
-def symlink_bytes(image, path, inode, block_size, debugfs, run):
+def symlink_bytes(image, path, inode, block_size, debugfs, run, *, cluster_blocks=1):
     """Resolve storage with debugfs, then compare raw bytes without text decoding."""
     length = inode["size"]
     if inode["type"] != "symlink" or not 0 < length < block_size:
         raise RuntimeError("Invalid independently decoded symlink type or length")
     inline = length < INODE_BLOCK_DATA_SIZE
-    if inode["blocks"] != (0 if inline else block_size // SECTOR_SIZE):
+    if inode["blocks"] != (0 if inline else cluster_blocks * block_size // SECTOR_SIZE):
         raise RuntimeError("Symlink has an incorrect inline/block storage boundary")
     if inline:
         if inode["flags"] & INODE_EXTENTS:

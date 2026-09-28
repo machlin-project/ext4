@@ -49,6 +49,8 @@ struct ext4_fs {
 	struct ext4_info info;
 	uint32_t first_data_block;
 	uint32_t blocks_per_group;
+	uint32_t cluster_blocks;
+	uint32_t clusters_per_group;
 	uint32_t inodes_per_group;
 	uint32_t checksum_seed;
 	uint32_t directory_hash_seed[4];

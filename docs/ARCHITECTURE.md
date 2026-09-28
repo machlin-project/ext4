@@ -45,6 +45,20 @@ Mount validates geometry bounds and rejects the incompatible META_BG/RESIZE_INOD
 combination. Journal replay cannot change these captured geometry fields. Online
 filesystem resizing is not implemented. See the [ext4 block-group layouts](https://docs.kernel.org/filesystems/ext4/blockgroup.html).
 
+BIGALLOC keeps extent offsets and public accounting in filesystem blocks, while
+group bitmaps and their on-disk free counts use clusters. The allocator rounds
+metadata allocations to whole clusters. A data hole first searches its logical
+cluster for existing backing owned by that inode; physical and logical cluster
+offsets must agree. Reclamation frees a cluster only after excluding all surviving
+extent references. Map validation counts each data cluster once and rejects
+conflicting backing, duplicate ownership and data/metadata cluster aliases.
+Logical unmapping progress is distinct from physically freed blocks, allowing
+restartable orphan cleanup to advance while a cluster remains referenced.
+For 1 KiB BIGALLOC volumes, group zero starts at block zero but the primary
+superblock remains at byte 1024; transaction and replay paths use its actual
+address independently of the first data block. See the
+[cluster allocation format](https://docs.kernel.org/filesystems/ext4/bigalloc.html).
+
 ## I/O and cache contract
 
 Implementation and acceptance proceed through the portable core first, FSKit on

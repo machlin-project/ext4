@@ -317,7 +317,8 @@ ext4_xattr_parse_inode(struct ext4_xattr_snapshot *snapshot, const struct ext4_i
 		return EXT4_CORRUPT;
 	}
 	if (block != 0) {
-		if (inode->blocks_512 < fs->info.block_size / EXT4_SECTOR_SIZE) {
+		if (inode->blocks_512 <
+		    (uint64_t)fs->cluster_blocks * (fs->info.block_size / EXT4_SECTOR_SIZE)) {
 			return EXT4_CORRUPT;
 		}
 		error = ext4_xattr_external(snapshot, block);
@@ -348,7 +349,8 @@ ext4_xattr_parse_inode(struct ext4_xattr_snapshot *snapshot, const struct ext4_i
 			return error;
 		}
 	}
-	if (inode->blocks_512 < (ext4_xattr_value_blocks(snapshot) + (block != 0)) *
+	if (inode->blocks_512 <
+	    (ext4_xattr_value_blocks(snapshot) + (block == 0 ? 0 : fs->cluster_blocks)) *
 		(fs->info.block_size / EXT4_SECTOR_SIZE)) {
 		return EXT4_CORRUPT;
 	}

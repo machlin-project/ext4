@@ -68,8 +68,8 @@ ext4_inline_open(struct ext4_fs *fs, const struct ext4_inode *inode,
 	view->tail_size = ext4_le32(&record->entry->value_size);
 	view->tail_offset =
 	    view->tail_size == 0 ? 0 : (uint32_t)(view->tail - view->attributes.inode);
-	blocks =
-	    ext4_xattr_value_blocks(&view->attributes) + (view->attributes.external_block != 0);
+	blocks = ext4_xattr_value_blocks(&view->attributes) +
+	    (view->attributes.external_block == 0 ? 0 : fs->cluster_blocks);
 	if (inode->blocks_512 != blocks * (fs->info.block_size / EXT4_SECTOR_SIZE) ||
 	    size > EXT4_INODE_BLOCK_BYTES + view->tail_size ||
 	    (type == EXT4_MODE_DIRECTORY &&
@@ -280,6 +280,7 @@ ext4_inline_expand(
 	accounting = *allocation;
 	allocation->allocated = 0;
 	allocation->freed = 0;
+	allocation->unmapped = 0;
 	allocation->detached_shared_blocks = 0;
 	allocation->attribute_blocks_added = 0;
 	allocation->attribute_blocks_removed = 0;
@@ -325,6 +326,7 @@ ext4_inline_expand(
 	}
 	allocation->allocated = accounting.allocated;
 	allocation->freed = accounting.freed;
+	allocation->unmapped = accounting.unmapped;
 	allocation->detached_shared_blocks = accounting.detached_shared_blocks;
 	allocation->attribute_blocks_added = accounting.attribute_blocks_added;
 	allocation->attribute_blocks_removed = accounting.attribute_blocks_removed;

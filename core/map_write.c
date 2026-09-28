@@ -84,6 +84,7 @@ ext4_extent_check(struct ext4_allocation *allocation, const struct ext4_inode *i
 			end = start + length;
 			if (length == 0 || end > high || block == 0 || block >= fs->info.blocks ||
 			    length > fs->info.blocks - block ||
+			    block % fs->cluster_blocks != start % fs->cluster_blocks ||
 			    ext4_system_overlaps(fs, block, length)) {
 				return EXT4_CORRUPT;
 			}
@@ -934,7 +935,7 @@ ext4_write_map_allocate(struct ext4_allocation *allocation, const struct ext4_in
 		return ext4_indirect_allocate(allocation, disk, logical, physical);
 	}
 	if (run.physical == 0) {
-		error = ext4_allocate_block(allocation, physical);
+		error = ext4_cluster_allocate(allocation, inode, disk, logical, physical);
 		if (error != EXT4_OK) {
 			return error;
 		}
@@ -993,7 +994,7 @@ ext4_write_map_reserve(struct ext4_allocation *allocation, const struct ext4_ino
 	if (run.physical != 0) {
 		return EXT4_OK;
 	}
-	error = ext4_allocate_block(allocation, &physical);
+	error = ext4_cluster_allocate(allocation, inode, disk, logical, &physical);
 	return error == EXT4_OK
 	    ? ext4_extent_insert(allocation, inode, disk, logical, physical, true)
 	    : error;
@@ -1006,6 +1007,8 @@ struct ext4_map_owners {
 	size_t count;
 	size_t capacity;
 	uint64_t blocks;
+	uint64_t data_logical_end;
+	uint64_t data_physical_end;
 };
 
 static enum ext4_result
@@ -1015,8 +1018,16 @@ ext4_map_owner_add(struct ext4_allocation *allocation, struct ext4_map_owners *o
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_block_range *ranges;
 	struct ext4_block_range *last;
+	uint64_t offset;
 	size_t capacity;
 
+	if (block < fs->first_data_block || length == 0) {
+		return EXT4_CORRUPT;
+	}
+	offset = (block - fs->first_data_block) % fs->cluster_blocks;
+	block -= offset;
+	length =
+	    (length + offset + fs->cluster_blocks - 1U) / fs->cluster_blocks * fs->cluster_blocks;
 	if (block < fs->first_data_block || block >= fs->info.blocks || length == 0 ||
 	    length > fs->info.blocks - block || length > fs->info.blocks - owners->blocks ||
 	    ext4_system_overlaps(fs, block, length)) {
@@ -1051,6 +1062,42 @@ ext4_map_owner_add(struct ext4_allocation *allocation, struct ext4_map_owners *o
 	owners->ranges[owners->count].first = block;
 	owners->ranges[owners->count++].length = length;
 	return EXT4_OK;
+}
+
+static enum ext4_result
+ext4_map_data_owner_add(struct ext4_allocation *allocation, struct ext4_map_owners *owners,
+    const struct ext4_extent_disk *entry)
+{
+	struct ext4_fs *fs = allocation->fs;
+	uint64_t logical = ext4_le32(&entry->logical);
+	uint64_t physical = ext4_extent_physical(entry);
+	uint64_t length = ext4_extent_length(entry);
+	uint64_t first;
+	uint64_t end;
+	bool shared;
+
+	if (fs->cluster_blocks == 1) {
+		return ext4_map_owner_add(allocation, owners, physical, length);
+	}
+	if (physical % fs->cluster_blocks != logical % fs->cluster_blocks) {
+		return EXT4_CORRUPT;
+	}
+	first = physical / fs->cluster_blocks * fs->cluster_blocks;
+	end =
+	    (physical + length + fs->cluster_blocks - 1U) / fs->cluster_blocks * fs->cluster_blocks;
+	shared = owners->data_logical_end != 0 &&
+	    (owners->data_logical_end - 1U) / fs->cluster_blocks == logical / fs->cluster_blocks;
+	if (shared &&
+	    (owners->data_physical_end - 1U) / fs->cluster_blocks !=
+		physical / fs->cluster_blocks) {
+		return EXT4_CORRUPT;
+	}
+	owners->data_logical_end = logical + length;
+	owners->data_physical_end = physical + length;
+	if (shared) {
+		first += fs->cluster_blocks;
+	}
+	return first == end ? EXT4_OK : ext4_map_owner_add(allocation, owners, first, end - first);
 }
 
 struct ext4_extent_walk {
@@ -1104,9 +1151,7 @@ ext4_extent_owners(struct ext4_allocation *allocation, const struct ext4_inode *
 		entries = (struct ext4_extent_disk *)(header + 1);
 		indices = (struct ext4_extent_index_disk *)(header + 1);
 		if (frame->depth == 0) {
-			error = ext4_map_owner_add(allocation, owners,
-			    ext4_extent_physical(&entries[position]),
-			    ext4_extent_length(&entries[position]));
+			error = ext4_map_data_owner_add(allocation, owners, &entries[position]);
 			if (error != EXT4_OK) {
 				return error;
 			}
@@ -1349,6 +1394,7 @@ ext4_extent_truncate(struct ext4_allocation *allocation, const struct ext4_inode
 	struct ext4_extent_disk *entries;
 	struct ext4_extent_disk *entry;
 	uint64_t start;
+	uint64_t removed = 0;
 	uint16_t count;
 	uint16_t length;
 	uint16_t keep;
@@ -1376,18 +1422,20 @@ ext4_extent_truncate(struct ext4_allocation *allocation, const struct ext4_inode
 				break;
 			}
 			keep = first > start ? (uint16_t)(first - start) : 0;
-			if (allocation->freed >= limit) {
+			if (removed >= limit) {
 				stopped = true;
 				break;
 			}
-			if ((uint64_t)(length - keep) > limit - allocation->freed) {
-				keep = (uint16_t)(length - (limit - allocation->freed));
+			if ((uint64_t)(length - keep) > limit - removed) {
+				keep = (uint16_t)(length - (limit - removed));
 			}
-			error = ext4_free_blocks(
-			    allocation, ext4_extent_physical(entry) + keep, length - keep);
+			error = ext4_cluster_release(allocation, inode, disk,
+			    (uint32_t)(start + keep), ext4_extent_physical(entry) + keep,
+			    length - keep, (uint64_t)UINT32_MAX + 1U);
 			if (error != EXT4_OK) {
 				return error;
 			}
+			removed += length - keep;
 			if (keep != 0) {
 				unwritten = ext4_le16(&entry->length) > EXT4_EXTENT_UNWRITTEN_LIMIT;
 				ext4_encode16(&entry->length,
@@ -1468,7 +1516,8 @@ ext4_extent_punch(struct ext4_allocation *allocation, const struct ext4_inode *i
 		}
 		physical = ext4_extent_physical(&entries[index]);
 		unwritten = ext4_le16(&entries[index].length) > EXT4_EXTENT_UNWRITTEN_LIMIT;
-		error = ext4_free_blocks(allocation, physical + logical - start, length);
+		error = ext4_cluster_release(allocation, inode, disk, logical,
+		    physical + logical - start, length, removed_end);
 		if (error != EXT4_OK) {
 			goto out;
 		}

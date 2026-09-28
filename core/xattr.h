@@ -50,6 +50,7 @@ enum ext4_result ext4_xattr_inode_create(struct ext4_allocation *allocation,
 enum ext4_result ext4_xattr_inode_adjust(
     struct ext4_allocation *allocation, const struct ext4_xattr_record *record, int change);
 uint64_t ext4_xattr_value_blocks(const struct ext4_xattr_snapshot *snapshot);
+uint64_t ext4_xattr_value_charge(const struct ext4_fs *fs, uint32_t size);
 void ext4_xattr_checksum_set(
     struct ext4_fs *fs, uint64_t block, struct ext4_xattr_header_disk *header);
 enum ext4_result ext4_xattr_changes_validate(

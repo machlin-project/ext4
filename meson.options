@@ -53,3 +53,6 @@ option('inline_fixtures', type: 'string', value: '',
 
 option('inline_space_fixtures', type: 'string', value: '',
   description: 'Path to completely allocated INLINE_DATA fixtures')
+
+option('cluster_fixtures', type: 'string', value: '',
+  description: 'Path to independently generated BIGALLOC fixtures')

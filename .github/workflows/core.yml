@@ -128,6 +128,11 @@ jobs:
             2>&1 | tee artifacts/checks/group-checksum-fixtures.log
           python3 tests/generate_geometry_fixtures.py --output artifacts/geometry-fixtures \
             2>&1 | tee artifacts/checks/geometry-fixtures.log
+      - name: Generate clustered allocation images
+        if: matrix.suite == 'core'
+        run: |
+          python3 tests/generate_cluster_fixtures.py --tools-root vendor/e2fsprogs/build \
+            --output artifacts/cluster-fixtures 2>&1 | tee artifacts/checks/cluster-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
@@ -153,6 +158,7 @@ jobs:
               -Dea_inode_fixtures="$PWD/artifacts/ea-inode-fixtures" \
               -Dinline_fixtures="$PWD/artifacts/inline-fixtures" \
               -Dinline_space_fixtures="$PWD/artifacts/inline-space-fixtures" \
+              -Dcluster_fixtures="$PWD/artifacts/cluster-fixtures" \
               -Dxattr_space_fixtures="$PWD/artifacts/xattr-space-fixtures" \
               -Dxattr_enable_fixtures="$PWD/artifacts/xattr-enable-fixtures")
           fi
@@ -227,6 +233,24 @@ jobs:
           find artifacts/inline-fixtures artifacts/inline-space-fixtures artifacts/inline-exports \
             artifacts/inline-full-exports artifacts/inline-fault-exports artifacts/inline-independent \
             artifacts/inline-full-independent artifacts/inline-fault-independent \
+            -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Independently verify clustered allocation and interrupted transactions
+        if: matrix.suite == 'core'
+        run: |
+          mkdir artifacts/cluster-exports artifacts/cluster-fault-exports
+          .build/ext4-cluster-test --export artifacts/cluster-exports artifacts/cluster-fixtures/*.img \
+            2>&1 | tee artifacts/checks/cluster-exports.log
+          .build/ext4-cluster-test --fault-smoke --export artifacts/cluster-fault-exports \
+            artifacts/cluster-fixtures/cluster-1k.img artifacts/cluster-fixtures/cluster-4k.img \
+            2>&1 | tee artifacts/checks/cluster-fault-exports.log
+          python3 tests/check_clusters.py --tools-root vendor/e2fsprogs/build \
+            --fixtures artifacts/cluster-fixtures/report.json --exports artifacts/cluster-exports \
+            --output artifacts/cluster-independent 2>&1 | tee artifacts/checks/cluster-independent.log
+          python3 tests/check_cluster_faults.py --tools-root vendor/e2fsprogs/build \
+            --exports artifacts/cluster-fault-exports --recover .build/ext4-recover \
+            --output artifacts/cluster-fault-independent 2>&1 | tee artifacts/checks/cluster-fault-independent.log
+          find artifacts/cluster-fixtures artifacts/cluster-exports artifacts/cluster-fault-exports \
+            artifacts/cluster-independent artifacts/cluster-fault-independent \
             -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Independently verify persistent inode flags and recovery
         if: matrix.suite == 'core'

@@ -480,10 +480,8 @@ ext4_xattr_reference_edits(struct ext4_allocation *allocation, struct ext4_xattr
 	}
 	for (index = 0; index < edit->count; index++) {
 		if (edit->records[index].inode_storage) {
-			new_blocks +=
-			    ((uint64_t)ext4_le32(&edit->records[index].entry->value_size) +
-				allocation->fs->info.block_size - 1U) /
-			    allocation->fs->info.block_size;
+			new_blocks += ext4_xattr_value_charge(
+			    allocation->fs, ext4_le32(&edit->records[index].entry->value_size));
 		}
 	}
 	if (new_blocks > old_blocks) {
@@ -527,7 +525,7 @@ ext4_xattr_external_edit(
 			header = buffer;
 			ext4_encode32(&header->references, references - 1);
 			ext4_xattr_checksum_set(fs, block, header);
-			allocation->detached_shared_blocks++;
+			allocation->detached_shared_blocks += fs->cluster_blocks;
 			block = 0;
 		} else if (!external) {
 			error = ext4_free_blocks(allocation, block, 1);

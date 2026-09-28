@@ -6,6 +6,7 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 {
 	struct ext4_block_range primary;
 	uint32_t logarithm;
+	uint32_t cluster_logarithm;
 	uint32_t revision;
 	uint32_t incompat;
 	uint32_t checksum;
@@ -52,19 +53,26 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	    (fs->info.feature_compat & EXT4_FEATURE_COMPAT_RESIZE_INODE)) {
 		return EXT4_CORRUPT;
 	}
-	/* Cluster allocation changes geometry even for reads. */
-	if (fs->info.feature_ro_compat & EXT4_FEATURE_RO_BIGALLOC) {
-		return EXT4_UNSUPPORTED;
-	}
 	state = ext4_le16(&super->state);
 	if ((state & EXT4_ERROR_FS) ||
 	    (!recovery && (!(state & EXT4_VALID_FS) || ext4_le32(&super->last_orphan) != 0))) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
 	logarithm = ext4_le32(&super->log_block_size);
-	if (logarithm > 6 || ext4_le32(&super->log_cluster_size) != logarithm) {
+	cluster_logarithm = ext4_le32(&super->log_cluster_size);
+	if (logarithm > 6 || cluster_logarithm < logarithm || cluster_logarithm - logarithm > 15) {
 		return EXT4_UNSUPPORTED;
 	}
+	if (!(fs->info.feature_ro_compat & EXT4_FEATURE_RO_BIGALLOC) &&
+	    cluster_logarithm != logarithm) {
+		return EXT4_CORRUPT;
+	}
+	if ((fs->info.feature_ro_compat & EXT4_FEATURE_RO_BIGALLOC) &&
+	    !(incompat & EXT4_FEATURE_INCOMPAT_EXTENTS)) {
+		return EXT4_CORRUPT;
+	}
+	fs->cluster_blocks = 1U << (cluster_logarithm - logarithm);
+	fs->clusters_per_group = ext4_le32(&super->clusters_per_group);
 	fs->info.block_size = EXT4_MIN_BLOCK_SIZE << logarithm;
 	fs->info.blocks = ext4_le32(&super->blocks_count_lo);
 	fs->info.free_blocks = ext4_le32(&super->free_blocks_lo);
@@ -97,12 +105,16 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	    : EXT4_GROUP_BASE_SIZE;
 	if (fs->info.blocks <= fs->first_data_block ||
 	    fs->info.blocks > fs->environment.size_bytes / fs->info.block_size ||
-	    fs->first_data_block != (fs->info.block_size == EXT4_MIN_BLOCK_SIZE ? 1U : 0U) ||
-	    fs->blocks_per_group == 0 || fs->blocks_per_group > fs->info.block_size * 8U ||
-	    fs->inodes_per_group == 0 || fs->inodes_per_group > fs->info.block_size * 8U ||
-	    fs->info.inodes < EXT4_ROOT_INODE || fs->info.free_inodes > fs->info.inodes ||
-	    fs->info.free_blocks > fs->info.blocks || fs->inode_size < EXT4_INODE_BASE_SIZE ||
-	    fs->inode_size > fs->info.block_size || (fs->inode_size & (fs->inode_size - 1)) != 0 ||
+	    fs->first_data_block !=
+		(fs->info.block_size == EXT4_MIN_BLOCK_SIZE && fs->cluster_blocks == 1 ? 1U : 0U) ||
+	    fs->clusters_per_group == 0 ||
+	    fs->clusters_per_group > fs->info.block_size * EXT4_BITS_PER_BYTE ||
+	    (uint64_t)fs->clusters_per_group * fs->cluster_blocks != fs->blocks_per_group ||
+	    fs->info.free_blocks % fs->cluster_blocks != 0 || fs->inodes_per_group == 0 ||
+	    fs->inodes_per_group > fs->info.block_size * 8U || fs->info.inodes < EXT4_ROOT_INODE ||
+	    fs->info.free_inodes > fs->info.inodes || fs->info.free_blocks > fs->info.blocks ||
+	    fs->inode_size < EXT4_INODE_BASE_SIZE || fs->inode_size > fs->info.block_size ||
+	    (fs->inode_size & (fs->inode_size - 1)) != 0 ||
 	    fs->descriptor_size < EXT4_GROUP_BASE_SIZE ||
 	    fs->descriptor_size > EXT4_GROUP_MAX_SIZE ||
 	    fs->descriptor_size > fs->info.block_size ||

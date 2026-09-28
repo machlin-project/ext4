@@ -99,14 +99,17 @@ def snapshot(image, output, tools, run, *, allow_summary_lag=False):
                 allowed=(0, 4) if allow_summary_lag else (0,))
     header = run([tool(tools, "dumpe2fs"), "-h", image])
     counts = accounting(header)
+    cluster = re.search(r"^Cluster size:\s+(\d+)$", header, re.M)
+    cluster_blocks = int(cluster[1]) // counts["Block size"] if cluster else 1
     ea_inode = re.search(r"^Filesystem features:.*\bea_inode\b", header, re.M) is not None
     groups = run([tool(tools, "dumpe2fs"), image])
-    totals = re.findall(r"^\s+(\d+) free blocks, (\d+) free inodes, \d+ directories", groups, re.M)
+    totals = re.findall(r"^\s+(\d+) free (blocks|clusters), (\d+) free inodes, \d+ directories", groups, re.M)
     if not totals or len(totals) != len(re.findall(r"^Group \d+:", groups, re.M)):
         raise RuntimeError("Missing independent group accounting")
     lag = {}
-    for index, field in enumerate(("Free blocks", "Free inodes")):
-        total = sum(int(group[index]) for group in totals)
+    for field in ("Free blocks", "Free inodes"):
+        total = sum(int(group[0]) * (cluster_blocks if group[1] == "clusters" else 1)
+                    if field == "Free blocks" else int(group[2]) for group in totals)
         if counts[field] != total:
             lag[field] = dict(primary=counts[field], group_total=total)
             counts[field] = total
@@ -163,15 +166,16 @@ def snapshot(image, output, tools, run, *, allow_summary_lag=False):
             if external is None:
                 raise RuntimeError("Missing independent attribute block pointer")
             data_inode = dict(inode)
-            data_inode["blocks"] -= int(int(external[1]) != 0) * counts["Block size"] // SECTOR_BYTES
+            data_inode["blocks"] -= int(int(external[1]) != 0) * cluster_blocks * counts["Block size"] // SECTOR_BYTES
             if ea_inode:
                 # The preceding strict fsck validates total data plus logical
                 # value charges. Resolve the symlink target independently via
                 # bmap below; its data-only accounting excludes private values.
                 data_inode["blocks"] = (int(inode["size"] >= INODE_BLOCK_DATA_SIZE) *
-                                        counts["Block size"] // SECTOR_BYTES)
+                                        cluster_blocks * counts["Block size"] // SECTOR_BYTES)
             item["data"] = symlink_bytes(image, path, data_inode, counts["Block size"],
-                                         tool(tools, "debugfs"), run).hex()
+                                         tool(tools, "debugfs"), run,
+                                         cluster_blocks=cluster_blocks).hex()
         elif inode["type"] == "regular":
             value = output / f"data-{len(objects)}"
             run([tool(tools, "debugfs"), "-R", f'dump {path} "{value}"', image])

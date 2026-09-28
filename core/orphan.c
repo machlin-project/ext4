@@ -218,8 +218,9 @@ ext4_orphan_file_prepare(struct ext4_fs *fs)
 		}
 	}
 	if (file->inode.blocks_512 !=
-		(uint64_t)(file->block_count + file->mapping_count) *
-		    (fs->info.block_size / EXT4_SECTOR_SIZE) ||
+		((file->block_count + (uint64_t)fs->cluster_blocks - 1U) / fs->cluster_blocks +
+		    file->mapping_count) *
+		    fs->cluster_blocks * (fs->info.block_size / EXT4_SECTOR_SIZE) ||
 	    (file->pending != 0 &&
 		!(fs->info.feature_ro_compat & EXT4_FEATURE_RO_ORPHAN_PRESENT))) {
 		error = EXT4_CORRUPT;
@@ -302,7 +303,7 @@ ext4_orphan_record(struct ext4_fs *fs, uint32_t number, struct ext4_inode_disk *
 	}
 	attribute_sectors =
 	    ext4_le32(&disk->xattr_block_lo) != 0 || ext4_le16(&disk->xattr_block_hi) != 0
-	    ? fs->info.block_size / EXT4_SECTOR_SIZE
+	    ? (uint64_t)fs->cluster_blocks * (fs->info.block_size / EXT4_SECTOR_SIZE)
 	    : 0;
 	if (!*mapped && (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EA_INODE) &&
 	    ext4_inode_has_xattrs(fs, disk)) {
@@ -769,7 +770,8 @@ ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool re
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
-	if (!done && allocation.freed == 0 && allocation.attribute_blocks_removed == 0) {
+	if (!done && allocation.freed == 0 && allocation.unmapped == 0 &&
+	    allocation.attribute_blocks_removed == 0) {
 		error = EXT4_CORRUPT;
 		goto cancel;
 	}
@@ -879,7 +881,7 @@ ext4_orphan_cleanup(struct ext4_fs *fs, struct ext4_recovery_report *report)
 		return EXT4_OK;
 	}
 	if (fs->first_inode < EXT4_FIRST_NON_RESERVED_INODE || fs->first_inode > fs->info.inodes ||
-	    fs->blocks_per_group % EXT4_BITS_PER_BYTE != 0 ||
+	    fs->clusters_per_group % EXT4_BITS_PER_BYTE != 0 ||
 	    fs->inodes_per_group % EXT4_BITS_PER_BYTE != 0) {
 		return EXT4_CORRUPT;
 	}

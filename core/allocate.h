@@ -31,6 +31,8 @@ struct ext4_allocation {
 	uint32_t next_bit;
 	uint32_t allocated;
 	uint64_t freed;
+	/* Removing a mapping can retain a cluster referenced by another extent. */
+	uint64_t unmapped;
 	/* Dropping a shared external attribute reference changes i_blocks without
 	 * freeing that physical block. Keep it separate from allocation counters. */
 	uint64_t detached_shared_blocks;
@@ -49,6 +51,12 @@ enum ext4_result ext4_allocation_valid_range(
     struct ext4_allocation *allocation, uint64_t block, uint64_t length);
 enum ext4_result ext4_free_blocks(
     struct ext4_allocation *allocation, uint64_t block, uint64_t length);
+enum ext4_result ext4_cluster_allocate(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, const struct ext4_inode_disk *disk, uint32_t logical,
+    uint64_t *physical);
+enum ext4_result ext4_cluster_release(struct ext4_allocation *allocation,
+    const struct ext4_inode *inode, const struct ext4_inode_disk *disk, uint32_t logical,
+    uint64_t physical, uint32_t length, uint64_t removed_end);
 enum ext4_result ext4_allocation_super(struct ext4_allocation *allocation);
 /* Enroll one free inode and initialize its empty record in this transaction.
  * The caller links it into a directory before committing, and publishes the

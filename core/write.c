@@ -28,7 +28,7 @@ ext4_mount_writable(const struct ext4_environment *environment,
 		return error;
 	}
 	if (fs->first_inode < EXT4_FIRST_NON_RESERVED_INODE || fs->first_inode > fs->info.inodes ||
-	    fs->blocks_per_group % EXT4_BITS_PER_BYTE != 0 ||
+	    fs->clusters_per_group % EXT4_BITS_PER_BYTE != 0 ||
 	    fs->inodes_per_group % EXT4_BITS_PER_BYTE != 0) {
 		error = EXT4_CORRUPT;
 	} else {

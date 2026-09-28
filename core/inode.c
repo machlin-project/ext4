@@ -147,7 +147,10 @@ ext4_inode_decode_record(
 		goto out;
 	}
 	decoded.fast_symlink = (decoded.mode & EXT4_MODE_TYPE) == EXT4_MODE_SYMLINK &&
-	    decoded.blocks_512 == (xattr_block == 0 ? 0 : fs->info.block_size / EXT4_SECTOR_SIZE);
+	    decoded.blocks_512 ==
+		(xattr_block == 0
+			? 0
+			: (uint64_t)fs->cluster_blocks * (fs->info.block_size / EXT4_SECTOR_SIZE));
 	if (decoded.mode == 0 || (!orphan && decoded.links == 0)) {
 		error = EXT4_NOT_FOUND;
 	} else if ((decoded.flags & EXT4_INODE_INLINE_DATA) &&
@@ -195,6 +198,13 @@ ext4_inode_flags_writable(struct ext4_fs *fs, const struct ext4_inode *inode)
 		return EXT4_CORRUPT;
 	}
 	if (inode->flags & ~EXT4_INODE_WRITABLE_FLAGS) {
+		return EXT4_UNSUPPORTED;
+	}
+	if (fs->cluster_blocks > 1 &&
+	    !(inode->flags & (EXT4_INODE_EXTENTS | EXT4_INODE_INLINE_DATA)) &&
+	    ((inode->mode & EXT4_MODE_TYPE) == EXT4_MODE_REGULAR ||
+		(inode->mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY ||
+		((inode->mode & EXT4_MODE_TYPE) == EXT4_MODE_SYMLINK && !inode->fast_symlink))) {
 		return EXT4_UNSUPPORTED;
 	}
 	if (((inode->flags & EXT4_INODE_EXTENTS) &&

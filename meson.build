@@ -13,7 +13,7 @@ core_sources = files(
   'core/support.c', 'core/mount.c', 'core/inode.c', 'core/read.c', 'core/directory.c',
   'core/directory_lookup.c', 'core/inline.c', 'core/inline_create.c',
   'core/journal.c', 'core/recovery.c', 'core/group.c', 'core/system.c',
-  'core/allocate.c', 'core/map_write.c', 'core/write.c', 'core/orphan.c',
+  'core/allocate.c', 'core/cluster.c', 'core/map_write.c', 'core/write.c', 'core/orphan.c',
   'core/inode_allocate.c', 'core/inode_flags.c', 'core/namespace.c', 'core/lifetime.c',
   'core/directory_hash.c', 'core/directory_index.c', 'core/directory_write.c',
   'core/xattr.c', 'core/xattr_write.c', 'core/xattr_inode.c',
@@ -50,7 +50,7 @@ programs = {}
 foreach name, source : {
   'checksum': 'checksum', 'geometry': 'geometry',
   'xattr': 'xattr', 'xattr-write': 'xattr_write', 'xattr-lifetime': 'xattr_lifetime', 'space': 'space',
-  'ea-inode': 'ea_inode', 'inline': 'inline',
+  'ea-inode': 'ea_inode', 'inline': 'inline', 'cluster': 'cluster',
   'directory-index': 'directory_index', 'directory-lookup': 'directory_lookup', 'index-write': 'index_write',
   'reader': 'reader', 'read-ranges': 'read_ranges', 'corruption': 'corruption', 'journal': 'journal',
   'write': 'write', 'write-partial': 'write_partial', 'write-growth': 'write_growth',

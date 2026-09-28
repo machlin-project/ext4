@@ -247,7 +247,7 @@ ext4_journal_map(struct ext4_journal *journal, const struct ext4_inode *inode)
 			return error;
 		}
 		/* A journal cannot be sparse or overlap the primary control blocks. */
-		if (physical <= journal->fs->first_data_block + 1) {
+		if (physical <= EXT4_SUPER_OFFSET / journal->fs->info.block_size + 1U) {
 			return EXT4_CORRUPT;
 		}
 		if (path.count != 0 && journal->mapping_blocks == NULL) {
@@ -263,7 +263,8 @@ ext4_journal_map(struct ext4_journal *journal, const struct ext4_inode *inode)
 			    path.blocks[level] == previous.blocks[level]) {
 				continue;
 			}
-			if (path.blocks[level] <= journal->fs->first_data_block + 1) {
+			if (path.blocks[level] <=
+			    EXT4_SUPER_OFFSET / journal->fs->info.block_size + 1U) {
 				return EXT4_CORRUPT;
 			}
 			for (index = 0; index < journal->mapping_count; index++) {
@@ -550,7 +551,7 @@ ext4_journal_set_recovery(struct ext4_journal *journal, bool recovery)
 	uint32_t checksum;
 	enum ext4_result error;
 
-	error = ext4_block_read(fs, fs->first_data_block, journal->data);
+	error = ext4_block_read(fs, EXT4_SUPER_OFFSET / fs->info.block_size, journal->data);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -593,7 +594,8 @@ ext4_journal_set_recovery(struct ext4_journal *journal, bool recovery)
 		    ext4_crc32c(UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum));
 		ext4_encode32(&super->checksum, checksum);
 	}
-	error = ext4_journal_write_home(journal, fs->first_data_block, journal->data);
+	error = ext4_journal_write_home(
+	    journal, EXT4_SUPER_OFFSET / fs->info.block_size, journal->data);
 	if (error == EXT4_OK) {
 		error = ext4_journal_flush(journal);
 	}
@@ -673,7 +675,8 @@ ext4_transaction_snapshot(
 	}
 	journal = transaction->journal;
 	fs = journal->fs;
-	if (!ext4_journal_target(journal, block) || (!primary && block == fs->first_data_block) ||
+	if (!ext4_journal_target(journal, block) ||
+	    (!primary && block == EXT4_SUPER_OFFSET / fs->info.block_size) ||
 	    (!(journal->features & EXT4_JBD_64BIT) && block > UINT32_MAX)) {
 		return EXT4_INVALID_ARGUMENT;
 	}
@@ -730,7 +733,8 @@ ext4_transaction_super(struct ext4_transaction *transaction, struct ext4_super_d
 		return EXT4_INVALID_ARGUMENT;
 	}
 	fs = transaction->journal->fs;
-	error = ext4_transaction_snapshot(transaction, fs->first_data_block, true, &buffer);
+	error = ext4_transaction_snapshot(
+	    transaction, EXT4_SUPER_OFFSET / fs->info.block_size, true, &buffer);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -781,7 +785,7 @@ ext4_transaction_prepare_super(struct ext4_transaction *transaction)
 	uint32_t index;
 
 	for (index = 0; index < transaction->count; index++) {
-		if (transaction->entries[index].block != fs->first_data_block) {
+		if (transaction->entries[index].block != EXT4_SUPER_OFFSET / fs->info.block_size) {
 			continue;
 		}
 		super = (struct ext4_super_disk *)((uint8_t *)transaction->entries[index].buffer +

@@ -41,7 +41,7 @@ ext4_allocation_checksum(
 
 	if (fs->metadata_checksum) {
 		checksum = ext4_crc32c(
-		    fs->checksum_seed, bitmap, fs->blocks_per_group / EXT4_BITS_PER_BYTE);
+		    fs->checksum_seed, bitmap, fs->clusters_per_group / EXT4_BITS_PER_BYTE);
 		if (fs->descriptor_size < EXT4_GROUP_64_SIZE) {
 			checksum &= UINT16_MAX;
 		}
@@ -143,8 +143,11 @@ ext4_allocation_bitmap(struct ext4_allocation *allocation)
 	if (available > fs->blocks_per_group) {
 		available = fs->blocks_per_group;
 	}
+	available /= fs->cluster_blocks;
 	for (bit = 0; bit < fs->info.block_size * EXT4_BITS_PER_BYTE; bit++) {
-		system = bit >= available || ext4_system_block(fs, first + bit);
+		system = bit >= available ||
+		    ext4_system_overlaps(
+			fs, first + (uint64_t)bit * fs->cluster_blocks, fs->cluster_blocks);
 		if (uninitialized && system) {
 			ext4_bitmap_set(allocation->bitmap, bit);
 		}
@@ -153,7 +156,7 @@ ext4_allocation_bitmap(struct ext4_allocation *allocation)
 			return EXT4_CORRUPT;
 		}
 		if (!used) {
-			free_blocks++;
+			free_blocks += fs->cluster_blocks;
 		}
 	}
 	if (free_blocks != group->free_blocks) {
@@ -171,17 +174,18 @@ ext4_allocation_account(struct ext4_allocation *allocation)
 	struct ext4_group *group = &allocation->group;
 	uint32_t checksum;
 
-	ext4_encode16(&disk->free_blocks_lo, (uint16_t)group->free_blocks);
+	ext4_encode16(&disk->free_blocks_lo, (uint16_t)(group->free_blocks / fs->cluster_blocks));
 	ext4_encode16(&disk->flags, group->flags);
 	ext4_encode32(&allocation->super->free_blocks_lo, (uint32_t)allocation->free_blocks);
 	if (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
-		ext4_encode16(&disk->free_blocks_hi, (uint16_t)(group->free_blocks >> 16));
+		ext4_encode16(&disk->free_blocks_hi,
+		    (uint16_t)((group->free_blocks / fs->cluster_blocks) >> 16));
 		ext4_encode32(
 		    &allocation->super->free_blocks_hi, (uint32_t)(allocation->free_blocks >> 32));
 	}
 	if (fs->metadata_checksum) {
 		checksum = ext4_crc32c(fs->checksum_seed, allocation->bitmap,
-		    fs->blocks_per_group / EXT4_BITS_PER_BYTE);
+		    fs->clusters_per_group / EXT4_BITS_PER_BYTE);
 		ext4_encode16(&disk->block_bitmap_checksum_lo, (uint16_t)checksum);
 		if (fs->descriptor_size >= EXT4_GROUP_64_SIZE) {
 			ext4_encode16(&disk->block_bitmap_checksum_hi, (uint16_t)(checksum >> 16));
@@ -207,7 +211,8 @@ ext4_allocate_block(struct ext4_allocation *allocation, uint64_t *block)
 	}
 	/* Reserved space needs a separate admitted policy; ordinary writes cannot
 	 * consume it merely because the adapter runs with elevated credentials. */
-	if (allocation->free_blocks <= allocation->reserved_blocks) {
+	if (allocation->free_blocks <= allocation->reserved_blocks ||
+	    allocation->free_blocks - allocation->reserved_blocks < fs->cluster_blocks) {
 		return EXT4_NO_SPACE;
 	}
 	for (visited = 0; visited < fs->info.groups; visited++) {
@@ -242,17 +247,18 @@ ext4_allocate_block(struct ext4_allocation *allocation, uint64_t *block)
 			}
 		}
 		if (allocation->bitmap != NULL && allocation->group.free_blocks != 0) {
-			for (bit = allocation->next_bit;
-			    bit < fs->blocks_per_group && first + bit <= allocation->maximum_block;
+			for (bit = allocation->next_bit; bit < fs->clusters_per_group &&
+			    first + (uint64_t)(bit + 1U) * fs->cluster_blocks - 1U <=
+				allocation->maximum_block;
 			    bit++) {
 				if (!ext4_bitmap_test(allocation->bitmap, bit)) {
 					ext4_bitmap_set(allocation->bitmap, bit);
 					allocation->next_bit = bit + 1;
-					allocation->group.free_blocks--;
-					allocation->free_blocks--;
-					allocation->allocated++;
+					allocation->group.free_blocks -= fs->cluster_blocks;
+					allocation->free_blocks -= fs->cluster_blocks;
+					allocation->allocated += fs->cluster_blocks;
 					ext4_allocation_account(allocation);
-					*block = first + bit;
+					*block = first + (uint64_t)bit * fs->cluster_blocks;
 					return EXT4_OK;
 				}
 			}
@@ -305,8 +311,9 @@ ext4_allocation_valid_range(struct ext4_allocation *allocation, uint64_t block, 
 		if (error != EXT4_OK) {
 			return error;
 		}
-		for (index = 0; index < chunk; index++) {
-			if (!ext4_bitmap_test(allocation->scratch, bit + index)) {
+		for (index = bit / fs->cluster_blocks;
+		    index <= (bit + chunk - 1U) / fs->cluster_blocks; index++) {
+			if (!ext4_bitmap_test(allocation->scratch, index)) {
 				return EXT4_CORRUPT;
 			}
 		}
@@ -337,6 +344,15 @@ ext4_free_blocks(struct ext4_allocation *allocation, uint64_t block, uint64_t le
 
 	if (block < fs->first_data_block || block >= fs->info.blocks || length == 0 ||
 	    length > fs->info.blocks - block || ext4_system_overlaps(fs, block, length)) {
+		return EXT4_CORRUPT;
+	}
+	/* Metadata owns complete clusters. Data callers first prove that no
+	 * surviving extent still references either boundary cluster. */
+	relative = (block - fs->first_data_block) % fs->cluster_blocks;
+	block -= relative;
+	length =
+	    (length + relative + fs->cluster_blocks - 1U) / fs->cluster_blocks * fs->cluster_blocks;
+	if (length > fs->info.blocks - block || ext4_system_overlaps(fs, block, length)) {
 		return EXT4_CORRUPT;
 	}
 	error = ext4_allocation_super(allocation);
@@ -380,12 +396,13 @@ ext4_free_blocks(struct ext4_allocation *allocation, uint64_t block, uint64_t le
 				return error;
 			}
 		}
-		for (index = 0; index < chunk; index++) {
-			if (!ext4_bitmap_test(allocation->bitmap, bit + index)) {
+		for (index = bit / fs->cluster_blocks; index < (bit + chunk) / fs->cluster_blocks;
+		    index++) {
+			if (!ext4_bitmap_test(allocation->bitmap, index)) {
 				return EXT4_CORRUPT;
 			}
-			allocation->bitmap[(bit + index) / EXT4_BITS_PER_BYTE] &=
-			    (uint8_t)~(1U << ((bit + index) % EXT4_BITS_PER_BYTE));
+			allocation->bitmap[index / EXT4_BITS_PER_BYTE] &=
+			    (uint8_t)~(1U << (index % EXT4_BITS_PER_BYTE));
 		}
 		if (chunk > fs->blocks_per_group - allocation->group.free_blocks ||
 		    chunk > fs->info.blocks - allocation->free_blocks) {

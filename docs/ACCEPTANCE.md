@@ -41,7 +41,7 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Finish INLINE_DATA regression acceptance; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; INLINE_DATA focused faults, independent states/replay and eight Linux roundtrips pass; EA_INODE and distributed geometry retain accepted evidence |
+| Format compatibility | Finish INLINE_DATA regression acceptance and BIGALLOC native/capacity/regression acceptance; large logical/physical addresses and volume geometry beyond the current bounded images | Open; BIGALLOC focused faults and independent states/replay pass; INLINE_DATA focused faults, independent states/replay and eight Linux roundtrips pass; EA_INODE and distributed geometry retain accepted evidence |
 | Journal compatibility | Fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; v1 and async compatibility pass focused faults, independent replay, eight Linux roundtrips and their combined full regression |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
@@ -59,6 +59,39 @@ create/link/symlink/mkdir/mknod/unlink/rmdir/rename and atomic whiteout; raw xat
 internal-journal recovery and both orphan representations; HTree creation, lookup
 and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
 the remaining blocks have equal size or that the full core is accepted.
+
+## Clustered allocation
+
+BIGALLOC reads and mutations use cluster bitmap geometry with block-based extent
+addresses. Data allocation reuses the same inode's partially occupied cluster;
+hole punching and truncate preserve a cluster until its final data reference is
+removed. Directory, mapping and external-attribute blocks each own a full cluster.
+Private attribute values and open-unlinked cleanup retain cluster-based charges.
+
+Eight independent 32 MiB profiles cover 1/4 KiB blocks, cluster ratios 4/8/16,
+absent metadata checksums, explicit checksum seeds, INLINE_DATA, EA_INODE and
+orphan files. Functional checks cover fragmented sparse mappings, partial/final
+cluster release, truncate/regrowth, unwritten reservations, external attribute
+replacement/reclamation and held-unlinked inode lifetime. Eighty-eight checksummed
+malformed cases reject invalid geometry, unaligned or conflicting backing, aliasing
+and inconsistent sector accounting before issuing writes. Sanitized and optimized
+freestanding builds pass, including the 2 KiB stack-frame limit.
+
+Independent checks accept 32 mutation/lifetime states and 72 clean, committed and
+uncommitted replay states. All 5,935 recorded commands exit zero, including 112
+strict nonrepairing fsck checks and 24 journal-only oracle replays. Exact data,
+namespace, attributes and allocation totals agree; replay is idempotent.
+Twelve fault sweeps cover 246 allocation failures, 292 read failures and 1,536
+storage cuts. Of these cuts, 1,488 recover the complete old/new state and 48 reject
+a torn primary superblock; the latter are not successful crash recovery.
+
+Main-agent review: `artifacts/checks/cluster-focused-accepted.json`. Raw reports:
+`artifacts/cluster-independent-retry4/report.json` and
+`artifacts/cluster-fault-independent/report.json`. Reproduce with
+`generate_cluster_fixtures.py`, `ext4-cluster-test` (ordinary and `--faults` modes),
+`check_clusters.py` and `check_cluster_faults.py`; the core CI job runs the same
+independent checks. Native Linux roundtrips, full-disk cluster reuse and the
+expanded full regression remain pending. This does not establish adapter support.
 
 ## Inode-resident file and directory data
 

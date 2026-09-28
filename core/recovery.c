@@ -549,7 +549,7 @@ ext4_recovery_apply(struct ext4_recovery_scan *scan, struct ext4_recovery_report
 		if (record->flags & EXT4_JBD_ESCAPE) {
 			ext4_encode_be32((struct ext4_be32 *)journal->data, EXT4_JBD_MAGIC);
 		}
-		if (record->target == journal->fs->first_data_block) {
+		if (record->target == EXT4_SUPER_OFFSET / journal->fs->info.block_size) {
 			error = ext4_recovery_super(journal);
 			if (error != EXT4_OK) {
 				return error;
@@ -586,6 +586,8 @@ ext4_recovery_validate_home(struct ext4_journal *journal)
 		(fs->info.feature_incompat | EXT4_FEATURE_INCOMPAT_RECOVER) ||
 	    fresh->inode_size != fs->inode_size || fresh->descriptor_size != fs->descriptor_size ||
 	    fresh->blocks_per_group != fs->blocks_per_group ||
+	    fresh->cluster_blocks != fs->cluster_blocks ||
+	    fresh->clusters_per_group != fs->clusters_per_group ||
 	    fresh->inodes_per_group != fs->inodes_per_group ||
 	    fresh->checksum_seed != fs->checksum_seed || fresh->first_inode != fs->first_inode ||
 	    fresh->journal_inode != fs->journal_inode ||

@@ -53,6 +53,9 @@ ext4_group_reserved(const struct ext4_fs *fs, uint32_t group, struct ext4_block_
 		count = 1;
 	}
 	count += super ? 1U : 0U;
+	if (group == 0 && fs->first_data_block == 0 && fs->info.block_size == EXT4_MIN_BLOCK_SIZE) {
+		count++;
+	}
 	available = fs->info.blocks - first;
 	if (available > fs->blocks_per_group) {
 		available = fs->blocks_per_group;
@@ -81,8 +84,12 @@ ext4_group_descriptor_offset(const struct ext4_fs *fs, uint32_t group, uint64_t 
 		owner = group - group % per_block;
 		block = fs->first_data_block + (uint64_t)owner * fs->blocks_per_group +
 		    (ext4_group_has_super(fs, owner) ? 1U : 0U);
+		if (owner == 0 && fs->first_data_block == 0 &&
+		    fs->info.block_size == EXT4_MIN_BLOCK_SIZE) {
+			block++;
+		}
 	} else {
-		block = (uint64_t)fs->first_data_block + 1U + table;
+		block = EXT4_SUPER_OFFSET / fs->info.block_size + 1U + table;
 	}
 	if (block >= fs->info.blocks) {
 		return EXT4_CORRUPT;
@@ -154,6 +161,10 @@ ext4_group_decode(
 	decoded.table_blocks =
 	    ((uint64_t)fs->inodes_per_group * fs->inode_size + fs->info.block_size - 1) /
 	    fs->info.block_size;
+	if (decoded.free_blocks > fs->clusters_per_group) {
+		return EXT4_CORRUPT;
+	}
+	decoded.free_blocks *= fs->cluster_blocks;
 	if (decoded.inode_table < fs->first_data_block || decoded.inode_table >= fs->info.blocks ||
 	    decoded.table_blocks > fs->info.blocks - decoded.inode_table ||
 	    decoded.block_bitmap < fs->first_data_block ||
@@ -290,8 +301,9 @@ ext4_block_allocated(struct ext4_fs *fs, uint64_t block)
 	if (group.flags & EXT4_GROUP_BLOCK_UNINIT) {
 		return EXT4_CORRUPT;
 	}
-	return ext4_bitmap_allocated(fs, group.block_bitmap, fs->blocks_per_group,
-	    group.block_bitmap_checksum, (uint32_t)(relative % fs->blocks_per_group));
+	return ext4_bitmap_allocated(fs, group.block_bitmap, fs->clusters_per_group,
+	    group.block_bitmap_checksum,
+	    (uint32_t)(relative % fs->blocks_per_group) / fs->cluster_blocks);
 }
 
 enum ext4_result

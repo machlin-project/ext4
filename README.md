@@ -61,6 +61,13 @@ torn primary superblock. Eight native Linux roundtrips also pass, including
 open-unlinked cleanup and two pending core journals. The expanded 444-test CI
 regression is pending for this block.
 
+BIGALLOC implements cluster bitmap accounting, shared cluster backing within an
+inode, whole-cluster allocation and final-reference release. Eight profiles pass
+functional checks and 88 malformed cases. Independent verification accepts 32
+mutation/lifetime states and 72 transaction/replay states; 1,536 power cuts cover
+allocation, reuse, partial release, reservation and attribute reclamation. Native
+Linux roundtrips, full-disk cluster reuse and the expanded regression remain pending.
+
 Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.
 Both native adapters remain read-only. The FSKit adapter builds for macOS 26.4,
 but installation/mount tests await a signing profile with FSKit Module capability.

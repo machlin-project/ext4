@@ -9,6 +9,7 @@
 struct ext4_value_allocation {
 	uint32_t allocated;
 	uint64_t freed;
+	uint64_t unmapped;
 	uint64_t detached;
 	uint64_t added;
 	uint64_t removed;
@@ -20,12 +21,14 @@ ext4_value_allocation_begin(struct ext4_allocation *allocation, struct ext4_valu
 {
 	saved->allocated = allocation->allocated;
 	saved->freed = allocation->freed;
+	saved->unmapped = allocation->unmapped;
 	saved->detached = allocation->detached_shared_blocks;
 	saved->added = allocation->attribute_blocks_added;
 	saved->removed = allocation->attribute_blocks_removed;
 	saved->mapping_size = allocation->mapping_size;
 	allocation->allocated = 0;
 	allocation->freed = 0;
+	allocation->unmapped = 0;
 	allocation->detached_shared_blocks = 0;
 	allocation->attribute_blocks_added = 0;
 	allocation->attribute_blocks_removed = 0;
@@ -38,10 +41,19 @@ ext4_value_allocation_end(
 {
 	allocation->allocated = saved->allocated;
 	allocation->freed = saved->freed;
+	allocation->unmapped = saved->unmapped;
 	allocation->detached_shared_blocks = saved->detached;
 	allocation->attribute_blocks_added = saved->added;
 	allocation->attribute_blocks_removed = saved->removed;
 	allocation->mapping_size = saved->mapping_size;
+}
+
+uint64_t
+ext4_xattr_value_charge(const struct ext4_fs *fs, uint32_t size)
+{
+	uint64_t bytes = (uint64_t)fs->info.block_size * fs->cluster_blocks;
+
+	return ((uint64_t)size + bytes - 1U) / bytes * fs->cluster_blocks;
 }
 
 uint64_t
@@ -52,10 +64,8 @@ ext4_xattr_value_blocks(const struct ext4_xattr_snapshot *snapshot)
 
 	for (index = 0; index < snapshot->count; index++) {
 		if (snapshot->records[index].inode_storage) {
-			blocks +=
-			    ((uint64_t)ext4_le32(&snapshot->records[index].entry->value_size) +
-				snapshot->fs->info.block_size - 1U) /
-			    snapshot->fs->info.block_size;
+			blocks += ext4_xattr_value_charge(
+			    snapshot->fs, ext4_le32(&snapshot->records[index].entry->value_size));
 		}
 	}
 	return blocks;
