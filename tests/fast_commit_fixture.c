@@ -799,15 +799,16 @@ main(int argc, char **argv)
 	head.fc_tid = ext2fs_cpu_to_le32(FIXTURE_SEQUENCE);
 	record(&fixture, EXT4_FC_TAG_HEAD, &head, sizeof(head));
 	hello = lookup(&fixture, EXT2_ROOT_INO, "renamed");
-	inode_record(&fixture, hello, 1);
 	check(ext2fs_read_inode(fixture.pending, hello, &source), "read source range length");
 	require(source.i_size_high == 0, "bound source range length");
+	/* Like Linux, each commit logs a changed inode's ranges before its record. */
 	removed.fc_ino = ext2fs_cpu_to_le32(hello);
 	removed.fc_lblk = 0;
 	removed.fc_len = ext2fs_cpu_to_le32(
 	    (source.i_size + fixture.pending->blocksize - 1U) / fixture.pending->blocksize);
 	record(&fixture, EXT4_FC_TAG_DEL_RANGE, &removed, sizeof(removed));
 	data_records(&fixture, hello);
+	inode_record(&fixture, hello, 1);
 	commit(&fixture);
 
 	directory = lookup(&fixture, EXT2_ROOT_INO, "new-dir");
@@ -823,6 +824,16 @@ main(int argc, char **argv)
 		inode_record(&fixture, child, 0);
 		data_records(&fixture, child);
 		name_record(&fixture, EXT4_FC_TAG_CREAT, directory, child, name);
+	}
+	/* Linux then logs each changed regular file's ranges and final record after
+	 * the names; its replay derives block counts from these final records. It
+	 * never logs a directory or reserved inode outside a creation. The prefix
+	 * profiles fill their areas and log every file again in the last commit. */
+	for (index = 0; !fixture.large_prefix && index < created_files; index++) {
+		created_name(name, index);
+		child = lookup(&fixture, directory, name);
+		data_records(&fixture, child);
+		inode_record(&fixture, child, 0);
 	}
 	commit(&fixture);
 
