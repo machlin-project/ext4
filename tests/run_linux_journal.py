@@ -291,6 +291,8 @@ def main():
                 raise RuntimeError(f"missing guest evidence: {marker}")
         if case.get("ea_inode") and "LINUX_EXT4_EA_INODE_PASS" not in console:
             raise RuntimeError("Missing Linux EA_INODE mutation evidence")
+        if case.get("inline_data") and "LINUX_EXT4_INLINE_PASS" not in console:
+            raise RuntimeError("Missing Linux inline mutation evidence")
         header = run([tools / "misc/dumpe2fs", "-h", scratch])
         if "needs_recovery" not in header:
             raise RuntimeError("Linux did not leave a pending journal for the reverse roundtrip")

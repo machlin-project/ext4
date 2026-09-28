@@ -258,6 +258,7 @@ xattr_check_acl_access(void)
 }
 
 #include "linux_ea_inode.h"
+#include "linux_inline.h"
 
 static void
 check_xattrs(void)
@@ -285,6 +286,9 @@ check_xattrs(void)
 	}
 	if (access("/ea-inode", F_OK) == 0) {
 		check_ea_inodes();
+	}
+	if (access("/inline-data", F_OK) == 0) {
+		check_inline_data();
 	}
 	for (index = 0; index < sizeof(bytes); index++) {
 		bytes[index] = (uint8_t)(index * 23U + 0x67U);

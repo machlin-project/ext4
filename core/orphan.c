@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "allocate.h"
 #include "xattr.h"
+#include "inline.h"
 
 #define EXT4_ORPHAN_MAPPED_CREDITS (3U * (2U * EXT4_EXTENT_MAX_DEPTH + 1U) + 6U)
 #define EXT4_ORPHAN_UNMAPPED_CREDITS 5U
@@ -285,7 +286,7 @@ ext4_orphan_record(struct ext4_fs *fs, uint32_t number, struct ext4_inode_disk *
 	switch (type) {
 	case EXT4_MODE_REGULAR:
 	case EXT4_MODE_DIRECTORY:
-		*mapped = true;
+		*mapped = !(inode->flags & EXT4_INODE_INLINE_DATA);
 		break;
 	case EXT4_MODE_SYMLINK:
 		*mapped = !inode->fast_symlink;

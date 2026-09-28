@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "allocate.h"
 #include "xattr.h"
+#include "inline.h"
 
 #define EXT4_XATTR_BLOCK_HASH_SHIFT 16U
 #define EXT4_XATTR_HASH_BITS 32U
@@ -62,6 +63,9 @@ ext4_xattr_changes_validate(
 			if (change->name[byte] == 0) {
 				return EXT4_INVALID_ARGUMENT;
 			}
+		}
+		if (ext4_inline_key(change->name_index, change->name, change->name_length)) {
+			return EXT4_INVALID_ARGUMENT;
 		}
 		if ((fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EA_INODE) &&
 		    change->value_size > EXT4_XATTR_VALUE_MAX) {
@@ -229,12 +233,31 @@ ext4_xattr_place(struct ext4_xattr_edit *edit, size_t body_capacity)
 	size_t total = 0;
 	size_t cost;
 	size_t index;
-	size_t units = body_capacity / EXT4_XATTR_ALIGNMENT;
+	size_t units;
+	size_t pinned = edit->count;
 	size_t chosen;
 	size_t sum;
 	uint32_t *previous;
 
 	for (index = 0; index < edit->count; index++) {
+		if (ext4_inline_key(edit->records[index].entry->name_index,
+			(const uint8_t *)(edit->records[index].entry + 1),
+			edit->records[index].entry->name_length)) {
+			pinned = index;
+			cost = ext4_xattr_record_size(&edit->records[index]);
+			if (edit->records[index].inode_storage || cost > body_capacity) {
+				return EXT4_NO_SPACE;
+			}
+			edit->records[index].external = false;
+			body_capacity -= cost;
+			break;
+		}
+	}
+	units = body_capacity / EXT4_XATTR_ALIGNMENT;
+	for (index = 0; index < edit->count; index++) {
+		if (index == pinned) {
+			continue;
+		}
 		cost = ext4_xattr_record_size(&edit->records[index]);
 		total += cost;
 		if (cost > body_capacity) {
@@ -263,6 +286,9 @@ ext4_xattr_place(struct ext4_xattr_edit *edit, size_t body_capacity)
 	ext4_zero(previous, (units + 1) * sizeof(*previous));
 	previous[0] = UINT32_MAX;
 	for (index = 0; index < edit->count; index++) {
+		if (index == pinned) {
+			continue;
+		}
 		cost = ext4_xattr_record_size(&edit->records[index]) / EXT4_XATTR_ALIGNMENT;
 		for (sum = units; sum >= cost; sum--) {
 			if (previous[sum] == 0 && previous[sum - cost] != 0) {
@@ -279,7 +305,7 @@ ext4_xattr_place(struct ext4_xattr_edit *edit, size_t body_capacity)
 		return EXT4_NO_SPACE;
 	}
 	for (index = 0; index < edit->count; index++) {
-		edit->records[index].external = true;
+		edit->records[index].external = index != pinned;
 	}
 	while (chosen != 0) {
 		index = previous[chosen] - 1;
@@ -309,7 +335,10 @@ ext4_xattr_place_values(struct ext4_xattr_edit *edit, size_t body_capacity)
 		selected = edit->count;
 		for (index = 0; index < edit->count; index++) {
 			size = ext4_le32(&edit->records[index].entry->value_size);
-			if (!edit->records[index].inode_storage && size > largest) {
+			if (!edit->records[index].inode_storage && size > largest &&
+			    !ext4_inline_key(edit->records[index].entry->name_index,
+				(const uint8_t *)(edit->records[index].entry + 1),
+				edit->records[index].entry->name_length)) {
 				largest = size;
 				selected = index;
 			}
@@ -534,7 +563,7 @@ ext4_xattr_external_edit(
 }
 
 enum ext4_result
-ext4_xattr_apply(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+ext4_xattr_apply(struct ext4_allocation *allocation, struct ext4_inode *inode,
     struct ext4_inode_disk *disk, const struct ext4_xattr_change *changes, size_t count)
 {
 	struct ext4_fs *fs = allocation->fs;
@@ -543,6 +572,7 @@ ext4_xattr_apply(struct ext4_allocation *allocation, const struct ext4_inode *in
 	size_t body_capacity = 0;
 	size_t extra;
 	size_t index;
+	bool inline_full = false;
 	enum ext4_result error;
 
 	ext4_zero(&edit, sizeof(edit));
@@ -567,6 +597,7 @@ ext4_xattr_apply(struct ext4_allocation *allocation, const struct ext4_inode *in
 		}
 	}
 	error = ext4_xattr_place_values(&edit, body_capacity);
+	inline_full = error == EXT4_NO_SPACE && (inode->flags & EXT4_INODE_INLINE_DATA);
 	if (error != EXT4_OK) {
 		goto out;
 	}
@@ -614,11 +645,17 @@ out:
 		    fs->environment.context, edit.records, edit.capacity * sizeof(*edit.records));
 	}
 	ext4_xattr_close(&edit.snapshot);
+	if (inline_full) {
+		error = ext4_inline_expand(allocation, inode, disk);
+		if (error == EXT4_OK) {
+			error = ext4_xattr_apply(allocation, inode, disk, changes, count);
+		}
+	}
 	return error;
 }
 
 enum ext4_result
-ext4_xattr_drop(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+ext4_xattr_drop(struct ext4_allocation *allocation, struct ext4_inode *inode,
     struct ext4_inode_disk *disk, bool *done)
 {
 	struct ext4_xattr_edit edit;

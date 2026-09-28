@@ -41,7 +41,7 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | INLINE_DATA storage; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; EA_INODE focused faults, independent states/replay, six Linux roundtrips and the expanded regression pass; distributed geometry is accepted |
+| Format compatibility | Finish INLINE_DATA Linux/regression acceptance; BIGALLOC; large logical/physical addresses and volume geometry beyond the current bounded images | Open; INLINE_DATA focused faults and independent states/replay pass; EA_INODE and distributed geometry retain accepted evidence |
 | Journal compatibility | Fast commit and external journals, including interrupted replay and cross-implementation recovery | Open; v1 and async compatibility pass focused faults, independent replay, eight Linux roundtrips and their combined full regression |
 | Scale and sustained operation | Measured file/directory growth, fragmentation and allocator cost; bounded memory and write amplification; longer mixed-operation/crash sequences and fuzz coverage | Open |
 
@@ -59,6 +59,43 @@ create/link/symlink/mkdir/mknod/unlink/rmdir/rename and atomic whiteout; raw xat
 internal-journal recovery and both orphan representations; HTree creation, lookup
 and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
 the remaining blocks have equal size or that the full core is accepted.
+
+## Inode-resident file and directory data
+
+INLINE_DATA is implemented for regular files and directories. Reads and mutations
+validate the inode, internal `system.data` entry, both directory regions and
+attribute/data accounting. Writes, shrink/growth and hole punching retain inline
+storage while it fits; larger data, directory entries and attribute pressure
+convert it to ordinary mapping in the owning transaction. Newly created empty
+files and directories use inline storage when the inode has room and no inherited
+attributes. Raw mutation of `system.data` is rejected. Physical mapping APIs
+return unsupported for this representation; adapters must use the byte-read API.
+
+Eight independent 16 MiB profiles cover 1/4 KiB blocks, absent metadata checksums,
+explicit checksum seed, absent directory file types, 512-byte inodes, EA_INODE and
+orphan files. Ten checksummed malformed cases per profile reject before publishing
+data or issuing writes. Functional checks cover every file offset around the
+60-byte boundary, both directory regions and cookies, namespace mutation, body
+growth, conversion, attribute coexistence and held-unlinked lifetime. Two
+independently filled block maps demonstrate creation, inline writes and reclamation
+with zero free blocks; oversized directory insertion rejects without writes.
+
+The seven operations on each of the 1/4 KiB profiles cover 422 allocation failures,
+175 read failures and 2,016 storage cuts. Recovery accepts 1,956 cuts as the exact
+old or new home state and rejects 60 torn primary-superblock states. These rejects
+are not successful crash recovery. Independent nonrepairing e2fsck and exact data,
+namespace, attributes and accounting checks accept 80 mutation states, four
+full-block lifetime states, and 84 before/after/committed/uncommitted replay states.
+All 8,442 independent commands exit zero, without repair. Journal-only oracle runs
+omit `-f` and reject full fsck passes; repeated core recovery preserves clean bytes.
+
+The main-agent review is `artifacts/checks/inline-focused-accepted.json`; raw logs
+are under `artifacts/checks/inline-development/acceptance-*`. Reports are
+`artifacts/inline-accepted-independent/report.json`,
+`artifacts/inline-full-independent/report.json` and
+`artifacts/inline-fault-independent/report.json`. The prepared native Linux
+roundtrip and expanded 444-test regression are pending. This evidence does not
+establish installed FSKit or kext inline reads.
 
 ## Large values in private attribute inodes
 

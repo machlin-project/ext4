@@ -113,6 +113,14 @@ jobs:
             2>&1 | tee artifacts/checks/xattr-enable-fixtures.log
           python3 tests/generate_ea_inode_fixtures.py --tools-root vendor/e2fsprogs/build \
             --output artifacts/ea-inode-fixtures 2>&1 | tee artifacts/checks/ea-inode-fixtures.log
+      - name: Generate inline files, directories and full block bitmaps
+        if: matrix.suite == 'core'
+        run: |
+          python3 tests/generate_inline_fixtures.py --tools-root vendor/e2fsprogs/build \
+            --output artifacts/inline-fixtures 2>&1 | tee artifacts/checks/inline-fixtures.log
+          python3 tests/generate_inline_space.py --tools-root vendor/e2fsprogs/build \
+            --fixtures artifacts/inline-fixtures/report.json --output artifacts/inline-space-fixtures \
+            2>&1 | tee artifacts/checks/inline-space-fixtures.log
       - name: Generate legacy group checksum images
         if: matrix.suite == 'core'
         run: |
@@ -143,6 +151,8 @@ jobs:
               -Dgeometry_fixtures="$PWD/artifacts/geometry-fixtures")
             xattr_options=(-Dxattr_fixtures="$PWD/artifacts/xattr-fixtures" \
               -Dea_inode_fixtures="$PWD/artifacts/ea-inode-fixtures" \
+              -Dinline_fixtures="$PWD/artifacts/inline-fixtures" \
+              -Dinline_space_fixtures="$PWD/artifacts/inline-space-fixtures" \
               -Dxattr_space_fixtures="$PWD/artifacts/xattr-space-fixtures" \
               -Dxattr_enable_fixtures="$PWD/artifacts/xattr-enable-fixtures")
           fi
@@ -193,6 +203,30 @@ jobs:
             2>&1 | tee artifacts/checks/ea-inode-fault-independent.log
           find artifacts/ea-inode-fixtures artifacts/ea-inode-exports artifacts/ea-inode-independent \
             artifacts/ea-inode-fault-exports artifacts/ea-inode-fault-independent \
+            -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Independently verify inline mutation, lifetime and interrupted transactions
+        if: matrix.suite == 'core'
+        run: |
+          mkdir artifacts/inline-exports artifacts/inline-full-exports artifacts/inline-fault-exports
+          .build/ext4-inline-test --export artifacts/inline-exports artifacts/inline-fixtures/*.img \
+            2>&1 | tee artifacts/checks/inline-exports.log
+          .build/ext4-inline-test --full --export artifacts/inline-full-exports artifacts/inline-space-fixtures/*.img \
+            2>&1 | tee artifacts/checks/inline-full-exports.log
+          .build/ext4-inline-test --fault-smoke --export artifacts/inline-fault-exports \
+            artifacts/inline-fixtures/inline-1k.img artifacts/inline-fixtures/inline-4k.img \
+            2>&1 | tee artifacts/checks/inline-fault-exports.log
+          python3 tests/check_inline.py --tools-root vendor/e2fsprogs/build \
+            --fixtures artifacts/inline-fixtures/report.json --exports artifacts/inline-exports \
+            --output artifacts/inline-independent 2>&1 | tee artifacts/checks/inline-independent.log
+          python3 tests/check_inline.py --tools-root vendor/e2fsprogs/build --full \
+            --fixtures artifacts/inline-space-fixtures/report.json --exports artifacts/inline-full-exports \
+            --output artifacts/inline-full-independent 2>&1 | tee artifacts/checks/inline-full-independent.log
+          python3 tests/check_inline_faults.py --tools-root vendor/e2fsprogs/build \
+            --exports artifacts/inline-fault-exports --recover .build/ext4-recover \
+            --output artifacts/inline-fault-independent 2>&1 | tee artifacts/checks/inline-fault-independent.log
+          find artifacts/inline-fixtures artifacts/inline-space-fixtures artifacts/inline-exports \
+            artifacts/inline-full-exports artifacts/inline-fault-exports artifacts/inline-independent \
+            artifacts/inline-full-independent artifacts/inline-fault-independent \
             -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Independently verify persistent inode flags and recovery
         if: matrix.suite == 'core'

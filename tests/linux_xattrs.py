@@ -22,6 +22,7 @@ CAPABILITY_REVISION_2 = 0x02000000
 CAPABILITY_EFFECTIVE = 1
 CAP_NET_BIND_SERVICE = 10
 SECTOR_BYTES = 512
+INODE_INLINE_DATA = 0x10000000
 FILE = "/linux-xattr-file"
 DIRECTORY = "/linux-xattr-directory"
 INHERITED = "/directory/linux-inherited"
@@ -174,9 +175,18 @@ def snapshot(image, output, tools, run, *, allow_summary_lag=False):
         elif inode["type"] == "regular":
             value = output / f"data-{len(objects)}"
             run([tool(tools, "debugfs"), "-R", f'dump {path} "{value}"', image])
-            if not value.is_file() or value.stat().st_size != inode["size"]:
+            if not value.is_file():
+                raise RuntimeError("Missing independently extracted file")
+            raw = value.read_bytes()
+            if inode["flags"] & INODE_INLINE_DATA:
+                # libext2fs returns inode storage capacity, including bytes
+                # beyond logical EOF; those bytes are not visible file data.
+                if len(raw) < inode["size"]:
+                    raise RuntimeError("Truncated independent inline storage")
+                raw = raw[:inode["size"]]
+            if len(raw) != inode["size"]:
                 raise RuntimeError("Independent file length differs")
-            item["data"] = value.read_bytes().hex()
+            item["data"] = raw.hex()
         elif inode["type"] not in ("character", "block", "FIFO", "socket"):
             raise RuntimeError("Unsupported inode type in the attribute roundtrip fixture")
     return dict(objects=objects, accounting=counts, oracle_summary_lag=lag)
@@ -206,9 +216,11 @@ def prepare(case, tree, tools, *, verify_only=False):
     inode_lines, attribute_lines, data_lines = [], [], []
     for path, item in state["objects"].items():
         inode = item["inode"]
+        visible_attrs = {name: value for name, value in item["attrs"].items()
+                         if name != "system.data" or not inode["flags"] & INODE_INLINE_DATA}
         inode_lines.append(f"{path} {inode['inode']} {inode['mode'] | kinds[inode['type']]:o} "
-                           f"{inode['uid']} {inode['gid']} {inode['size']} {len(item['attrs'])}")
-        for name, value in item["attrs"].items():
+                           f"{inode['uid']} {inode['gid']} {inode['size']} {len(visible_attrs)}")
+        for name, value in visible_attrs.items():
             index, _ = namespace(name)
             raw = bytes.fromhex(value)
             if index in (2, 3):
@@ -227,6 +239,8 @@ def prepare(case, tree, tools, *, verify_only=False):
     (tree / "xattr-options").write_text(f"{int(verify_only)}\n")
     if case.get("ea_inode"):
         (tree / "ea-inode").touch()
+    if case.get("inline_data"):
+        (tree / "inline-data").touch()
     (tree / "linux-acl").write_bytes(acl_bytes(LINUX_ACL_ENTRIES, userspace=True))
     (tree / "linux-capability").write_bytes(struct.pack(
         "<IIIII", CAPABILITY_REVISION_2 | CAPABILITY_EFFECTIVE, 1 << CAP_NET_BIND_SERVICE, 0, 0, 0))
@@ -312,6 +326,9 @@ def write_core_expectations(state, output):
 
 
 def verify(case, image, output, tools, recover, reader, run, *, native_replay=None):
+    if case.get("inline_data"):
+        from linux_inline import verify as verify_inline
+        return verify_inline(case, image, output, tools, recover, reader, run, native_replay)
     if case.get("ea_inode"):
         from linux_ea_inode import verify as verify_ea
         return verify_ea(case, image, output, tools, recover, reader, run, native_replay)

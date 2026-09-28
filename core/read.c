@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
+#include "inline.h"
 
 static enum ext4_result ext4_map_blocks(struct ext4_fs *fs, const struct ext4_inode *inode,
     uint32_t logical, uint8_t **scratch, uint64_t *physical, uint64_t *blocks,
@@ -274,6 +275,9 @@ ext4_map_blocks(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t log
 	if (path != NULL) {
 		path->count = 0;
 	}
+	if (inode->flags & EXT4_INODE_INLINE_DATA) {
+		return EXT4_UNSUPPORTED;
+	}
 	if (inode->flags & EXT4_INODE_EXTENTS) {
 		return ext4_extent_map(fs, inode, logical, scratch, physical, blocks, path);
 	}
@@ -335,6 +339,13 @@ ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, v
 	}
 	if (length > inode->size - offset) {
 		length = (size_t)(inode->size - offset);
+	}
+	if (inode->flags & EXT4_INODE_INLINE_DATA) {
+		error = ext4_inline_read(fs, inode, offset, buffer, length);
+		if (error == EXT4_OK) {
+			*completed = length;
+		}
+		return error;
 	}
 	if (inode->fast_symlink) {
 		if (inode->size > sizeof(inode->block_data)) {

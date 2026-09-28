@@ -47,3 +47,9 @@ option('directory_links_fixture', type: 'string', value: '',
   description: 'Enable a real independently authored directory at the link-count boundary')
 option('directory_index_64k_fixture', type: 'string', value: '',
   description: 'Enable directory index creation on a 64 KiB-block image with an internal journal')
+
+option('inline_fixtures', type: 'string', value: '',
+  description: 'Path to independently generated INLINE_DATA fixtures')
+
+option('inline_space_fixtures', type: 'string', value: '',
+  description: 'Path to completely allocated INLINE_DATA fixtures')

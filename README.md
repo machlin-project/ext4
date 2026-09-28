@@ -52,6 +52,14 @@ including native orphan recovery and two pending core journals. The expanded
 Large attributes on short symlinks and legacy Lustre
 value-inode encodings are explicitly unsupported.
 
+INLINE_DATA adds small files and directories stored in the inode, transactional
+growth into ordinary blocks, attribute coexistence and open-unlinked cleanup.
+Eight format profiles pass focused checks, including creation at zero free blocks.
+Independent checks accept 84 functional/lifetime states and 84 journal states;
+2,016 interrupted-write cases recover the old or new transaction, or reject a
+torn primary superblock. Native Linux roundtrips and the expanded 444-test CI
+regression are pending for this block.
+
 Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.
 Both native adapters remain read-only. The FSKit adapter builds for macOS 26.4,
 but installation/mount tests await a signing profile with FSKit Module capability.

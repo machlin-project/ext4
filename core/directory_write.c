@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "directory_write.h"
 #include "directory_index.h"
+#include "inline.h"
 
 static uint32_t
 ext4_directory_minimum(size_t length)
@@ -80,6 +81,9 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 	uint32_t previous;
 	uint32_t occupied;
 	uint32_t best = UINT32_MAX;
+	uint32_t inline_used = 0;
+	uint32_t inline_tail = 0;
+	uint32_t inline_hash = 0;
 	uint16_t names;
 	size_t index;
 	bool exists = false;
@@ -87,8 +91,17 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 	bool dot;
 	bool dotdot;
 	bool eligible;
+	bool inline_data = (parent->flags & EXT4_INODE_INLINE_DATA) != 0;
 	enum ext4_result error;
 
+	if (inline_data) {
+		error = ext4_inline_directory(
+		    fs, parent, disk, buffer, false, &inline_used, &inline_tail, &inline_hash);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		blocks = 1;
+	}
 	if (tree != NULL && action == EXT4_DIRECTORY_INSERT) {
 		error =
 		    ext4_directory_hash(tree->version, tree->seed, name, name_length, &requested);
@@ -99,31 +112,46 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 	ext4_zero(slot, sizeof(*slot));
 	ext4_zero(&repack, sizeof(repack));
 	slot->logical = UINT32_MAX;
+	if (inline_data) {
+		slot->inline_disk = disk;
+		slot->inline_tail = inline_tail;
+		slot->inline_hash = inline_hash;
+	}
 	for (logical = 0; logical < blocks; logical++) {
 		if (tree != NULL && tree->ranges[logical].kind == EXT4_INDEX_NODE) {
 			continue;
 		}
-		usable =
-		    tree != NULL && logical == 0 ? fs->info.block_size : ext4_directory_usable(fs);
+		usable = inline_data		   ? inline_used
+		    : tree != NULL && logical == 0 ? fs->info.block_size
+						   : ext4_directory_usable(fs);
 		eligible = tree == NULL ||
 		    (logical != 0 && ext4_index_contains(&tree->ranges[logical], requested.major));
 		occupied = 0;
-		error = ext4_write_map_lookup(allocation, parent, disk, logical, &run);
-		if (error != EXT4_OK) {
-			return error;
-		}
-		if (run.physical == 0 || run.unwritten) {
-			return EXT4_CORRUPT;
-		}
-		error = ext4_transaction_read(allocation->transaction, run.physical, buffer);
-		if (error == EXT4_OK) {
-			error = ext4_directory_checksum(fs, parent, logical, buffer);
-		}
-		if (error != EXT4_OK) {
-			return error;
+		if (inline_data) {
+			run.physical = 0;
+		} else {
+			error = ext4_write_map_lookup(allocation, parent, disk, logical, &run);
+			if (error != EXT4_OK) {
+				return error;
+			}
+			if (run.physical == 0 || run.unwritten) {
+				return EXT4_CORRUPT;
+			}
+			error =
+			    ext4_transaction_read(allocation->transaction, run.physical, buffer);
+			if (error == EXT4_OK) {
+				error = ext4_directory_checksum(fs, parent, logical, buffer);
+			}
+			if (error != EXT4_OK) {
+				return error;
+			}
 		}
 		previous = UINT32_MAX;
 		for (offset = 0; offset < usable; previous = offset, offset += length) {
+			if (inline_data &&
+			    (offset == EXT4_INLINE_DOTS_SIZE || offset == EXT4_INLINE_FIRST_END)) {
+				previous = UINT32_MAX;
+			}
 			if (usable - offset < sizeof(*entry)) {
 				return EXT4_CORRUPT;
 			}
@@ -246,15 +274,42 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 }
 
 enum ext4_result
-ext4_directory_scan(struct ext4_allocation *allocation, const struct ext4_inode *parent,
+ext4_directory_scan(struct ext4_allocation *allocation, struct ext4_inode *parent,
     struct ext4_inode_disk *disk, const uint8_t *name, size_t name_length,
     enum ext4_directory_action action, uint32_t expected_parent, struct ext4_directory_slot *slot)
 {
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_directory_index tree;
+	bool grown;
 	bool indexed = (parent->flags & EXT4_INODE_INDEX) != 0;
 	enum ext4_result error;
 
+	if (parent->flags & EXT4_INODE_INLINE_DATA) {
+		error = ext4_write_map_validate(allocation, parent, disk);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		error = ext4_directory_scan_blocks(allocation, parent, disk, name, name_length,
+		    action, expected_parent, slot, NULL);
+		if (error != EXT4_OK || action != EXT4_DIRECTORY_INSERT || slot->logical == 0) {
+			return error;
+		}
+		error = ext4_inline_grow(allocation, parent, disk, parent->size + 1U, &grown);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		if (grown) {
+			error = ext4_directory_scan_blocks(allocation, parent, disk, name,
+			    name_length, action, expected_parent, slot, NULL);
+			if (error != EXT4_OK || slot->logical == 0) {
+				return error;
+			}
+		}
+		error = ext4_inline_expand(allocation, parent, disk);
+		if (error != EXT4_OK) {
+			return error;
+		}
+	}
 	if (parent->size == 0 || parent->size % fs->info.block_size != 0) {
 		return EXT4_CORRUPT;
 	}
@@ -640,6 +695,27 @@ out:
 	return error;
 }
 
+static struct ext4_dir_header_disk *
+ext4_directory_inline_entry(const struct ext4_directory_slot *slot, uint32_t offset)
+{
+	uint8_t *base;
+
+	if (offset >= EXT4_INLINE_FIRST_END) {
+		base = (uint8_t *)slot->inline_disk + slot->inline_tail;
+		return (struct ext4_dir_header_disk *)(base + offset - EXT4_INLINE_FIRST_END);
+	}
+	base = slot->inline_disk->block_data + EXT4_INLINE_PARENT_SIZE;
+	return (struct ext4_dir_header_disk *)(base + offset - EXT4_INLINE_DOTS_SIZE);
+}
+
+static void
+ext4_directory_inline_changed(const struct ext4_directory_slot *slot)
+{
+	/* An inode-body value may use the canonical zero hash. The inode checksum
+	 * is set by the namespace owner after all its private edits are complete. */
+	ext4_zero((uint8_t *)slot->inline_disk + slot->inline_hash, sizeof(struct ext4_le32));
+}
+
 enum ext4_result
 ext4_directory_insert(struct ext4_allocation *allocation, const struct ext4_inode *parent,
     struct ext4_inode_disk *disk, struct ext4_directory_slot *slot, uint32_t number,
@@ -653,6 +729,16 @@ ext4_directory_insert(struct ext4_allocation *allocation, const struct ext4_inod
 	bool zero;
 	enum ext4_result error;
 
+	if (slot->inline_disk != NULL) {
+		buffer = (uint8_t *)ext4_directory_inline_entry(slot, slot->offset);
+		if (slot->used != 0) {
+			ext4_directory_length((struct ext4_dir_header_disk *)buffer, slot->used);
+		}
+		ext4_directory_entry(fs, buffer + slot->used, slot->length - slot->used, number,
+		    type, name, name_length);
+		ext4_directory_inline_changed(slot);
+		return ext4_inode_account(allocation, parent, disk, parent->size);
+	}
 	if (slot->repack) {
 		return ext4_directory_repack(
 		    allocation, parent, disk, slot, number, type, name, name_length, false);
@@ -690,7 +776,7 @@ ext4_directory_insert(struct ext4_allocation *allocation, const struct ext4_inod
 }
 
 enum ext4_result
-ext4_directory_initialize(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+ext4_directory_initialize(struct ext4_allocation *allocation, struct ext4_inode *inode,
     struct ext4_inode_disk *disk, uint32_t parent)
 {
 	struct ext4_fs *fs = allocation->fs;
@@ -698,8 +784,16 @@ ext4_directory_initialize(struct ext4_allocation *allocation, const struct ext4_
 	uint64_t physical;
 	uint32_t first = ext4_directory_minimum(1);
 	bool zero;
+	bool inline_created;
 	enum ext4_result error;
 
+	error = ext4_inline_start(allocation, inode, disk, parent, &inline_created);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (inline_created) {
+		return ext4_inode_account(allocation, inode, disk, inode->size);
+	}
 	error = ext4_write_map_allocate(allocation, inode, disk, 0, &physical, &zero);
 	if (error == EXT4_OK) {
 		error = ext4_transaction_buffer(allocation->transaction, physical, &buffer);
@@ -727,12 +821,17 @@ ext4_directory_remove(struct ext4_allocation *allocation, const struct ext4_inod
 	uint32_t length;
 	enum ext4_result error;
 
-	error = ext4_transaction_buffer(allocation->transaction, slot->physical, &snapshot);
-	if (error != EXT4_OK) {
-		return error;
+	buffer = NULL;
+	if (slot->inline_disk != NULL) {
+		entry = ext4_directory_inline_entry(slot, slot->offset);
+	} else {
+		error = ext4_transaction_buffer(allocation->transaction, slot->physical, &snapshot);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		buffer = snapshot;
+		entry = (struct ext4_dir_header_disk *)(buffer + slot->offset);
 	}
-	buffer = snapshot;
-	entry = (struct ext4_dir_header_disk *)(buffer + slot->offset);
 	if (ext4_le32(&entry->inode) != slot->number ||
 	    ext4_directory_record_length(allocation->fs, entry) != slot->length) {
 		return EXT4_CORRUPT;
@@ -741,14 +840,20 @@ ext4_directory_remove(struct ext4_allocation *allocation, const struct ext4_inod
 	if (slot->previous == UINT32_MAX) {
 		ext4_directory_length(entry, slot->length);
 	} else {
-		previous = (struct ext4_dir_header_disk *)(buffer + slot->previous);
+		previous = slot->inline_disk != NULL
+		    ? ext4_directory_inline_entry(slot, slot->previous)
+		    : (struct ext4_dir_header_disk *)(buffer + slot->previous);
 		length = ext4_directory_record_length(allocation->fs, previous);
 		if (slot->previous + length != slot->offset) {
 			return EXT4_CORRUPT;
 		}
 		ext4_directory_length(previous, length + slot->length);
 	}
-	ext4_directory_checksum_set(allocation->fs, parent, buffer);
+	if (slot->inline_disk != NULL) {
+		ext4_directory_inline_changed(slot);
+	} else {
+		ext4_directory_checksum_set(allocation->fs, parent, buffer);
+	}
 	return EXT4_OK;
 }
 
@@ -760,11 +865,25 @@ ext4_directory_replace(struct ext4_allocation *allocation, const struct ext4_ino
 	void *buffer;
 	enum ext4_result error;
 
-	error = ext4_transaction_buffer(allocation->transaction, slot->physical, &buffer);
-	if (error != EXT4_OK) {
-		return error;
+	buffer = NULL;
+	if (slot->inline_disk != NULL && slot->offset == EXT4_INLINE_DOT_SIZE) {
+		if (type != EXT4_FT_DIRECTORY ||
+		    ext4_le32((const struct ext4_le32 *)slot->inline_disk->block_data) !=
+			slot->number) {
+			return EXT4_CORRUPT;
+		}
+		ext4_encode32((struct ext4_le32 *)slot->inline_disk->block_data, number);
+		return EXT4_OK;
 	}
-	entry = (struct ext4_dir_header_disk *)((uint8_t *)buffer + slot->offset);
+	if (slot->inline_disk != NULL) {
+		entry = ext4_directory_inline_entry(slot, slot->offset);
+	} else {
+		error = ext4_transaction_buffer(allocation->transaction, slot->physical, &buffer);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		entry = (struct ext4_dir_header_disk *)((uint8_t *)buffer + slot->offset);
+	}
 	if (ext4_le32(&entry->inode) != slot->number ||
 	    ext4_directory_record_length(allocation->fs, entry) != slot->length) {
 		return EXT4_CORRUPT;
@@ -776,7 +895,11 @@ ext4_directory_replace(struct ext4_allocation *allocation, const struct ext4_ino
 	if ((parent->flags & EXT4_INODE_INDEX) && slot->logical == 0) {
 		ext4_index_checksum_set(allocation->fs, parent, 0, buffer);
 	} else {
-		ext4_directory_checksum_set(allocation->fs, parent, buffer);
+		if (slot->inline_disk != NULL) {
+			ext4_directory_inline_changed(slot);
+		} else {
+			ext4_directory_checksum_set(allocation->fs, parent, buffer);
+		}
 	}
 	return EXT4_OK;
 }

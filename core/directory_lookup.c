@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "directory_index.h"
+#include "inline.h"
 
 struct ext4_lookup_node {
 	uint8_t *buffer;
@@ -48,10 +49,17 @@ static enum ext4_result
 ext4_lookup_read(struct ext4_lookup_state *state, uint32_t logical, uint8_t *buffer)
 {
 	size_t completed;
+	uint32_t used;
+	uint32_t tail;
+	uint32_t hash;
 	enum ext4_result error;
 
 	if (logical >= state->blocks) {
 		return EXT4_CORRUPT;
+	}
+	if (state->directory->flags & EXT4_INODE_INLINE_DATA) {
+		return ext4_inline_directory(
+		    state->fs, state->directory, NULL, buffer, true, &used, &tail, &hash);
 	}
 	error =
 	    ext4_read(state->fs, state->directory, (uint64_t)logical * state->fs->info.block_size,
@@ -376,10 +384,12 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 	if ((directory->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
 		return EXT4_NOT_DIRECTORY;
 	}
-	if (directory->size % fs->info.block_size != 0) {
+	if (!(directory->flags & EXT4_INODE_INLINE_DATA) &&
+	    directory->size % fs->info.block_size != 0) {
 		return EXT4_CORRUPT;
 	}
-	state.blocks = directory->size / fs->info.block_size;
+	state.blocks =
+	    directory->flags & EXT4_INODE_INLINE_DATA ? 1 : directory->size / fs->info.block_size;
 	if (state.blocks > (uint64_t)UINT32_MAX + 1U) {
 		return EXT4_RANGE;
 	}

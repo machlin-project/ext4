@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "directory_write.h"
 #include "xattr.h"
+#include "inline.h"
 
 #define EXT4_CREATE_FIELDS                                                                         \
 	(EXT4_ATTR_PERMISSIONS | EXT4_ATTR_UID | EXT4_ATTR_GID | EXT4_ATTR_ACCESS_TIME |           \
@@ -153,6 +154,7 @@ ext4_namespace_new(struct ext4_allocation *allocation, const struct ext4_inode *
 {
 	struct ext4_fs *fs = allocation->fs;
 	uint32_t flags;
+	bool inline_created;
 	enum ext4_result error;
 
 	/* The owner admits ACL/security inheritance, including explicitly none. */
@@ -178,6 +180,9 @@ ext4_namespace_new(struct ext4_allocation *allocation, const struct ext4_inode *
 	if (error == EXT4_OK && (attributes->fields & EXT4_ATTR_XATTRS)) {
 		error = ext4_xattr_apply(
 		    allocation, child, *disk, attributes->xattrs, attributes->xattr_count);
+	}
+	if (error == EXT4_OK && mode == EXT4_MODE_REGULAR) {
+		error = ext4_inline_start(allocation, child, *disk, 0, &inline_created);
 	}
 	return error;
 }

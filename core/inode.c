@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
 #include "xattr.h"
+#include "inline.h"
 
 static enum ext4_result
 ext4_decode_time(uint32_t seconds, uint32_t extra, struct ext4_timestamp *time)
@@ -149,8 +150,12 @@ ext4_inode_decode_record(
 	    decoded.blocks_512 == (xattr_block == 0 ? 0 : fs->info.block_size / EXT4_SECTOR_SIZE);
 	if (decoded.mode == 0 || (!orphan && decoded.links == 0)) {
 		error = EXT4_NOT_FOUND;
-	} else if (decoded.flags & EXT4_INODE_INLINE_DATA) {
-		error = EXT4_UNSUPPORTED;
+	} else if ((decoded.flags & EXT4_INODE_INLINE_DATA) &&
+	    (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_INLINE_DATA) ||
+		(decoded.flags & (EXT4_INODE_EXTENTS | EXT4_INODE_INDEX | EXT4_INODE_EA_INODE)) ||
+		((decoded.mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR &&
+		    (decoded.mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY))) {
+		error = EXT4_CORRUPT;
 	} else if ((decoded.fast_symlink && decoded.size >= sizeof(decoded.block_data)) ||
 	    decoded.size > (uint64_t)UINT32_MAX * fs->info.block_size) {
 		error = EXT4_CORRUPT;
@@ -224,6 +229,9 @@ ext4_inode_writable(
 	struct ext4_xattr_snapshot snapshot;
 	enum ext4_result error = ext4_inode_flags_writable(fs, inode);
 
+	if (error == EXT4_OK && (inode->flags & EXT4_INODE_INLINE_DATA)) {
+		return ext4_inline_validate(fs, inode, disk);
+	}
 	if (error != EXT4_OK || !ext4_inode_has_xattrs(fs, disk)) {
 		return error;
 	}

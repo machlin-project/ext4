@@ -431,8 +431,9 @@ malformed_cases(struct device *device)
 			expected = EXT4_UNSUPPORTED;
 			break;
 		case INLINE_ORPHAN:
+			/* The feature is absent and the original block map is still set. */
 			ext4_encode32(&disk->flags, payload.flags | EXT4_INODE_INLINE_DATA);
-			expected = EXT4_UNSUPPORTED;
+			expected = EXT4_CORRUPT;
 			break;
 		case EXTERNAL_XATTR:
 			ext4_encode32(&disk->xattr_block_lo, fs->first_data_block + 1);

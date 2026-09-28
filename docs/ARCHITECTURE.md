@@ -401,6 +401,29 @@ It writes sorted entries, disjoint padded values, entry/block hashes and metadat
 checksums. Existing nonzero extra_isize bounds inode-body storage; 128-byte inodes
 and records with no extended body use external storage.
 
+INLINE_DATA owns the first 60 data bytes in `i_block` and the remaining capacity in
+an inode-body `system.data` attribute. That internal key remains in the inode body
+when other attributes are repacked; callers cannot modify it through raw attribute
+batches. The raw get/list API exposes disk keys, so adapters must hide this
+implementation key from native attribute namespaces. Files without enough inline
+capacity convert within their current transaction. The conversion preserves all
+visible bytes and attributes, releases the internal key and installs an extent or
+indirect map before accounting and checksum publication. New empty files and
+directories use available inline storage only when no inherited attributes already
+occupy the inode body; attributed creation can use ordinary mapped storage.
+
+Inline directories have an inode-number parent followed by two independent entry
+regions. The core validates both regions before presenting a linear directory
+view with synthetic dot entries. Cookies identify stable positions within that
+view, including conversion to a mapped block. Removal never merges records across
+a region boundary. Directory growth first expands the inode-body region, then
+allocates an ordinary block only when inline capacity is insufficient. Inline
+objects own no data blocks, including at zero free blocks and during held-unlinked
+lifetime; external attributes and EA_INODE logical charges remain separately
+accounted. Byte reads handle this representation, while physical mapping APIs
+return unsupported because inline bytes are metadata protected by the inode's
+checksum and ownership.
+
 On EA_INODE filesystems, values up to 64 KiB can move into private regular inodes
 when inode-body and external-block packing is insufficient. Their entries retain
 the name, size, private inode number and hash; their value offset is zero. Reads

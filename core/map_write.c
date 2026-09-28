@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "allocate.h"
 #include "xattr.h"
+#include "inline.h"
 
 struct ext4_extent_path {
 	uint8_t *nodes[EXT4_EXTENT_MAX_DEPTH + 1];
@@ -1226,13 +1227,20 @@ ext4_write_map_validate(struct ext4_allocation *allocation, const struct ext4_in
 	size_t index;
 	enum ext4_result error;
 
+	if (inode->flags & EXT4_INODE_INLINE_DATA) {
+		error = ext4_inline_validate(fs, inode, disk);
+		if (error != EXT4_OK) {
+			return error;
+		}
+	}
 	ext4_zero(&owners, sizeof(owners));
 	scratch = fs->environment.allocate(fs->environment.context, scratch_size);
 	if (scratch == NULL) {
 		return EXT4_NO_MEMORY;
 	}
-	if (type == EXT4_MODE_REGULAR || type == EXT4_MODE_DIRECTORY ||
-	    (type == EXT4_MODE_SYMLINK && !inode->fast_symlink)) {
+	if (!(inode->flags & EXT4_INODE_INLINE_DATA) &&
+	    (type == EXT4_MODE_REGULAR || type == EXT4_MODE_DIRECTORY ||
+		(type == EXT4_MODE_SYMLINK && !inode->fast_symlink))) {
 		error = inode->flags & EXT4_INODE_EXTENTS
 		    ? ext4_extent_owners(allocation, inode, disk, &owners, scratch)
 		    : ext4_indirect_owners(allocation, disk, &owners, scratch);

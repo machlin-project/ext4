@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "allocate.h"
 #include "xattr.h"
+#include "inline.h"
 
 #define EXT4_ATTRIBUTE_FIELDS                                                                      \
 	((uint32_t)(EXT4_ATTR_PERMISSIONS | EXT4_ATTR_UID | EXT4_ATTR_GID |                        \
@@ -402,6 +403,7 @@ ext4_growth_check(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 	struct ext4_transaction *transaction;
 	struct ext4_inode_disk *disk;
 	struct ext4_inode inode;
+	struct ext4_inode original;
 	struct ext4_allocation allocation;
 	bool allocation_ready = false;
 	enum ext4_result error;
@@ -417,6 +419,11 @@ ext4_growth_check(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 	error = update->fields & EXT4_ATTR_XATTRS
 	    ? ext4_edit_inode_record(fs, transaction, number, generation, &disk, &inode)
 	    : ext4_edit_inode(fs, transaction, number, generation, &disk, &inode);
+	if (error != EXT4_OK) {
+		ext4_transaction_cancel(transaction);
+		return error;
+	}
+	original = inode;
 	if (error == EXT4_OK && (inode.mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR) {
 		error = (inode.mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY ? EXT4_IS_DIRECTORY
 									     : EXT4_UNSUPPORTED;
@@ -452,7 +459,7 @@ ext4_growth_check(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 	}
 	ext4_transaction_cancel(transaction);
 	if (error == EXT4_OK) {
-		*result = inode;
+		*result = original;
 	}
 	return error;
 }
@@ -512,7 +519,7 @@ ext4_growth_clear(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t e
 	if (credits < 2) {
 		return EXT4_RANGE;
 	}
-	if (end <= inode->size) {
+	if (end <= inode->size || (inode->flags & EXT4_INODE_INLINE_DATA)) {
 		return EXT4_OK;
 	}
 	targets = fs->environment.allocate(
@@ -828,6 +835,7 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 	size_t consumed = 0;
 	bool allocation_ready = false;
 	bool zero;
+	bool inline_done;
 	enum ext4_result error;
 
 	if (completed == NULL) {
@@ -899,6 +907,15 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 		goto cancel;
 	}
 	allocation_ready = true;
+	error = ext4_inline_edit(&allocation, &inode, disk,
+	    offset + length > inode.size ? offset + length : inode.size, offset, buffer, length,
+	    &inline_done);
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	if (inline_done) {
+		goto attributes;
+	}
 	allocation.mapping_size = offset + length;
 	if ((update->fields & EXT4_ATTR_XATTRS) || ext4_inode_has_xattrs(fs, disk)) {
 		error = ext4_write_map_validate(&allocation, &inode, disk);
@@ -967,6 +984,7 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 		consumed += chunk;
 		within = 0;
 	}
+attributes:
 	if (update->fields & EXT4_ATTR_XATTRS) {
 		error = ext4_xattr_apply(
 		    &allocation, &inode, disk, update->xattrs, update->xattr_count);
@@ -1147,6 +1165,7 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 	uint32_t feature_compat;
 	bool allocation_ready = false;
 	bool done = true;
+	bool inline_done;
 	enum ext4_result error;
 
 	*retry = false;
@@ -1206,6 +1225,13 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 		goto cancel;
 	}
 	allocation_ready = true;
+	error = ext4_inline_edit(&allocation, &inode, disk, size, 0, NULL, 0, &inline_done);
+	if (error != EXT4_OK) {
+		goto cancel;
+	}
+	if (inline_done) {
+		goto attributes;
+	}
 	if (size > inode.size &&
 	    ((update->fields & EXT4_ATTR_XATTRS) || ext4_inode_has_xattrs(fs, disk))) {
 		error = ext4_write_map_validate(&allocation, &inode, disk);
@@ -1265,6 +1291,7 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 	if (growth != NULL && size > inode.size) {
 		growth->zeroing = target_count != 0;
 	}
+attributes:
 	if (error == EXT4_OK && (update->fields & EXT4_ATTR_XATTRS)) {
 		error = ext4_xattr_apply(
 		    &allocation, &inode, disk, update->xattrs, update->xattr_count);
@@ -1286,8 +1313,10 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 	feature_compat = allocation.super == NULL ? fs->info.feature_compat
 						  : ext4_le32(&allocation.super->feature_compat);
 	ext4_allocation_destroy(&allocation);
-	fs->environment.release(
-	    fs->environment.context, targets, (size_t)credits * sizeof(*targets));
+	if (targets != NULL) {
+		fs->environment.release(
+		    fs->environment.context, targets, (size_t)credits * sizeof(*targets));
+	}
 	error = ext4_edit_commit(fs, transaction);
 	if (error == EXT4_OK) {
 		fs->info.free_blocks = free_blocks;
@@ -1400,6 +1429,7 @@ ext4_file_range_step(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 	uint32_t blocks;
 	uint32_t work = 0;
 	bool allocation_ready = false;
+	bool inline_done;
 	bool punch = (flags & EXT4_FALLOC_PUNCH_HOLE) != 0;
 	enum ext4_result error;
 
@@ -1424,6 +1454,22 @@ ext4_file_range_step(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 	}
 	if (error != EXT4_OK) {
 		goto cancel;
+	}
+	if (inode.flags & EXT4_INODE_INLINE_DATA) {
+		if (punch) {
+			amount = position >= inode.size ? 0 : inode.size - position;
+			if (amount > end - position) {
+				amount = end - position;
+			}
+			error = ext4_inline_edit(&allocation, &inode, disk, inode.size,
+			    amount == 0 ? 0 : position, NULL, (size_t)amount, &inline_done);
+			position = end;
+		} else {
+			error = ext4_inline_expand(&allocation, &inode, disk);
+		}
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
 	}
 	/* The public operation validated the complete map before its first step.
 	 * Its exclusive owner prevents any other mutation between checkpoints. */
@@ -1564,7 +1610,9 @@ ext4_fallocate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_
 		error = EXT4_PERMISSION_DENIED;
 	}
 	if (error == EXT4_OK && !(flags & EXT4_FALLOC_PUNCH_HOLE) &&
-	    !(inode.flags & EXT4_INODE_EXTENTS)) {
+	    !(inode.flags & EXT4_INODE_EXTENTS) &&
+	    !((inode.flags & EXT4_INODE_INLINE_DATA) &&
+		(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS))) {
 		error = EXT4_UNSUPPORTED;
 	}
 	if (error == EXT4_OK && !(flags & EXT4_FALLOC_KEEP_SIZE)) {

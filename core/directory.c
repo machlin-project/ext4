@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
+#include "inline.h"
 
 uint32_t
 ext4_directory_record_length(struct ext4_fs *fs, const struct ext4_dir_header_disk *header)
@@ -158,6 +159,10 @@ ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_
 	struct ext4_dir_entry decoded;
 	uint8_t *buffer;
 	uint64_t block_offset;
+	uint64_t size;
+	uint32_t inline_used;
+	uint32_t inline_tail;
+	uint32_t inline_hash;
 	size_t completed;
 	uint32_t offset;
 	uint32_t wanted;
@@ -174,13 +179,14 @@ ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_
 	if ((directory->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
 		return EXT4_NOT_DIRECTORY;
 	}
-	if (directory->size % fs->info.block_size != 0 || *cookie > directory->size) {
+	size = directory->flags & EXT4_INODE_INLINE_DATA ? fs->info.block_size : directory->size;
+	if (size % fs->info.block_size != 0 || *cookie > size) {
 		return EXT4_CORRUPT;
 	}
-	if (directory->size / fs->info.block_size > (uint64_t)UINT32_MAX + 1U) {
+	if (size / fs->info.block_size > (uint64_t)UINT32_MAX + 1U) {
 		return EXT4_RANGE;
 	}
-	if (*cookie == directory->size) {
+	if (*cookie == size) {
 		return EXT4_NOT_FOUND;
 	}
 	buffer = fs->environment.allocate(fs->environment.context, fs->info.block_size);
@@ -188,11 +194,17 @@ ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_
 		return EXT4_NO_MEMORY;
 	}
 	error = EXT4_NOT_FOUND;
-	while (*cookie < directory->size) {
+	while (*cookie < size) {
 		wanted = (uint32_t)(*cookie % fs->info.block_size);
 		block_offset = *cookie - wanted;
-		error =
-		    ext4_read(fs, directory, block_offset, buffer, fs->info.block_size, &completed);
+		if (directory->flags & EXT4_INODE_INLINE_DATA) {
+			error = ext4_inline_directory(fs, directory, NULL, buffer, true,
+			    &inline_used, &inline_tail, &inline_hash);
+			completed = fs->info.block_size;
+		} else {
+			error = ext4_read(
+			    fs, directory, block_offset, buffer, fs->info.block_size, &completed);
+		}
 		if (error != EXT4_OK) {
 			goto out;
 		}

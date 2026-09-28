@@ -3,13 +3,33 @@
 # required cases; missing images fail tests instead of silently removing them.
 paths = {}
 foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
-  'namespace_fixtures', 'xattr_fixtures', 'ea_inode_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
+  'namespace_fixtures', 'xattr_fixtures', 'ea_inode_fixtures', 'inline_fixtures', 'inline_space_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
   'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures', 'geometry_fixtures',
   'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
   'directory_index_64k_fixture']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
 endforeach
+
+if paths['inline_fixtures'] != ''
+  foreach profile : ['1k', '4k', 'no-checksum', 'checksum-seed', 'no-filetype', 'inode512', 'ea-inode', 'orphan-file']
+    test('inline-mutation-' + profile, programs['inline'],
+      args: paths['inline_fixtures'] / ('inline-' + profile + '.img'), timeout: 300, suite: 'core')
+    if profile in ['1k', '4k']
+      test('inline-faults-' + profile, programs['inline'],
+        args: ['--faults', paths['inline_fixtures'] / ('inline-' + profile + '.img')],
+        timeout: 600, suite: 'core')
+    endif
+  endforeach
+endif
+
+if paths['inline_space_fixtures'] != ''
+  foreach profile : ['1k', '4k']
+    test('inline-space-' + profile, programs['inline'],
+      args: ['--full', paths['inline_space_fixtures'] / ('inline-' + profile + '.img')],
+      timeout: 300, suite: 'core')
+  endforeach
+endif
 
 xattr_profiles = ['1k', '4k', '16k', '64k', 'indirect', 'no-checksum',
   'checksum-seed', 'inode128', 'inode512', 'orphan-file']

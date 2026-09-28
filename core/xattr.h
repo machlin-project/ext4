@@ -54,10 +54,9 @@ void ext4_xattr_checksum_set(
     struct ext4_fs *fs, uint64_t block, struct ext4_xattr_header_disk *header);
 enum ext4_result ext4_xattr_changes_validate(
     struct ext4_fs *fs, const struct ext4_xattr_change *changes, size_t count);
-enum ext4_result ext4_xattr_apply(struct ext4_allocation *allocation,
-    const struct ext4_inode *inode, struct ext4_inode_disk *disk,
-    const struct ext4_xattr_change *changes, size_t count);
-enum ext4_result ext4_xattr_drop(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+enum ext4_result ext4_xattr_apply(struct ext4_allocation *allocation, struct ext4_inode *inode,
+    struct ext4_inode_disk *disk, const struct ext4_xattr_change *changes, size_t count);
+enum ext4_result ext4_xattr_drop(struct ext4_allocation *allocation, struct ext4_inode *inode,
     struct ext4_inode_disk *disk, bool *done);
 
 #endif
