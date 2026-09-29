@@ -24,6 +24,7 @@
 #define FILE_LIMIT (128U * 1024U)
 #define WRITE_LIMIT (12U * 1024U)
 #define PARTIAL_LIMIT (80U * 1024U)
+#define INLINE_KEY "data"
 #define XATTR_KEYS 4U
 #define XATTR_VALUE_LIMIT 80U
 #define VERIFY_INTERVAL 50U
@@ -1196,14 +1197,16 @@ static void
 verify_content(struct state *state, const struct object *object, const struct ext4_inode *inode,
     bool attributes)
 {
-	struct ext4_xattr_key keys[XATTR_KEYS + 1U];
+	struct ext4_xattr_key keys[XATTR_KEYS + 2U];
 	uint8_t name[2] = { 'k', 0 };
 	uint8_t value[XATTR_VALUE_LIMIT];
 	size_t completed;
 	size_t count;
 	size_t size;
+	size_t index;
 	uint32_t key;
 	uint32_t present = 0;
+	uint32_t listed = 0;
 
 	CHECK(inode->number == object->number && inode->generation == object->generation);
 	CHECK((inode->mode & EXT4_MODE_TYPE) == expected_type(object->kind));
@@ -1260,9 +1263,20 @@ verify_content(struct state *state, const struct object *object, const struct ex
 	}
 	if (attributes) {
 		EXPECT(ext4_list_xattrs(state->fs, object->number, object->generation, keys,
-			   XATTR_KEYS + 1U, &count),
+			   XATTR_KEYS + 2U, &count),
 		    EXT4_OK);
-		CHECK(count == present);
+		/* The raw list also reports an inline-data inode's internal key. */
+		for (index = 0; index < count; index++) {
+			if (keys[index].name_index == EXT4_XATTR_USER) {
+				listed++;
+				continue;
+			}
+			CHECK((inode->flags & EXT4_INODE_INLINE_DATA) &&
+			    keys[index].name_index == EXT4_XATTR_SYSTEM &&
+			    keys[index].name_length == sizeof(INLINE_KEY) - 1U &&
+			    memcmp(keys[index].name, INLINE_KEY, sizeof(INLINE_KEY) - 1U) == 0);
+		}
+		CHECK(listed == present);
 	}
 }
 
