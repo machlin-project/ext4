@@ -91,6 +91,11 @@ Filesystems requiring recovery are rejected by the read-only mount. The separate
 offline recovery API requires an explicit write capability and exclusive resource
 ownership; a platform never invokes it as a side effect of a read-only mount.
 
+Writable mounts require an internal or external journal, because every write is a
+journaled transaction. Volumes without one, including revision-0 ext2 volumes,
+mount read-only and a writable mount returns unsupported; unjournaled writes would
+need a different crash contract.
+
 The write capability requires exact writes, coherent read-after-write and a flush
 that persists preceding writes through every volatile cache. Completion
 of a userspace callback is not evidence of device persistence. FSKit's direct

@@ -86,3 +86,5 @@ option('casefold_fixtures', type: 'string', value: '',
 
 option('quota_fixtures', type: 'string', value: '',
   description: 'Path to e2fsprogs-authored quota-tracking images')
+option('format_fixtures', type: 'string', value: '',
+  description: 'Path to e2fsprogs-authored format and geometry variants')

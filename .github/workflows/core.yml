@@ -178,6 +178,11 @@ jobs:
         run: |
           python3 tests/generate_quota_fixtures.py --tools-root vendor/e2fsprogs/build \
             --output artifacts/quota-fixtures 2>&1 | tee artifacts/checks/quota-fixtures.log
+      - name: Generate format and geometry variants
+        if: matrix.suite == 'sustained'
+        run: |
+          python3 tests/generate_format_fixtures.py --tools-root vendor/e2fsprogs/build \
+            --output artifacts/format-fixtures 2>&1 | tee artifacts/checks/format-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
@@ -209,7 +214,8 @@ jobs:
               -Dquota_fixtures="$PWD/artifacts/quota-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == sustained ]]; then
-            format_options=(-Dquota_fixtures="$PWD/artifacts/quota-fixtures")
+            format_options=(-Dquota_fixtures="$PWD/artifacts/quota-fixtures" \
+              -Dformat_fixtures="$PWD/artifacts/format-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == core ]]; then
             group_options=(-Dgroup_checksum_fixtures="$PWD/artifacts/group-checksum-fixtures" \

@@ -113,6 +113,10 @@ part in this byte comparison because their durable prefix or orphan lifetime is
 not one of two images. Ballast files fill the volume with seeded data, so writes,
 growth and namespace operations also run near and at allocation exhaustion.
 
+`tests/generate_format_fixtures.py --tools-root E2FSPROGS_BUILD --output NEW`
+authors one volume per optional format feature or geometry, and the `format_fixtures`
+option adds a sustained case for each.
+
 `--objects`, `--entries` and `--directories` raise the model's limits; the wide
 cases keep up to 2,000 names in three directories to exercise indexed growth and
 splits. `--export DIRECTORY` writes the final clean image, a manifest and expected

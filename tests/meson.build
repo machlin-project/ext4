@@ -9,7 +9,7 @@ foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
   'directory_index_64k_fixture', 'large_file_fixtures', 'large_volume_fixtures', 'external_journal_fixtures',
   'fast_commit_fixtures', 'mmp_fixtures', 'verity_fixtures', 'casefold_vectors',
-  'casefold_fixtures', 'quota_fixtures']
+  'casefold_fixtures', 'quota_fixtures', 'format_fixtures']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
 endforeach
@@ -619,6 +619,21 @@ if paths['quota_fixtures'] != ''
     test('sustained-quota-' + profile, programs['sustained'],
       args: [paths['quota_fixtures'] / ('quota-' + profile + '.img'), sustained_seed.to_string(),
         '4000'],
+      timeout: 600, suite: 'sustained')
+    sustained_seed += 1
+  endforeach
+endif
+if paths['format_fixtures'] != ''
+  # One optional format feature or geometry per image; see generate_format_fixtures.py.
+  foreach variant : ['block-64k', 'meta-bg', 'meta-bg-1k', 'sparse-super2',
+    'sparse-super2-no-backups', 'no-sparse-super', 'no-flex-bg', 'no-64bit', 'no-huge-file',
+    'no-dir-nlink', 'no-extra-isize', 'no-filetype', 'no-dir-index', 'no-ext-attr',
+    'group-checksum', 'inode-512', 'inode-1024', 'few-inodes', 'small-groups', 'large-dir',
+    'stable-inodes', 'orphan-file', 'fast-commit', 'inline-data', 'ea-inode', 'bigalloc-64k',
+    'encrypt', 'casefold', 'verity']
+    test('sustained-format-' + variant, programs['sustained'],
+      args: [paths['format_fixtures'] / ('format-' + variant + '.img'),
+        sustained_seed.to_string(), '1500'],
       timeout: 600, suite: 'sustained')
     sustained_seed += 1
   endforeach

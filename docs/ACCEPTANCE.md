@@ -41,7 +41,7 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Wider geometry and format coverage; quota limit enforcement and key-based encryption await product decisions; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
+| Format compatibility | Quota limit enforcement, key-based encryption and enabling verity await product decisions; unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | Recovering volumes whose Linux fast-commit replay was interrupted needs a replay-authority decision; until then the core refuses torn bitmap and inode checksums and leaves the log pending | Open; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay of two native captures are accepted, and the torn states of two range-heavy captures fail closed (see "Fast-commit combinations and interrupted foreign replay evidence" and "Interrupted Linux replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
 | Scale and sustained operation | Indexed operations still classify the whole index tree; first-fit allocation fragments large writes in fragmented free space; decisions on larger live transactions, ordered data writes and group commit | Open; measured workloads show bounded peak memory, about 2.1 times device writes for journaled data and five barriers per operation, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence" and "Sustained operation and fuzzing evidence") |
 
@@ -105,6 +105,25 @@ that exposed two defects in the first version of this work: a map record changed
 behind a writable mount skipped revalidation, and a history-dependent reclamation
 step made recovery after a power cut differ from the uninterrupted image.
 Measurements are in `artifacts/checks/scale-measurements-2/`.
+
+## Format and geometry variant evidence
+
+`tests/generate_format_fixtures.py` authors one empty volume per optional feature or
+geometry that the other writable fixtures do not already cover, each changing the
+base feature set in one respect: 64 KiB blocks, META_BG with 4 KiB and 1 KiB blocks,
+SPARSE_SUPER2 with and without backup superblocks, no SPARSE_SUPER, no FLEX_BG, no
+64BIT, no HUGE_FILE, no DIR_NLINK, no EXTRA_ISIZE, no FILETYPE, no DIR_INDEX, no
+EXT_ATTR, GDT_CSUM instead of METADATA_CSUM, 512- and 1,024-byte inodes, 64 inodes,
+1,024-block groups, LARGEDIR, STABLE_INODES, the orphan file, fast commits,
+INLINE_DATA, EA_INODE, BIGALLOC with 64 KiB clusters, encryption, casefolding and
+verity. Strict fsck accepts every image, and 1,500 sustained operations with power
+cuts pass on each; the complete sustained suite passes all 44 cases
+(`artifacts/checks/sustained-format-first/`). The first run exposed a model error
+in the sustained test, not in the core: the raw attribute list also reports an
+inline-data inode's internal `system.data` key, as its contract states. A volume
+without a journal and a revision-0 ext2 volume are read correctly and refuse
+writable mounting. Multi-mount protection needs the adapter's sleep operation and
+retains its own format tests.
 
 ## Sustained operation and fuzzing evidence
 
