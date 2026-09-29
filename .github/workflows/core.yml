@@ -254,6 +254,22 @@ jobs:
             --output artifacts/index-hash-independent 2>&1 | tee artifacts/checks/index-hash-independent.log
           python3 tests/generate_index_collisions.py --probe .build/ext4-directory-hash-test \
             --output artifacts/index-collisions 2>&1 | tee artifacts/checks/index-collisions.log
+      - name: Independently verify casefolded directories after writable changes
+        if: matrix.suite == 'format'
+        run: |
+          exports=()
+          for profile in 4k-strict 1k-relaxed; do
+            directory="artifacts/casefold-exports/$profile"
+            mkdir -p "$directory"
+            .build/ext4-casefold-fs-test "artifacts/casefold-fixtures/casefold-$profile.img" \
+              "artifacts/casefold-fixtures/casefold-$profile.manifest" "$directory" \
+              2>&1 | tee "artifacts/checks/casefold-export-$profile.log"
+            exports+=(--exports "$directory")
+          done
+          python3 tests/check_casefold.py --tools-root vendor/e2fsprogs/build "${exports[@]}" \
+            --output artifacts/casefold-independent 2>&1 | tee artifacts/checks/casefold-independent.log
+          find artifacts/casefold-exports artifacts/casefold-independent \
+            -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Run conformance and fault tests
         run: env -i PATH="$PATH" meson test -C .build --no-rebuild -j 2 --suite '${{ matrix.suite }}' --print-errorlogs
       - name: Independently check fast-commit recovery
@@ -1132,22 +1148,6 @@ jobs:
             vendor/e2fsprogs/build/e2fsck/e2fsck -fn "$image" || exit 1
           done 2>&1 | tee artifacts/checks/encrypt-independent.log
           find artifacts/encrypt-exports -type f -name '*.img' -delete
-      - name: Independently verify casefolded directories after writable changes
-        if: matrix.suite == 'format'
-        run: |
-          exports=()
-          for profile in 4k-strict 1k-relaxed; do
-            directory="artifacts/casefold-exports/$profile"
-            mkdir -p "$directory"
-            .build/ext4-casefold-fs-test "artifacts/casefold-fixtures/casefold-$profile.img" \
-              "artifacts/casefold-fixtures/casefold-$profile.manifest" "$directory" \
-              2>&1 | tee "artifacts/checks/casefold-export-$profile.log"
-            exports+=(--exports "$directory")
-          done
-          python3 tests/check_casefold.py --tools-root vendor/e2fsprogs/build "${exports[@]}" \
-            --output artifacts/casefold-independent 2>&1 | tee artifacts/checks/casefold-independent.log
-          find artifacts/casefold-exports artifacts/casefold-independent artifacts/casefold-vectors \
-            -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Independently verify power cuts without a journal
         if: matrix.suite == 'format'
         run: |
@@ -1198,6 +1198,7 @@ jobs:
             artifacts/**/*.log
             artifacts/**/*.json
             artifacts/**/*.xml
+            artifacts/casefold-independent/*.img
             artifacts/fixtures/features.txt
             artifacts/fixtures/tool-versions.txt
             .build/meson-logs/meson-log.txt

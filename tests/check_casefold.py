@@ -8,6 +8,7 @@ the expected names, removals and inherited flags."""
 import argparse
 import json
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 
@@ -54,8 +55,15 @@ def main():
                               timeout=300, check=False)
         row["commands"].append(dict(command=command, status=done.returncode,
                                     stdout=done.stdout[-4000:], stderr=done.stderr[-4000:]))
+        # Keep the failing oracle output too; fsck diagnoses corruption on stdout.
+        (output / "report.json").write_text(json.dumps(rows, indent=2) + "\n")
         if done.returncode != 0:
-            raise RuntimeError(f"Command failed ({done.returncode}): {command}\n{done.stderr}")
+            failed_image = output / Path(row["image"]).name
+            shutil.copyfile(row["image"], failed_image)
+            row["failure_image"] = str(failed_image)
+            (output / "report.json").write_text(json.dumps(rows, indent=2) + "\n")
+            raise RuntimeError(f"Command failed ({done.returncode}): {command}\n"
+                               f"{done.stdout}\n{done.stderr}")
         return done.stdout
 
     for directory in args.exports:
