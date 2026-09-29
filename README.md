@@ -41,8 +41,9 @@ Reservation now retains mapping capacity for partial KEEP_SIZE growth, including
 moving EOF between extents at zero free blocks. Focused faults, 30 independent
 image states, six Linux roundtrips and its expanded regression pass.
 Imported full trees without spare capacity can still reject a reservation or
-short growth safely. Scale workloads are measured with bounded core memory.
-Wider format and journal compatibility, the remaining allocator and index costs
+short growth safely. Scale workloads are measured with bounded core memory, and
+29 further format and geometry variants pass sustained operation. Recovering volumes
+whose Linux fast-commit replay was interrupted, the whole-tree index validation cost
 and the transaction and commit decisions remain open core work.
 
 EA_INODE adds values up to 64 KiB, shared value references, transactional updates

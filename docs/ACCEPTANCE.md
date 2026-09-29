@@ -89,7 +89,12 @@ Directory creation with 4 KiB blocks now reads 14 blocks per create at every siz
 up to 50,000 entries, down from 16 to 21. With 1 KiB blocks it reads 16 to 36 per
 create from the first to the fifth 10,000 entries, down from 27 to 120; the
 remaining growth is the whole-tree index classification. A lookup reads four blocks
-with 4 KiB blocks and five with 1 KiB blocks at 50,000 entries.
+with 4 KiB blocks and five with 1 KiB blocks at 50,000 entries. On volumes with
+262,144 inodes, creating 200,000 names in one directory costs 14 to 18 reads and
+16.5 to 25.4 µs per create with 4 KiB blocks and 31 to 86 reads and 13.6 to 53.0 µs
+with 1 KiB blocks from 40,000 to 200,000 entries; a lookup then reads five blocks,
+and peak core allocation stays below 281 KiB. Strict fsck accepts both results
+(`artifacts/checks/scale-directory-200k/`).
 
 Peak live core allocation stays at 1.16 MiB with 4 KiB blocks and 372 KiB with
 1 KiB blocks for 256 MiB files, the bound of a 256-snapshot transaction, and at
@@ -162,7 +167,10 @@ Checksum-repairing journal mutation then ran four further 25-minute campaigns: t
 1 KiB fast-commit prefix without metadata checksums, continuing its corpus, pending
 4 KiB and indirect 4 KiB fast-commit prefixes, and an ordinary v3-checksum log with
 revokes. About 612,000 inputs found nothing. The fast-commit corpus grew from 8,666
-edges and 32,515 features to 10,295 and 41,976. This remains bounded coverage.
+edges and 32,515 features to 10,295 and 41,976. Four more 25-minute campaigns on
+checksum-free volumes with inline data, a casefolded directory, quota and project
+accounting, and value inodes executed about 2.35 million inputs without a finding.
+This remains bounded coverage.
 
 ## Multi-mount protection evidence
 
