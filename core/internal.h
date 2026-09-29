@@ -270,10 +270,38 @@ enum ext4_result ext4_block_allocated(struct ext4_fs *fs, uint64_t block);
 enum ext4_result ext4_load(
     const struct ext4_environment *environment, bool recovery, struct ext4_fs **result);
 
-uint16_t ext4_le16(const struct ext4_le16 *value);
-uint32_t ext4_le32(const struct ext4_le32 *value);
-void ext4_encode16(struct ext4_le16 *output, uint16_t value);
-void ext4_encode32(struct ext4_le32 *output, uint32_t value);
+/* Keep wire decoding visible to the compiler in metadata scans. Byte accesses
+ * preserve the unaligned and host-endianness contract without libc or intrinsics. */
+static inline uint16_t
+ext4_le16(const struct ext4_le16 *value)
+{
+	return (uint16_t)value->bytes[0] | (uint16_t)((uint16_t)value->bytes[1] << 8);
+}
+
+static inline uint32_t
+ext4_le32(const struct ext4_le32 *value)
+{
+	return (uint32_t)value->bytes[0] | ((uint32_t)value->bytes[1] << 8) |
+	    ((uint32_t)value->bytes[2] << 16) | ((uint32_t)value->bytes[3] << 24);
+}
+
+static inline void
+ext4_encode16(struct ext4_le16 *output, uint16_t value)
+{
+	output->bytes[0] = (uint8_t)value;
+	output->bytes[1] = (uint8_t)(value >> 8);
+}
+
+static inline void
+ext4_encode32(struct ext4_le32 *output, uint32_t value)
+{
+	unsigned int index;
+
+	for (index = 0; index < sizeof(output->bytes); index++) {
+		output->bytes[index] = (uint8_t)(value >> (index * 8));
+	}
+}
+
 void ext4_copy(void *destination, const void *source, size_t length);
 void ext4_zero(void *destination, size_t length);
 bool ext4_equal(const void *left, const void *right, size_t length);

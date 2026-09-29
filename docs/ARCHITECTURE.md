@@ -1162,12 +1162,18 @@ ranges. Extent runs stop at extent and ancestor-index boundaries; legacy runs
 stop at their pointer-table boundary, while an absent ancestor represents its
 remaining sparse subtree. Unwritten extents return zeros. A read allocates mapping
 scratch only when it reaches an external node and reuses that one block for the
-rest of the call. Inline extent maps and direct pointers need no scratch buffer.
-Checksums and range validation precede each returned mapping; there is no mapping
-cache shared across operations or retained across mutations. Native mappings end
+rest of the call. Once an extent leaf's checksum and every record have passed
+validation, the read retains that private leaf and locates subsequent data/hole
+ranges with binary search. An ancestor's next-index boundary limits reuse; crossing
+it restarts the checked descent before overwriting scratch. Inline extent maps and
+direct pointers need no scratch buffer. No leaf or validation state survives the
+read, so later calls observe changed mapping nodes and validate them again. Native mappings end
 at the block containing EOF even if later blocks are preallocated. The platform
 owner zeroes padding in that final block before exposing it through its page cache.
-Focused tests, warm-cache benchmarks and the full 249-test CI regression pass.
+The range tests cover holes, unwritten extents, ancestor transitions, partial
+failure, allocation failure, changed nodes between calls and corrupt records outside
+the requested range. Performance and current regression evidence belong in
+[CORE-REVIEW.md](CORE-REVIEW.md).
 
 An indexed insertion reuses record slack, compacts a fragmented leaf, or splits
 the leaf at a balanced record boundary. Equal hashes retain the collision

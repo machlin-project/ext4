@@ -313,6 +313,56 @@ extent_cases(struct model *model, struct ext4_inode *inode)
 }
 
 static void
+extent_cursor_cases(struct model *model, struct ext4_inode *inode)
+{
+	enum { DATA_EXTENTS = 12, LOGICAL_BLOCKS = DATA_EXTENTS * 2 };
+
+	uint32_t physical[LOGICAL_BLOCKS];
+	uint32_t bs = model->fs.info.block_size;
+	uint8_t *leaf = model_block(model, MODEL_NODE_FIRST);
+	uint8_t *output = malloc((size_t)LOGICAL_BLOCKS * bs);
+	size_t completed;
+	unsigned int index;
+
+	CHECK(output != NULL);
+	inode->flags = EXT4_INODE_EXTENTS;
+	inode->size = (uint64_t)LOGICAL_BLOCKS * bs;
+	node_header(inode->block_data, sizeof(inode->block_data), 1, 1);
+	node_index(inode->block_data, 0, 0, MODEL_NODE_FIRST);
+	node_header(leaf, bs, 0, DATA_EXTENTS);
+	for (index = 0; index < DATA_EXTENTS; index++) {
+		physical[index * 2U] = MODEL_DATA_FIRST + index;
+		physical[index * 2U + 1U] = 0;
+		node_extent(leaf, index, index * 2U, 1, physical[index * 2U]);
+	}
+	node_seal(model, inode, leaf);
+	check_window(model, inode, 0, physical, LOGICAL_BLOCKS);
+	model_reset(model);
+	CHECK(ext4_read(&model->fs, inode, 0, output, (size_t)inode->size, &completed) == EXT4_OK);
+	/* One checked leaf supplies every data/hole transition within this call. */
+	CHECK(model->reads == DATA_EXTENTS + 1U && model->allocations == 1 && model->live == 0);
+
+	/* A subsequent call sees a changed map, even with unchanged inode fields. */
+	node_extent(leaf, 0, 0, 1, MODEL_DATA_OTHER);
+	node_seal(model, inode, leaf);
+	model_reset(model);
+	CHECK(ext4_read(&model->fs, inode, 0, output, bs, &completed) == EXT4_OK);
+	CHECK(completed == bs && memcmp(output, model_block(model, MODEL_DATA_OTHER), bs) == 0);
+	CHECK(model->reads == 2 && model->live == 0);
+
+	/* Validate the entire leaf before retaining it, including a corrupt record
+	 * beyond this request, whose checksum is otherwise correct. */
+	node_extent(leaf, DATA_EXTENTS - 1U, 0, 1, MODEL_DATA_FIRST);
+	node_seal(model, inode, leaf);
+	model_reset(model);
+	memset(output, 0xa5, bs);
+	CHECK(ext4_read(&model->fs, inode, 0, output, bs, &completed) == EXT4_CORRUPT);
+	CHECK(completed == 0 && output[0] == 0xa5 && model->live == 0);
+	free(output);
+	puts("PASS read-local extent reuse, fresh later calls and full-leaf validation");
+}
+
+static void
 indirect_cases(struct model *model, struct ext4_inode *inode)
 {
 	const uint32_t beginning[] = { MODEL_DATA_FIRST, MODEL_DATA_FIRST + 1U, 0, MODEL_DATA_OTHER,
@@ -417,6 +467,7 @@ main(void)
 			inode.number = EXT4_ROOT_INODE;
 			inode.generation = 1;
 			extent_cases(&model, &inode);
+			extent_cursor_cases(&model, &inode);
 			indirect_cases(&model, &inode);
 			logical_limit(&model, &inode);
 			CHECK(model.live == 0);
