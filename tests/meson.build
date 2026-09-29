@@ -88,7 +88,16 @@ endif
 foreach name : ['ext4-4k.img', 'ext4-1k.img']
   test('encrypt-no-key-' + name, programs['encrypt'],
     args: ['--synthetic', paths['fixtures'] / name], timeout: 300, suite: 'format')
+  test('encrypt-keyed-write-' + name, programs['encrypt'],
+    args: ['--write', paths['fixtures'] / name], timeout: 300, suite: 'format')
 endforeach
+if paths['format_fixtures'] != ''
+  foreach variant : ['encrypt', 'inline-data']
+    test('encrypt-keyed-write-' + variant, programs['encrypt'],
+      args: ['--write', paths['format_fixtures'] / ('format-' + variant + '.img')],
+      timeout: 300, suite: 'format')
+  endforeach
+endif
 
 if paths['casefold_vectors'] != ''
   test('casefold-oracle', programs['casefold'], args: [paths['casefold_vectors']],

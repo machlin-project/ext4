@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
+#include "fscrypt.h"
 #include "allocate.h"
 #include "inline.h"
 #include "quota.h"
@@ -426,6 +427,50 @@ ext4_file_size_valid(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_
 	    : EXT4_OK;
 }
 
+/* Change [within, within + length) of a file data block's snapshot to source bytes, or
+ * to zeros when source is NULL. A fresh block has no earlier contents. An encrypted
+ * file's snapshot holds ciphertext: it is decrypted unless fresh, changed and
+ * encrypted again with the file's key and the block's logical number. */
+static enum ext4_result
+ext4_data_change(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
+    uint8_t *snapshot, bool fresh, size_t within, const void *source, size_t length)
+{
+	struct ext4_fscrypt_key key;
+	uint8_t *plain = NULL;
+	uint8_t *target = snapshot;
+	enum ext4_result error = EXT4_OK;
+
+	if (inode->flags & EXT4_INODE_ENCRYPT) {
+		error = ext4_fscrypt_key(fs, inode, &key);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		plain = fs->environment.allocate(fs->environment.context, fs->info.block_size);
+		if (plain == NULL) {
+			return EXT4_NO_MEMORY;
+		}
+		target = plain;
+		if (!fresh) {
+			error = ext4_fscrypt_block(fs, &key, logical, false, snapshot, plain);
+		}
+	}
+	if (error == EXT4_OK && fresh) {
+		ext4_zero(target, fs->info.block_size);
+	}
+	if (error == EXT4_OK && source != NULL) {
+		ext4_copy(target + within, source, length);
+	} else if (error == EXT4_OK) {
+		ext4_zero(target + within, length);
+	}
+	if (target != snapshot) {
+		if (error == EXT4_OK) {
+			error = ext4_fscrypt_block(fs, &key, logical, true, plain, snapshot);
+		}
+		fs->environment.release(fs->environment.context, plain, fs->info.block_size);
+	}
+	return error;
+}
+
 static enum ext4_result
 ext4_write_snapshot(struct ext4_allocation *allocation, struct ext4_write_target *targets,
     uint32_t *count, uint32_t capacity, uint32_t logical, uint64_t physical, bool blank,
@@ -498,10 +543,13 @@ ext4_write_gap(struct ext4_allocation *allocation, const struct ext4_inode *inod
 		if (run.physical != 0 && !run.unwritten) {
 			error = ext4_write_snapshot(allocation, targets, count, capacity, logical,
 			    run.physical, false, &snapshot);
+			if (error == EXT4_OK) {
+				error = ext4_data_change(fs, inode, logical, snapshot, false,
+				    within, NULL, (size_t)chunk);
+			}
 			if (error != EXT4_OK) {
 				return error;
 			}
-			ext4_zero((uint8_t *)snapshot + within, (size_t)chunk);
 		}
 		position += chunk;
 	}
@@ -515,6 +563,7 @@ static enum ext4_result
 ext4_growth_check(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t end,
     const struct ext4_inode_update *update, struct ext4_inode *result)
 {
+	struct ext4_fscrypt_key key;
 	struct ext4_transaction *transaction;
 	struct ext4_inode_disk *disk;
 	struct ext4_inode inode;
@@ -543,10 +592,10 @@ ext4_growth_check(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 		error = (inode.mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY ? EXT4_IS_DIRECTORY
 									     : EXT4_UNSUPPORTED;
 	}
-	/* Growth preparation would zero Merkle metadata stored beyond EOF, or
-	 * expose zeros that encrypted readers would decrypt as garbage. */
+	/* Growth preparation would zero Merkle metadata stored beyond EOF. Encrypted
+	 * zeros need the file's key. */
 	if (error == EXT4_OK && (inode.flags & EXT4_INODE_ENCRYPT)) {
-		error = EXT4_ENCRYPTED;
+		error = ext4_fscrypt_key(fs, &inode, &key);
 	}
 	if (error == EXT4_OK && (inode.flags & EXT4_INODE_VERITY)) {
 		error = EXT4_PERMISSION_DENIED;
@@ -791,7 +840,8 @@ ext4_unwritten_zero(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	for (index = position; error == EXT4_OK && index < end; index++) {
 		error = ext4_transaction_data(transaction, range->physical + index, true, &buffer);
 		if (error == EXT4_OK) {
-			ext4_zero(buffer, fs->info.block_size);
+			error = ext4_data_change(fs, &inode, range->logical + index, buffer, true,
+			    0, NULL, fs->info.block_size);
 		}
 	}
 	if (error == EXT4_OK && initialize && end == length) {
@@ -937,6 +987,7 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
     const void *buffer, size_t length, const struct ext4_inode_update *update, size_t *completed,
     struct ext4_growth *growth)
 {
+	struct ext4_fscrypt_key key;
 	struct ext4_transaction *transaction;
 	struct ext4_inode_disk *disk;
 	struct ext4_inode inode;
@@ -1000,9 +1051,13 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 									     : EXT4_UNSUPPORTED;
 		goto cancel;
 	}
+	/* Encrypted contents need the file's key; they never stay in the inode. */
 	if (inode.flags & EXT4_INODE_ENCRYPT) {
-		error = EXT4_ENCRYPTED;
-		goto cancel;
+		error = inode.flags & EXT4_INODE_INLINE_DATA ? EXT4_CORRUPT
+							     : ext4_fscrypt_key(fs, &inode, &key);
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
 	}
 	if ((inode.flags & EXT4_INODE_DATA_PROTECTED) ||
 	    ((inode.flags & EXT4_INODE_APPEND) && offset != inode.size)) {
@@ -1109,10 +1164,12 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 		if (error != EXT4_OK) {
 			goto cancel;
 		}
-		if (zero) {
-			ext4_zero(snapshot, fs->info.block_size);
+		error = ext4_data_change(fs, &inode, (uint32_t)(logical + index), snapshot,
+		    zero || chunk == fs->info.block_size, within,
+		    (const uint8_t *)buffer + consumed, chunk);
+		if (error != EXT4_OK) {
+			goto cancel;
 		}
-		ext4_copy((uint8_t *)snapshot + within, (const uint8_t *)buffer + consumed, chunk);
 		consumed += chunk;
 		within = 0;
 	}
@@ -1282,6 +1339,7 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
     const struct ext4_inode_update *update, struct ext4_inode *result, uint32_t batch, bool *retry,
     bool *pending, struct ext4_growth *growth)
 {
+	struct ext4_fscrypt_key key;
 	struct ext4_transaction *transaction;
 	struct ext4_inode_disk *disk;
 	struct ext4_inode inode;
@@ -1337,8 +1395,11 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 		goto cancel;
 	}
 	if (inode.flags & EXT4_INODE_ENCRYPT) {
-		error = EXT4_ENCRYPTED;
-		goto cancel;
+		error = inode.flags & EXT4_INODE_INLINE_DATA ? EXT4_CORRUPT
+							     : ext4_fscrypt_key(fs, &inode, &key);
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
 	}
 	if (inode.flags & (EXT4_INODE_RESTRICTED_FLAGS | EXT4_INODE_VERITY)) {
 		error = EXT4_PERMISSION_DENIED;
@@ -1648,7 +1709,8 @@ ext4_file_range_step(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 				error = ext4_transaction_data(
 				    transaction, run.physical, false, &buffer);
 				if (error == EXT4_OK) {
-					ext4_zero((uint8_t *)buffer + within, (size_t)amount);
+					error = ext4_data_change(fs, &inode, logical, buffer, false,
+					    within, NULL, (size_t)amount);
 				}
 				work++;
 			}
@@ -1734,9 +1796,6 @@ ext4_fallocate(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_
 	}
 	end = offset + length;
 	error = ext4_growth_check(fs, number, generation, end, update, &inode);
-	if (error == EXT4_OK && (inode.flags & EXT4_INODE_ENCRYPT)) {
-		error = EXT4_ENCRYPTED;
-	}
 	if (error == EXT4_OK &&
 	    ((inode.flags & EXT4_INODE_DATA_PROTECTED) ||
 		((inode.flags & EXT4_INODE_APPEND) && (flags & EXT4_FALLOC_PUNCH_HOLE)))) {

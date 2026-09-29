@@ -303,6 +303,22 @@ AES against FIPS-197, and XTS, CBC with ciphertext stealing and HKDF-SHA512 agai
 answers computed with OpenSSL, including the key identifier Linux stored for the
 probe's master key.
 
+`ext4-encrypt-test --write IMAGE [EXPORT_DIRECTORY]` sets the ENCRYPT feature on a
+base image if needed and encrypts a directory through the core with the test
+adapter. Invalid, unsupported and unknown-key policies, a non-empty directory and a
+file must be refused, and the same policy again must change nothing. Empty, small,
+block-sized, partial, sparse, large and long-named files, a subdirectory, fast and
+block symlinks and a FIFO are then created, overwritten inside blocks, truncated into
+a block and grown, written into preallocation and punched, linked and renamed, and
+compared with a model at every stage. Unencrypted files must not enter the encrypted
+directory and an encrypted file must be able to leave it. No plaintext name, target
+or content may reach the device, the tree must be unreadable without the key, and a
+read-only mount must read it back. A power cut at every write or barrier of an
+encrypted overwrite across three blocks and of a truncation into a block must
+recover the old or the new contents. The export directory receives
+`encrypted-NAME.img` and a manifest of every object. The `format` suite runs it on
+the 4 KiB and 1 KiB base images and the format fixture with ENCRYPT.
+
 `tests/run_linux_encrypt.py --create` runs from the lab with `--lab`, `--prepared`,
 `--runner` and a fresh `--output`. Linux adds a raw key, sets a v2 AES-256-XTS/CTS
 policy with 32-byte name padding, and creates encrypted files up to 197 KiB, long
@@ -310,6 +326,9 @@ names, a subdirectory, a symlink, an empty encrypted top-level directory and pla
 files; the image must pass strict fsck. After the core test changes a copy,
 `--verify IMAGE` adds the same key and requires every encrypted byte, the symlink
 target, the removed directory and the renamed plain file, followed by strict fsck.
+`--verify-core IMAGE --manifest MANIFEST` adds the same key to a tree the core
+encrypted and requires every manifest object: files by size and SHA-256, symlinks by
+target and the types of directories and FIFOs, followed by strict fsck.
 
 ## Casefold tests
 

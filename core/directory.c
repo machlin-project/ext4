@@ -246,7 +246,7 @@ ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_
 			if (decoded.inode != 0 && (directory->flags & EXT4_INODE_ENCRYPT) &&
 			    !ext4_fscrypt_dot(decoded.name, decoded.name_length)) {
 				error = ext4_fscrypt_name_decrypt(fs, &key, decoded.name,
-				    decoded.name_length, plain, &plain_length);
+				    decoded.name_length, EXT4_NAME_MAX, plain, &plain_length);
 				if (error != EXT4_OK) {
 					goto out;
 				}

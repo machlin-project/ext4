@@ -731,8 +731,29 @@ encrypted names. A symlink target is a little-endian 16-bit ciphertext length an
 ciphertext, in the inode or its block. Native mappings of encrypted files stay
 refused, since they would expose ciphertext. Casefolded encrypted directories hash
 plaintext names with a derived key, and encrypted verity files keep a ciphertext
-tree over plaintext; both are unsupported with a key. Writing encrypted objects,
-setting policies and Linux's no-key names are not implemented.
+tree over plaintext; both are unsupported with a key.
+
+With the key the core also writes encrypted objects as Linux does. The adapter's
+`random_bytes` supplies nonces. `ext4_set_encryption_policy` encrypts an empty
+directory on a volume with the ENCRYPT feature when the adapter holds the policy's
+master key, writing its context and the inode flag in one transaction; the same
+policy again changes nothing and another returns EXISTS. `ext4_get_encryption_policy`
+reports a policy without the key. A regular file, directory or symlink created in an
+encrypted directory receives the directory's policy with a new nonce and the ENCRYPT
+flag in its creation transaction, and never keeps inline data; special files keep
+unencrypted inodes under encrypted names. New names are padded and encrypted with the
+directory's key before insertion, removal or rename. A new symlink's target is padded
+to at most the block size less three bytes, encrypted with a key derived from the new
+inode's policy, which is never cached before its commit, and stored with its length.
+Like Linux, an encrypted directory accepts a link or rename only of special files and
+objects of its own policy; another policy returns `EXT4_CROSS_POLICY`, which adapters
+report as EXDEV, while encrypted objects may move into unencrypted directories. Every
+data change of an encrypted file, including writes, zeroing of gaps, unwritten and
+preallocated blocks, truncated tails and punched edges, decrypts the block's
+snapshot unless it is new or completely replaced, changes the plaintext and encrypts
+it again under the block's logical number within the same transaction, so journaled,
+ordered and deferred commits carry only ciphertext. Linux's no-key names are not
+implemented.
 
 Operations that need no plaintext remain available: owner, permission, timestamp and
 ordinary attribute changes on encrypted objects; rename, link and removal of an
@@ -741,9 +762,10 @@ update; rmdir of an empty encrypted directory; and final deletion, which release
 the complete map. Directory validation accepts any name byte in encrypted
 directories, whose names are ciphertext, while still checking records, checksums and
 the index hash of the stored bytes. The fscrypt context attribute (index 9) cannot be
-created, replaced or removed. Offline cleanup refuses a linked encrypted orphan, since
-its partial-block zeroing would corrupt ciphertext; unlinked encrypted orphans are
-released.
+created, replaced or removed through attribute interfaces. Offline cleanup trims a
+linked encrypted orphan without zeroing its partial last block, which it cannot
+decrypt; as in Linux, those bytes past EOF stay ciphertext and are never read.
+Unlinked encrypted orphans are released.
 
 ## Casefolded directories
 

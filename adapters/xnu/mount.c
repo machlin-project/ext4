@@ -48,6 +48,7 @@ ext4_xnu_error(enum ext4_result result)
 	case EXT4_PERMISSION_DENIED:
 		return EPERM;
 	case EXT4_CROSS_PROJECT:
+	case EXT4_CROSS_POLICY:
 		return EXDEV;
 	case EXT4_QUOTA_EXCEEDED:
 		return EDQUOT;

@@ -289,11 +289,9 @@ ext4_orphan_record(struct ext4_fs *fs, uint32_t number, struct ext4_inode_disk *
 		return error;
 	}
 	type = inode->mode & EXT4_MODE_TYPE;
-	/* Linked cleanup truncates beyond EOF, where verity metadata lives, and
-	 * zeroes a partial block that an encrypted file keeps as ciphertext. */
+	/* Linked cleanup truncates beyond EOF, where verity metadata lives. */
 	if (inode->links != 0 &&
-	    (type != EXT4_MODE_REGULAR ||
-		(inode->flags & (EXT4_INODE_VERITY | EXT4_INODE_ENCRYPT)))) {
+	    (type != EXT4_MODE_REGULAR || (inode->flags & EXT4_INODE_VERITY))) {
 		return EXT4_UNSUPPORTED;
 	}
 	switch (type) {
@@ -793,7 +791,10 @@ ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool re
 	if (error == EXT4_OK && mapped) {
 		error = ext4_write_map_trim(&allocation, &inode, disk, first, *limit, &done);
 	}
-	if (error == EXT4_OK && done && mapped && (inode.links != 0 || retained)) {
+	/* An encrypted file's partial block is ciphertext that cleanup cannot zero
+	 * without its key; as in Linux, those bytes past EOF stay and are never read. */
+	if (error == EXT4_OK && done && mapped && (inode.links != 0 || retained) &&
+	    !(inode.flags & EXT4_INODE_ENCRYPT)) {
 		error = ext4_orphan_tail(&allocation, &inode, disk);
 	}
 	if (error == EXT4_OK && done && mapped && !retained && inode.links == 0 &&

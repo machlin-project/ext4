@@ -363,6 +363,7 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 	struct ext4_inode found;
 	struct ext4_fscrypt_key key;
 	uint8_t cipher[EXT4_NAME_MAX];
+	uint8_t padded[EXT4_NAME_MAX];
 	uint8_t *buffer;
 	size_t capacity;
 	size_t index;
@@ -398,8 +399,8 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 			error = EXT4_UNSUPPORTED;
 		}
 		if (error == EXT4_OK) {
-			error = ext4_fscrypt_name_encrypt(
-			    fs, &key, name, name_length, cipher, &cipher_length);
+			error = ext4_fscrypt_name_encrypt(fs, &key, name, name_length,
+			    EXT4_NAME_MAX, padded, cipher, &cipher_length);
 		}
 		if (error != EXT4_OK) {
 			return error;

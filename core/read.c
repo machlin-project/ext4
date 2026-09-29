@@ -517,7 +517,7 @@ ext4_read_encrypted_link(struct ext4_fs *fs, const struct ext4_inode *inode, uin
 		error = cipher_length > bytes - EXT4_FSCRYPT_SYMLINK_HEADER
 		    ? EXT4_CORRUPT
 		    : ext4_fscrypt_name_decrypt(fs, &key, stored + EXT4_FSCRYPT_SYMLINK_HEADER,
-			  cipher_length, plain, &plain_length);
+			  cipher_length, fs->info.block_size, plain, &plain_length);
 	}
 	if (error == EXT4_OK && offset < plain_length) {
 		*completed =

@@ -63,6 +63,7 @@ ext4_error(enum ext4_result result)
 		error = EPERM;
 		break;
 	case EXT4_CROSS_PROJECT:
+	case EXT4_CROSS_POLICY:
 		error = EXDEV;
 		break;
 	case EXT4_QUOTA_EXCEEDED:

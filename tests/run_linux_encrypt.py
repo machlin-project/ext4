@@ -16,7 +16,8 @@ from generate_fixtures import EXPECTED_FEATURES, UUID, resolve_tools
 KERNEL = 'LINUX_ENCRYPT_KERNEL=Linux 6.12.94-0-virt aarch64'
 IMAGE_BYTES = 32 * 1024 * 1024
 BLOCK_SIZE = 4096
-PHASES = {'create': (0, 'LINUX_ENCRYPT_CREATED'), 'verify': (1, 'LINUX_ENCRYPT_VERIFIED')}
+PHASES = {'create': (0, 'LINUX_ENCRYPT_CREATED'), 'verify': (1, 'LINUX_ENCRYPT_VERIFIED'),
+          'core': (2, 'LINUX_ENCRYPT_CORE_VERIFIED')}
 
 
 def digest(path):
@@ -34,7 +35,12 @@ def main():
     mode.add_argument('--create', action='store_true',
                       help='create a new image with Linux-encrypted content')
     mode.add_argument('--verify', type=Path, help='verify an image changed by the core')
+    mode.add_argument('--verify-core', type=Path,
+                      help='verify a tree the core encrypted, as its manifest describes')
+    parser.add_argument('--manifest', type=Path, help='manifest of --verify-core')
     args = parser.parse_args()
+    if (args.verify_core is None) != (args.manifest is None):
+        parser.error('--verify-core needs --manifest')
     lab, prepared, runner, output = (
         value.resolve() for value in (args.lab, args.prepared, args.runner, args.output))
     if Path.cwd() != lab:
@@ -70,7 +76,7 @@ def main():
     run(prep, compile_command)
     prep.update(passed=True, probe_sha256=digest(output / 'init'),
                 probe_source_sha256=digest(source))
-    name = 'create' if args.create else 'verify'
+    name = 'create' if args.create else 'verify' if args.verify else 'core'
     phase, marker = PHASES[name]
     row = dict(kind=name, commands=[], passed=False)
     rows.append(row)
@@ -81,12 +87,15 @@ def main():
                   '-m', 0, '-O', 'none,' + ','.join(sorted(features)), '-U', UUID,
                   '-E', 'lazy_itable_init=0,nodiscard', image, IMAGE_BYTES // BLOCK_SIZE])
     else:
-        shutil.copyfile(args.verify, image)
-        row['input_sha256'] = digest(args.verify)
+        source = args.verify or args.verify_core
+        shutil.copyfile(source, image)
+        row['input_sha256'] = digest(source)
     tree = output / 'root'
     shutil.copytree(prepared / 'root-0', tree)
     shutil.copy2(output / 'init', tree / 'init')
     (tree / 'phase').write_text(f'{phase}\n')
+    if args.manifest is not None:
+        shutil.copyfile(args.manifest, tree / 'manifest')
     archive = output / 'probe.cpio'
     listing = '\n'.join(str(x.relative_to(tree)) for x in sorted(tree.rglob('*'))) + '\n'
     with archive.open('wb') as stream:

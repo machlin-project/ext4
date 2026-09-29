@@ -179,7 +179,7 @@ jobs:
           python3 tests/generate_quota_fixtures.py --tools-root vendor/e2fsprogs/build \
             --output artifacts/quota-fixtures 2>&1 | tee artifacts/checks/quota-fixtures.log
       - name: Generate format and geometry variants
-        if: matrix.suite == 'sustained'
+        if: matrix.suite == 'format' || matrix.suite == 'sustained'
         run: |
           python3 tests/generate_format_fixtures.py --tools-root vendor/e2fsprogs/build \
             --output artifacts/format-fixtures 2>&1 | tee artifacts/checks/format-fixtures.log
@@ -211,7 +211,8 @@ jobs:
               -Dverity_fixtures="$PWD/artifacts/verity-fixtures" \
               -Dcasefold_vectors="$PWD/artifacts/casefold-vectors/vectors.txt" \
               -Dcasefold_fixtures="$PWD/artifacts/casefold-fixtures" \
-              -Dquota_fixtures="$PWD/artifacts/quota-fixtures")
+              -Dquota_fixtures="$PWD/artifacts/quota-fixtures" \
+              -Dformat_fixtures="$PWD/artifacts/format-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == sustained ]]; then
             format_options=(-Dquota_fixtures="$PWD/artifacts/quota-fixtures" \
@@ -1105,7 +1106,18 @@ jobs:
             --output artifacts/verity-signatures 2>&1 | tee artifacts/checks/verity-signatures.log
           find artifacts/verity-signatures -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.manifest' ! -name '*.der' -delete
-      - name: Independently verify casefolded directories after writable changes
+      - name: Independently check trees the core encrypted
+        if: matrix.suite == 'format'
+        run: |
+          mkdir artifacts/encrypt-exports
+          for image in artifacts/fixtures/ext4-1k.img artifacts/fixtures/ext4-4k.img \
+            artifacts/format-fixtures/format-encrypt.img; do
+            .build/ext4-encrypt-test --write "$image" artifacts/encrypt-exports || exit 1
+          done 2>&1 | tee artifacts/checks/encrypt-exports.log
+          for image in artifacts/encrypt-exports/*.img; do
+            vendor/e2fsprogs/build/e2fsck/e2fsck -fn "$image" || exit 1
+          done 2>&1 | tee artifacts/checks/encrypt-independent.log
+          find artifacts/encrypt-exports -type f -name '*.img' -delete
         if: matrix.suite == 'format'
         run: |
           exports=()

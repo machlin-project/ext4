@@ -41,15 +41,14 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Writing encrypted objects and setting fscrypt policies through adapter-supplied ciphers and keys; Linux's no-key names; unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity reading and enabling, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
+| Format compatibility | Linux's no-key names for encrypted directories without a key; unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity reading and enabling, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | None; by product decision the core keeps refusing torn bitmap and inode checksums that an interrupted Linux fast-commit replay leaves, and leaves the log pending for Linux or e2fsck | Accepted with that documented limitation; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay of two native captures are accepted, and the torn states of two range-heavy captures fail closed (see "Fast-commit combinations and interrupted foreign replay evidence" and "Interrupted Linux replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
 | Scale and sustained operation | Indexed operations still classify the whole index tree | Open; measured workloads show bounded peak memory; group commit, ordered data and lazy checkpointing reach write amplification 1.0, a few barriers per commit and two per synchronous commit, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence", "Deferred commit evidence", "Ordered data evidence", "Lazy checkpointing evidence" and "Sustained operation and fuzzing evidence") |
 
 MMP, fs-verity reading, enabling and measurement with protected writable metadata,
-encrypted volumes without keys and reading them with keys from adapter callbacks,
-casefolded directories and quota/project accounting with limits enforced under an
-adapter's policy are implemented. Writing encrypted objects, setting policies and
-no-key names are not. Built-in verity signatures are stored and checked by the
+encrypted volumes without keys and reading, writing and encrypting them with keys
+from adapter callbacks, casefolded directories and quota/project accounting with
+limits enforced under an adapter's policy are implemented. No-key names are not. Built-in verity signatures are stored and checked by the
 adapter's callback. Encryption is not accepted merely because mounting rejects it
 safely. They must not disappear from a future readiness claim. The core
 currently requires one serialized resource owner; native operation locking,
@@ -349,6 +348,27 @@ releases every key handle. The reference AES, XTS, CBC with ciphertext stealing 
 HKDF-SHA512 match FIPS-197 and OpenSSL, and HKDF reproduces the key identifier
 Linux stored in the tree's encryption context. The complete 688-test regression passes
 (`artifacts/checks/scale-regression-20/`).
+
+## Encrypted writing evidence
+
+`ext4-encrypt-test --write` encrypts a directory through the core with the test
+adapter on the 4 KiB and 1 KiB base volumes and on the ENCRYPT and inline-data
+format fixtures (`artifacts/checks/encrypt-write-1/`). Unknown keys, invalid versions,
+unsupported modes, a non-empty directory and a file are refused as policies, the
+same policy again changes nothing and another returns EXISTS; the inline directory is
+moved to a block first. Fourteen objects follow the model through overwrites inside
+blocks, truncation into a block and growth, writes into preallocation, a punched hole
+with partial edges, a rename into a subdirectory, a link, a refused rename and link
+of an unencrypted file, a move of an encrypted file into an unencrypted directory and
+removals. No plaintext name, symlink target or file contents reach the device, none
+of the new encrypted objects is inline, the tree is unreadable without the key, and a
+read-only mount reads it back. A power cut at each of 19 events of an overwrite across
+three blocks and each of 21 events of a truncation into a block recovers the old or
+the new contents. Strict e2fsck accepts all four exported trees, and Linux 6.12 with
+the same master key reads every one of their 12 remaining objects: file contents by
+SHA-256, fast and block symlink targets, the directory and the FIFO (the lab's
+`artifacts/ext4-encrypt/core-verified-*/`). The complete 692-test regression passes
+(`artifacts/checks/scale-regression-21/`).
 
 ## Casefolded directories evidence
 

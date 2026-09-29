@@ -42,7 +42,10 @@ enum ext4_result {
 	 * of another project; Linux reports EXDEV. */
 	EXT4_CROSS_PROJECT,
 	/* An enforced quota limit refused the change; Linux reports EDQUOT. */
-	EXT4_QUOTA_EXCEEDED
+	EXT4_QUOTA_EXCEEDED,
+	/* A link or rename would place an object in an encrypted directory of another
+	 * encryption policy; Linux reports EXDEV. */
+	EXT4_CROSS_POLICY
 };
 
 enum ext4_file_type {
@@ -549,9 +552,10 @@ struct ext4_verity_parameters {
  * first key_size bytes encrypted with AES-128-ECB under the 16-byte info. cipher runs
  * an fscrypt mode with a derived key and a 16-byte IV: AES-256-XTS over one data unit,
  * or AES-256-CBC with ciphertext stealing, as Linux's cts(cbc(aes)), over one name.
- * Input and output are distinct. release_key releases a handle of either kind. The
- * mount keeps up to 16 derived keys; installing the environment again releases
- * them, which is how a removed key stops being used. */
+ * Input and output are distinct. release_key releases a handle of either kind.
+ * random_bytes fills a new inode's nonce. The mount keeps up to 16 derived keys;
+ * installing the environment again releases them, which is how a removed key stops
+ * being used. */
 #define EXT4_FSCRYPT_MODE_AES_256_XTS 1U
 #define EXT4_FSCRYPT_MODE_AES_256_CTS 4U
 
@@ -567,9 +571,34 @@ struct ext4_crypto_environment {
 	enum ext4_result (*cipher)(void *context, void *key, uint8_t mode, bool encrypt,
 	    const uint8_t *iv, const void *input, void *output, size_t length);
 	void (*release_key)(void *context, void *key);
+	enum ext4_result (*random_bytes)(void *context, void *buffer, size_t length);
 };
 /* Install or, with NULL, remove the adapter's cryptography; the core copies it. */
 enum ext4_result ext4_set_crypto(struct ext4_fs *fs, const struct ext4_crypto_environment *crypto);
+
+/* An fscrypt policy, as FS_IOC_GET_ENCRYPTION_POLICY_EX reports it: version 1 or 2,
+ * the contents and names modes, flags whose low two bits select name padding of
+ * 4 << flags bytes, and the master key's 16-byte identifier, of which version 1 uses
+ * the first eight bytes as its descriptor. */
+struct ext4_encryption_policy {
+	uint8_t version;
+	uint8_t contents_mode;
+	uint8_t filenames_mode;
+	uint8_t flags;
+	uint8_t identifier[16];
+};
+/* The policy of an encrypted inode, without needing its key; NOT_FOUND for an
+ * unencrypted inode, as Linux reports ENODATA. */
+enum ext4_result ext4_get_encryption_policy(
+    struct ext4_fs *fs, const struct ext4_inode *inode, struct ext4_encryption_policy *policy);
+/* Encrypt an empty directory under a policy, as FS_IOC_SET_ENCRYPTION_POLICY does:
+ * the volume needs the ENCRYPT feature and the adapter the policy's master key.
+ * Objects created in the directory inherit the policy with nonces of their own. A
+ * directory with the same policy is unchanged; another policy returns EXISTS,
+ * entries NOT_EMPTY, and other types NOT_DIRECTORY. Unsupported modes and flags,
+ * and casefolded directories, return UNSUPPORTED. result receives the directory. */
+enum ext4_result ext4_set_encryption_policy(struct ext4_fs *fs, uint32_t number,
+    uint32_t generation, const struct ext4_encryption_policy *policy, struct ext4_inode *result);
 
 /* Enable fs-verity on a linked regular file, as FS_IOC_ENABLE_VERITY does. The
  * volume must have the verity feature and the file extent mapping, which inline

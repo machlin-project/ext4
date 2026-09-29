@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
+#include "fscrypt.h"
 #include "directory_write.h"
 #include "xattr.h"
 #include "inline.h"
@@ -101,6 +102,61 @@ ext4_directory_links_valid(struct ext4_fs *fs, const struct ext4_inode *inode, b
 	return empty ? inode->links == 2 : inode->links >= 2;
 }
 
+/* Names in an encrypted directory are stored and hashed as ciphertext: encrypt the
+ * name as it would be stored. Casefolded encrypted directories hash plaintext with a
+ * derived key, which is not implemented. Other directories keep the name. */
+static enum ext4_result
+ext4_namespace_cipher(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_t **name,
+    size_t *name_length, uint8_t *cipher)
+{
+	struct ext4_fscrypt_key key;
+	uint8_t padded[EXT4_NAME_MAX];
+	size_t length = 0;
+	enum ext4_result error;
+
+	if (!(directory->flags & EXT4_INODE_ENCRYPT)) {
+		return EXT4_OK;
+	}
+	error = ext4_fscrypt_key(fs, directory, &key);
+	if (error == EXT4_OK && (directory->flags & EXT4_INODE_CASEFOLD)) {
+		error = EXT4_UNSUPPORTED;
+	}
+	if (error == EXT4_OK) {
+		error = ext4_fscrypt_name_encrypt(
+		    fs, &key, *name, *name_length, EXT4_NAME_MAX, padded, cipher, &length);
+	}
+	if (error == EXT4_OK) {
+		*name = cipher;
+		*name_length = length;
+	}
+	return error;
+}
+
+/* An encrypted symlink stores its target encrypted with the symlink's own key. */
+static enum ext4_result
+ext4_symlink_encrypt(struct ext4_fs *fs, const struct ext4_fscrypt_policy *policy,
+    const uint8_t *target, size_t length, uint8_t **stored, size_t *stored_length)
+{
+	struct ext4_fscrypt_key key;
+	enum ext4_result error;
+
+	*stored = fs->environment.allocate(fs->environment.context, fs->info.block_size);
+	if (*stored == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	error = ext4_fscrypt_derive(fs, policy, EXT4_MODE_SYMLINK, &key);
+	if (error == EXT4_OK) {
+		error =
+		    ext4_fscrypt_symlink_encrypt(fs, &key, target, length, *stored, stored_length);
+		fs->crypto.release_key(fs->crypto.context, key.handle);
+	}
+	if (error != EXT4_OK) {
+		fs->environment.release(fs->environment.context, *stored, fs->info.block_size);
+		*stored = NULL;
+	}
+	return error;
+}
+
 static enum ext4_result
 ext4_symlink_initialize(struct ext4_allocation *allocation, struct ext4_inode *inode,
     struct ext4_inode_disk *disk, const uint8_t *target, size_t length)
@@ -150,7 +206,7 @@ static enum ext4_result
 ext4_namespace_new(struct ext4_allocation *allocation, const struct ext4_inode *parent,
     const struct ext4_inode_disk *parent_disk, uint16_t mode,
     const struct ext4_inode_update *attributes, struct ext4_inode_disk **disk,
-    struct ext4_inode *child)
+    struct ext4_inode *child, struct ext4_fscrypt_policy *policy)
 {
 	struct ext4_fs *fs = allocation->fs;
 	uint32_t flags;
@@ -191,7 +247,11 @@ ext4_namespace_new(struct ext4_allocation *allocation, const struct ext4_inode *
 		error = ext4_xattr_apply(
 		    allocation, child, *disk, attributes->xattrs, attributes->xattr_count);
 	}
-	if (error == EXT4_OK && mode == EXT4_MODE_REGULAR) {
+	if (error == EXT4_OK) {
+		error = ext4_fscrypt_inherit(allocation, parent, child, *disk, policy);
+	}
+	/* Like Linux, encrypted files never keep their data in the inode. */
+	if (error == EXT4_OK && mode == EXT4_MODE_REGULAR && !(child->flags & EXT4_INODE_ENCRYPT)) {
 		error = ext4_inline_start(allocation, child, *disk, 0, &inline_created);
 	}
 	return error;
@@ -228,9 +288,13 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	struct ext4_inode_update times;
 	struct ext4_directory_slot slot;
 	struct ext4_allocation allocation;
+	struct ext4_fscrypt_policy policy;
+	uint8_t cipher[EXT4_NAME_MAX];
+	uint8_t *stored_target = NULL;
 	uint32_t feature_compat;
 	uint32_t feature_ro_compat;
 	size_t index;
+	size_t stored_length = 0;
 	bool ready = false;
 	enum ext4_file_type type;
 	enum ext4_result error;
@@ -293,9 +357,9 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		error = EXT4_PERMISSION_DENIED;
 		goto cancel;
 	}
-	/* New names in an encrypted directory must be encrypted with its key. */
-	if (parent.flags & EXT4_INODE_ENCRYPT) {
-		error = EXT4_ENCRYPTED;
+	/* New names in an encrypted directory are encrypted with its key. */
+	error = ext4_namespace_cipher(fs, &parent, &name, &name_length, cipher);
+	if (error != EXT4_OK) {
 		goto cancel;
 	}
 	if (!ext4_directory_links_valid(fs, &parent, false)) {
@@ -332,6 +396,10 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 			error = EXT4_CROSS_PROJECT;
 			goto cancel;
 		}
+		error = ext4_fscrypt_permitted(fs, &parent, &child);
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
 		times.fields = EXT4_ATTR_CHANGE_TIME;
 		error = ext4_inode_apply(fs, child_disk, &times);
 		if (error != EXT4_OK) {
@@ -356,7 +424,14 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	}
 	if (create_mode != 0) {
 		error = ext4_namespace_new(&allocation, &parent, parent_disk, create_mode,
-		    attributes, &child_disk, &child);
+		    attributes, &child_disk, &child, &policy);
+		if (error == EXT4_OK && create_mode == EXT4_MODE_SYMLINK &&
+		    (child.flags & EXT4_INODE_ENCRYPT)) {
+			error = ext4_symlink_encrypt(
+			    fs, &policy, link_target, link_length, &stored_target, &stored_length);
+			link_target = stored_target;
+			link_length = stored_length;
+		}
 		if (error == EXT4_OK && create_mode == EXT4_MODE_DIRECTORY) {
 			error = ext4_directory_initialize(
 			    &allocation, &child, child_disk, parent.number);
@@ -413,11 +488,19 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	}
 	fs->info.feature_compat = feature_compat;
 	fs->info.feature_ro_compat |= feature_ro_compat & EXT4_FEATURE_RO_DIR_NLINK;
+	if (stored_target != NULL) {
+		fs->environment.release(
+		    fs->environment.context, stored_target, fs->info.block_size);
+	}
 	*result = child;
 	return EXT4_OK;
 cancel:
 	if (ready) {
 		ext4_allocation_destroy(&allocation);
+	}
+	if (stored_target != NULL) {
+		fs->environment.release(
+		    fs->environment.context, stored_target, fs->info.block_size);
 	}
 	ext4_transaction_cancel(transaction);
 	return error;
@@ -559,6 +642,7 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 	struct ext4_allocation allocation;
 	struct ext4_directory_slot slot;
 	struct ext4_directory_slot empty;
+	uint8_t cipher[EXT4_NAME_MAX];
 	uint16_t type;
 	bool ready = false;
 	bool last;
@@ -599,8 +683,8 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 		error = EXT4_PERMISSION_DENIED;
 		goto cancel;
 	}
-	if (parent.flags & EXT4_INODE_ENCRYPT) {
-		error = EXT4_ENCRYPTED;
+	error = ext4_namespace_cipher(fs, &parent, &name, &name_length, cipher);
+	if (error != EXT4_OK) {
 		goto cancel;
 	}
 	if (!ext4_directory_links_valid(fs, &parent, false)) {
@@ -748,6 +832,10 @@ struct ext4_rename_state {
 	struct ext4_directory_slot entries[2];
 	struct ext4_directory_slot dotdot[2];
 	struct ext4_allocation allocation;
+	/* Names as an encrypted parent stores them. */
+	struct ext4_rename_entry ciphered[2];
+	uint8_t cipher[2][EXT4_NAME_MAX];
+	struct ext4_fscrypt_policy whiteout_policy;
 };
 
 static enum ext4_result
@@ -916,10 +1004,14 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 			error = EXT4_NOT_FOUND;
 			goto cancel;
 		}
-		if (state->parents[index].flags & EXT4_INODE_ENCRYPT) {
-			error = EXT4_ENCRYPTED;
+		state->ciphered[index] = *names[index];
+		error =
+		    ext4_namespace_cipher(fs, &state->parents[index], &state->ciphered[index].name,
+			&state->ciphered[index].name_length, state->cipher[index]);
+		if (error != EXT4_OK) {
 			goto cancel;
 		}
+		names[index] = &state->ciphered[index];
 		if (!ext4_directory_links_valid(fs, &state->parents[index], false)) {
 			error = EXT4_CORRUPT;
 			goto cancel;
@@ -937,6 +1029,16 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 		}
 		directory[index] =
 		    (state->objects[index].mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY;
+	}
+	/* As in Linux, an encrypted directory receives only objects of its policy. */
+	if (names[0]->directory != names[1]->directory) {
+		error = ext4_fscrypt_permitted(fs, &state->parents[1], &state->objects[0]);
+		if (error == EXT4_OK && exchange) {
+			error = ext4_fscrypt_permitted(fs, &state->parents[0], &state->objects[1]);
+		}
+		if (error != EXT4_OK) {
+			goto cancel;
+		}
 	}
 	exists = state->objects[1].number != 0;
 	if (exists && (flags & EXT4_RENAME_NOREPLACE)) {
@@ -1001,7 +1103,7 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 	if (whiteout_attributes != NULL) {
 		error = ext4_namespace_new(&state->allocation, &state->parents[0],
 		    state->parent_disks[0], EXT4_MODE_CHARACTER, whiteout_attributes,
-		    &state->whiteout_disk, &state->whiteout);
+		    &state->whiteout_disk, &state->whiteout, &state->whiteout_policy);
 		if (error == EXT4_OK) {
 			error = ext4_inode_account(
 			    &state->allocation, &state->whiteout, state->whiteout_disk, 0);
@@ -1070,14 +1172,15 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 		goto cancel;
 	}
 	if (!exists) {
+		/* The destination name as its parent stores it. */
 		error = ext4_directory_scan(&state->allocation, &state->parents[1],
-		    state->parent_disks[1], destination->name, destination->name_length,
+		    state->parent_disks[1], names[1]->name, names[1]->name_length,
 		    EXT4_DIRECTORY_INSERT, 0, &space);
 		if (error == EXT4_OK) {
 			error = ext4_directory_insert(&state->allocation, &state->parents[1],
 			    state->parent_disks[1], &space, state->objects[0].number,
-			    ext4_namespace_type(state->objects[0].mode), destination->name,
-			    destination->name_length);
+			    ext4_namespace_type(state->objects[0].mode), names[1]->name,
+			    names[1]->name_length);
 		}
 	}
 	if (error != EXT4_OK) {

@@ -72,11 +72,17 @@ struct ext4_fscrypt_key {
 	uint8_t flags;
 };
 
+struct ext4_allocation;
+
 /* Decode and admit an encrypted inode's policy; UNSUPPORTED for modes and flags the
  * core does not implement. */
 enum ext4_result ext4_fscrypt_policy(
     struct ext4_fs *fs, const struct ext4_inode *inode, struct ext4_fscrypt_policy *policy);
-/* The inode's key from the mount's cache or the adapter; ENCRYPTED without the
+/* Derive the key of an inode of type under policy, which includes its nonce;
+ * ENCRYPTED without the adapter's master key. The caller releases the handle. */
+enum ext4_result ext4_fscrypt_derive(struct ext4_fs *fs, const struct ext4_fscrypt_policy *policy,
+    uint32_t type, struct ext4_fscrypt_key *key);
+/* A committed inode's key from the mount's cache or the adapter; ENCRYPTED without the
  * adapter's master key. The mount owns the handle. */
 enum ext4_result ext4_fscrypt_key(
     struct ext4_fs *fs, const struct ext4_inode *inode, struct ext4_fscrypt_key *key);
@@ -85,13 +91,34 @@ void ext4_fscrypt_forget(struct ext4_fs *fs);
 /* Decrypt or encrypt one filesystem block of contents at a logical block. */
 enum ext4_result ext4_fscrypt_block(struct ext4_fs *fs, const struct ext4_fscrypt_key *key,
     uint64_t logical, bool encrypt, const void *input, void *output);
-/* Decrypt a stored name into plaintext without its padding; plain holds 255 bytes. */
+/* Decrypt a stored name or target of at most maximum bytes into plaintext without
+ * its padding; plain holds length bytes. */
 enum ext4_result ext4_fscrypt_name_decrypt(struct ext4_fs *fs, const struct ext4_fscrypt_key *key,
-    const uint8_t *cipher, size_t length, uint8_t *plain, size_t *plain_length);
-/* Pad and encrypt a name as it is stored; cipher holds 255 bytes. */
+    const uint8_t *cipher, size_t length, size_t maximum, uint8_t *plain, size_t *plain_length);
+/* Pad a name or target to the policy's padding, at least 16 and at most maximum bytes,
+ * and encrypt it as it is stored; padded and cipher hold maximum bytes. */
 enum ext4_result ext4_fscrypt_name_encrypt(struct ext4_fs *fs, const struct ext4_fscrypt_key *key,
-    const uint8_t *plain, size_t length, uint8_t *cipher, size_t *cipher_length);
+    const uint8_t *plain, size_t length, size_t maximum, uint8_t *padded, uint8_t *cipher,
+    size_t *cipher_length);
+/* The stored form of an encrypted symlink target in a block-sized buffer: the
+ * ciphertext's little-endian 16-bit length, the ciphertext and a NUL. stored_length is
+ * the symlink's size, which excludes the NUL. */
+enum ext4_result ext4_fscrypt_symlink_encrypt(struct ext4_fs *fs,
+    const struct ext4_fscrypt_key *key, const uint8_t *target, size_t length, uint8_t *stored,
+    size_t *stored_length);
 /* Whether a directory entry name is the unencrypted "." or "..". */
 bool ext4_fscrypt_dot(const uint8_t *name, size_t length);
+bool ext4_fscrypt_policy_equal(
+    const struct ext4_fscrypt_policy *left, const struct ext4_fscrypt_policy *right);
+/* Give a new regular file, directory or symlink in an encrypted directory the
+ * directory's policy with a nonce of its own, reported in policy. Special files stay
+ * unencrypted. */
+enum ext4_result ext4_fscrypt_inherit(struct ext4_allocation *allocation,
+    const struct ext4_inode *parent, struct ext4_inode *child, struct ext4_inode_disk *disk,
+    struct ext4_fscrypt_policy *policy);
+/* Whether an inode may have a name in a directory: an encrypted directory holds only
+ * special files and objects of its own policy; otherwise CROSS_POLICY. */
+enum ext4_result ext4_fscrypt_permitted(
+    struct ext4_fs *fs, const struct ext4_inode *directory, const struct ext4_inode *inode);
 
 #endif

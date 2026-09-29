@@ -828,7 +828,11 @@ ext4_directory_initialize(struct ext4_allocation *allocation, struct ext4_inode 
 	bool inline_created;
 	enum ext4_result error;
 
-	error = ext4_inline_start(allocation, inode, disk, parent, &inline_created);
+	/* Like Linux, encrypted directories never keep their entries in the inode. */
+	inline_created = false;
+	error = inode->flags & EXT4_INODE_ENCRYPT
+	    ? EXT4_OK
+	    : ext4_inline_start(allocation, inode, disk, parent, &inline_created);
 	if (error != EXT4_OK) {
 		return error;
 	}
