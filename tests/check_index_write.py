@@ -18,6 +18,8 @@ INODE_INDEX = 0x1000
 HIGH_BYTE_POSITION = 16
 MUTATION_TIME = (1700000050, 0)
 OUTPUT_INLINE_LIMIT = 32768
+# Names the functional test links after a remount to measure probed changes.
+PROBED_LINKS = 48
 
 
 def recorded_output(payload):
@@ -120,7 +122,7 @@ def main():
         after = accounting(run([tools["dumpe2fs"], "-h", image]))
         block_size = before["Block size"]
         large = "large_dir" in fixture["features"]
-        added = 32 if large else 700 if block_size == MIN_BLOCK_SIZE else 160
+        added = (32 if large else 700 if block_size == MIN_BLOCK_SIZE else 160) + PROBED_LINKS
         old_root = listing(source, "/")
         new_root = listing(image, "/")
         container = stat(image, "/container")
