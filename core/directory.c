@@ -4,6 +4,13 @@
 #include "internal.h"
 #include "inline.h"
 
+struct ext4_nokey_search {
+	const struct ext4_fscrypt_nokey *nokey;
+	uint8_t *cipher;
+	size_t cipher_length;
+	uint32_t number;
+};
+
 uint32_t
 ext4_directory_record_length(struct ext4_fs *fs, const struct ext4_dir_header_disk *header)
 {
@@ -380,13 +387,6 @@ ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_
 {
 	return ext4_directory_visit(fs, directory, cookie, visit, context, false);
 }
-
-struct ext4_nokey_search {
-	const struct ext4_fscrypt_nokey *nokey;
-	uint8_t *cipher;
-	size_t cipher_length;
-	uint32_t number;
-};
 
 static enum ext4_dir_action
 ext4_directory_nokey_visit(void *context, const struct ext4_dir_entry *entry, uint64_t next)

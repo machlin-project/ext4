@@ -3,6 +3,34 @@
 #include "xattr.h"
 #include "inline.h"
 
+#define EXT4_INODE_MAX_RANGES (1U << 20)
+
+struct ext4_map_owners {
+	struct ext4_block_range *ranges;
+	size_t count;
+	size_t capacity;
+	uint64_t blocks;
+	uint64_t data_logical_end;
+	uint64_t data_physical_end;
+};
+
+struct ext4_extent_walk {
+	uint8_t *node;
+	uint64_t low;
+	uint64_t high;
+	uint16_t next;
+	uint16_t depth;
+};
+
+struct ext4_indirect_walk {
+	struct ext4_le32 *pointers;
+	struct ext4_le32 *parent;
+	uint64_t block;
+	uint64_t logical;
+	uint64_t span;
+	uint32_t next;
+};
+
 struct ext4_extent_path {
 	uint8_t *nodes[EXT4_EXTENT_MAX_DEPTH + 1];
 	uint64_t blocks[EXT4_EXTENT_MAX_DEPTH + 1];
@@ -1063,17 +1091,6 @@ ext4_write_map_reserve(struct ext4_allocation *allocation, const struct ext4_ino
 	    : error;
 }
 
-#define EXT4_INODE_MAX_RANGES (1U << 20)
-
-struct ext4_map_owners {
-	struct ext4_block_range *ranges;
-	size_t count;
-	size_t capacity;
-	uint64_t blocks;
-	uint64_t data_logical_end;
-	uint64_t data_physical_end;
-};
-
 static enum ext4_result
 ext4_map_owner_add(struct ext4_allocation *allocation, struct ext4_map_owners *owners,
     uint64_t block, uint64_t length)
@@ -1163,14 +1180,6 @@ ext4_map_data_owner_add(struct ext4_allocation *allocation, struct ext4_map_owne
 	return first == end ? EXT4_OK : ext4_map_owner_add(allocation, owners, first, end - first);
 }
 
-struct ext4_extent_walk {
-	uint8_t *node;
-	uint64_t low;
-	uint64_t high;
-	uint16_t next;
-	uint16_t depth;
-};
-
 static enum ext4_result
 ext4_extent_owners(struct ext4_allocation *allocation, const struct ext4_inode *inode,
     struct ext4_inode_disk *disk, struct ext4_map_owners *owners, uint8_t *scratch)
@@ -1238,15 +1247,6 @@ ext4_extent_owners(struct ext4_allocation *allocation, const struct ext4_inode *
 		    position + 1 < count ? ext4_le32(&indices[position + 1].logical) : frame->high;
 	}
 }
-
-struct ext4_indirect_walk {
-	struct ext4_le32 *pointers;
-	struct ext4_le32 *parent;
-	uint64_t block;
-	uint64_t logical;
-	uint64_t span;
-	uint32_t next;
-};
 
 static enum ext4_result
 ext4_indirect_owners(struct ext4_allocation *allocation, struct ext4_inode_disk *disk,

@@ -4,6 +4,12 @@
 #include "inline.h"
 #include "unicode.h"
 
+struct ext4_directory_sort_entry {
+	uint32_t hash;
+	uint32_t offset;
+	uint32_t used;
+};
+
 static uint32_t
 ext4_directory_minimum(size_t length)
 {
@@ -399,12 +405,6 @@ ext4_directory_scan(struct ext4_allocation *allocation, struct ext4_inode *paren
 	ext4_directory_name_close(fs, &key);
 	return error;
 }
-
-struct ext4_directory_sort_entry {
-	uint32_t hash;
-	uint32_t offset;
-	uint32_t used;
-};
 
 static uint64_t
 ext4_directory_sort_key(const struct ext4_directory_sort_entry *entry)

@@ -194,7 +194,8 @@ ext4_quota_runs_build(struct ext4_fs *fs)
 			return error;
 		}
 		if (index == 0) {
-			fs->inode_table_blocks = group.table_blocks;
+			/* Mount geometry bounds this to eight times the inode size in bytes. */
+			fs->inode_table_blocks = (uint32_t)group.table_blocks;
 		}
 		if (group.table_blocks != fs->inode_table_blocks || group.table_blocks == 0) {
 			return EXT4_CORRUPT;

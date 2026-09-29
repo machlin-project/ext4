@@ -5,6 +5,26 @@
 #include "quota.h"
 #include "xattr.h"
 
+struct ext4_write_target {
+	uint64_t physical;
+	uint32_t logical;
+};
+
+/* Only an exclusive operation can retain this preparation across transactions.
+ * No position or validation result survives the public call. */
+struct ext4_growth {
+	uint64_t zeroed;
+	/* The old EOF's unwritten suffix can release the slot needed by the
+	 * new EOF's prefix. Both conversions publish in the data transaction. */
+	struct ext4_unwritten_extent deferred[2];
+	uint32_t initialized[2];
+	uint32_t deferred_count;
+	uint32_t allocation_logical;
+	bool capacity_failed;
+	bool zeroing;
+	bool mapping_no_space;
+};
+
 #define EXT4_ATTRIBUTE_FIELDS                                                                      \
 	((uint32_t)(EXT4_ATTR_PERMISSIONS | EXT4_ATTR_UID | EXT4_ATTR_GID |                        \
 	    EXT4_ATTR_ACCESS_TIME | EXT4_ATTR_CHANGE_TIME | EXT4_ATTR_MODIFY_TIME |                \
@@ -348,26 +368,6 @@ ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	}
 	return error;
 }
-
-struct ext4_write_target {
-	uint64_t physical;
-	uint32_t logical;
-};
-
-/* Only an exclusive operation can retain this preparation across transactions.
- * No position or validation result survives the public call. */
-struct ext4_growth {
-	uint64_t zeroed;
-	/* The old EOF's unwritten suffix can release the slot needed by the
-	 * new EOF's prefix. Both conversions publish in the data transaction. */
-	struct ext4_unwritten_extent deferred[2];
-	uint32_t initialized[2];
-	uint32_t deferred_count;
-	uint32_t allocation_logical;
-	bool capacity_failed;
-	bool zeroing;
-	bool mapping_no_space;
-};
 
 static uint64_t
 ext4_indirect_overhead(uint64_t blocks, uint64_t pointers)

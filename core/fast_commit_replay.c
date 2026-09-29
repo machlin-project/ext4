@@ -4,6 +4,13 @@
 #include "quota.h"
 #include "xattr.h"
 
+/* Blocks that inodes named by the log owned before the crash. */
+struct ext4_fc_owned {
+	struct ext4_block_range *ranges;
+	size_t count;
+	size_t capacity;
+};
+
 #define EXT4_FC_OWNED_INITIAL 64U
 
 struct ext4_fc_inode_state {
@@ -673,13 +680,6 @@ ext4_fc_apply_name(struct ext4_fc_replay *replay, uint16_t type,
 	}
 	return error;
 }
-
-/* Blocks that inodes named by the log owned before the crash. */
-struct ext4_fc_owned {
-	struct ext4_block_range *ranges;
-	size_t count;
-	size_t capacity;
-};
 
 static enum ext4_result
 ext4_fc_owned_add(struct ext4_fs *fs, struct ext4_fc_owned *owned, uint64_t first, uint64_t length)

@@ -4,6 +4,22 @@
 #include "xattr.h"
 #include "inline.h"
 
+struct ext4_rename_state {
+	struct ext4_inode parents[2];
+	struct ext4_inode objects[2];
+	struct ext4_inode whiteout;
+	struct ext4_inode_disk *parent_disks[2];
+	struct ext4_inode_disk *object_disks[2];
+	struct ext4_inode_disk *whiteout_disk;
+	struct ext4_directory_slot entries[2];
+	struct ext4_directory_slot dotdot[2];
+	struct ext4_allocation allocation;
+	/* Names as an encrypted parent stores them. */
+	struct ext4_rename_entry ciphered[2];
+	uint8_t cipher[2][EXT4_NAME_MAX];
+	struct ext4_fscrypt_policy whiteout_policy;
+};
+
 #define EXT4_CREATE_FIELDS                                                                         \
 	(EXT4_ATTR_PERMISSIONS | EXT4_ATTR_UID | EXT4_ATTR_GID | EXT4_ATTR_ACCESS_TIME |           \
 	    EXT4_ATTR_MODIFY_TIME | EXT4_ATTR_CHANGE_TIME)
@@ -838,22 +854,6 @@ ext4_rmdir(struct ext4_fs *fs, uint32_t directory, uint32_t directory_generation
 	return ext4_namespace_remove(fs, directory, directory_generation, name, name_length, target,
 	    target_generation, true, time, result);
 }
-
-struct ext4_rename_state {
-	struct ext4_inode parents[2];
-	struct ext4_inode objects[2];
-	struct ext4_inode whiteout;
-	struct ext4_inode_disk *parent_disks[2];
-	struct ext4_inode_disk *object_disks[2];
-	struct ext4_inode_disk *whiteout_disk;
-	struct ext4_directory_slot entries[2];
-	struct ext4_directory_slot dotdot[2];
-	struct ext4_allocation allocation;
-	/* Names as an encrypted parent stores them. */
-	struct ext4_rename_entry ciphered[2];
-	uint8_t cipher[2][EXT4_NAME_MAX];
-	struct ext4_fscrypt_policy whiteout_policy;
-};
 
 static enum ext4_result
 ext4_rename_resolve(
