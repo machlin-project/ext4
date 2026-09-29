@@ -10,139 +10,32 @@ the Machlin lab owns combined kernel and VM acceptance.
 
 ## Status
 
-The portable core implements extent and indirect reads, sparse files, transactional
-writes and allocation, bounded growth/truncate, and open-unlinked lifetime.
-Namespace operations include create/mkdir/symlink/mknod/link/unlink/rmdir/rename,
-rename exchange and whiteout, HTree mutation, automatic indexing, LARGEDIR and
-DIR_NLINK. Raw inode-body and external xattrs follow metadata, data and namespace
-transactions. Internal and single-user external journal recovery handles legacy
-and modern orphan records.
+The portable core's functional acceptance queue is complete, subject to the explicit
+format limits and interoperability exceptions in [the acceptance matrix](docs/ACCEPTANCE.md).
+It supports ordinary and verified reads, transactional writes, allocation and
+preallocation, extent and indirect maps, namespace operations, indexed directories, extended attributes,
+inline data, clustered allocation, quotas, multi-mount protection, fscrypt and
+fs-verity. Recovery covers internal/external journals, fast commits and orphan
+cleanup. Volumes without a journal require an explicit write option.
 
-The completed 552-test CI regression passes all six jobs, including independent
-image checks, artifact upload and job cleanup. Linux mutation/recovery roundtrips
-provide separate native interoperability evidence. Tests cover malformed media,
-allocation/read failures and interrupted writes under ASan/UBSan; freestanding
-compilation enforces a 2 KiB stack-frame budget. Read profiles span 1–64 KiB blocks,
-checksummed and legacy formats. Detailed evidence and known exceptions are in
-[the acceptance matrix](docs/ACCEPTANCE.md).
+Tests combine independently authored images, Linux roundtrips, malformed inputs,
+resource failures, interrupted writes, sustained mixed operations and fuzzing.
+ASan/UBSan builds and freestanding compilation with a 2 KiB stack-frame budget
+check the shared implementation. Historical test counts and their exact limitations
+belong in the acceptance matrix; they do not establish native adapter readiness.
 
-Atomic inode flags, immutable/append-only protection and inheritance pass focused,
-independent and six Linux roundtrip checks, including the full regression.
-Preallocation and hole punching pass independent and Linux acceptance. Full-disk
-writes within existing EOF also pass. KEEP_SIZE growth reaching a reserved extent's
-last block passes focused faults, independent checks, six Linux roundtrips and
-the full regression. META_BG and SPARSE_SUPER2 pass focused
-fault tests, independent mutation/recovery checks, eight Linux roundtrips and
-their expanded full regression. JBD2 checksum v1 and async commit
-compatibility pass focused faults, independent replay in both directions and
-eight Linux roundtrips and their combined full regression; the writer
-retains its existing durability barriers on async-format journals.
-Reservation now retains mapping capacity for partial KEEP_SIZE growth, including
-moving EOF between extents at zero free blocks. Focused faults, 30 independent
-image states, six Linux roundtrips and its expanded regression pass.
-Imported full trees without spare capacity can still reject a reservation or
-short growth safely. Scale workloads are measured with bounded core memory, and
-29 further format and geometry variants pass sustained operation. Recovering volumes
-whose Linux fast-commit replay was interrupted, the whole-tree index validation cost
-and the transaction and commit decisions remain open core work.
+The current phase is final review, code organization and measured performance work.
+See [the review and performance criteria](docs/CORE-REVIEW.md). The target is 15%
+higher throughput than Linux on matched filesystem workloads; SHA/AES measurements
+are separate. This target has not been demonstrated. AES and key management are
+adapter services, while the core has portable SHA and metadata checksums.
 
-EA_INODE adds values up to 64 KiB, shared value references, transactional updates
-and staged reclamation. Six format profiles pass focused mutation/corruption
-checks, 96 independent image states and twelve private-orphan recovery states.
-Power-cut tests cover create, replace, remove and shared-block copying.
-Independent replay accepts 48 transaction states. All six Linux roundtrips pass,
-including native orphan recovery and two pending core journals. The expanded
-432-test regression passes across the unchanged five suites and the corrected core job.
-Large attributes on short symlinks and legacy Lustre
-value-inode encodings are explicitly unsupported.
-
-INLINE_DATA adds small files and directories stored in the inode, transactional
-growth into ordinary blocks, attribute coexistence and open-unlinked cleanup.
-Eight format profiles pass focused checks, including creation at zero free blocks.
-Independent checks accept 84 functional/lifetime states and 84 journal states;
-2,016 interrupted-write cases recover the old or new transaction, or reject a
-torn primary superblock. Eight native Linux roundtrips also pass, including
-open-unlinked cleanup and two pending core journals. The expanded 444-test CI
-regression passes all six suites with no failures or skips.
-
-BIGALLOC implements cluster bitmap accounting, shared cluster backing within an
-inode, whole-cluster allocation and final-reference release. Eight profiles pass
-functional checks and 88 malformed cases. Independent verification accepts 32
-mutation/lifetime states and 72 transaction/replay states; 1,536 power cuts cover
-allocation, reuse, partial release, reservation and attribute reclamation. Two
-completely allocated images and private attribute values pass four further
-independent states. Eight native Linux/core/Linux roundtrips pass, including orphan
-recovery and pending core journals. The expanded 466-test regression passes.
-
-Large logical-file tests cover 2/4 GiB byte boundaries, the signed 32-bit block
-boundary and format size ceilings on nine profiles up to 64 KiB blocks. Inline
-expansion now uses its destination mapping's limit; legacy sector accounting
-also bounds growth when HUGE_FILE is absent. All nine focused tests and 36
-independent mutation/reclamation states pass. Six native Linux roundtrips pass
-with ordinary ordered mounts; the two BIGALLOC profiles pass with explicit
-`nodelalloc`. The pinned Linux reference writes inconsistent allocation counters
-with delayed allocation at the maximum clustered-file offset; that failure remains
-recorded and the core rejects the corrupt orphan. The expanded regression passes;
-this does not establish large-volume scale.
-
-Sparse multi-terabyte volumes now exercise last-group inode tables, directories,
-data, extent nodes and xattrs, including physical block numbers above 32 bits.
-The writer promotes an empty 32-bit journal to wide tags at its first transaction.
-Three profiles pass 21 independent read/mutation/reclamation/recovery states and
-native Linux/core/Linux roundtrips, including direct Linux replay of the core's
-high-address journal. The expanded 469-test regression and independent checks pass.
-
-External journals now use an explicitly owned second device, with UUID association
-checks and separate durability barriers. Five format profiles pass 30 independent
-states. Fault tests cover 936 interrupted transactions and 396 interrupted recoveries
-with independently surviving device caches. Four native Linux profiles pass all
-16 boots, including recovery in both directions and open-unlinked cleanup. The
-expanded 476-test regression passes; this support is not yet exposed by either
-native adapter.
-
-Fast-commit recovery is under development. The decoder validates bounded committed
-records and semantic replay converts them into one ordinary durable transaction.
-Linux-generated 1 and 4 KiB images pass basic replay comparisons and expanded
-core/Linux roundtrips with inode reuse, new directories, long names, sparse maps
-and unwritten extents. Seventy-six automated cases on thirteen independently authored
-profiles cover decode/replay, resource failures and interrupted recovery; independent
-output checks pass. Modern-orphan, special-inode, attribute-reuse and indirect
-fast replay also pass the 552-test CI regression.
-Modern orphan slots
-are coordinated with inode-generation reuse, final deletion and linked truncation.
-Protocol fixtures also exercise short and mapped symlinks, device identities,
-FIFOs and sockets. The pinned Linux writer falls back to ordinary commits for
-these inode types; that native roundtrip is separate from protocol-fixture replay.
-Generation reuse atomically releases private attributes and preserves shared values,
-including multiple old owners detaching the same external block in one conversion.
-Three recovered attribute-reuse profiles also pass native Linux reads and strict fsck.
-Indirect replay reconstructs sparse maps, releases old trees through triple indirect
-on generation reuse, and handles legacy orphans and mapped symlinks. Journal freezing
-now consumes validated mapping runs, removing repeated reads of the same indirect
-nodes. All 94 affected recovery, mapping and journal tests pass, as do thirteen
-independent output checks and native Linux readback of both indirect profiles.
-The recovery-scaling checkpoint adds sorted replay indexes, journal-block reuse,
-one directory scan per name operation and range-based bitmap validation. Large
-protocol prefixes exercise 256 and 1,024 created files. All fifteen recovered
-outputs pass independent verification, and two actual Linux boots read both large
-prefixes. Its hosted CI timed out on the sampled 4 KiB fault case. Indexed namespace
-operations now validate the index graph and only hash-eligible leaves; inode bitmaps
-are checked byte-wise and ARMv8 targets use CRC32C instructions. Release recovery of
-the 1,024-file prefix drops from 765 to 45 ms with byte-identical output, and the
-complete local 563-test sanitized regression passes.
-Wider format combinations and broader semantic-corruption acceptance remain open.
-See the fast-commit development
-evidence and the recorded native-reference failure in the acceptance matrix;
-these checks do not close the journal-compatibility requirement.
-
-Development proceeds through the core, then FSKit on stock macOS, then LXNU policy.
-Both native adapters remain read-only. The FSKit adapter builds for macOS 26.4,
-but installation/mount tests await a signing profile with FSKit Module capability.
-The arm64e kext passes eleven read-only profiles in a dedicated custom-kernel VM,
-including mmap, concurrent reads and lifetime checks; x86_64 has compilation only.
-Native writes, ACL enforcement and Linux capability policy remain unimplemented.
-
-Generated disk images and reports are not source artifacts.
+Both native adapters remain read-only. FSKit builds unsigned, but installation and
+mount acceptance await a signing profile with FSKit Module capability. The arm64e
+kext has read-only acceptance in a dedicated custom-kernel VM; x86_64 has compilation
+evidence. Native writes, page-cache integration for mutation, ACL enforcement and
+LXNU policy follow core review, with FSKit first. Encryption providers must also be
+implemented and accepted in each native adapter.
 
 ## Layout
 

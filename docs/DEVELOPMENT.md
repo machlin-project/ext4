@@ -31,9 +31,9 @@ directory for the independent checkers and VM harnesses.
 After adding a new Meson option, first regenerate an existing build with
 `meson setup --reconfigure .build`, then set the new option with `-D`.
 
-`meson test -C .build --list` lists the configured cases. The eight disjoint suites
-are `core`, `orphan-file`, `namespace`, `removal`, `rename`, `indexed`, `sustained` and
-`format`; select one with `--suite NAME`, or use quoted test-name patterns. Complete output, per-test
+`meson test -C .build --list` lists the configured cases. The nine disjoint suites
+are `core`, `orphan-file`, `namespace`, `removal`, `rename`, `indexed`, `sustained`,
+`format` and `fast-commit`; select one with `--suite NAME`, or use quoted test-name patterns. Complete output, per-test
 JSON records and JUnit results are in `.build/meson-logs/testlog.txt`,
 `testlog.json` and `testlog.junit.xml`. CI retains all three, including successful
 fault-test output and explicit applicability skips.
@@ -245,6 +245,36 @@ flushes cost nothing, so times measure the core rather than the medium.
 fsck of each result and writes `measurements.jsonl`. Compare source revisions with the same `tools/scale.c` driver
 on a quiet host: add it and its `meson.build` executable to a `git archive` of the
 baseline revision, build both with the same options and run them in turn.
+
+`ext4-hash-benchmark` measures portable SHA-256/SHA-512 at 64 bytes, 1 KiB,
+4 KiB and 64 KiB, plus no-key filename decoding. Each row contains nine raw timings
+and its iteration count; SHA rows include a digest for independent verification.
+The executable uses the same optimized freestanding core as `ext4-scale`, without
+sanitizers. Compare two revisions with this identical driver and build flags,
+interleave their runs, and keep input generation and output validation outside the
+clock. These are algorithm measurements, not comparisons with Linux or AES.
+`hash-streams-and-nokey-names` checks independent hashlib answers, every initial
+split through a SHA-512 block, unaligned input ending at an allocation boundary,
+byte-at-a-time updates, empty updates and Linux-compatible no-key decoding.
+
+Before timing Linux comparisons, qualify the existing dedicated VM with
+`tests/linux_timing.c`. Cross-compile it with the accepted static-musl recipe from
+`tests/run_linux_external_journal.py`, then create a newc initramfs containing only
+`init` and empty `proc`/`sys` directories. From the absolute lab directory, invoke
+the verified Linux runner with the prepared kernel, that initramfs, two CPUs,
+512 MiB and `console=hvc0 rdinit=/init panic=-1 loglevel=4`; pass no disk arguments.
+Do not attach networking. Apply a 90-second timeout to this runner only.
+
+Capture the raw console and host monotonic receipt timestamps of `TIMING_BEGIN`
+and `TIMING_END` while streaming its output. Require a clean exit, the identified
+guest kernel and clocksource, positive clock durations, and 50/250/1,000 ms sleeps
+between the request and 125% of it plus 5 ms. Compare both guest elapsed clocks to
+the host interval, allowing the larger of 2% or 20 ms for console jitter. Report
+the CPU repetitions and scaling even if noisy. A completion marker alone is not
+qualification, and clock resolution is not accuracy. Save the compile and runner
+commands with their logs and artifact identities. The accepted short probe and its
+limits are described in [CORE-REVIEW.md](CORE-REVIEW.md); subsequent comparisons
+need warmup and longer interleaved workloads with both contenders in the guest.
 
 ## Multi-mount protection tests
 

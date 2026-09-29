@@ -30,6 +30,18 @@ general registers only and compute the same raw reflected update; the choice is
 fixed at compile time. Other targets, including the x86_64 kernel build, keep the
 table.
 
+SHA-256 and SHA-512 consume complete input blocks directly, including unaligned
+buffers, and retain only partial streaming blocks. The decoder uses byte loads,
+so this introduces neither alignment assumptions nor reads past the input. Eight
+compression rounds per loop rotate working-word roles through inline functions.
+Verity configuration hashes the padded salt once and keeps that initial context; each
+Merkle block clones it. The per-read/per-enable context owns this state, without
+a global cache or changed digest format. These portable paths allocate no memory
+and remain usable in FSKit and kernel builds. AES, key derivation and key lifetime
+remain the adapter's cryptography contract; test reference ciphers are not a
+production provider. Architecture-specific acceleration must respect the native
+execution context, including kernel SIMD ownership, and retain portable fallbacks.
+
 Legacy `GDT_CSUM` group descriptors use CRC16 over the UUID, little-endian group
 number and full descriptor with the checksum field omitted. The 32-byte remainder
 table is immutable. `METADATA_CSUM` takes precedence and retains its CRC32C rules.
