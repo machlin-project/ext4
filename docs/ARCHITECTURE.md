@@ -153,17 +153,27 @@ mutation still builds and validates its private transaction, which a failure can
 without effect. When it completes, its snapshots replace their blocks in one compound
 transaction, all or nothing: buffers for new blocks are allocated before any copy.
 The compound holds at most commit_blocks snapshots, never more than the recovery
-bound of half the ring and 32 MiB. Every device read, including file data and the
-next mutation's own reads, overlays the compound's blocks, so the owner sees its
-completed mutations; only the journal's recovery-marker update reads the home
-superblock, and only while the log holds no committed transaction. The compound becomes durable as one ordinary JBD2 transaction on
-`ext4_commit`, on `ext4_sync`, or when the next mutation would not fit, and a
+bound of half the ring and 32 MiB. Every live read, including file data and the
+next mutation's own reads, selects the compound's blocks before committed snapshots
+or home storage, so the owner sees its completed mutations. Only the journal's
+recovery-marker update reads the home superblock, and only while the log holds no
+committed transaction. The compound becomes durable as one ordinary JBD2 transaction
+on `ext4_commit`, on `ext4_sync`, or when the next mutation would not fit, and a
 mutation larger than the compound commits on its own after it. A power cut loses the
 mutations after the last durable commit and never exposes part of one; recovery is
 unchanged. Quota differences are applied as a mutation joins the compound, against
 the state it overlays. Recovery conversions, such as fast-commit replay, always commit
 durably. unmount discards pending mutations, as power loss would, so adapters commit
 on fsync and sync before unmount.
+
+`core/journal_read.c` owns delivery of that live byte view separately from log
+commit/checkpoint ordering. Held blocks are copied directly from their snapshots;
+only maximal home ranges call the environment's read operation. Unaligned request
+ends are clipped to their blocks. This adds no allocation or new cache and never
+reads obsolete home bytes merely to replace them with snapshots. The transaction
+index and its range-prefix query remain private to `journal.c`. The owning adapter
+serializes operations, keeping snapshot pointers valid throughout the read. An
+aborted filesystem still refuses reads, including ones entirely held in memory.
 
 `EXT4_WRITE_ORDERED_DATA` writes regular-file data in place instead of journaling
 it, in either commit mode, as Linux's data=ordered does. Writes, gap and unwritten-
@@ -184,8 +194,8 @@ commit.
 `ext4_write_options.checkpoint_blocks` checkpoints lazily, as jbd2's checkpoint list
 does, in either commit mode. A committed transaction stays in the log, and its
 snapshots stay in memory as the latest committed version of their blocks, at most
-checkpoint_blocks; reads overlay them beneath the compound, and their home blocks are
-not written. The next transaction is logged after it with the next sequence without
+checkpoint_blocks; reads select them when the compound has no newer version, and
+their home blocks are not written. The next transaction is logged after it with the next sequence without
 rewriting the journal superblock, so a commit costs its log blocks and two barriers,
 and a block changed by many commits reaches its home once. A checkpoint writes every
 held block home, flushes and empties the log with one journal-superblock update. It
@@ -699,7 +709,10 @@ is hashed after the salt, which is zero-padded to the hash input block, and each
 tree block on the path must contain the child's digest until the root hash matches
 the descriptor. A read stops before the first unverifiable block and reports the
 verified prefix. The level-zero hash block last verified through the root is reused
-within one call; nothing is cached across calls or mutations, so each call parses
+within one call. A read context also owns separate mapping cursors for data and
+Merkle metadata, so alternating between them does not repeatedly read and validate
+the same extent leaf. Their two scratch blocks are allocated on demand and released
+with the existing data/hash buffers; no buffers survive the call. Each call parses
 the descriptor again. `ext4_map_read` refuses verity files because a native mapping
 would bypass verification; adapters must read them through the core.
 
@@ -1195,7 +1208,7 @@ cannot suppress an earlier readable prefix. Physical discontinuities also end it
 The device fills a packed prefix of the caller's output buffer; spans are moved
 backwards to their logical positions before holes are zeroed. Overlapping moves
 copy backwards within the span. This needs no data buffer or additional heap
-allocation and retains no file bytes after the call. The same journal overlay
+allocation and retains no file bytes after the call. The same current journal view
 serves the combined read. Failed I/O does not publish that batch as completed;
 earlier completed bytes remain valid. Callers requiring allocated data still stop
 at the first hole or unwritten extent. Encrypted-block decryption and verity
@@ -1208,8 +1221,9 @@ metadata reads or allocations. Misses use the same checked descent as ordinary
 reads and transfer its buffer into the cache without copying. Round-robin eviction
 reuses the displaced buffer as scratch. At most eight leaf blocks, capped at
 64 KiB, plus one scratch block and fixed bookkeeping belong to a hold. File data
-always passes through the environment and current journal overlay; this is not
-a file-data/page cache. Legacy indirect maps reuse scratch but not cached leaves.
+always comes from the current journal snapshots or the environment; the held-read
+cache itself stores no file data or pages. Legacy indirect maps reuse scratch but
+not cached leaves.
 
 A mount revision advances before every nonempty transaction commit attempt,
 covering direct writes, ordered data, deferred publication and failed commits.

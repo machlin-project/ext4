@@ -415,20 +415,20 @@ ext4_inode_seed(const struct ext4_fs *fs, const struct ext4_inode *inode)
 enum ext4_result
 ext4_device_read(struct ext4_fs *fs, uint64_t offset, void *buffer, size_t length)
 {
-	enum ext4_result error;
-
 	if (fs->aborted) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
 	if (offset > fs->environment.size_bytes || length > fs->environment.size_bytes - offset) {
 		return EXT4_CORRUPT;
 	}
-	error = fs->environment.read(fs->environment.context, offset, buffer, length);
-	/* Operations merged into a deferred commit are the current state. */
-	if (error == EXT4_OK && fs->journal != NULL) {
-		ext4_journal_overlay(fs->journal, offset, buffer, length);
+	if (length == 0) {
+		return EXT4_OK;
 	}
-	return error;
+	if (fs->journal != NULL &&
+	    (fs->journal->compound != NULL || fs->journal->checkpoint != NULL)) {
+		return ext4_journal_read_current(fs->journal, offset, buffer, length);
+	}
+	return fs->environment.read(fs->environment.context, offset, buffer, length);
 }
 
 enum ext4_result

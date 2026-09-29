@@ -232,9 +232,9 @@ bool ext4_commit_rejected(enum ext4_result error);
 /* With deferred commit, make every merged operation durable as one transaction and
  * checkpoint it. Without pending operations it writes nothing. */
 enum ext4_result ext4_journal_commit(struct ext4_journal *journal);
-/* Copy the committed but not checkpointed blocks, then the pending operations'
- * blocks, over a device read of [offset, offset+length). */
-void ext4_journal_overlay(
+/* Read the live view: pending operations, then committed snapshots, then home.
+ * ext4_device_read validates the byte range and aborted state before entry. */
+enum ext4_result ext4_journal_read_current(
     const struct ext4_journal *journal, uint64_t offset, void *buffer, size_t length);
 /* Leading blocks of [block, block + count) whose current contents are at home on
  * the device rather than only in the journal's memory. */

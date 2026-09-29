@@ -70,6 +70,18 @@ and both unsigned kext plus FSKit builds, recorded in
 validate these later edits; track the new full CI matrix separately without holding
 up development while it runs.
 
+The current batch gives verity reads a context with independent data/tree mapping
+cursors and separates current journal-view delivery from commit/checkpoint code.
+Pending or committed snapshots supply their own bytes without rereading obsolete
+home data. The new independently authored fragmented verity profile crosses two
+external leaves; measured throughput is about 49% higher than the preceding core,
+with 807-to-32 allocations per file pass. RAM write profiles show substantially
+fewer backend reads with deferred/lazy commits, unchanged writes/flushes and matching
+checked images; those timings do not establish the Linux or native-adapter target.
+See the current review section and `artifacts/checks/read-write-state/`. Final full
+regression and native builds for this batch are pending acceptance; the source
+is stable while those checks run. The ordinary Linux +15% target remains open.
+
 Both adapters remain read-only. FSKit integration precedes LXNU policy; signing
 is deferred. No host kernel, boot-policy, NVRAM or system-file changes are authorized.
 Native cryptography and write/page-cache integration require their own acceptance.

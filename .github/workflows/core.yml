@@ -1106,7 +1106,7 @@ jobs:
         if: matrix.suite == 'format'
         run: |
           exports=()
-          for profile in 4k 1k-salted sha512 4k-inline; do
+          for profile in 4k 1k-salted sha512 4k-inline 4k-fragmented; do
             directory="artifacts/verity-exports/$profile"
             mkdir -p "$directory"
             .build/ext4-verity-test "artifacts/verity-fixtures/verity-$profile.img" \

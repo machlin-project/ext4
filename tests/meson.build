@@ -4,6 +4,7 @@
 paths = {}
 test('range-index', programs['ranges'], suite: 'core')
 test('hash-streams-and-nokey-names', programs['hash'], suite: 'core')
+test('journal-live-read-ranges', programs['journal-read'], suite: 'core')
 test('hash-portable-streams-and-nokey-names', programs['hash-portable'], suite: 'core')
 foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'namespace_fixtures', 'xattr_fixtures', 'ea_inode_fixtures', 'inline_fixtures', 'inline_space_fixtures', 'cluster_fixtures', 'cluster_space_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',
@@ -128,7 +129,7 @@ if paths['quota_fixtures'] != ''
 endif
 
 if paths['verity_fixtures'] != ''
-  foreach profile : ['4k', '1k-salted', 'sha512', '4k-inline']
+  foreach profile : ['4k', '1k-salted', 'sha512', '4k-inline', '4k-fragmented']
     stem = paths['verity_fixtures'] / ('verity-' + profile)
     test('verity-' + profile, programs['verity'], args: [stem + '.img', stem + '.manifest'],
       timeout: 300, suite: 'format')

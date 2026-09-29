@@ -155,6 +155,44 @@ read_all(struct ext4_fs *fs, const struct ext4_inode *inode, uint8_t *buffer, si
 	return EXT4_OK;
 }
 
+/* One request crosses Merkle and extent boundaries without recreating the read
+ * context. Failed operations may publish only a byte-exact verified prefix. */
+static void
+verify_whole(struct ext4_posix_image *image, struct ext4_fs *fs, const struct ext4_inode *inode,
+    const uint8_t *expected)
+{
+	uint8_t *buffer = malloc(inode->size + 1U);
+	uint64_t allocations = image->allocation_calls;
+	uint64_t reads = image->read_calls;
+	uint64_t fault;
+	size_t completed;
+	enum ext4_result error;
+
+	CHECK(buffer != NULL);
+	EXPECT(ext4_read(fs, inode, 0, buffer, inode->size, &completed), EXT4_OK);
+	CHECK(completed == inode->size && memcmp(buffer, expected, completed) == 0);
+	allocations = image->allocation_calls - allocations;
+	reads = image->read_calls - reads;
+	for (fault = 1; fault <= allocations + (reads != 0 ? 3U : 0U); fault++) {
+		memset(buffer, 0xcc, inode->size + 1U);
+		if (fault <= allocations) {
+			image->fail_allocation_at = image->allocation_calls + fault;
+			error = EXT4_NO_MEMORY;
+		} else {
+			/* First, middle and last device read of the successful request. */
+			image->fail_read_at =
+			    image->read_calls + 1U + (reads - 1U) * (fault - allocations - 1U) / 2U;
+			error = EXT4_IO;
+		}
+		EXPECT(ext4_read(fs, inode, 0, buffer, inode->size, &completed), error);
+		CHECK(completed < inode->size && image->live_allocations == 1U);
+		CHECK(memcmp(buffer, expected, completed) == 0 && buffer[completed] == 0xcc);
+		image->fail_allocation_at = 0;
+		image->fail_read_at = 0;
+	}
+	free(buffer);
+}
+
 static void
 verify_good(struct ext4_posix_image *image, struct ext4_fs *fs, const struct entry *entry)
 {
@@ -185,6 +223,7 @@ verify_good(struct ext4_posix_image *image, struct ext4_fs *fs, const struct ent
 	ext4_sha256_update(&sha256, buffer, total);
 	ext4_sha256_final(&sha256, digest);
 	CHECK(total == entry->size && memcmp(digest, entry->sha256, sizeof(digest)) == 0);
+	verify_whole(image, fs, &inode, buffer);
 	for (offset = 0; offset < inode.size; offset += inode.size / 7U + 1U) {
 		EXPECT(ext4_read(fs, &inode, offset, piece, CHUNK_BYTES, &completed), EXT4_OK);
 		CHECK(completed ==
@@ -236,6 +275,9 @@ verify_damaged(struct ext4_fs *fs, const struct entry *entry, uint32_t block_siz
 		/* A sequential read keeps the verified prefix before the damaged block. */
 		EXPECT(read_all(fs, &inode, buffer, &total), EXT4_CORRUPT);
 		CHECK(total == block * block_size);
+		memset(buffer, 0xcc, inode.size);
+		EXPECT(ext4_read(fs, &inode, 0, buffer, inode.size, &completed), EXT4_CORRUPT);
+		CHECK(completed == block * block_size && buffer[completed] == 0xcc);
 		/* The last block belongs to another verified level-zero hash block. */
 		EXPECT(ext4_read(fs, &inode, inode.size - 1U, buffer, 1, &completed), EXT4_OK);
 		CHECK(completed == 1);

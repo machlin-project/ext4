@@ -27,6 +27,9 @@ PROFILES = (
     # Enabling verity converts small inline files to extents first.
     dict(name="4k-inline", block_size=4096, algorithm=1, salt=b"", sizes=(100, 600 * 1024),
          features={"inline_data"}),
+    # More extents than one external leaf holds, with Merkle metadata beyond EOF.
+    dict(name="4k-fragmented", block_size=4096, algorithm=1, salt=b"",
+         sizes=(100, 3 * 1024 * 1024 + 77), fragmented=True),
 )
 
 
@@ -90,12 +93,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--tools-root", type=Path)
+    parser.add_argument("--profile", choices=[profile["name"] for profile in PROFILES],
+                        help="Generate only this profile (default: all)")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     tools = resolve_tools(args.tools_root)
     reports = []
     for profile in PROFILES:
+        if args.profile and profile["name"] != args.profile:
+            continue
         fs_block = profile["block_size"]
         image = output / f"verity-{profile['name']}.img"
         manifest = output / f"verity-{profile['name']}.manifest"
@@ -126,7 +133,13 @@ def main():
         lines = []
         for index, (kind, size, damage) in enumerate(cases):
             data = bytearray(generator.randbytes(size))
-            if size > 3 * fs_block:
+            if profile.get("fragmented"):
+                # debugfs leaves these zero blocks sparse; alternate holes force
+                # checked mapping reads to cross external extent-leaf boundaries.
+                for offset in range(fs_block, size, 2 * fs_block):
+                    length = min(fs_block, size - offset)
+                    data[offset:offset + length] = bytes(length)
+            elif size > 3 * fs_block:
                 # A sparse data run exercises holes covered by the tree.
                 data[fs_block:3 * fs_block] = bytes(2 * fs_block)
             data = bytes(data)

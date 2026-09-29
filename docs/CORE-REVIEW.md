@@ -525,3 +525,71 @@ writing those same instructions in inline assembly is not itself an optimization
 Raw disassembly, rejected prototypes, correctness logs and all timing rows remain
 under `artifacts/checks/instruction-audit/`; final integration evidence belongs in
 `artifacts/checks/sha-instructions/`.
+
+
+## Current-view reads and verified-read lifetime
+
+The next read/write batch removes two sources of repeated work without changing
+journal ordering or verity's trust boundary. A verity read context owns its three
+existing data/hash buffers and separate mapping cursors for data and tree reads.
+Each cursor retains only the current validated leaf and one scratch block. Buffers
+are released on every exit; descriptor checking and verification through the root
+remain mandatory. No verified file-data cache survives the call.
+
+`core/journal_read.c` selects the latest block version before reading any home
+storage: pending compound snapshots take precedence over committed checkpoint
+snapshots, and only remaining home ranges reach the environment. This eliminates
+reads of bytes which the old overlay immediately replaced. It benefits reads after
+mutations and subsequent transactions' snapshot seed reads. Transaction indexing,
+publication, barriers and checkpoint ownership remain in `journal.c`; this is not
+a new writeback cache. Aborted mounts still reject memory-backed reads.
+
+An empty journal view bypasses this router entirely and reads home directly.
+The isolated range test uses real transaction snapshots with an independent byte
+model at 1, 4 and 64 KiB. It covers overlapping versions, unaligned ends, whole
+memory-backed reads with the backend set to fail, coalesced home gaps, each gap's
+I/O failure, range overflow, aborted state and allocation balance. Verity coverage
+adds whole-file requests crossing mapping/Merkle boundaries, all allocation
+failures and sampled first/middle/last read failures. Returned prefixes must match
+independently checked file contents, with no unverified next byte delivered. The
+new independently authored `4k-fragmented` fixture alternates allocated data with
+holes across a file larger than one external extent leaf can describe, including
+Merkle metadata beyond EOF. Existing inline-root files alone cannot establish
+external-leaf cursor reuse or its allocation savings.
+
+Generated evidence for this batch belongs in `artifacts/checks/read-write-state/`.
+The saved baseline already contains the ARM SHA-256 optimization. Verity timings
+therefore measure cursor lifetime separately from SHA acceleration. Write timings
+use an in-memory device and include each phase's final sync. They measure core
+CPU/copy/I/O-request costs; they do not establish physical-device durability costs
+or the Linux throughput target. Ordinary read-only profiles do not traverse the
+new journal path and acquire no implied speedup from it.
+
+
+On the Apple M4 Pro, the new fragmented SHA-256 file contains 3,145,805 data bytes
+and crosses two external extent leaves. Four alternating baseline/candidate/
+candidate/baseline executions, each with 301 measured repetitions, retained equal
+byte counts and content digests. Baseline median times were 2.690 and 2.694 ms;
+candidate medians were 1.806 and 1.803 ms: **1.489–1.494 times the throughput**.
+Read callbacks fell from 1,202 to 428 and allocations from 807 to 32 per file pass.
+This is an old/new core comparison on a verified sparse file, not a Linux result.
+The existing inline-root profiles provide no external-leaf allocation savings.
+Three further SHA-512 A-B-B-A sets, 501 repetitions per process, had aggregate
+median ratio 0.996, without a systematic change; individual set ratios ranged
+from 0.979 to 1.023. The earlier two-pair SHA-512 dip did not reproduce consistently.
+
+The first journal-routing candidate completed 32 RAM-backend write executions:
+1/4 KiB blocks, synchronous/deferred/lazy/ordered-lazy modes, A-B-B-A order. Every
+phase retained identical write counts, write bytes, flushes and allocation counts.
+All resulting image hashes matched within each profile, and every image passed
+`e2fsck -fn`. With ordered data and lazy checkpoints, sequential-write backend
+reads fell from 25,424 to 39 at 1 KiB and from 2,946 to 8 at 4 KiB. The CPU-only
+elapsed results were mostly near parity; removing backend work alone does not
+prove faster storage or adapter performance. The final empty-view dispatch skips
+the journal router on synchronous operations; its control measurements are kept
+separately from the initial candidate. Raw reports retain all three write phases,
+including sequential writes and random overwrites, not just the final truncation.
+
+Final full regression and native compilation are tracked separately from those
+measurements. Do not treat the earlier read-batch or SHA acceptance as validation
+of this later journal/verity change.
