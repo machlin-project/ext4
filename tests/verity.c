@@ -55,6 +55,11 @@ struct entry {
 	char failure[16];
 };
 
+struct read_fault_counts {
+	uint64_t allocations;
+	uint64_t reads;
+};
+
 static void
 hex_decode(const char *text, uint8_t *output, size_t length)
 {
@@ -193,32 +198,73 @@ verify_whole(struct ext4_posix_image *image, struct ext4_fs *fs, const struct ex
 	free(buffer);
 }
 
+/* Each chunk is a separate stateless API call. Inject every allocation and read
+ * failure into that call directly, without replaying the already verified file
+ * prefix for every fault. This keeps coverage linear in the number of chunks. */
+static struct read_fault_counts
+verify_chunk_faults(struct ext4_posix_image *image, struct ext4_fs *fs,
+    const struct ext4_inode *inode, const uint8_t *expected, uint8_t *buffer)
+{
+	struct read_fault_counts counts = { 0 };
+	uint64_t allocations;
+	uint64_t reads;
+	uint64_t fault;
+	uint64_t offset = 0;
+	size_t length;
+	size_t completed;
+	enum ext4_result error;
+
+	while (offset < inode->size) {
+		length = inode->size - offset < CHUNK_BYTES ? (size_t)(inode->size - offset)
+							    : CHUNK_BYTES;
+		allocations = image->allocation_calls;
+		reads = image->read_calls;
+		EXPECT(ext4_read(fs, inode, offset, buffer, length, &completed), EXT4_OK);
+		CHECK(completed == length && memcmp(buffer, expected + offset, length) == 0);
+		allocations = image->allocation_calls - allocations;
+		reads = image->read_calls - reads;
+		counts.allocations += allocations;
+		counts.reads += reads;
+		for (fault = 1; fault <= allocations + reads; fault++) {
+			memset(buffer, 0xcc, length + 1U);
+			if (fault <= allocations) {
+				image->fail_allocation_at = image->allocation_calls + fault;
+				error = EXT4_NO_MEMORY;
+			} else {
+				image->fail_read_at = image->read_calls + fault - allocations;
+				error = EXT4_IO;
+			}
+			EXPECT(ext4_read(fs, inode, offset, buffer, length, &completed), error);
+			CHECK(completed < length && image->live_allocations == 1U);
+			CHECK(memcmp(buffer, expected + offset, completed) == 0 &&
+			    buffer[completed] == 0xcc);
+			image->fail_allocation_at = 0;
+			image->fail_read_at = 0;
+		}
+		offset += length;
+	}
+	return counts;
+}
+
 static void
 verify_good(struct ext4_posix_image *image, struct ext4_fs *fs, const struct entry *entry)
 {
 	struct ext4_inode inode = find(fs, entry->name);
 	struct ext4_mapping mapping;
 	struct ext4_sha256 sha256;
+	struct read_fault_counts faults;
 	uint8_t digest[EXT4_SHA256_DIGEST_SIZE];
 	uint8_t *buffer;
 	uint8_t *piece;
-	uint64_t allocations;
-	uint64_t reads;
-	uint64_t fault;
 	size_t total;
 	size_t completed;
 	uint64_t offset;
-	enum ext4_result expected;
 
 	CHECK(inode.size == entry->size && (inode.flags & EXT4_INODE_VERITY));
 	buffer = malloc(inode.size + 1U);
-	piece = malloc(CHUNK_BYTES);
+	piece = malloc(CHUNK_BYTES + 1U);
 	CHECK(buffer != NULL && piece != NULL);
-	allocations = image->allocation_calls;
-	reads = image->read_calls;
 	EXPECT(read_all(fs, &inode, buffer, &total), EXT4_OK);
-	allocations = image->allocation_calls - allocations;
-	reads = image->read_calls - reads;
 	ext4_sha256_init(&sha256);
 	ext4_sha256_update(&sha256, buffer, total);
 	ext4_sha256_final(&sha256, digest);
@@ -233,25 +279,12 @@ verify_good(struct ext4_posix_image *image, struct ext4_fs *fs, const struct ent
 	if (inode.size != 0) {
 		EXPECT(ext4_map_read(fs, &inode, 0, 1, &mapping), EXT4_UNSUPPORTED);
 	}
-	/* Allocation and read failures return errors without leaks or partial lies. */
-	for (fault = 1; fault <= allocations + reads; fault++) {
-		if (fault <= allocations) {
-			image->fail_allocation_at = image->allocation_calls + fault;
-			expected = EXT4_NO_MEMORY;
-		} else {
-			image->fail_read_at = image->read_calls + fault - allocations;
-			expected = EXT4_IO;
-		}
-		EXPECT(read_all(fs, &inode, buffer, &total), expected);
-		CHECK(total < inode.size && image->live_allocations == 1U);
-		image->fail_allocation_at = 0;
-		image->fail_read_at = 0;
-	}
+	faults = verify_chunk_faults(image, fs, &inode, buffer, piece);
 	free(piece);
 	free(buffer);
 	printf("PASS verified %s: %" PRIu64 " bytes, %" PRIu64 " allocation and %" PRIu64
 	       " read faults\n",
-	    entry->name, entry->size, allocations, reads);
+	    entry->name, entry->size, faults.allocations, faults.reads);
 }
 
 static void
