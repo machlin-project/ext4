@@ -165,9 +165,10 @@ Continue the actual remaining queue in `docs/ACCEPTANCE.md`:
   claims with equivalent measured workloads.
 - Expand required geometry/format compatibility. MMP, quota/project accounting and
   limit enforcement, casefold, keyless encryption and verity reading, enabling and
-  measurement, with built-in signatures checked by an adapter callback, are
-  implemented. Key-based encryption, through cipher and key callbacks from the
-  adapter as decided, remains; do not silently remove it.
+  measurement, with built-in signatures checked by an adapter callback, and reading
+  encrypted objects with keys from adapter callbacks are implemented. Writing
+  encrypted objects, setting policies and no-key names remain; do not silently
+  remove them.
 - Sustained mixed-operation/crash sequences, operations fuzzing and
   checksum-repairing journal fuzzing are in place; keep extending them. Fix
   discovered contracts at their owning layer, not in the test harness.

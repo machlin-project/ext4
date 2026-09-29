@@ -263,7 +263,7 @@ first_path(struct device *device, struct ext4_fs *fs)
 	path.leaf = mapped_block(device, fs, &path.query.directory, path.leaf_logical);
 	path.next_leaf =
 	    mapped_block(device, fs, &path.query.directory, ext4_le32(&entries[1].block));
-	EXPECT(ext4_directory_entry_decode(fs, path.leaf, 0, &entry, &record), EXT4_OK);
+	EXPECT(ext4_directory_entry_decode(fs, path.leaf, 0, false, &entry, &record), EXT4_OK);
 	CHECK(entry.inode != 0 && entry.name_length > 2 && record < fs->info.block_size);
 	path.query.number = entry.inode;
 	path.query.length = entry.name_length;

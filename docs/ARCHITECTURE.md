@@ -699,16 +699,40 @@ before the descriptor is written, and an unsigned file is refused before any wri
 when signatures are required. `ext4_measure_verity` returns the file digest, the unsalted hash of the descriptor
 with its signature size cleared, as FS_IOC_MEASURE_VERITY does.
 
-## Encryption without keys
+## Encryption
 
 Volumes with the ENCRYPT incompatibility, and the STABLE_INODES compatibility
 feature that some fscrypt policies require, are admitted. The core holds no keys and
-performs no cryptography. Objects with the ENCRYPT inode flag keep ciphertext
-contents, names and symlink targets, so every operation needing plaintext returns
-`EXT4_ENCRYPTED`: reads and native mappings of encrypted files and symlinks,
+runs no cipher. Objects with the ENCRYPT inode flag keep ciphertext contents, names
+and symlink targets. Without the adapter's key, every operation needing plaintext
+returns `EXT4_ENCRYPTED`: reads and native mappings of encrypted files and symlinks,
 iteration and lookup in encrypted directories, any name addition, removal or rename
 whose parent directory is encrypted, and writes, truncation, preallocation or growth
-of encrypted files. Denials occur before any write.
+of encrypted files. Denials occur before any write. Raw reads of an encrypted
+directory return its blocks, whose names are ciphertext.
+
+With fscrypt callbacks installed by `ext4_set_crypto`, the core reads encrypted
+objects as Linux does. It decodes the context attribute (index 9, name "c") of
+version 1 or 2 and admits AES-256-XTS contents with AES-256-CTS names, the default
+and most common policy, with any name padding; other modes, the DIRECT_KEY and
+IV_INO_LBLK flags and data units other than the filesystem block are unsupported. The
+adapter finds the master key by the policy's identifier or descriptor and derives
+the inode's key: for version 2, HKDF-SHA512 with info "fscrypt", its NUL, context 2
+and the nonce; for version 1, AES-128-ECB under the nonce. Regular files use the
+contents mode and directories and symlinks the names mode. The mount keeps 16 derived
+keys by inode and generation; installing the environment again or unmounting
+releases them. A file block is decrypted with its logical block number as the
+little-endian IV, while holes and unwritten blocks read as zeros. Directory names,
+except the unencrypted dot entries, are decrypted with the directory's key and a
+zero IV, and their NUL padding is removed. A lookup pads the name to the policy's
+padding and at least 16 bytes, encrypts it and finds the stored ciphertext, hashing
+it as stored for indexed directories. Directory validation accepts any byte in
+encrypted names. A symlink target is a little-endian 16-bit ciphertext length and the
+ciphertext, in the inode or its block. Native mappings of encrypted files stay
+refused, since they would expose ciphertext. Casefolded encrypted directories hash
+plaintext names with a derived key, and encrypted verity files keep a ciphertext
+tree over plaintext; both are unsupported with a key. Writing encrypted objects,
+setting policies and Linux's no-key names are not implemented.
 
 Operations that need no plaintext remain available: owner, permission, timestamp and
 ordinary attribute changes on encrypted objects; rename, link and removal of an
@@ -719,8 +743,7 @@ directories, whose names are ciphertext, while still checking records, checksums
 the index hash of the stored bytes. The fscrypt context attribute (index 9) cannot be
 created, replaced or removed. Offline cleanup refuses a linked encrypted orphan, since
 its partial-block zeroing would corrupt ciphertext; unlinked encrypted orphans are
-released. Supplying keys, deriving per-file keys and presenting Linux-style no-key
-names are product decisions and are not implemented.
+released.
 
 ## Casefolded directories
 

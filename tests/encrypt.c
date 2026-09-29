@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
+#include "crypto.h"
 #include "storage.h"
 
 #include <inttypes.h>
@@ -7,7 +8,10 @@
  * names, contents or symlink targets, preserve encrypted objects, and still let
  * the unencrypted part of the volume and encrypted objects' own metadata change.
  * --synthetic builds the tree through the core and then marks it encrypted in
- * memory; otherwise the image comes from the Linux fscrypt probe. */
+ * memory; otherwise the image comes from the Linux fscrypt probe. --key then also
+ * supplies the probe's master key through a test adapter built on the reference
+ * cryptography: every encrypted name, file and symlink target must read back as the
+ * probe wrote it, and a different key or none must leave them unreadable. */
 
 #define ENCRYPT_SECONDS 1700006000
 #define PLAIN_FILE 24U
@@ -17,6 +21,144 @@
 #define CHANGED_PERMISSIONS 0600U
 
 static const struct ext4_timestamp encrypt_time = { ENCRYPT_SECONDS, 0 };
+
+/* The Linux probe's tree: odd files in secret, even ones in secret/inner, every fifth
+ * with a long name, a symlink and an empty directory. */
+#define PROBE_FILES 24U
+#define PROBE_LONG_NAME_BYTES 180U
+#define PROBE_LINK_TARGET "inner/file-01-target-x"
+#define PROBE_KEY_BYTES 64U
+#define PROBE_KEY_MULTIPLIER 7U
+#define PROBE_KEY_OFFSET 3U
+#define NAME_BYTES 256U
+#define FSCRYPT_HKDF_PREFIX "fscrypt"
+#define FSCRYPT_HKDF_PREFIX_SIZE 8U
+#define FSCRYPT_KEY_IDENTIFIER_CONTEXT 1U
+#define FSCRYPT_IDENTIFIER_BYTES 16U
+#define FSCRYPT_V2 2U
+#define FSCRYPT_V1_KEY_BYTES 16U
+
+/* A test adapter's keyring: one master key, found by its fscrypt identifier. */
+struct keyring {
+	uint8_t master[PROBE_KEY_BYTES];
+	uint8_t identifier[FSCRYPT_IDENTIFIER_BYTES];
+	uint32_t handles;
+	uint32_t derivations;
+};
+
+struct key {
+	uint8_t bytes[PROBE_KEY_BYTES];
+	size_t size;
+};
+
+static void
+keyring_init(struct keyring *keyring, uint8_t offset)
+{
+	uint8_t info[FSCRYPT_HKDF_PREFIX_SIZE + 1U];
+	unsigned int index;
+
+	memset(keyring, 0, sizeof(*keyring));
+	for (index = 0; index < PROBE_KEY_BYTES; index++) {
+		keyring->master[index] = (uint8_t)(index * PROBE_KEY_MULTIPLIER + offset);
+	}
+	memcpy(info, FSCRYPT_HKDF_PREFIX, FSCRYPT_HKDF_PREFIX_SIZE);
+	info[FSCRYPT_HKDF_PREFIX_SIZE] = FSCRYPT_KEY_IDENTIFIER_CONTEXT;
+	test_hkdf_sha512(keyring->master, sizeof(keyring->master), info, sizeof(info),
+	    keyring->identifier, sizeof(keyring->identifier));
+}
+
+static struct key *
+key_new(struct keyring *keyring)
+{
+	struct key *key = calloc(1, sizeof(*key));
+
+	CHECK(key != NULL);
+	keyring->handles++;
+	return key;
+}
+
+static enum ext4_result
+find_key(void *context, uint8_t version, const uint8_t *identifier, size_t size, void **master)
+{
+	struct keyring *keyring = context;
+	struct key *key;
+
+	if (version != FSCRYPT_V2 || size != sizeof(keyring->identifier) ||
+	    memcmp(identifier, keyring->identifier, size) != 0) {
+		return EXT4_NOT_FOUND;
+	}
+	key = key_new(keyring);
+	memcpy(key->bytes, keyring->master, sizeof(keyring->master));
+	key->size = sizeof(keyring->master);
+	*master = key;
+	return EXT4_OK;
+}
+
+static enum ext4_result
+derive_key(void *context, void *master, uint8_t version, const uint8_t *info, size_t info_size,
+    size_t key_size, void **result)
+{
+	struct keyring *keyring = context;
+	struct key *source = master;
+	struct key *key;
+	struct test_aes aes;
+	size_t offset;
+
+	CHECK(key_size <= sizeof(key->bytes) && key_size <= source->size);
+	key = key_new(keyring);
+	key->size = key_size;
+	if (version == FSCRYPT_V2) {
+		test_hkdf_sha512(
+		    source->bytes, source->size, info, info_size, key->bytes, key_size);
+	} else {
+		/* Version 1: the master key encrypted with AES-128-ECB under the nonce. */
+		CHECK(info_size == FSCRYPT_V1_KEY_BYTES);
+		test_aes_init(&aes, info, FSCRYPT_V1_KEY_BYTES);
+		for (offset = 0; offset < key_size; offset += TEST_AES_BLOCK) {
+			test_aes_encrypt(&aes, source->bytes + offset, key->bytes + offset);
+		}
+	}
+	keyring->derivations++;
+	*result = key;
+	return EXT4_OK;
+}
+
+static enum ext4_result
+cipher(void *context, void *handle, uint8_t mode, bool encrypt, const uint8_t *iv,
+    const void *input, void *output, size_t length)
+{
+	struct key *key = handle;
+
+	(void)context;
+	CHECK(input != output);
+	if (mode == EXT4_FSCRYPT_MODE_AES_256_XTS) {
+		test_aes_xts(key->bytes, key->size, iv, encrypt, input, output, length);
+	} else if (mode == EXT4_FSCRYPT_MODE_AES_256_CTS) {
+		test_aes_cts(key->bytes, key->size, iv, encrypt, input, output, length);
+	} else {
+		return EXT4_UNSUPPORTED;
+	}
+	return EXT4_OK;
+}
+
+static void
+release_key(void *context, void *handle)
+{
+	struct keyring *keyring = context;
+
+	CHECK(keyring->handles != 0);
+	keyring->handles--;
+	free(handle);
+}
+
+static struct ext4_crypto_environment
+keyring_environment(struct keyring *keyring)
+{
+	struct ext4_crypto_environment crypto = { keyring, NULL, false, find_key, derive_key,
+		cipher, release_key };
+
+	return crypto;
+}
 
 /* Matches the Linux probe so both fixture kinds share the plain file check. */
 static uint8_t
@@ -225,6 +367,126 @@ visit(void *context, const struct ext4_dir_entry *entry, uint64_t next_cookie)
 }
 
 static void
+probe_name(char *name, unsigned int file)
+{
+	int length = file % 5U == 0
+	    ? snprintf(name, NAME_BYTES, "long-%02u-%0*u", file, (int)PROBE_LONG_NAME_BYTES, file)
+	    : snprintf(name, NAME_BYTES, "file-%02u", file);
+
+	CHECK(length > 0 && length < (int)NAME_BYTES);
+}
+
+struct listing {
+	char names[PROBE_FILES + 8U][NAME_BYTES];
+	uint32_t count;
+};
+
+static enum ext4_dir_action
+collect(void *context, const struct ext4_dir_entry *entry, uint64_t next_cookie)
+{
+	struct listing *listing = context;
+
+	(void)next_cookie;
+	CHECK(listing->count < sizeof(listing->names) / sizeof(listing->names[0]));
+	CHECK(entry->name_length < NAME_BYTES && entry->name[entry->name_length] == 0);
+	memcpy(listing->names[listing->count++], entry->name, (size_t)entry->name_length + 1U);
+	return EXT4_DIR_ACCEPT;
+}
+
+static bool
+listed(const struct listing *listing, const char *name)
+{
+	uint32_t index;
+
+	for (index = 0; index < listing->count; index++) {
+		if (strcmp(listing->names[index], name) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* With the probe's key every encrypted name, file and target reads back. */
+static void
+keyed(struct device *device)
+{
+	static struct listing listing;
+	struct keyring keyring;
+	struct keyring other;
+	struct ext4_crypto_environment crypto;
+	struct ext4_fs *fs;
+	struct ext4_inode secret;
+	struct ext4_inode inner;
+	struct ext4_inode directory;
+	struct ext4_inode inode;
+	struct ext4_mapping mapping;
+	struct ext4_dir_entry entry;
+	char name[NAME_BYTES];
+	char target[NAME_BYTES];
+	uint64_t cookie = 0;
+	uint32_t derivations;
+	unsigned int file;
+	size_t completed;
+
+	keyring_init(&keyring, PROBE_KEY_OFFSET);
+	keyring_init(&other, PROBE_KEY_OFFSET + 1U);
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	secret = find(fs, EXT4_ROOT_INODE, "secret");
+	/* Another master key is not the one the policy names. */
+	crypto = keyring_environment(&other);
+	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	EXPECT(ext4_iterate_dir(fs, &secret, &cookie, collect, &listing), EXT4_ENCRYPTED);
+	EXPECT(ext4_lookup(fs, &secret, (const uint8_t *)"inner", 5, &inode), EXT4_ENCRYPTED);
+	crypto = keyring_environment(&keyring);
+	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	EXPECT(ext4_iterate_dir(fs, &secret, &cookie, collect, &listing), EXT4_NOT_FOUND);
+	CHECK(listed(&listing, ".") && listed(&listing, "..") && listed(&listing, "inner") &&
+	    listed(&listing, "empty") && listed(&listing, "link") &&
+	    listing.count == 5U + PROBE_FILES / 2U);
+	inner = find(fs, secret.number, "inner");
+	listing.count = 0;
+	cookie = 0;
+	EXPECT(ext4_iterate_dir(fs, &inner, &cookie, collect, &listing), EXT4_NOT_FOUND);
+	CHECK(listing.count == 2U + PROBE_FILES / 2U);
+	for (file = 0; file < PROBE_FILES; file++) {
+		directory = file % 2U ? secret : inner;
+		probe_name(name, file);
+		CHECK(listed(&listing, name) == !(file % 2U));
+		inode = find(fs, directory.number, name);
+		CHECK((inode.flags & EXT4_INODE_ENCRYPT) && inode.size == file_size(file));
+		verify_pattern(fs, &inode, file);
+		EXPECT(ext4_map_read(fs, &inode, 0, 1, &mapping), EXT4_ENCRYPTED);
+	}
+	inode = find(fs, secret.number, "link");
+	EXPECT(ext4_read(fs, &inode, 0, target, sizeof(target), &completed), EXT4_OK);
+	CHECK(completed == strlen(PROBE_LINK_TARGET) &&
+	    memcmp(target, PROBE_LINK_TARGET, completed) == 0);
+	directory = find(fs, secret.number, "empty");
+	cookie = 0;
+	EXPECT(ext4_next_dir(fs, &directory, &cookie, &entry), EXT4_OK);
+	CHECK(strcmp((const char *)entry.name, ".") == 0);
+	EXPECT(ext4_next_dir(fs, &directory, &cookie, &entry), EXT4_OK);
+	CHECK(strcmp((const char *)entry.name, "..") == 0);
+	EXPECT(ext4_next_dir(fs, &directory, &cookie, &entry), EXT4_NOT_FOUND);
+	/* A derived key is reused while it stays among the mount's cached keys. */
+	inode = find(fs, secret.number, "file-01");
+	verify_pattern(fs, &inode, 1);
+	derivations = keyring.derivations;
+	verify_pattern(fs, &inode, 1);
+	CHECK(keyring.derivations == derivations);
+	EXPECT(ext4_set_crypto(fs, NULL), EXT4_OK);
+	CHECK(keyring.handles == 0);
+	EXPECT(ext4_read(fs, &inode, 0, target, 1, &completed), EXT4_ENCRYPTED);
+	crypto = keyring_environment(&keyring);
+	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	verify_pattern(fs, &inode, 1);
+	ext4_unmount(fs);
+	CHECK(keyring.handles == 0 && other.handles == 0 && device->writes == 0);
+	printf("PASS keyed access reads %u encrypted files, their names and the symlink target\n",
+	    PROBE_FILES);
+}
+
+static void
 read_only(struct device *device)
 {
 	struct ext4_fs *fs;
@@ -245,7 +507,8 @@ read_only(struct device *device)
 	EXPECT(ext4_iterate_dir(fs, &secret, &cookie, visit, NULL), EXT4_ENCRYPTED);
 	EXPECT(ext4_next_dir(fs, &secret, &cookie, &entry), EXT4_ENCRYPTED);
 	EXPECT(ext4_lookup(fs, &secret, (const uint8_t *)"inner", 5, &inode), EXT4_ENCRYPTED);
-	EXPECT(ext4_read(fs, &secret, 0, &byte, 1, &completed), EXT4_ENCRYPTED);
+	/* Directory blocks hold ciphertext names but no encrypted bytes. */
+	EXPECT(ext4_read(fs, &secret, 0, &byte, 1, &completed), EXT4_OK);
 	encrypted_objects(fs, &file, &link);
 	EXPECT(ext4_read(fs, &file, 0, &byte, 1, &completed), EXT4_ENCRYPTED);
 	CHECK(completed == 0);
@@ -401,11 +664,14 @@ main(int argc, char **argv)
 	const char *image = NULL;
 	const char *exports = NULL;
 	bool synthetic = false;
+	bool key = false;
 	int argument;
 
 	for (argument = 1; argument < argc; argument++) {
 		if (strcmp(argv[argument], "--synthetic") == 0) {
 			synthetic = true;
+		} else if (strcmp(argv[argument], "--key") == 0) {
+			key = true;
 		} else if (image == NULL) {
 			image = argv[argument];
 		} else if (exports == NULL) {
@@ -415,8 +681,9 @@ main(int argc, char **argv)
 			break;
 		}
 	}
-	if (image == NULL) {
-		fprintf(stderr, "usage: %s [--synthetic] IMAGE [EXPORT_DIRECTORY]\n", argv[0]);
+	if (image == NULL || (key && synthetic)) {
+		fprintf(
+		    stderr, "usage: %s [--synthetic | --key] IMAGE [EXPORT_DIRECTORY]\n", argv[0]);
 		return 2;
 	}
 	storage_open(&device, image);
@@ -424,6 +691,9 @@ main(int argc, char **argv)
 		synthesize(&device);
 	}
 	read_only(&device);
+	if (key) {
+		keyed(&device);
+	}
 	writable(&device, exports, image);
 	storage_close(&device);
 	return 0;

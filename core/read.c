@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
+#include "fscrypt.h"
 #include "inline.h"
 #include "journal.h"
 #include "verity.h"
@@ -411,10 +412,127 @@ out:
 	return error;
 }
 
+/* Decrypt an encrypted regular file's blocks. Holes and unwritten blocks read as
+ * zeros, as in Linux; every other block is decrypted with the file's key and its
+ * logical block number as the IV. */
+static enum ext4_result
+ext4_read_encrypted(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset,
+    uint8_t *output, size_t length, size_t *completed)
+{
+	struct ext4_fscrypt_key key;
+	uint8_t *scratch = NULL;
+	uint8_t *blocks = NULL;
+	uint64_t logical;
+	uint64_t physical = 0;
+	uint64_t run;
+	size_t within;
+	size_t chunk;
+	enum ext4_result error;
+
+	error = ext4_fscrypt_key(fs, inode, &key);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	blocks = fs->environment.allocate(fs->environment.context, 2U * fs->info.block_size);
+	if (blocks == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	while (error == EXT4_OK && *completed < length) {
+		logical = (offset + *completed) / fs->info.block_size;
+		within = (size_t)((offset + *completed) % fs->info.block_size);
+		chunk = fs->info.block_size - within;
+		if (chunk > length - *completed) {
+			chunk = length - *completed;
+		}
+		error = logical > UINT32_MAX ? EXT4_RANGE
+					     : ext4_map_blocks(fs, inode, (uint32_t)logical,
+						   &scratch, &physical, &run, NULL);
+		if (error != EXT4_OK) {
+			break;
+		}
+		if (physical == 0) {
+			ext4_zero(output + *completed, chunk);
+		} else {
+			error = ext4_device_read(
+			    fs, physical * fs->info.block_size, blocks, fs->info.block_size);
+			if (error == EXT4_OK) {
+				error = ext4_fscrypt_block(
+				    fs, &key, logical, false, blocks, blocks + fs->info.block_size);
+			}
+			if (error != EXT4_OK) {
+				break;
+			}
+			ext4_copy(
+			    output + *completed, blocks + fs->info.block_size + within, chunk);
+		}
+		*completed += chunk;
+	}
+	if (scratch != NULL) {
+		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
+	}
+	fs->environment.release(fs->environment.context, blocks, 2U * fs->info.block_size);
+	return error;
+}
+
+/* Decrypt an encrypted symlink's target: a little-endian 16-bit ciphertext length,
+ * then the ciphertext, stored in the inode or its block. */
+static enum ext4_result
+ext4_read_encrypted_link(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset,
+    uint8_t *output, size_t length, size_t *completed)
+{
+	struct ext4_fscrypt_key key;
+	struct ext4_le16 stored_length;
+	uint8_t *stored;
+	uint8_t *plain;
+	size_t cipher_length;
+	size_t plain_length = 0;
+	size_t read = 0;
+	size_t bytes = (size_t)inode->size;
+	enum ext4_result error;
+
+	error = ext4_fscrypt_key(fs, inode, &key);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (bytes < EXT4_FSCRYPT_SYMLINK_HEADER || bytes > fs->info.block_size ||
+	    (inode->flags & EXT4_INODE_INLINE_DATA)) {
+		return EXT4_CORRUPT;
+	}
+	stored = fs->environment.allocate(fs->environment.context, 2U * fs->info.block_size);
+	if (stored == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	plain = stored + fs->info.block_size;
+	if (inode->fast_symlink) {
+		error = bytes > sizeof(inode->block_data) ? EXT4_CORRUPT : EXT4_OK;
+		if (error == EXT4_OK) {
+			ext4_copy(stored, inode->block_data, bytes);
+		}
+	} else {
+		error = ext4_read_mapped(fs, inode, 0, stored, bytes, true, &read);
+	}
+	if (error == EXT4_OK) {
+		ext4_copy(&stored_length, stored, sizeof(stored_length));
+		cipher_length = ext4_le16(&stored_length);
+		error = cipher_length > bytes - EXT4_FSCRYPT_SYMLINK_HEADER
+		    ? EXT4_CORRUPT
+		    : ext4_fscrypt_name_decrypt(fs, &key, stored + EXT4_FSCRYPT_SYMLINK_HEADER,
+			  cipher_length, plain, &plain_length);
+	}
+	if (error == EXT4_OK && offset < plain_length) {
+		*completed =
+		    plain_length - (size_t)offset < length ? plain_length - (size_t)offset : length;
+		ext4_copy(output, plain + offset, *completed);
+	}
+	fs->environment.release(fs->environment.context, stored, 2U * fs->info.block_size);
+	return error;
+}
+
 enum ext4_result
 ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, void *buffer,
     size_t length, size_t *completed)
 {
+	struct ext4_fscrypt_key key;
 	enum ext4_result error;
 
 	if (completed == NULL) {
@@ -432,8 +550,28 @@ ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, v
 	    (inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_SYMLINK) {
 		return EXT4_UNSUPPORTED;
 	}
-	if (inode->flags & EXT4_INODE_ENCRYPT) {
-		return EXT4_ENCRYPTED;
+	/* Encrypted directory blocks hold ciphertext names, but no encrypted bytes. */
+	if ((inode->flags & EXT4_INODE_ENCRYPT) &&
+	    (inode->mode & EXT4_MODE_TYPE) == EXT4_MODE_SYMLINK) {
+		return ext4_read_encrypted_link(fs, inode, offset, buffer, length, completed);
+	}
+	if ((inode->flags & EXT4_INODE_ENCRYPT) &&
+	    (inode->mode & EXT4_MODE_TYPE) == EXT4_MODE_REGULAR) {
+		/* The tree of an encrypted verity file covers plaintext and is ciphertext. */
+		if (inode->flags & EXT4_INODE_VERITY) {
+			error = ext4_fscrypt_key(fs, inode, &key);
+			return error == EXT4_OK ? EXT4_UNSUPPORTED : error;
+		}
+		if (inode->flags & EXT4_INODE_INLINE_DATA) {
+			return EXT4_CORRUPT;
+		}
+		if (offset >= inode->size) {
+			return EXT4_OK;
+		}
+		if (length > inode->size - offset) {
+			length = (size_t)(inode->size - offset);
+		}
+		return ext4_read_encrypted(fs, inode, offset, buffer, length, completed);
 	}
 	if (inode->flags & EXT4_INODE_VERITY) {
 		return ext4_verity_read(fs, inode, offset, buffer, length, completed);

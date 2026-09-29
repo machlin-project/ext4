@@ -18,7 +18,7 @@ core_sources = files(
   'core/inode_allocate.c', 'core/inode_flags.c', 'core/namespace.c', 'core/lifetime.c',
   'core/directory_hash.c', 'core/directory_index.c', 'core/directory_write.c',
   'core/xattr.c', 'core/xattr_write.c', 'core/xattr_inode.c', 'core/mmp.c',
-  'core/sha.c', 'core/verity.c', 'core/verity_enable.c', 'core/unicode.c', 'core/quota.c',
+  'core/sha.c', 'core/verity.c', 'core/verity_enable.c', 'core/fscrypt.c', 'core/unicode.c', 'core/quota.c',
 )
 core_arguments = ['-Wpedantic', '-ffreestanding', '-fno-builtin']
 public_headers = include_directories('include')
@@ -68,6 +68,8 @@ foreach name, source : {
     include_directories: internal_headers, dependencies: posix_dependency)}
 endforeach
 programs += {'directory-hash': executable('ext4-directory-hash-test', 'tests/directory_hash.c',
+  include_directories: internal_headers, dependencies: ext4_dependency)}
+programs += {'crypto-vectors': executable('ext4-crypto-vectors-test', 'tests/crypto_vectors.c',
   include_directories: internal_headers, dependencies: ext4_dependency)}
 executable('ext4-recover', 'tools/recover.c', dependencies: posix_dependency)
 executable('ext4-read-benchmark', ['tools/benchmark_read.c', 'adapters/posix/image.c'],

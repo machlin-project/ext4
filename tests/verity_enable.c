@@ -592,8 +592,9 @@ static void
 signatures(struct device *device)
 {
 	struct signer signer = { 0 };
-	struct ext4_crypto_environment crypto = { &signer, test_verify, false };
-	struct ext4_crypto_environment invalid = { &signer, NULL, true };
+	struct ext4_crypto_environment crypto = { &signer, test_verify, false, NULL, NULL, NULL,
+		NULL };
+	struct ext4_crypto_environment invalid = { &signer, NULL, true, NULL, NULL, NULL, NULL };
 	struct ext4_verity_parameters parameters = { EXT4_VERITY_HASH_SHA256, 0, NULL, 0, NULL, 0 };
 	struct ext4_inode inode;
 	struct ext4_inode result;

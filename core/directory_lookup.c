@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
+#include "fscrypt.h"
 #include "directory_index.h"
 #include "inline.h"
 #include "unicode.h"
@@ -154,8 +155,8 @@ ext4_lookup_scan(struct ext4_lookup_state *state, uint32_t logical,
 		return error;
 	}
 	while (offset < state->fs->info.block_size) {
-		error =
-		    ext4_directory_entry_decode(state->fs, state->leaf, offset, &entry, &length);
+		error = ext4_directory_entry_decode(state->fs, state->leaf, offset,
+		    (state->directory->flags & EXT4_INODE_ENCRYPT) != 0, &entry, &length);
 		if (error != EXT4_OK) {
 			return error;
 		}
@@ -360,9 +361,12 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 {
 	struct ext4_lookup_state state = { 0 };
 	struct ext4_inode found;
+	struct ext4_fscrypt_key key;
+	uint8_t cipher[EXT4_NAME_MAX];
 	uint8_t *buffer;
 	size_t capacity;
 	size_t index;
+	size_t cipher_length = 0;
 	uint32_t number;
 	uint8_t levels;
 	bool indexed;
@@ -385,9 +389,23 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 	if ((directory->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
 		return EXT4_NOT_DIRECTORY;
 	}
-	/* A plaintext name cannot be matched or hashed against ciphertext names. */
-	if (directory->flags & EXT4_INODE_ENCRYPT) {
-		return EXT4_ENCRYPTED;
+	/* Encrypted directories store and hash ciphertext names: the lookup name is
+	 * encrypted as it would be stored. Casefolded ones hash plaintext names with a
+	 * key derived for the directory, which is not implemented. */
+	if ((directory->flags & EXT4_INODE_ENCRYPT) && !ext4_fscrypt_dot(name, name_length)) {
+		error = ext4_fscrypt_key(fs, directory, &key);
+		if (error == EXT4_OK && (directory->flags & EXT4_INODE_CASEFOLD)) {
+			error = EXT4_UNSUPPORTED;
+		}
+		if (error == EXT4_OK) {
+			error = ext4_fscrypt_name_encrypt(
+			    fs, &key, name, name_length, cipher, &cipher_length);
+		}
+		if (error != EXT4_OK) {
+			return error;
+		}
+		name = cipher;
+		name_length = cipher_length;
 	}
 	if (!(directory->flags & EXT4_INODE_INLINE_DATA) &&
 	    directory->size % fs->info.block_size != 0) {

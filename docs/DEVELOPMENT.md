@@ -292,6 +292,17 @@ encrypted directory and change an encrypted file's permissions. An optional expo
 directory receives the changed image. Synthetic images lack real fscrypt contexts and
 are not fsck oracles.
 
+`ext4-encrypt-test --key IMAGE`, with the image the Linux probe created, also
+installs a test adapter holding the probe's master key, built on the reference
+cryptography in `tests/crypto.h`. Another master key must leave the tree
+unreadable; the probe's key must list both encrypted directories exactly, read every
+file's contents and the symlink target, keep native mappings refused and reuse a
+cached derived key, and every key handle must be released by unmount.
+`ext4-crypto-vectors-test`, in the `core` suite, checks that reference cryptography:
+AES against FIPS-197, and XTS, CBC with ciphertext stealing and HKDF-SHA512 against
+answers computed with OpenSSL, including the key identifier Linux stored for the
+probe's master key.
+
 `tests/run_linux_encrypt.py --create` runs from the lab with `--lab`, `--prepared`,
 `--runner` and a fresh `--output`. Linux adds a raw key, sets a v2 AES-256-XTS/CTS
 policy with 32-byte name padding, and creates encrypted files up to 197 KiB, long

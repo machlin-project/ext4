@@ -538,12 +538,35 @@ struct ext4_verity_parameters {
  * signatures are stored and ignored, as by a kernel without built-in signature
  * support. require_signatures, which needs verify_signature, refuses verity files
  * without a signature, as Linux's fs.verity.require_signatures does. Verified
- * digests are remembered per mount. */
+ * digests are remembered per mount.
+ *
+ * fscrypt keys and ciphers are supplied together or not at all, as handles whose key
+ * bytes stay with the adapter. find_key returns the master key an encryption policy
+ * names, by a 16-byte identifier for version 2 policies or an 8-byte descriptor for
+ * version 1, or NOT_FOUND; without it encrypted objects stay unreadable, as without a
+ * key in Linux. derive_key derives key_size bytes from a master key: for version 2,
+ * HKDF-SHA512 with a salt of zeros and the given info; for version 1, the master key's
+ * first key_size bytes encrypted with AES-128-ECB under the 16-byte info. cipher runs
+ * an fscrypt mode with a derived key and a 16-byte IV: AES-256-XTS over one data unit,
+ * or AES-256-CBC with ciphertext stealing, as Linux's cts(cbc(aes)), over one name.
+ * Input and output are distinct. release_key releases a handle of either kind. The
+ * mount keeps up to 16 derived keys; installing the environment again releases
+ * them, which is how a removed key stops being used. */
+#define EXT4_FSCRYPT_MODE_AES_256_XTS 1U
+#define EXT4_FSCRYPT_MODE_AES_256_CTS 4U
+
 struct ext4_crypto_environment {
 	void *context;
 	enum ext4_result (*verify_signature)(void *context, const uint8_t *message,
 	    size_t message_size, const uint8_t *signature, size_t signature_size);
 	bool require_signatures;
+	enum ext4_result (*find_key)(void *context, uint8_t policy_version,
+	    const uint8_t *identifier, size_t identifier_size, void **master);
+	enum ext4_result (*derive_key)(void *context, void *master, uint8_t policy_version,
+	    const uint8_t *info, size_t info_size, size_t key_size, void **key);
+	enum ext4_result (*cipher)(void *context, void *key, uint8_t mode, bool encrypt,
+	    const uint8_t *iv, const void *input, void *output, size_t length);
+	void (*release_key)(void *context, void *key);
 };
 /* Install or, with NULL, remove the adapter's cryptography; the core copies it. */
 enum ext4_result ext4_set_crypto(struct ext4_fs *fs, const struct ext4_crypto_environment *crypto);

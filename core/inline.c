@@ -159,7 +159,7 @@ ext4_inline_region(
 	enum ext4_result error;
 
 	while (offset < end) {
-		error = ext4_directory_entry_decode(fs, buffer, offset, &entry, &length);
+		error = ext4_directory_entry_decode(fs, buffer, offset, false, &entry, &length);
 		if (error != EXT4_OK || length > end - offset ||
 		    (entry.inode != 0 && entry.name[0] == '.' &&
 			(entry.name_length == 1 ||

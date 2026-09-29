@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "verity.h"
+#include "fscrypt.h"
 #include "sha.h"
 
 /* See the fs-verity documentation in the Linux kernel sources. Every Merkle
@@ -280,10 +281,22 @@ ext4_verity_accept(struct ext4_fs *fs, const struct ext4_inode *inode,
 enum ext4_result
 ext4_set_crypto(struct ext4_fs *fs, const struct ext4_crypto_environment *crypto)
 {
-	if (fs == NULL ||
-	    (crypto != NULL && crypto->require_signatures && crypto->verify_signature == NULL)) {
+	bool fscrypt;
+
+	if (fs == NULL) {
 		return EXT4_INVALID_ARGUMENT;
 	}
+	if (crypto != NULL) {
+		fscrypt = crypto->find_key != NULL;
+		if ((crypto->require_signatures && crypto->verify_signature == NULL) ||
+		    (crypto->derive_key != NULL) != fscrypt ||
+		    (crypto->cipher != NULL) != fscrypt ||
+		    (crypto->release_key != NULL) != fscrypt) {
+			return EXT4_INVALID_ARGUMENT;
+		}
+	}
+	/* Keys derived under the previous environment belong to it. */
+	ext4_fscrypt_forget(fs);
 	ext4_zero(&fs->crypto, sizeof(fs->crypto));
 	if (crypto != NULL) {
 		fs->crypto = *crypto;

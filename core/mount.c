@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
+#include "fscrypt.h"
 #include "journal.h"
 #include "quota.h"
 
@@ -285,6 +286,7 @@ ext4_unmount(struct ext4_fs *fs)
 		return;
 	}
 	environment = fs->environment;
+	ext4_fscrypt_forget(fs);
 	ext4_inode_holds_destroy(fs);
 	ext4_quota_close(fs);
 	ext4_journal_close(fs->journal);

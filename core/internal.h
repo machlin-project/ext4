@@ -74,6 +74,17 @@ struct ext4_verified_signature {
 	uint8_t digest[EXT4_VERITY_DIGEST_BYTES];
 };
 
+/* An encrypted inode's key, derived by the adapter and held by handle. */
+#define EXT4_FSCRYPT_KEYS 16U
+
+struct ext4_fscrypt_cached_key {
+	uint32_t number;
+	uint32_t generation;
+	void *handle;
+	uint8_t mode;
+	uint8_t flags;
+};
+
 /* Consecutive inode tables: groups first_group through first_group + groups - 1
  * each occupy the filesystem's inode_table_blocks, starting at block. */
 struct ext4_inode_table_run {
@@ -151,6 +162,9 @@ struct ext4_fs {
 	struct ext4_verified_signature verified_signatures[EXT4_VERIFIED_SIGNATURES];
 	uint32_t verified_signature_count;
 	uint32_t verified_signature_next;
+	struct ext4_fscrypt_cached_key fscrypt_keys[EXT4_FSCRYPT_KEYS];
+	uint32_t fscrypt_key_count;
+	uint32_t fscrypt_key_next;
 	struct ext4_journal *journal;
 	struct ext4_orphan_file *orphan_file;
 	struct ext4_inode_hold *holds;
@@ -225,8 +239,10 @@ enum ext4_result ext4_edit_inode(struct ext4_fs *fs, struct ext4_transaction *tr
     uint32_t number, uint32_t generation, struct ext4_inode_disk **disk, struct ext4_inode *inode);
 uint32_t ext4_directory_record_length(
     struct ext4_fs *fs, const struct ext4_dir_header_disk *header);
+/* Names in an encrypted directory are ciphertext and may hold any byte; other names
+ * may hold neither NUL nor '/'. */
 enum ext4_result ext4_directory_entry_decode(struct ext4_fs *fs, const uint8_t *buffer,
-    uint32_t offset, struct ext4_dir_entry *entry, uint32_t *record_length);
+    uint32_t offset, bool ciphertext, struct ext4_dir_entry *entry, uint32_t *record_length);
 /* The caller resolves the on-disk signedness policy into a hash version.
  * Seed words are host-order; NULL/all-zero uses the specified default seed.
  * Failure leaves result unchanged. This hashes bytes without name normalization. */

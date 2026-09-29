@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
+#include "fscrypt.h"
 #include "internal.h"
 #include "inline.h"
 
@@ -79,7 +80,7 @@ ext4_directory_checksum(
 
 enum ext4_result
 ext4_directory_entry_decode(struct ext4_fs *fs, const uint8_t *buffer, uint32_t offset,
-    struct ext4_dir_entry *entry, uint32_t *record_length)
+    bool ciphertext, struct ext4_dir_entry *entry, uint32_t *record_length)
 {
 	const struct ext4_dir_header_disk *header;
 	uint32_t length;
@@ -113,7 +114,7 @@ ext4_directory_entry_decode(struct ext4_fs *fs, const uint8_t *buffer, uint32_t 
 		if (names == 0 || (filetype && header->type > EXT4_FT_SYMLINK)) {
 			return EXT4_CORRUPT;
 		}
-		for (index = 0; index < names; index++) {
+		for (index = 0; !ciphertext && index < names; index++) {
 			if (buffer[offset + sizeof(*header) + index] == 0 ||
 			    buffer[offset + sizeof(*header) + index] == '/') {
 				return EXT4_CORRUPT;
@@ -130,7 +131,8 @@ ext4_directory_entry_decode(struct ext4_fs *fs, const uint8_t *buffer, uint32_t 
 }
 
 static enum ext4_result
-ext4_directory_block_validate(struct ext4_fs *fs, const uint8_t *buffer, uint32_t wanted)
+ext4_directory_block_validate(
+    struct ext4_fs *fs, const uint8_t *buffer, uint32_t wanted, bool ciphertext)
 {
 	struct ext4_dir_entry entry;
 	uint32_t offset = 0;
@@ -138,7 +140,8 @@ ext4_directory_block_validate(struct ext4_fs *fs, const uint8_t *buffer, uint32_
 	enum ext4_result error;
 
 	while (offset < fs->info.block_size) {
-		error = ext4_directory_entry_decode(fs, buffer, offset, &entry, &length);
+		error =
+		    ext4_directory_entry_decode(fs, buffer, offset, ciphertext, &entry, &length);
 		if (error != EXT4_OK) {
 			return error;
 		}
@@ -157,6 +160,8 @@ ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_
     void *context)
 {
 	struct ext4_dir_entry decoded;
+	struct ext4_fscrypt_key key;
+	uint8_t plain[EXT4_NAME_MAX];
 	uint8_t *buffer;
 	uint64_t block_offset;
 	uint64_t size;
@@ -167,6 +172,7 @@ ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_
 	uint32_t offset;
 	uint32_t wanted;
 	uint32_t record_length;
+	size_t plain_length;
 	enum ext4_result error;
 	enum ext4_dir_action action;
 
@@ -181,7 +187,10 @@ ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_
 	}
 	/* Encrypted names can be neither presented nor resumed without a key. */
 	if (directory->flags & EXT4_INODE_ENCRYPT) {
-		return EXT4_ENCRYPTED;
+		error = ext4_fscrypt_key(fs, directory, &key);
+		if (error != EXT4_OK) {
+			return error;
+		}
 	}
 	size = directory->flags & EXT4_INODE_INLINE_DATA ? fs->info.block_size : directory->size;
 	if (size % fs->info.block_size != 0 || *cookie > size) {
@@ -219,19 +228,32 @@ ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_
 		error = ext4_directory_checksum(
 		    fs, directory, (uint32_t)(block_offset / fs->info.block_size), buffer);
 		if (error == EXT4_OK) {
-			error = ext4_directory_block_validate(fs, buffer, wanted);
+			error = ext4_directory_block_validate(
+			    fs, buffer, wanted, (directory->flags & EXT4_INODE_ENCRYPT) != 0);
 		}
 		if (error != EXT4_OK) {
 			goto out;
 		}
 		offset = wanted;
 		while (offset < fs->info.block_size) {
-			error = ext4_directory_entry_decode(
-			    fs, buffer, offset, &decoded, &record_length);
+			error = ext4_directory_entry_decode(fs, buffer, offset,
+			    (directory->flags & EXT4_INODE_ENCRYPT) != 0, &decoded, &record_length);
 			if (error != EXT4_OK) {
 				goto out;
 			}
 			offset += record_length;
+			/* Dot entries are stored unencrypted; other names are ciphertext. */
+			if (decoded.inode != 0 && (directory->flags & EXT4_INODE_ENCRYPT) &&
+			    !ext4_fscrypt_dot(decoded.name, decoded.name_length)) {
+				error = ext4_fscrypt_name_decrypt(fs, &key, decoded.name,
+				    decoded.name_length, plain, &plain_length);
+				if (error != EXT4_OK) {
+					goto out;
+				}
+				ext4_copy(decoded.name, plain, plain_length);
+				decoded.name[plain_length] = 0;
+				decoded.name_length = (uint16_t)plain_length;
+			}
 			if (decoded.inode != 0) {
 				action = visit(context, &decoded, block_offset + offset);
 				if (action == EXT4_DIR_STOP) {
