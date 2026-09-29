@@ -13,7 +13,9 @@ struct ext4_extent_cursor {
 	const uint8_t *leaf;
 	uint64_t first;
 	uint64_t limit;
+	uint64_t next;
 	uint16_t entries;
+	uint16_t position;
 };
 
 struct ext4_cached_leaf {
@@ -39,6 +41,15 @@ struct ext4_map_reader {
  * The owner must close the reader before changing either. */
 enum ext4_result ext4_map_reader_next(struct ext4_fs *fs, const struct ext4_inode *inode,
     struct ext4_map_reader *reader, uint32_t logical, uint64_t *physical, uint64_t *blocks);
+/* Look ahead only through already validated leaves. Never allocate or read the
+ * device: planning a later run must not move a metadata failure ahead of data. */
+bool ext4_map_reader_cached(
+    struct ext4_map_reader *reader, uint32_t logical, uint64_t *physical, uint64_t *blocks);
+/* Deliver a byte range, batching adjacent physical data across logical holes.
+ * require_data rejects holes, including unwritten extents, at their boundary. */
+enum ext4_result ext4_map_reader_read(struct ext4_fs *fs, const struct ext4_inode *inode,
+    struct ext4_map_reader *reader, uint64_t offset, void *buffer, size_t length, bool require_data,
+    size_t *completed);
 void ext4_map_reader_close(struct ext4_fs *fs, struct ext4_map_reader *reader);
 
 #endif

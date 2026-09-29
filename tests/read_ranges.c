@@ -24,10 +24,14 @@ struct model {
 	uint8_t *data;
 	size_t size;
 	size_t reads;
+	size_t data_reads;
+	size_t data_bytes;
 	size_t allocations;
 	size_t fail_read;
+	size_t fail_data_read;
 	size_t fail_allocation;
 	size_t live;
+	bool poison_failed_read;
 };
 
 static enum ext4_result
@@ -36,7 +40,16 @@ model_read(void *opaque, uint64_t offset, void *buffer, size_t length)
 	struct model *model = opaque;
 
 	CHECK(offset <= model->size && length <= model->size - offset);
-	if (++model->reads == model->fail_read) {
+	model->reads++;
+	if (offset >= (uint64_t)MODEL_DATA_FIRST * model->fs.info.block_size) {
+		model->data_reads++;
+		model->data_bytes += length;
+	}
+	if (model->reads == model->fail_read ||
+	    (model->fail_data_read != 0 && model->data_reads == model->fail_data_read)) {
+		if (model->poison_failed_read) {
+			memset(buffer, 0xcc, length);
+		}
 		return EXT4_IO;
 	}
 	memcpy(buffer, model->data + offset, length);
@@ -73,7 +86,10 @@ model_reset(struct model *model)
 {
 	CHECK(model->live == 0);
 	model->reads = model->allocations = 0;
+	model->data_reads = model->data_bytes = 0;
 	model->fail_read = model->fail_allocation = 0;
+	model->fail_data_read = 0;
+	model->poison_failed_read = false;
 }
 
 static uint8_t *
@@ -340,8 +356,10 @@ extent_cursor_cases(struct model *model, struct ext4_inode *inode)
 	check_window(model, inode, 0, physical, LOGICAL_BLOCKS);
 	model_reset(model);
 	CHECK(ext4_read(&model->fs, inode, 0, output, (size_t)inode->size, &completed) == EXT4_OK);
-	/* One checked leaf supplies every data/hole transition within this call. */
-	CHECK(model->reads == DATA_EXTENTS + 1U && model->allocations == 1 && model->live == 0);
+	/* One checked leaf supplies every transition; neighboring physical data is
+	 * batched without reading disk bytes for logical holes or allocating data. */
+	CHECK(model->reads <= 4 && model->allocations == 1 && model->live == 0);
+	CHECK(model->data_bytes == (size_t)DATA_EXTENTS * bs);
 
 	/* A subsequent call sees a changed map, even with unchanged inode fields. */
 	node_extent(leaf, 0, 0, 1, MODEL_DATA_OTHER);
@@ -361,6 +379,148 @@ extent_cursor_cases(struct model *model, struct ext4_inode *inode)
 	CHECK(completed == 0 && output[0] == 0xa5 && model->live == 0);
 	free(output);
 	puts("PASS read-local extent reuse, fresh later calls and full-leaf validation");
+}
+
+static void
+batched_reads(struct model *model, struct ext4_inode *inode)
+{
+	enum { DATA_EXTENTS = 40, LOGICAL_BLOCKS = DATA_EXTENTS * 2 };
+
+	struct ext4_map_reader reader = { 0 };
+	const uint32_t overlapping[] = { MODEL_DATA_FIRST, 0, MODEL_DATA_FIRST + 1U,
+		MODEL_DATA_FIRST + 2U, MODEL_DATA_FIRST + 3U, MODEL_DATA_FIRST + 4U,
+		MODEL_DATA_FIRST + 5U, MODEL_DATA_FIRST + 6U, 0, 0 };
+	uint32_t physical[LOGICAL_BLOCKS];
+	uint32_t bs = model->fs.info.block_size;
+	uint32_t logical;
+	uint64_t mapped;
+	uint64_t run;
+	uint8_t *left = model_block(model, MODEL_NODE_FIRST);
+	uint8_t *right = model_block(model, MODEL_NODE_FIRST + 1U);
+	size_t bytes = (size_t)LOGICAL_BLOCKS * bs;
+	uint8_t *expected = calloc(1, bytes);
+	uint8_t *output = malloc(bytes + 1U);
+	size_t completed;
+	size_t window = 3U * bs + 17U;
+	unsigned int index;
+	unsigned int pass;
+
+	CHECK(expected != NULL && output != NULL);
+	inode->flags = EXT4_INODE_EXTENTS;
+	inode->size = bytes;
+	node_header(inode->block_data, sizeof(inode->block_data), 1, 1);
+	node_index(inode->block_data, 0, 0, MODEL_NODE_FIRST);
+	node_header(left, bs, 0, DATA_EXTENTS);
+	for (index = 0; index < DATA_EXTENTS; index++) {
+		physical[index * 2U] = MODEL_DATA_FIRST + index;
+		physical[index * 2U + 1U] = 0;
+		node_extent(left, index, index * 2U, 1, physical[index * 2U]);
+		memcpy(expected + (size_t)index * 2U * bs, model_block(model, physical[index * 2U]),
+		    bs);
+	}
+	node_seal(model, inode, left);
+	check_window(model, inode, 0, physical, LOGICAL_BLOCKS);
+	model_reset(model);
+	/* The sequential hint and binary-search fallback must agree with the
+	 * independent block model under forward, backward and permuted requests. */
+	for (pass = 0; pass < 3U; pass++) {
+		for (index = 0; index < LOGICAL_BLOCKS; index++) {
+			logical = pass == 0 ? index
+			    : pass == 1	    ? LOGICAL_BLOCKS - 1U - index
+					    : index * 37U % LOGICAL_BLOCKS;
+			CHECK(ext4_map_reader_next(
+				  &model->fs, inode, &reader, logical, &mapped, &run) == EXT4_OK);
+			CHECK(mapped == physical[logical]);
+			CHECK(run ==
+			    (logical == LOGICAL_BLOCKS - 1U ? (uint64_t)UINT32_MAX + 1U - logical
+							    : 1U));
+		}
+	}
+	ext4_map_reader_close(&model->fs, &reader);
+	CHECK(model->reads == 1 && model->allocations == 1 && model->live == 0);
+	model_reset(model);
+	CHECK(ext4_read(&model->fs, inode, 0, output, bytes, &completed) == EXT4_OK);
+	CHECK(completed == bytes && memcmp(output, expected, bytes) == 0);
+	CHECK(model->data_reads >= 2 && model->data_reads <= DATA_EXTENTS / 4U);
+	CHECK(model->data_bytes == (size_t)DATA_EXTENTS * bs && model->allocations == 1);
+	/* Start inside a hole and finish inside data; both request ends are unaligned. */
+	model_reset(model);
+	memset(output, 0xa5, bytes + 1U);
+	CHECK(ext4_read(&model->fs, inode, bs + 37U, output, window, &completed) == EXT4_OK);
+	CHECK(completed == window && memcmp(output, expected + bs + 37U, window) == 0);
+	CHECK(model->data_reads == 1 && output[window] == 0xa5);
+	model_reset(model);
+	model->fail_data_read = 1;
+	model->poison_failed_read = true;
+	memset(output, 0xa5, bytes + 1U);
+	CHECK(ext4_read(&model->fs, inode, bs + 37U, output, window, &completed) == EXT4_IO);
+	CHECK(completed == bs - 37U && memcmp(output, expected + bs + 37U, completed) == 0);
+	CHECK(output[window] == 0xa5 && model->live == 0);
+	/* A failed callback may have overwritten its entire packed destination. No
+	 * part of that batch is reported complete, and the earlier prefix survives. */
+	model_reset(model);
+	model->fail_data_read = 2;
+	model->poison_failed_read = true;
+	memset(output, 0xa5, bytes + 1U);
+	CHECK(ext4_read(&model->fs, inode, 0, output, bytes, &completed) == EXT4_IO);
+	CHECK(completed != 0 && completed < bytes && memcmp(output, expected, completed) == 0);
+	CHECK(output[bytes] == 0xa5 && model->live == 0);
+	model_reset(model);
+	/* Physical discontinuities must end a batch, even with a regular hole pattern. */
+	for (index = 0; index < DATA_EXTENTS; index++) {
+		physical[index * 2U] =
+		    MODEL_DATA_FIRST + index / 2U + (index % 2U) * DATA_EXTENTS / 2U;
+		node_extent(left, index, index * 2U, 1, physical[index * 2U]);
+	}
+	node_seal(model, inode, left);
+	check_window(model, inode, 0, physical, LOGICAL_BLOCKS);
+	model_reset(model);
+	CHECK(ext4_read(&model->fs, inode, 0, output, bytes, &completed) == EXT4_OK);
+	CHECK(model->data_reads == DATA_EXTENTS);
+
+	/* The later data span overlaps its packed source; its intervening unwritten
+	 * extent must become zeros, and a require-data caller must stop before it. */
+	node_header(inode->block_data, sizeof(inode->block_data), 0, 3);
+	node_extent(inode->block_data, 0, 0, 1, MODEL_DATA_FIRST);
+	node_extent(inode->block_data, 1, 1, EXT4_EXTENT_UNWRITTEN_LIMIT + 1U, MODEL_DATA_OTHER);
+	node_extent(inode->block_data, 2, 2, 6, MODEL_DATA_FIRST + 1U);
+	inode->size = sizeof(overlapping) / sizeof(*overlapping) * bs - 17U;
+	check_window(model, inode, 0, overlapping, sizeof(overlapping) / sizeof(*overlapping));
+	model_reset(model);
+	memset(output, 0xa5, bytes + 1U);
+	CHECK(ext4_read_mapped(&model->fs, inode, 0, output, (size_t)inode->size, true,
+		  &completed) == EXT4_CORRUPT);
+	CHECK(completed == bs && memcmp(output, model_block(model, MODEL_DATA_FIRST), bs) == 0);
+	CHECK(output[bs] == 0xa5 && model->data_reads == 1 && model->live == 0);
+
+	/* Planning must not fetch an unvisited leaf early. Its error follows the
+	 * successful data and hole prefix from the already validated left leaf. */
+	node_header(inode->block_data, sizeof(inode->block_data), 1, 2);
+	node_index(inode->block_data, 0, 0, MODEL_NODE_FIRST);
+	node_index(inode->block_data, 1, 8, MODEL_NODE_FIRST + 1U);
+	node_header(left, bs, 0, 4);
+	for (index = 0; index < 4; index++) {
+		node_extent(left, index, index * 2U, 1, MODEL_DATA_FIRST + index);
+	}
+	node_header(right, bs, 0, 1);
+	node_extent(right, 0, 8, 0, MODEL_DATA_FIRST + 4U);
+	node_seal(model, inode, left);
+	node_seal(model, inode, right);
+	inode->size = 10U * bs;
+	model_reset(model);
+	CHECK(ext4_read(&model->fs, inode, 0, output, (size_t)inode->size, &completed) ==
+	    EXT4_CORRUPT);
+	CHECK(completed == 8U * bs && memcmp(output, expected, completed) == 0);
+	CHECK(model->data_reads == 1 && model->reads == 3 && model->live == 0);
+	model_reset(model);
+	model->fail_read = 3;
+	model->poison_failed_read = true;
+	CHECK(ext4_read(&model->fs, inode, 0, output, (size_t)inode->size, &completed) == EXT4_IO);
+	CHECK(completed == 8U * bs && memcmp(output, expected, completed) == 0 && model->live == 0);
+	model_reset(model);
+	free(output);
+	free(expected);
+	puts("PASS batched sparse reads, bounded I/O, overlap, unwritten data and error prefixes");
 }
 
 static void
@@ -562,6 +722,7 @@ main(void)
 			inode.generation = 1;
 			extent_cases(&model, &inode);
 			extent_cursor_cases(&model, &inode);
+			batched_reads(&model, &inode);
 			cached_leaves(&model, &inode);
 			indirect_cases(&model, &inode);
 			logical_limit(&model, &inode);

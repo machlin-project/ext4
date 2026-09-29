@@ -200,6 +200,8 @@ ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t log
 				cursor->first = first;
 				cursor->limit = leaf_limit;
 				cursor->entries = entries;
+				cursor->next = UINT64_MAX;
+				cursor->position = 0;
 			}
 			if (blocks != NULL) {
 				*blocks = boundary - logical;
@@ -224,10 +226,11 @@ ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t log
 }
 
 /* All records, physical ranges and the checksum were checked before publishing
- * the leaf. Binary search now locates a run without repeating that validation. */
+ * the leaf. A sequential boundary crosses at most one validated record; other
+ * requests use binary search. Neither path repeats validation. */
 static void
 ext4_extent_cursor_map(
-    const struct ext4_extent_cursor *cursor, uint32_t logical, uint64_t *physical, uint64_t *blocks)
+    struct ext4_extent_cursor *cursor, uint32_t logical, uint64_t *physical, uint64_t *blocks)
 {
 	const struct ext4_extent_disk *extents = (const struct ext4_extent_disk *)(cursor->leaf +
 	    sizeof(struct ext4_extent_header_disk));
@@ -241,12 +244,19 @@ ext4_extent_cursor_map(
 	uint16_t middle;
 	bool unwritten;
 
-	while (low < high) {
-		middle = low + (high - low) / 2U;
-		if (ext4_le32(&extents[middle].logical) <= logical) {
-			low = middle + 1U;
-		} else {
-			high = middle;
+	if (logical == cursor->next) {
+		low = cursor->position;
+		if (low < cursor->entries && ext4_le32(&extents[low].logical) <= logical) {
+			low++;
+		}
+	} else {
+		while (low < high) {
+			middle = low + (high - low) / 2U;
+			if (ext4_le32(&extents[middle].logical) <= logical) {
+				low = middle + 1U;
+			} else {
+				high = middle;
+			}
 		}
 	}
 	*physical = 0;
@@ -277,6 +287,8 @@ ext4_extent_cursor_map(
 		}
 	}
 	*blocks = boundary - logical;
+	cursor->position = low;
+	cursor->next = boundary;
 }
 
 static enum ext4_result
@@ -440,6 +452,27 @@ ext4_extent_cache_capacity(const struct ext4_fs *fs)
 	return capacity < EXT4_READ_CACHE_LEAVES ? capacity : EXT4_READ_CACHE_LEAVES;
 }
 
+bool
+ext4_map_reader_cached(
+    struct ext4_map_reader *reader, uint32_t logical, uint64_t *physical, uint64_t *blocks)
+{
+	struct ext4_extent_cache *cache = reader->cache;
+	uint32_t index;
+
+	if (ext4_extent_cursor_contains(&reader->cursor, logical)) {
+		ext4_extent_cursor_map(&reader->cursor, logical, physical, blocks);
+		return true;
+	}
+	for (index = 0; cache != NULL && index < EXT4_READ_CACHE_LEAVES; index++) {
+		if (ext4_extent_cursor_contains(&cache->leaves[index].cursor, logical)) {
+			reader->cursor = cache->leaves[index].cursor;
+			ext4_extent_cursor_map(&reader->cursor, logical, physical, blocks);
+			return true;
+		}
+	}
+	return false;
+}
+
 enum ext4_result
 ext4_map_reader_next(struct ext4_fs *fs, const struct ext4_inode *inode,
     struct ext4_map_reader *reader, uint32_t logical, uint64_t *physical, uint64_t *blocks)
@@ -448,7 +481,6 @@ ext4_map_reader_next(struct ext4_fs *fs, const struct ext4_inode *inode,
 	struct ext4_cached_leaf *slot;
 	uint8_t *spare;
 	uint32_t capacity;
-	uint32_t index;
 	enum ext4_result error;
 
 	if (fs->aborted) {
@@ -458,18 +490,10 @@ ext4_map_reader_next(struct ext4_fs *fs, const struct ext4_inode *inode,
 		return ext4_map_blocks(
 		    fs, inode, logical, &reader->scratch, physical, blocks, NULL);
 	}
-	if (ext4_extent_cursor_contains(&reader->cursor, logical)) {
-		ext4_extent_cursor_map(&reader->cursor, logical, physical, blocks);
+	if (ext4_map_reader_cached(reader, logical, physical, blocks)) {
 		return EXT4_OK;
 	}
 	capacity = ext4_extent_cache_capacity(fs);
-	for (index = 0; cache != NULL && index < capacity; index++) {
-		if (ext4_extent_cursor_contains(&cache->leaves[index].cursor, logical)) {
-			reader->cursor = cache->leaves[index].cursor;
-			ext4_extent_cursor_map(&reader->cursor, logical, physical, blocks);
-			return EXT4_OK;
-		}
-	}
 	error = ext4_extent_map(
 	    fs, inode, logical, &reader->scratch, physical, blocks, NULL, NULL, &reader->cursor);
 	if (error != EXT4_OK || cache == NULL || capacity == 0 ||

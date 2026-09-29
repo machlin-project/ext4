@@ -1161,12 +1161,15 @@ File reads and native mapping queries return contiguous physical ranges or hole
 ranges. Extent runs stop at extent and ancestor-index boundaries; legacy runs
 stop at their pointer-table boundary, while an absent ancestor represents its
 remaining sparse subtree. `core/map_read.c` owns traversal, validation and mapping
-state; `core/read.c` owns byte delivery, EOF, decryption and verity routing.
+state; `core/read_io.c` plans and delivers mapped byte ranges, while `core/read.c`
+owns inode snapshots, EOF, decryption and verity routing.
 Unwritten extents return zeros. An ordinary `ext4_read` allocates mapping
 scratch only when it reaches an external node and reuses that one block for the
 rest of the call. Once an extent leaf's checksum and every record have passed
 validation, the read retains that private leaf and locates subsequent data/hole
-ranges with binary search. An ancestor's next-index boundary limits reuse; crossing
+ranges with a cursor at sequential boundaries and binary search for other seeks.
+The hint advances at most one record because validation excludes overlaps and
+empty extents. An ancestor's next-index boundary limits reuse; crossing
 it restarts the checked descent before overwriting scratch. Inline extent maps and
 direct pointers need no scratch buffer. No leaf or validation state survives an
 ordinary read, so later calls observe changed mapping nodes and validate them again. Native
@@ -1176,6 +1179,21 @@ The range tests cover holes, unwritten extents, ancestor transitions, partial
 failure, allocation failure, changed nodes between calls and corrupt records outside
 the requested range. Performance and current regression evidence belong in
 [CORE-REVIEW.md](CORE-REVIEW.md).
+
+Mapped byte reads can combine physically adjacent data across logical holes into
+one environment read. A plan holds at most 32 data spans and combines at most
+256 KiB of data; an already contiguous request retains its ordinary direct read.
+Lookahead uses only already validated extent leaves, without metadata I/O or
+allocation. Crossing an uncached leaf ends the plan, so a later metadata error
+cannot suppress an earlier readable prefix. Physical discontinuities also end it.
+The device fills a packed prefix of the caller's output buffer; spans are moved
+backwards to their logical positions before holes are zeroed. Overlapping moves
+copy backwards within the span. This needs no data buffer or additional heap
+allocation and retains no file bytes after the call. The same journal overlay
+serves the combined read. Failed I/O does not publish that batch as completed;
+earlier completed bytes remain valid. Callers requiring allocated data still stop
+at the first hole or unwritten extent. Encrypted-block decryption and verity
+verification retain their existing boundaries.
 
 `ext4_read_held` uses the existing inode hold as the owner of an optional read
 snapshot and bounded extent-leaf cache. Repeated holds share it. Fully checked

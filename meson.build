@@ -10,7 +10,8 @@ if cc.get_id() in ['clang', 'apple-clang']
 endif
 
 core_sources = files(
-  'core/support.c', 'core/mount.c', 'core/inode.c', 'core/read.c', 'core/map_read.c', 'core/directory.c',
+  'core/support.c', 'core/mount.c', 'core/inode.c', 'core/read.c', 'core/read_io.c',
+  'core/map_read.c', 'core/directory.c',
   'core/directory_lookup.c', 'core/inline.c', 'core/inline_create.c',
   'core/journal.c', 'core/recovery.c', 'core/group.c', 'core/system.c',
   'core/fast_commit.c', 'core/fast_commit_replay.c',

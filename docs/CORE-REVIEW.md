@@ -399,3 +399,66 @@ hashes, console, run record and comparison are in the lab's
 `artifacts/ext4-journal/read-compare-held/`. Before/after analysis and local checks
 are in this repository's `artifacts/checks/read-held/`. The earlier baseline
 remains preserved in `read-compare-inline/`.
+
+## Batched physical reads and sequential mapping
+
+`core/read_io.c` now separates mapped-byte planning and delivery from inode
+lifetime, EOF and cryptographic routing. It combines adjacent physical data even
+when holes separate their logical positions. The plan holds at most 32 spans and
+256 KiB of data, uses the caller's buffer for packing and backwards expansion,
+and allocates no data buffer. Lookahead cannot issue metadata I/O: only already
+validated leaves can extend a plan. A physical discontinuity or uncached leaf
+ends it. The existing exact-read and journal-overlay boundary is unchanged.
+
+A validated extent cursor also remembers the exclusive end of its last mapping
+and the next extent position. At that boundary it advances at most one record;
+other seeks still use binary search. The full-leaf validation and ancestor limits
+remain the source of trust. This avoids repeatedly searching the same leaf while
+building a sequential plan.
+
+Two candidate measurements separate the effects. Batching alone raised sparse
+warm sequential throughput from 16,412.6 to 25,207.6 MiB/s. The sequential cursor
+then raised it to 31,343.4 MiB/s, another 24.3%, without changing callback counts,
+callback bytes or allocations in any profile. From the held-read baseline, this
+is a 91.0% core improvement. The same immutable image, API, warmup, cold cache
+reset, requests and guest configuration were retained for both candidate boots.
+
+| File | Cache | Access | Linux MiB/s | Core MiB/s | Core / Linux | Paired range |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| Contiguous | Warm | Sequential | 32,481.8 | 31,253.4 | 0.962 | 0.939–0.973 |
+| Contiguous | Warm | Random | 4,405.8 | 4,221.0 | 0.958 | 0.940–1.003 |
+| Contiguous | Guest-cold | Sequential | 9,271.0 | 8,381.2 | 0.904 | 0.883–0.950 |
+| Contiguous | Guest-cold | Random | 171.7 | 169.8 | 0.989 | 0.962–1.015 |
+| Sparse | Warm | Sequential | 23,943.9 | 31,343.4 | **1.309** | **1.297–1.343** |
+| Sparse | Warm | Random | 10,624.4 | 15,874.7 | **1.494** | **1.457–1.565** |
+| Sparse | Guest-cold | Sequential | 6,539.6 | 10,692.9 | **1.635** | **1.615–1.670** |
+| Sparse | Guest-cold | Random | 325.4 | 334.6 | 1.028 | 0.988–1.058 |
+
+**Three of eight profiles now exceed Linux by at least 15% in every pair.**
+Warm sparse sequential callbacks per logical GiB fell from 131,072 to 4,544;
+guest-cold sequential callbacks fell from 132,224 to 6,016. Their callback bytes
+and allocations are unchanged. All warm samples again recorded zero actual
+virtual-device I/O. Other profiles' callback counters were unchanged. Between-boot
+changes in both contenders remain visible: the final contiguous cold sequential
+core is faster than the preceding candidate in absolute terms, while its Linux
+ratio fell from 0.958 to 0.904. Do not attribute that movement to the cursor alone.
+
+For contiguous warm sequential I/O, the raw backend diagnostic reached 31,175.2
+MiB/s, essentially the core's 31,253.4 MiB/s; raw warm random reached 4,322.3 versus
+the core's 4,221.0. These measurements leave little core overhead to remove on
+this backend. They do not establish a 15% advantage for contiguous files or native
+FSKit/LXNU adapters. Neither adapter has been switched to the held-read API.
+
+Focused ASan/UBSan range and held-read checks passed, and the optimized freestanding
+build remains within the 2 KiB frame limit. Coverage includes 1–64 KiB blocks,
+checksums on/off, bounded batching, nonadjacent physical data, overlapping expansion,
+unwritten extents, unaligned request ends, a leading hole, failed callbacks that
+overwrite their output, and later metadata failures preserving the earlier prefix.
+Forward, backward and permuted cursor queries compare against an independent
+logical-block model. Full batch regression and native compilation are pending.
+
+Both single candidate boots completed all 140 sample rows and byte checks, powered
+off cleanly and preserved the image. Their preparation and raw evidence are in
+the lab's `artifacts/ext4-journal/read-compare-batched/` and
+`artifacts/ext4-journal/read-compare-batched-cursor/`; derived comparisons and checks
+are in this repository's `artifacts/checks/read-batch/`.

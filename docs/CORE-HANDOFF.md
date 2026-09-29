@@ -33,15 +33,19 @@ FSKit byte reads can use the held-read entry point. XNU/LXNU must retain native
 UBC/cluster I/O and would need held mapping queries to share the leaf cache with
 block-map requests, rather than routing regular I/O around the native page cache.
 
-Sparse warm random core throughput is 15,222.5 MiB/s versus Linux's 9,654.0 MiB/s:
-57.7% faster, with every pair at least 55.4% faster. It is 8.11 times the prior core
-run. Sparse guest-cold sequential reading is 20.8% faster than Linux. The other six
-profiles do not clear the 15% target; keep all eight results and raw-backend
-diagnostics in the review. Cold passes explicitly drop the core's new metadata
-cache and charge reconstruction. Do not claim an overall Linux or native-adapter
-win, or rerun timing qualification without an invalidating change. Sparse warm
-sequential I/O still makes one backend call per data extent; physical adjacency
-across holes is a possible bounded batching opportunity, not an accepted change.
+The next batch implements bounded physical I/O coalescing across logical holes
+in `core/read_io.c`, with in-place expansion and no extra data allocation. A cursor
+advances at sequential extent boundaries and falls back to binary search for other
+seeks. It only reuses fully validated metadata; lookahead performs no device I/O.
+Sparse warm sequential core throughput is now 31,343.4 MiB/s versus Linux's
+23,943.9 MiB/s, a 30.9% advantage and 91.0% above the held-read baseline. Sparse
+warm random is 49.4% faster than Linux, and guest-cold sequential is 63.5% faster.
+These three profiles clear 15% in every pair; the other five do not. Keep all eight
+results and raw-backend diagnostics in the review. Cold passes discard the core
+metadata cache and charge reconstruction. Do not claim an overall Linux or native
+adapter win, or repeat timing qualification without an invalidating change.
+Contiguous warm sequential throughput is already essentially the raw backend's
+throughput; further algorithm changes cannot be assumed to deliver 15% there.
 
 The held-read batch passed the full 712-test ASan/UBSan regression and unsigned
 FSKit plus arm64e/x86_64 kext compilation. Do not repeat those checks for report or
@@ -49,6 +53,9 @@ CI-diagnostic changes. The original CI format job rejected one mutated relaxed
 casefold image; its stdout and image were lost by the old checker. Local reruns
 and the complete diagnostic CI format job passed. Preserve this as an unexplained
 failure: improved logging and a passing rerun do not prove a filesystem fix.
+The later batching/cursor batch has focused and VM evidence; its full regression
+and unsigned native compilation are pending. Preserve the separate evidence for
+the two batches and compiled revisions when continuing work.
 
 Both adapters remain read-only. FSKit integration precedes LXNU policy; signing
 is deferred. No host kernel, boot-policy, NVRAM or system-file changes are authorized.

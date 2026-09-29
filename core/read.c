@@ -12,55 +12,6 @@ struct ext4_read_state {
 	uint64_t revision;
 };
 
-static enum ext4_result
-ext4_read_mapping(struct ext4_fs *fs, const struct ext4_inode *inode,
-    struct ext4_map_reader *reader, uint64_t offset, void *buffer, size_t length, bool require_data,
-    size_t *completed)
-{
-	uint8_t *output = buffer;
-	uint64_t physical;
-	uint64_t logical;
-	uint64_t blocks;
-	uint64_t bytes;
-	size_t chunk;
-	size_t in_block;
-	enum ext4_result error;
-
-	*completed = 0;
-	while (*completed < length) {
-		logical = offset / fs->info.block_size;
-		if (logical > UINT32_MAX) {
-			return EXT4_RANGE;
-		}
-		in_block = (size_t)(offset % fs->info.block_size);
-		error =
-		    ext4_map_reader_next(fs, inode, reader, (uint32_t)logical, &physical, &blocks);
-		if (error != EXT4_OK) {
-			return error;
-		}
-		bytes = blocks * fs->info.block_size - in_block;
-		chunk = length - *completed;
-		if (bytes < chunk) {
-			chunk = (size_t)bytes;
-		}
-		if (physical == 0) {
-			if (require_data) {
-				return EXT4_CORRUPT;
-			}
-			ext4_zero(output + *completed, chunk);
-		} else {
-			error = ext4_device_read(fs, physical * fs->info.block_size + in_block,
-			    output + *completed, chunk);
-			if (error != EXT4_OK) {
-				return error;
-			}
-		}
-		*completed += chunk;
-		offset += chunk;
-	}
-	return EXT4_OK;
-}
-
 enum ext4_result
 ext4_read_mapped(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, void *buffer,
     size_t length, bool require_data, size_t *completed)
@@ -68,8 +19,8 @@ ext4_read_mapped(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t of
 	struct ext4_map_reader reader = { 0 };
 	enum ext4_result error;
 
-	error =
-	    ext4_read_mapping(fs, inode, &reader, offset, buffer, length, require_data, completed);
+	error = ext4_map_reader_read(
+	    fs, inode, &reader, offset, buffer, length, require_data, completed);
 	ext4_map_reader_close(fs, &reader);
 	return error;
 }
@@ -266,7 +217,7 @@ ext4_read_with_mapping(struct ext4_fs *fs, const struct ext4_inode *inode,
 		*completed = length;
 		return EXT4_OK;
 	}
-	return ext4_read_mapping(fs, inode, reader, offset, buffer, length, false, completed);
+	return ext4_map_reader_read(fs, inode, reader, offset, buffer, length, false, completed);
 }
 
 enum ext4_result
