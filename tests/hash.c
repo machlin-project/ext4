@@ -55,7 +55,7 @@ hash_streams(void)
 		length = hash_vectors[vector].length;
 		decode_digest(hash_vectors[vector].sha256, expected256, sizeof(expected256));
 		decode_digest(hash_vectors[vector].sha512, expected512, sizeof(expected512));
-		for (alignment = 0; alignment < 8U; alignment++) {
+		for (alignment = 0; alignment < 16U; alignment++) {
 			/* The input ends at the allocation boundary, exposing overreads to ASan. */
 			allocation = malloc(length + alignment + (length == 0));
 			CHECK(allocation != NULL);

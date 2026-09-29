@@ -1,7 +1,15 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "sha.h"
 
-/* FIPS 180-4 SHA-256 and SHA-512 with immutable round constants, byte-wise
+/* The target must guarantee SHA-256 instructions and permit SIMD use. Kernel
+ * builds retain the portable transform until native SIMD ownership is accepted. */
+#if defined(__aarch64__) && defined(__ARM_FEATURE_SHA2) && defined(__ARM_NEON) &&                  \
+    !defined(KERNEL) && !defined(EXT4_SHA_PORTABLE) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#include <arm_neon.h>
+#define EXT4_SHA256_ARM64 1
+#endif
+
+/* FIPS 180-4 SHA-256 and SHA-512 with immutable round constants,
  * big-endian message decoding and no allocation or mutable global state.
  * Full input blocks are consumed directly, including unaligned input; only a
  * partial block is copied into the context's streaming buffer. */
@@ -46,11 +54,14 @@ static const uint64_t ext4_sha512_rounds[80] = { UINT64_C(0x428a2f98d728ae22),
 	UINT64_C(0x4cc5d4becb3e42b6), UINT64_C(0x597f299cfc657e2a), UINT64_C(0x5fcb6fab3ad6faec),
 	UINT64_C(0x6c44198c4a475817) };
 
+#ifndef EXT4_SHA256_ARM64
 static uint32_t
 ext4_rotate32(uint32_t value, unsigned int count)
 {
 	return (value >> count) | (value << (32U - count));
 }
+
+#endif
 
 static uint64_t
 ext4_rotate64(uint64_t value, unsigned int count)
@@ -58,6 +69,42 @@ ext4_rotate64(uint64_t value, unsigned int count)
 	return (value >> count) | (value << (64U - count));
 }
 
+#ifdef EXT4_SHA256_ARM64
+/* Four rounds keep the two halves' original state paired. The schedule ring
+ * consumes four words and replaces only that slot with the words 16 rounds on. */
+static void
+ext4_sha256_block(struct ext4_sha256 *context, const uint8_t *block)
+{
+	uint32x4_t initial_abcd = vld1q_u32(context->state);
+	uint32x4_t initial_efgh = vld1q_u32(context->state + 4U);
+	uint32x4_t abcd = initial_abcd;
+	uint32x4_t efgh = initial_efgh;
+	uint32x4_t messages[4];
+	uint32x4_t words;
+	uint32x4_t previous;
+	unsigned int round;
+	unsigned int slot;
+
+	for (slot = 0; slot < 4U; slot++) {
+		messages[slot] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block + slot * 16U)));
+	}
+	for (round = 0; round < 16U; round++) {
+		slot = round % 4U;
+		words = vaddq_u32(messages[slot], vld1q_u32(ext4_sha256_rounds + round * 4U));
+		previous = abcd;
+		abcd = vsha256hq_u32(abcd, efgh, words);
+		efgh = vsha256h2q_u32(efgh, previous, words);
+		if (round < 12U) {
+			messages[slot] = vsha256su1q_u32(
+			    vsha256su0q_u32(messages[slot], messages[(slot + 1U) % 4U]),
+			    messages[(slot + 2U) % 4U], messages[(slot + 3U) % 4U]);
+		}
+	}
+	vst1q_u32(context->state, vaddq_u32(abcd, initial_abcd));
+	vst1q_u32(context->state + 4U, vaddq_u32(efgh, initial_efgh));
+}
+
+#else
 /* One FIPS 180-4 round. Eight calls rotate the roles of the working words,
  * removing the seven explicit word moves from each loop iteration. */
 static inline void
@@ -121,6 +168,8 @@ ext4_sha256_block(struct ext4_sha256 *context, const uint8_t *block)
 		context->state[index] += work[index];
 	}
 }
+
+#endif
 
 /* One FIPS 180-4 round. Eight calls rotate the roles of the working words,
  * removing the seven explicit word moves from each loop iteration. */

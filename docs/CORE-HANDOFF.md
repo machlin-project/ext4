@@ -33,7 +33,7 @@ FSKit byte reads can use the held-read entry point. XNU/LXNU must retain native
 UBC/cluster I/O and would need held mapping queries to share the leaf cache with
 block-map requests, rather than routing regular I/O around the native page cache.
 
-The next batch implements bounded physical I/O coalescing across logical holes
+The read path implements bounded physical I/O coalescing across logical holes
 in `core/read_io.c`, with in-place expansion and no extra data allocation. A cursor
 advances at sequential extent boundaries and falls back to binary search for other
 seeks. It only reuses fully validated metadata; lookahead performs no device I/O.
@@ -53,9 +53,22 @@ CI-diagnostic changes. The original CI format job rejected one mutated relaxed
 casefold image; its stdout and image were lost by the old checker. Local reruns
 and the complete diagnostic CI format job passed. Preserve this as an unexplained
 failure: improved logging and a passing rerun do not prove a filesystem fix.
-The later batching/cursor batch has focused and VM evidence; its full regression
-and unsigned native compilation are pending. Preserve the separate evidence for
-the two batches and compiled revisions when continuing work.
+The later batching/cursor batch also passed 712/712 ASan/UBSan tests, with the same
+29 explicit applicability skips, unchanged captured source/binary hashes and both
+kext plus unsigned FSKit builds. Preserve the separate evidence for the two batches
+and compiled revisions when continuing work.
+
+The following SHA-256 instruction batch enables ACLE rounds only in eligible
+little-endian ARM64 userspace builds; kernel and other builds retain the portable
+transform. Its measured hash speedup is 4.4–4.8 times the scalar core, separate from
+the Linux read target. A Meson test explicitly retains scalar-path coverage, and
+the shared hash vectors now cover 16 alignments. CRC is unchanged: its alignment
+prototype regressed short unaligned userspace inputs and was rejected. See the
+review for measurements. The final source passed 18/18 focused ASan/UBSan checks
+and both unsigned kext plus FSKit builds, recorded in
+`artifacts/checks/sha-instructions/`. The earlier 712-test read regression does not
+validate these later edits; track the new full CI matrix separately without holding
+up development while it runs.
 
 Both adapters remain read-only. FSKit integration precedes LXNU policy; signing
 is deferred. No host kernel, boot-policy, NVRAM or system-file changes are authorized.

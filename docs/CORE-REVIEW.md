@@ -449,16 +449,79 @@ the core's 4,221.0. These measurements leave little core overhead to remove on
 this backend. They do not establish a 15% advantage for contiguous files or native
 FSKit/LXNU adapters. Neither adapter has been switched to the held-read API.
 
+This is a limit on the demonstrated benefit of removing mapping work in this
+profile, not an established ceiling for reads generally. The diagnostic uses a
+16 MiB contiguous file, 1 MiB sequential requests and 4 KiB random requests through
+a buffered block-device backend. Warm random requests take a median 925.4 ns in
+the core versus 903.7 ns directly through that backend. Guest-cold sequential
+device traffic is 1.06299 bytes per requested byte for the core, 1.0625 for the raw
+backend and 1.0 for Linux file reads. This locates excess traffic below the core's
+mapping layer; readahead is a candidate explanation, not a measured cause. Larger
+files, different request sizes, concurrent reads, verity and native adapter paths
+need their own evidence. The recorded diagnostic breakdown is in
+`artifacts/checks/read-batch/backend-cost.json`.
+
 Focused ASan/UBSan range and held-read checks passed, and the optimized freestanding
 build remains within the 2 KiB frame limit. Coverage includes 1–64 KiB blocks,
 checksums on/off, bounded batching, nonadjacent physical data, overlapping expansion,
 unwritten extents, unaligned request ends, a leading hole, failed callbacks that
 overwrite their output, and later metadata failures preserving the earlier prefix.
 Forward, backward and permuted cursor queries compare against an independent
-logical-block model. Full batch regression and native compilation are pending.
+logical-block model. The single full batch regression passed **712/712 tests**
+under ASan/UBSan in 21 minutes 26.77 seconds, with no failed or wholly skipped tests.
+The 29 existing in-test applicability skips remain separate. All 168 captured source
+and build-input hashes and 50 test/library binary hashes stayed unchanged. Unsigned
+arm64e and x86_64 kext builds, the unsigned FSKit build and formatting checks passed.
+These are compilation results, not native installation or mount acceptance.
 
 Both single candidate boots completed all 140 sample rows and byte checks, powered
 off cleanly and preserved the image. Their preparation and raw evidence are in
 the lab's `artifacts/ext4-journal/read-compare-batched/` and
 `artifacts/ext4-journal/read-compare-batched-cursor/`; derived comparisons and checks
 are in this repository's `artifacts/checks/read-batch/`.
+
+## ARM64 SHA-256 instructions
+
+Little-endian ARM64 userspace builds now use the target's SHA-256 instructions
+through [Arm ACLE intrinsics](https://arm-software.github.io/acle/neon_intrinsics/advsimd.html#sha256).
+The compression transform processes four rounds at a time and keeps a four-vector
+message schedule. The compiler target must guarantee the instructions. Kernel
+builds, other targets and builds defining `EXT4_SHA_PORTABLE` retain the scalar
+transform. Streaming, salt-state cloning, context layout and digest format are
+unchanged. The scalar path has its own unconditional Meson test, and both paths
+exercise 16 input alignments, exact allocation ends and the independent streaming
+vectors. Enabling the new cryptographic SIMD path in XNU requires separate native
+acceptance; existing kernel memory-copy instructions do not establish that result.
+
+On the Apple M4 Pro, Apple Clang 21 O2 builds alternated baseline/candidate/candidate/
+baseline after the read regression finished and before native builds resumed.
+Each execution measured nine samples per size with 8 MiB per sample, using the
+existing hash harness and unaligned input. All digests matched across all four
+runs. Rates below are medians across 18 samples per version, in MiB/s:
+
+| SHA-256 input | Scalar | Instructions | Throughput ratio |
+| --- | ---: | ---: | ---: |
+| 64 B | 210.7 | 929.6 | 4.412 |
+| 1 KiB | 425.1 | 2,029.2 | 4.773 |
+| 4 KiB | 451.2 | 2,117.0 | 4.692 |
+| 64 KiB | 459.6 | 2,182.5 | 4.749 |
+
+The unchanged SHA-512 control ratios ranged from 0.989 to 1.013. These are hash
+microbenchmarks against the previous core, not Linux file-read or mounted FSKit
+results. Ordinary read throughput does not acquire this multiplier. The final
+source passed **18/18 focused ASan/UBSan checks**: accelerated and portable hashes,
+reference crypto, every configured verity/encrypted read and write profile, verity
+enabling, and sustained encrypted/verity operation. Unsigned arm64e/x86_64 kext and
+FSKit builds passed. The complete read-batch regression above predates this SHA
+change; the full CI matrix for the new source is separate and may run in the
+background. Native builds do not establish installation or mount acceptance.
+
+A CRC alignment experiment was not retained. It reduced ordinary userspace
+throughput to 58–61% of the baseline on unaligned 64-byte inputs. A strict-alignment
+userspace diagnostic improved some profiles, but did not establish kernel runtime
+performance. The existing CRC implementation is unchanged. Copy/zero already use
+compiler-generated vector instructions on ARM64, and CRC already uses `CRC32CX`;
+writing those same instructions in inline assembly is not itself an optimization.
+Raw disassembly, rejected prototypes, correctness logs and all timing rows remain
+under `artifacts/checks/instruction-audit/`; final integration evidence belongs in
+`artifacts/checks/sha-instructions/`.

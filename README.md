@@ -28,9 +28,9 @@ The current phase is final review, code organization and measured performance wo
 See [the review and performance criteria](docs/CORE-REVIEW.md). The target is 15%
 higher throughput than Linux on matched filesystem workloads; SHA/AES measurements
 are separate. The general target remains open; the review records all measured
-read profiles, including one that exceeds it and the remaining gaps. AES and key
-management are adapter services, while the core has portable SHA and metadata
-checksums.
+read profiles, including three that exceed it and the remaining gaps. AES and key
+management are adapter services, while the core has portable SHA, ARM64 userspace
+SHA-256 acceleration and metadata checksums.
 
 Both native adapters remain read-only. FSKit builds unsigned, but installation and
 mount acceptance await a signing profile with FSKit Module capability. The arm64e

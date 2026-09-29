@@ -31,9 +31,15 @@ fixed at compile time. Other targets, including the x86_64 kernel build, keep th
 table.
 
 SHA-256 and SHA-512 consume complete input blocks directly, including unaligned
-buffers, and retain only partial streaming blocks. The decoder uses byte loads,
-so this introduces neither alignment assumptions nor reads past the input. Eight
-compression rounds per loop rotate working-word roles through inline functions.
+buffers, and retain only partial streaming blocks. The portable decoder uses byte
+loads; eight compression rounds per loop rotate working-word roles through inline
+functions. Little-endian ARM64 userspace targets that guarantee SHA-256 instructions
+use ACLE intrinsics for four rounds at a time and a four-vector schedule ring.
+Loads consume exactly one complete block without alignment assumptions. Kernel
+builds retain the portable transform pending native SIMD ownership acceptance;
+other targets and `EXT4_SHA_PORTABLE` builds also retain it. Both paths run the same
+independent digest and streaming tests. There is no runtime feature probe or new
+allocation, and the streaming context and digest format are unchanged.
 Verity configuration hashes the padded salt once and keeps that initial context; each
 Merkle block clones it. The per-read/per-enable context owns this state, without
 a global cache or changed digest format. These portable paths allocate no memory

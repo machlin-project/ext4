@@ -69,6 +69,10 @@ foreach name, source : {
   programs += {name: executable('ext4-' + name + '-test', 'tests/' + source + '.c',
     include_directories: internal_headers, dependencies: posix_dependency)}
 endforeach
+# Test the scalar SHA fallback even when the host enables hardware SHA rounds.
+programs += {'hash-portable': executable('ext4-hash-portable-test',
+  ['tests/hash.c', 'core/sha.c'], include_directories: internal_headers,
+  dependencies: ext4_dependency, c_args: core_arguments + ['-DEXT4_SHA_PORTABLE'])}
 programs += {'directory-hash': executable('ext4-directory-hash-test', 'tests/directory_hash.c',
   include_directories: internal_headers, dependencies: ext4_dependency)}
 programs += {'crypto-vectors': executable('ext4-crypto-vectors-test', 'tests/crypto_vectors.c',
