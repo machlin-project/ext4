@@ -214,3 +214,95 @@ encrypted reads and avoidable base-device reads fully covered by pending journal
 snapshots. Both require ownership/error-path tests before changing behavior.
 Larger journal decomposition should follow these ownership boundaries and have a
 separate behavioral acceptance; moving code between files alone is not a speedup.
+
+## Same-guest ordinary reads
+
+The first matched read comparison exposed repeated extent-tree walks as a major
+cost on sparse files. A read now retains its checked extent leaf for the duration
+of that call and uses binary search for subsequent ranges. Crossing an ancestor's
+index boundary restarts validation; no mapping cache survives the call. The wire
+decode/encode helpers have their unchanged byte-based bodies inlined, allowing
+metadata scans to avoid an external call for each field. The change adds neither
+platform instructions nor a data cache and uses the existing single scratch block.
+
+The final probe runs both readers in the qualified Linux guest: two CPUs,
+512 MiB, CPU 0 affinity, Linux 6.12.94-0-virt aarch64. Both read the same immutable,
+checksummed 4 KiB-block ext4 device. The core uses exact buffered raw-device `pread`;
+Linux uses its mounted ext4 file `pread`. Files are 16 MiB: one contiguous extent,
+or alternating 4 KiB data and holes with 2,048 extents. There is no userspace image
+preload, private data cache, mmap backend or added core readahead. Mount, lookup,
+warmup and independent full-file validation are outside timing. This measures the
+library/backend boundary against Linux VFS; it does not establish native adapter
+performance or other file sizes and fragmentation patterns.
+
+Seven interleaved samples per reader cover sequential 1 MiB and permuted 4 KiB
+requests. Warm samples read 8 GiB and 1 GiB, respectively. Guest-cold samples read
+2 GiB and 64 MiB, dropping guest caches before each complete 16 MiB pass outside
+timing. Host/storage caches remain warm or uncontrolled. All warm profiles recorded
+zero virtual-device reads for both contenders. Final throughputs below use median
+elapsed time; paired ranges show every Linux/core time ratio rather than a
+confidence interval. With seven samples, nearest-rank p95 is the maximum sample.
+
+| File | Cache | Access | Linux MiB/s | Core MiB/s | Core / Linux | Paired range |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| Contiguous | Warm | Sequential | 32,987.3 | 31,705.8 | 0.961 | 0.934–0.974 |
+| Contiguous | Warm | Random | 4,469.0 | 4,367.9 | 0.977 | 0.948–1.003 |
+| Contiguous | Guest-cold | Sequential | 9,415.0 | 8,719.0 | 0.926 | 0.905–0.974 |
+| Contiguous | Guest-cold | Random | 173.5 | 172.4 | 0.994 | 0.971–1.012 |
+| Sparse | Warm | Sequential | 24,355.2 | 16,364.3 | 0.672 | 0.666–0.678 |
+| Sparse | Warm | Random | 10,646.0 | 1,877.7 | 0.176 | 0.172–0.182 |
+| Sparse | Guest-cold | Sequential | 6,669.3 | 8,186.5 | **1.227** | **1.205–1.281** |
+| Sparse | Guest-cold | Random | 325.8 | 286.3 | 0.879 | 0.798–1.026 |
+
+Only sparse guest-cold sequential reading clears 1.15 in every pair. **The general
+15% target is not achieved.** For sparse warm sequential reading, core throughput
+improved 10.40 times over the initial baseline; warm random reading improved 29.3%.
+The initial sequential batches were shorter; the final and intermediate cursor
+runs use the longer batches described above. These before/after figures normalize
+bytes and elapsed time, and must not be confused with the Linux ratios.
+
+Per GiB of sparse sequential logical data, core read callbacks fell from 655,360
+to 133,888 and callback bytes from 2.50 GiB to 0.511 GiB. Allocations stayed at
+1,024 per GiB, one scratch allocation per 1 MiB request. The 4 KiB random API calls
+still re-read and revalidate external mapping nodes and cannot share that scratch.
+The remaining warm random gap is substantial; it is not covered by the one passing
+profile.
+
+A diagnostic third contender reads the contiguous file's checked physical range
+directly through the same backend, bypassing every core filesystem operation.
+Its throughput relative to Linux was 0.933 warm sequential, 0.987 warm random,
+0.930 guest-cold sequential and 1.004 guest-cold random. This measured backend
+limit leaves no demonstrated 15% headroom for contiguous reads through this
+interface. Removing more mapping instructions cannot remove its I/O boundary.
+This is evidence about the present harness, not a proof about all backends or
+native FSKit/LXNU performance.
+
+Further work belongs at explicit ownership boundaries: bounded mapping reuse
+across requests needs invalidation for mutation, truncation and deferred journal
+state; batching sparse I/O needs an adapter capability or carefully bounded
+gathering. FSKit resource I/O and XNU's existing UBC/clustered read path must be
+measured separately. A private replacement for the native page cache, an mmap-only
+test backend or disabling Linux caching would not establish the requested product
+advantage. Encrypted and verity reads remain separate profiles.
+
+The range regression covers checked-leaf reuse, fresh mapping contents on a later
+call, corruption outside the requested range, partial I/O errors, allocation
+failure, ancestor boundaries and EOF across the supported block sizes. The final
+focused ASan/UBSan selection (`image-reader`, `file-read-ranges`, `malformed-images`)
+passes all three tests. Both final guest readers validated their output, all 140
+sample rows were complete, the guest powered off cleanly and the image hash was
+unchanged. The single end-of-batch ASan/UBSan regression then passed **711/711**
+tests in 21 minutes 12 seconds, with no failures or whole-test skips. The existing
+29 in-test applicability skips remain separate: two inode-body checks on 128-byte
+inodes and 27 directory-split transitions assigned to other fixture profiles.
+Unsigned arm64e and x86_64 kext compilation, including the 2 KiB frame check, and
+the final style/diff checks pass. No extension was installed or booted for this
+batch. GitHub CI for this optimized source is still running at report collection;
+earlier green CI does not close that run.
+
+Commands, raw console, all samples, CPU/I/O counters, source/binary identities and
+checks are in the lab's `artifacts/ext4-journal/read-compare-baseline-2/`,
+`read-compare-cursor/` and `read-compare-inline/`. The last directory is the final
+implementation; earlier measurements remain preserved. Local test/build logs are
+under this repository's `artifacts/checks/read-performance/`. The preparation and
+analysis commands are documented in [DEVELOPMENT.md](DEVELOPMENT.md).

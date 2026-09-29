@@ -23,6 +23,17 @@ and filesystem workload with equivalent durability. SHA/AES results are separate
 old/new core measurements cannot establish the Linux target. Read the current
 review report for evidence, remaining coverage and the comparison protocol.
 
+The same-guest ordinary-read comparison is now implemented. Checked extent leaves
+are reused within each read, and wire accessors are inline. The overall Linux target
+remains open: one sparse sequential profile exceeds it, while random sparse reads
+still repeat mapping work across API calls. The contiguous raw-backend diagnostic
+shows that this harness has no demonstrated 15% headroom even without filesystem
+work. Preserve all eight reported profiles and keep the raw diagnostic separate
+from core results. Do not rerun VM timing qualification or the initial baseline
+without a change that invalidates them. Further cross-request mapping reuse must
+have an explicit mutation/journal invalidation contract; native cache and I/O costs
+belong to the adapters. See the ordinary-read section of the review for exact data.
+
 Both adapters remain read-only. FSKit integration precedes LXNU policy; signing
 is deferred. No host kernel, boot-policy, NVRAM or system-file changes are authorized.
 Native cryptography and write/page-cache integration require their own acceptance.

@@ -1167,8 +1167,8 @@ validation, the read retains that private leaf and locates subsequent data/hole
 ranges with binary search. An ancestor's next-index boundary limits reuse; crossing
 it restarts the checked descent before overwriting scratch. Inline extent maps and
 direct pointers need no scratch buffer. No leaf or validation state survives the
-read, so later calls observe changed mapping nodes and validate them again. Native mappings end
-at the block containing EOF even if later blocks are preallocated. The platform
+read, so later calls observe changed mapping nodes and validate them again. Native
+mappings end at the block containing EOF even if later blocks are preallocated. The platform
 owner zeroes padding in that final block before exposing it through its page cache.
 The range tests cover holes, unwritten extents, ancestor transitions, partial
 failure, allocation failure, changed nodes between calls and corrupt records outside

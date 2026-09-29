@@ -306,7 +306,7 @@ checked physical offset. This diagnoses the backend's achievable speed; it is
 never a core result. `tests/check_read_benchmark.py CONSOLE --output REPORT`
 requires complete paired profiles, verifies equal work and reports all eight
 core/Linux comparisons, medians/p95 and every paired throughput ratio. All seven
-ratios must exceed 1.15 for the reported per-profile target flag; the flag is not
+ratios must reach 1.15 for the reported per-profile target flag; the flag is not
 a statistical confidence interval or a claim about mounted FSKit/LXNU performance.
 
 ## Multi-mount protection tests
