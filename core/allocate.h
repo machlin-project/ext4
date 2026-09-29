@@ -144,6 +144,9 @@ enum ext4_result ext4_write_map_mergeable(struct ext4_allocation *allocation,
 enum ext4_result ext4_write_map_lookup(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, const struct ext4_inode_disk *disk, uint32_t logical,
     struct ext4_map_run *run);
+/* Return mapped backing with allocation and protected-range checks complete.
+ * Existing blocks are validated; new blocks come from a checked bitmap. Callers
+ * must still reject aliases between different requested logical blocks. */
 enum ext4_result ext4_write_map_allocate(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t logical,
     uint64_t *physical, bool *zero);

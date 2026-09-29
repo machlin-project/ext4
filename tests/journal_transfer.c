@@ -22,6 +22,7 @@
 #define DATA_FIRST 12U
 #define DATA_SECOND 13U
 #define HOME_BYTE 0x11U
+#define ALLOCATION_BYTE 0xa5U
 
 struct device {
 	uint8_t *home;
@@ -44,6 +45,8 @@ device_allocate(void *context, size_t size)
 	}
 	buffer = malloc(size);
 	CHECK(buffer != NULL);
+	/* The environment does not promise zero-filled memory. */
+	memset(buffer, ALLOCATION_BYTE, size);
 	device->live++;
 	return buffer;
 }
@@ -88,7 +91,7 @@ stage(struct ext4_transaction *transaction, uint32_t block, bool data, uint8_t v
 	struct ext4_fs *fs = ext4_transaction_fs(transaction);
 	void *buffer;
 
-	CHECK((data ? ext4_transaction_data(transaction, block, true, &buffer)
+	CHECK((data ? ext4_transaction_data_replace(transaction, block, &buffer)
 		    : ext4_transaction_buffer_blank(transaction, block, &buffer)) == EXT4_OK);
 	memset(buffer, value, fs->info.block_size);
 	return buffer;

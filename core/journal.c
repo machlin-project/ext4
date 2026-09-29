@@ -2,6 +2,12 @@
 #include "journal.h"
 #include "quota.h"
 
+enum ext4_snapshot_contents {
+	EXT4_SNAPSHOT_CURRENT,
+	EXT4_SNAPSHOT_ZERO,
+	EXT4_SNAPSHOT_REPLACE,
+};
+
 struct ext4_transaction_entry {
 	uint64_t block;
 	void *buffer;
@@ -915,6 +921,32 @@ ext4_transaction_size(uint32_t credits)
 	    (size_t)ext4_transaction_slot_count(credits) * sizeof(uint32_t);
 }
 
+/* Private transactions and retained snapshot sets share storage, but their
+ * admission and publication belong to their callers. Entries are initialized
+ * when enrolled; only the header and empty index need initialization here. */
+static struct ext4_transaction *
+ext4_transaction_allocate(struct ext4_journal *journal, uint32_t capacity)
+{
+	struct ext4_transaction *transaction;
+	uint32_t slots = ext4_transaction_slot_count(capacity);
+	uint32_t slot;
+	size_t size = ext4_transaction_size(capacity);
+
+	transaction = journal->fs->environment.allocate(journal->fs->environment.context, size);
+	if (transaction == NULL) {
+		return NULL;
+	}
+	ext4_zero(transaction, sizeof(*transaction));
+	transaction->journal = journal;
+	transaction->capacity = capacity;
+	transaction->slots = (uint32_t *)(transaction->entries + capacity);
+	transaction->slot_mask = slots - 1U;
+	for (slot = 0; slot < slots; slot++) {
+		transaction->slots[slot] = UINT32_MAX;
+	}
+	return transaction;
+}
+
 static uint32_t
 ext4_transaction_slot(const struct ext4_transaction *transaction, uint64_t block)
 {
@@ -956,10 +988,7 @@ ext4_transaction_create(struct ext4_journal *journal, uint32_t credits, bool rec
     uint32_t sequence, struct ext4_transaction **result)
 {
 	struct ext4_transaction *transaction;
-	uint32_t slots;
-	uint32_t slot;
 	uint32_t capacity;
-	size_t size;
 	enum ext4_result error;
 
 	if (result == NULL) {
@@ -989,21 +1018,11 @@ ext4_transaction_create(struct ext4_journal *journal, uint32_t credits, bool rec
 	if (!journal->direct && capacity * 2U + 1U >= journal->last - journal->first) {
 		return EXT4_RANGE;
 	}
-	size = ext4_transaction_size(capacity);
-	transaction = journal->fs->environment.allocate(journal->fs->environment.context, size);
+	transaction = ext4_transaction_allocate(journal, capacity);
 	if (transaction == NULL) {
 		return EXT4_NO_MEMORY;
 	}
-	ext4_zero(transaction, size);
-	slots = ext4_transaction_slot_count(capacity);
-	transaction->slots = (uint32_t *)(transaction->entries + capacity);
-	transaction->slot_mask = slots - 1U;
-	for (slot = 0; slot < slots; slot++) {
-		transaction->slots[slot] = UINT32_MAX;
-	}
-	transaction->journal = journal;
 	transaction->credits = credits;
-	transaction->capacity = capacity;
 	transaction->sequence = recovery ? sequence : journal->sequence;
 	transaction->recovery = recovery;
 	journal->transaction_active = true;
@@ -1027,7 +1046,7 @@ ext4_transaction_begin_recovery(struct ext4_journal *journal, uint32_t sequence,
 
 static enum ext4_result
 ext4_transaction_snapshot(struct ext4_transaction *transaction, uint64_t block, bool primary,
-    bool blank, bool data, void **result)
+    enum ext4_snapshot_contents contents, bool data, void **result)
 {
 	struct ext4_journal *journal;
 	struct ext4_fs *fs;
@@ -1063,10 +1082,10 @@ ext4_transaction_snapshot(struct ext4_transaction *transaction, uint64_t block, 
 	if (buffer == NULL) {
 		return EXT4_NO_MEMORY;
 	}
-	if (blank) {
+	error = EXT4_OK;
+	if (contents == EXT4_SNAPSHOT_ZERO) {
 		ext4_zero(buffer, fs->info.block_size);
-		error = EXT4_OK;
-	} else {
+	} else if (contents == EXT4_SNAPSHOT_CURRENT) {
 		error = ext4_block_read(fs, block, buffer);
 	}
 	if (error != EXT4_OK) {
@@ -1084,20 +1103,30 @@ ext4_transaction_snapshot(struct ext4_transaction *transaction, uint64_t block, 
 enum ext4_result
 ext4_transaction_buffer(struct ext4_transaction *transaction, uint64_t block, void **result)
 {
-	return ext4_transaction_snapshot(transaction, block, false, false, false, result);
+	return ext4_transaction_snapshot(
+	    transaction, block, false, EXT4_SNAPSHOT_CURRENT, false, result);
 }
 
 enum ext4_result
 ext4_transaction_buffer_blank(struct ext4_transaction *transaction, uint64_t block, void **result)
 {
-	return ext4_transaction_snapshot(transaction, block, false, true, false, result);
+	return ext4_transaction_snapshot(
+	    transaction, block, false, EXT4_SNAPSHOT_ZERO, false, result);
 }
 
 enum ext4_result
 ext4_transaction_data(
     struct ext4_transaction *transaction, uint64_t block, bool blank, void **result)
 {
-	return ext4_transaction_snapshot(transaction, block, false, blank, true, result);
+	return ext4_transaction_snapshot(transaction, block, false,
+	    blank ? EXT4_SNAPSHOT_ZERO : EXT4_SNAPSHOT_CURRENT, true, result);
+}
+
+enum ext4_result
+ext4_transaction_data_replace(struct ext4_transaction *transaction, uint64_t block, void **result)
+{
+	return ext4_transaction_snapshot(
+	    transaction, block, false, EXT4_SNAPSHOT_REPLACE, true, result);
 }
 
 void
@@ -1156,8 +1185,8 @@ ext4_transaction_super(struct ext4_transaction *transaction, struct ext4_super_d
 	 * whose checksum commit recalculates. */
 	enrolled =
 	    ext4_transaction_peek(transaction, EXT4_SUPER_OFFSET / fs->info.block_size) != NULL;
-	error = ext4_transaction_snapshot(
-	    transaction, EXT4_SUPER_OFFSET / fs->info.block_size, true, false, false, &buffer);
+	error = ext4_transaction_snapshot(transaction, EXT4_SUPER_OFFSET / fs->info.block_size,
+	    true, EXT4_SNAPSHOT_CURRENT, false, &buffer);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -1587,23 +1616,12 @@ ext4_journal_set_create(
     struct ext4_journal *journal, uint32_t capacity, struct ext4_transaction **result)
 {
 	struct ext4_transaction *set;
-	uint32_t slots = ext4_transaction_slot_count(capacity);
-	uint32_t slot;
-	size_t size = ext4_transaction_size(capacity);
 
-	set = journal->fs->environment.allocate(journal->fs->environment.context, size);
+	set = ext4_transaction_allocate(journal, capacity);
 	if (set == NULL) {
 		return EXT4_NO_MEMORY;
 	}
-	ext4_zero(set, size);
-	set->slots = (uint32_t *)(set->entries + capacity);
-	set->slot_mask = slots - 1U;
-	for (slot = 0; slot < slots; slot++) {
-		set->slots[slot] = UINT32_MAX;
-	}
-	set->journal = journal;
 	set->credits = capacity;
-	set->capacity = capacity;
 	set->sequence = journal->sequence;
 	set->held = true;
 	*result = set;

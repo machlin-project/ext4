@@ -196,6 +196,11 @@ enum ext4_result ext4_transaction_buffer(
  * ordered data it is written in place before the commit instead of logged. */
 enum ext4_result ext4_transaction_data(
     struct ext4_transaction *transaction, uint64_t block, bool blank, void **result);
+/* Private data storage with unspecified contents, including an earlier snapshot
+ * if already enrolled. The caller must fill the whole block before committing,
+ * or cancel the transaction on failure. No old-data read or clearing is needed. */
+enum ext4_result ext4_transaction_data_replace(
+    struct ext4_transaction *transaction, uint64_t block, void **result);
 /* Record blocks this transaction frees for ordered data's reuse rule. */
 void ext4_transaction_freed(struct ext4_transaction *transaction, uint64_t block, uint64_t length);
 /* Enroll a block whose previous contents the caller replaces completely: a new

@@ -15,11 +15,13 @@
 #define TEST_WRITE_FIELDS (EXT4_ATTR_PERMISSIONS | EXT4_ATTR_MODIFY_TIME | EXT4_ATTR_CHANGE_TIME)
 #define TEST_MAPPING_BLOCKS 6U
 #define TEST_MAPPING_STRIDE 2U
+#define TEST_ALLOCATION_BYTE 0xa5U
 
 enum test_mapping_case {
 	TEST_MAPPING_DUPLICATE,
 	TEST_MAPPING_NODE_ALIAS,
 	TEST_MAPPING_PROTECTED,
+	TEST_MAPPING_FREE,
 	TEST_MAPPING_REVERSED,
 	TEST_MAPPING_INTERLEAVED,
 	TEST_MAPPING_CASES
@@ -81,6 +83,8 @@ device_allocate(void *context, size_t size)
 	}
 	buffer = malloc(size);
 	if (buffer != NULL) {
+		/* Expose incomplete initialization in full writes and fresh partial blocks. */
+		memset(buffer, TEST_ALLOCATION_BYTE, size);
 		device->live++;
 	}
 	return buffer;
@@ -1576,6 +1580,36 @@ truncate_sparse_limits(struct device *device)
 	printf("truncate sparse limits: maximum size, no allocation, hardlink identity\n");
 }
 
+static uint64_t
+mapping_free_block(struct device *device, struct ext4_fs *fs)
+{
+	struct ext4_group group;
+	const uint8_t *bitmap;
+	uint64_t block;
+	uint32_t index;
+	uint32_t bit;
+
+	for (index = 0; index < fs->info.groups; index++) {
+		EXPECT(ext4_group_get(fs, index, &group), EXT4_OK);
+		if (group.free_blocks == 0 || (group.flags & EXT4_GROUP_BLOCK_UNINIT)) {
+			continue;
+		}
+		bitmap = device->cache + group.block_bitmap * device->block_size;
+		for (bit = 0; bit < fs->clusters_per_group; bit++) {
+			if ((bitmap[bit / EXT4_BITS_PER_BYTE] &
+				(1U << (bit % EXT4_BITS_PER_BYTE))) == 0) {
+				block = fs->first_data_block +
+				    (uint64_t)index * fs->blocks_per_group +
+				    (uint64_t)bit * fs->cluster_blocks;
+				CHECK(block < fs->info.blocks && !ext4_system_block(fs, block));
+				return block;
+			}
+		}
+	}
+	CHECK(false);
+	return 0;
+}
+
 static void
 mapping_operations(struct device *device)
 {
@@ -1601,6 +1635,7 @@ mapping_operations(struct device *device)
 	uint64_t inode_offset;
 	uint64_t node;
 	uint64_t replacement;
+	uint64_t free_block;
 	size_t tail_offset;
 	size_t completed;
 	uint32_t index;
@@ -1630,6 +1665,7 @@ mapping_operations(struct device *device)
 	EXPECT(ext4_inode_location(fs, inode.number, &inode_offset), EXT4_OK);
 	EXPECT(ext4_get_inode(fs, inode.number, &inode), EXT4_OK);
 	EXPECT(ext4_sync(fs), EXT4_OK);
+	free_block = mapping_free_block(device, fs);
 	ext4_unmount(fs);
 	memcpy(prepared, device->stable, device->size);
 	for (test = 0; test < TEST_MAPPING_CASES; test++) {
@@ -1662,7 +1698,10 @@ mapping_operations(struct device *device)
 			    : test == TEST_MAPPING_INTERLEAVED ? interleaved[index]
 							       : index;
 			replacement = physical[source];
-			if (index == TEST_MAPPING_BLOCKS - 1U && test < TEST_MAPPING_REVERSED) {
+			if (test == TEST_MAPPING_FREE && index == 0) {
+				/* Reject before filling holes could allocate the forged backing. */
+				replacement = free_block;
+			} else if (index == TEST_MAPPING_BLOCKS - 1U && test < TEST_MAPPING_FREE) {
 				replacement = test == TEST_MAPPING_DUPLICATE ? physical[0]
 				    : test == TEST_MAPPING_NODE_ALIAS	     ? node
 									     : fs->first_data_block;
@@ -1700,8 +1739,10 @@ mapping_operations(struct device *device)
 			CHECK(completed == 0 && device->writes == 0 &&
 			    memcmp(before, device->cache, device->size) == 0);
 			EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation,
-				   (uint64_t)TEST_MAPPING_STRIDE * device->block_size + 7, &update,
-				   &after),
+				   test == TEST_MAPPING_FREE
+				       ? 7U
+				       : (uint64_t)TEST_MAPPING_STRIDE * device->block_size + 7,
+				   &update, &after),
 			    EXT4_CORRUPT);
 			CHECK(device->writes == 0 &&
 			    memcmp(before, device->cache, device->size) == 0);

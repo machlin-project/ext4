@@ -420,6 +420,14 @@ admission, growth preparation and commit remain at the operation boundary.
 Success and cancellation release the edit's resources before consuming its
 transaction. Only a successful commit publishes the completed byte count.
 
+Mapping allocation returns backing whose bitmap and protected-range checks are
+complete. Lookup-only gap clearing performs those checks itself. A shared data edit
+then admits the physical target, obtains private storage and initializes the bytes;
+staging does not repeat allocation validation or receive an uninitialized buffer.
+Complete replacements bypass old-data reads and clearing, while fresh partial writes
+initialize omitted plaintext to zero. Failed preparation cancels the private
+transaction before publication.
+
 The target guard owns one bounded array of physical blocks, shared by write,
 growth clearing and truncate-tail clearing. These operations visit logical blocks
 in increasing order; only a gap/payload boundary may revisit the last block with

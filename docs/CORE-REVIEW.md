@@ -15,11 +15,13 @@ key services, locking, native caches, credentials and platform resource lifetime
 The current filesystem instance requires a serialized owner. This review does not
 introduce native concurrency by adding locks inside portable algorithms.
 
-No confirmed data-integrity defect was found in the inspected paths. In particular,
-a trailing zero base64url sextet initially looked like an invalid no-key filename,
-but the pinned [Linux 6.12 decoder](https://github.com/torvalds/linux/blob/v6.12/fs/crypto/fname.c)
-accepts it too. Preserve that behavior within the name-size bound; changing it would
-be an interoperability change, not a correctness fix.
+The write review found and fixed an indirect-map alias: a direct data pointer could
+target one of the inode's indirect roots outside the requested logical path. The
+regression test fails against the saved earlier core. See the mapping review below
+for the remaining validation boundary. A trailing zero base64url sextet initially
+looked like an invalid no-key filename, but the pinned
+[Linux 6.12 decoder](https://github.com/torvalds/linux/blob/v6.12/fs/crypto/fname.c)
+accepts it too; preserve that behavior within the name-size bound.
 
 ## Changes
 
@@ -696,6 +698,100 @@ was added to indirect lookup. This checks the inode's explicit roots and current
 ancestors; it does not imply a scan of all other inodes or unvisited descendants.
 Evidence is under `artifacts/checks/write-targets/`.
 
+The final RAM-image comparison uses A-B-B-A for each 1/4 KiB commit profile.
+The table gives baseline time divided by candidate time; greater than one favors
+the candidate. Sequential writes cover 64 MiB; random overwrite performs 1,000
+64 KiB requests. Truncate is one sub-millisecond operation and does not establish
+a stable timing improvement.
+
+| Block size / commit policy | Sequential | Random overwrite | Truncate |
+| --- | ---: | ---: | ---: |
+| 1 KiB deferred | 1.131 | 1.109 | 0.856 |
+| 1 KiB ordered/lazy | 1.097 | 1.034 | 1.026 |
+| 1 KiB synchronous | 1.088 | 1.027 | 1.072 |
+| 4 KiB deferred | 1.243 | 1.241 | 0.984 |
+| 4 KiB ordered/lazy | 1.098 | 1.022 | 0.990 |
+| 4 KiB synchronous | 1.107 | 1.101 | 0.884 |
+
+All 24 executions preserved I/O bytes, callbacks and barriers; all four output
+hashes match within each profile and every image passes `e2fsck -fn`. Images are
+saved after truncate; the functional tests separately verify payloads. Peak live
+memory falls by 2,048 bytes in all profiles. For 4 KiB deferred random overwrite,
+allocations fall from 58,019 to 25,071. These measurements compare core revisions,
+not Linux or physical devices. Reports are in `final-measurements/`.
+
+The longer 500,000-overwrite ordered test is less favorable. Against the exact
+preceding core, median time is 3,352.92 ms versus 3,299.35 ms, about 1.6% slower,
+despite allocations falling from 20,500,008 to 12,500,006. All four images match
+and pass strict fsck; deterministic I/O and barriers match. Do not claim an
+ordered-mode speedup from the short table. Reports in `exact-ordered/` distinguish
+this comparison from the earlier diagnostic against the read/journal baseline.
+
+The mapping/ownership source passed 716/716 ASan/UBSan tests, with 29 explicit in-test
+applicability skips and no Meson-level skips, plus formatting and unsigned FSKit,
+arm64e kext and x86_64 kext compilation. The full test run retained unchanged
+binaries while the following initialization changes were developed separately.
+Neither native compilation nor the RAM model proves installed-adapter acceptance.
+
+## Snapshot initialization and data editing
+
+Private operations, deferred compounds and checkpoint sets now share one storage
+constructor. It initializes the header and empty index; each entry is fully assigned
+when enrolled. Clearing unused entry capacity, and clearing the index before filling
+it with empty-slot sentinels, served no ownership or validation requirement.
+
+Data snapshot initialization also distinguishes current contents, a zeroed block and
+complete replacement. The internal replacement API allocates private storage without
+reading or clearing old data. The file-data edit owns initialization of every byte:
+copy or encryption fills complete writes, and a fresh partial write zeros its omitted
+plaintext before applying the change. Any failed initialization cancels the private
+transaction before publication. Metadata and partial edits of existing data retain
+their prior snapshot contract. No allocator, native-provider or durability contract
+changes. The ownership and file-write test allocators fill memory with nonzero bytes
+to exercise fresh blocks, gap clearing and error cleanup without relying on zeroed
+allocator memory.
+
+The initialization changes passed 60 focused ASan/UBSan tests and the 4 KiB deferred
+commit fault profile. A same-session A-B-C-C-B-A comparison used the exact preceding
+core, the mapping/ownership version and this initialization version. Median time for
+500,000 ordered overwrites was 3,360.93 / 3,379.48 / 2,995.08 ms: 12.8% higher
+throughput than the mapping/ownership version. All six images match and pass strict
+fsck, with unchanged I/O, barriers and allocation counts between the latter two.
+The short sequential samples varied substantially (26.16 and 22.01 ms for the
+candidate); neither they nor a single sub-millisecond truncate qualify a timing win.
+These are RAM core comparisons, not Linux or native-adapter results. Evidence is in
+`artifacts/checks/snapshot-initialization/`.
+
+The following structural refinement gives one file-data edit responsibility for
+target admission, snapshot acquisition and byte initialization. Mapping allocation
+already validates existing backing or issues a block from a checked bitmap, so the
+data edit no longer repeats that check. Lookup-only gap clearing still validates its
+backing explicitly. Complete gap-block replacement also avoids reading bytes it will
+discard. The new corruption case forges a mapping to a genuinely free bitmap block
+and requires unchanged-media rejection from both write and truncate.
+
+The combined source passed 42 focused ASan/UBSan cases, including mapped/free-block
+corruption, reversed/interleaved mappings, growth, unwritten extents, encryption,
+BIGALLOC and sustained ordered/lazy commits. The A-C-D-D-C-A comparison retains the
+exact preceding core (A), initialization version (C) and combined version (D):
+
+| Workload | Earlier core (ms) | Initialization (ms) | Combined (ms) | Earlier / combined |
+| --- | ---: | ---: | ---: | ---: |
+| Sequential, 64 MiB | 26.539 | 22.019 | 22.403 | 1.185 |
+| Random overwrite, 500,000 requests | 3349.252 | 3004.713 | 2954.520 | 1.134 |
+| Single truncate | 0.1125 | 0.1175 | 0.1120 | 1.004 |
+
+The combined long overwrite is about 13.4% higher throughput than the earlier core;
+the data-edit refinement contributes about 1.7% over initialization in this run.
+That small increment and the short sequential/truncate timings need qualification
+before broader claims. Allocation counts remain unchanged from initialization;
+I/O bytes, callbacks and barriers match all three versions. All six output images
+match and pass strict fsck. Reports are in `artifacts/checks/write-data-ownership/`.
+The combined source also passes formatting, the freestanding 2 KiB frame budget,
+and unsigned FSKit plus arm64e/x86_64 kext builds. The earlier 716-test full regression
+belongs to the preceding mapping/ownership version. Full Linux CI acceptance of
+the combined source remains pending; track the background matrix separately.
+
 ## Bounded verity fault execution
 
 The Linux format job timed out after 300 seconds on the fragmented verity fixture.
@@ -708,6 +804,6 @@ guard byte. Whole-file, random-offset, corruption and writable-policy cases rema
 All five verity profiles passed locally after this change. The fragmented profile
 still exercises 4,200 allocation and 5,384 read failures, finishing in 0.47 seconds
 in the focused run. This is a test-harness improvement, not a filesystem speedup.
-The Linux timeout is observed; the resulting GitHub job must still be checked
-after publication. Raw failure and fixed-test logs are retained in the write
-optimization evidence directories above.
+The published Linux format job now passes with the timeout unchanged. Other jobs
+in that matrix were still active at the recorded snapshot. Raw failure and fixed
+test logs are retained in the write optimization evidence directories above.

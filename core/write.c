@@ -555,20 +555,30 @@ ext4_write_targets_add(struct ext4_write_targets *targets, uint32_t logical, uin
 	return EXT4_OK;
 }
 
+/* The caller supplies an allocation-validated mapping. This edit owns alias
+ * admission, private storage and complete initialization; no uninitialized
+ * replacement escapes to a caller that might commit it. */
 static enum ext4_result
-ext4_write_snapshot(struct ext4_allocation *allocation, struct ext4_write_targets *targets,
-    uint32_t logical, uint64_t physical, bool blank, void **snapshot)
+ext4_write_data(struct ext4_allocation *allocation, struct ext4_write_targets *targets,
+    const struct ext4_inode *inode, uint32_t logical, uint64_t physical, bool fresh, size_t within,
+    const void *source, size_t length)
 {
+	struct ext4_fs *fs = allocation->fs;
+	void *snapshot;
+	bool replace = fresh || (within == 0 && length == fs->info.block_size);
 	enum ext4_result error;
 
 	error = ext4_write_targets_add(targets, logical, physical);
-	if (error == EXT4_OK) {
-		error = ext4_allocation_valid(allocation, physical);
+	if (error != EXT4_OK) {
+		return error;
 	}
-	if (error == EXT4_OK) {
-		error = ext4_transaction_data(allocation->transaction, physical, blank, snapshot);
+	error = replace
+	    ? ext4_transaction_data_replace(allocation->transaction, physical, &snapshot)
+	    : ext4_transaction_data(allocation->transaction, physical, false, &snapshot);
+	if (error != EXT4_OK) {
+		return error;
 	}
-	return error;
+	return ext4_data_change(fs, inode, logical, snapshot, fresh, within, source, length);
 }
 
 static enum ext4_result
@@ -578,7 +588,6 @@ ext4_write_gap(struct ext4_allocation *allocation, const struct ext4_inode *inod
 {
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_map_run run;
-	void *snapshot;
 	uint64_t position = inode->size;
 	uint64_t chunk;
 	uint32_t logical;
@@ -609,11 +618,11 @@ ext4_write_gap(struct ext4_allocation *allocation, const struct ext4_inode *inod
 			chunk = end - position;
 		}
 		if (run.physical != 0 && !run.unwritten) {
-			error = ext4_write_snapshot(
-			    allocation, targets, logical, run.physical, false, &snapshot);
+			/* Lookup alone has not checked this data block's allocation. */
+			error = ext4_allocation_valid(allocation, run.physical);
 			if (error == EXT4_OK) {
-				error = ext4_data_change(fs, inode, logical, snapshot, false,
-				    within, NULL, (size_t)chunk);
+				error = ext4_write_data(allocation, targets, inode, logical,
+				    run.physical, false, within, NULL, (size_t)chunk);
 			}
 			if (error != EXT4_OK) {
 				return error;
@@ -903,7 +912,8 @@ ext4_unwritten_zero(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 		error = EXT4_CORRUPT;
 	}
 	for (index = position; error == EXT4_OK && index < end; index++) {
-		error = ext4_transaction_data(transaction, range->physical + index, true, &buffer);
+		error =
+		    ext4_transaction_data_replace(transaction, range->physical + index, &buffer);
 		if (error == EXT4_OK) {
 			error = ext4_data_change(fs, &inode, range->logical + index, buffer, true,
 			    0, NULL, fs->info.block_size);
@@ -1080,7 +1090,6 @@ ext4_write_stage(struct ext4_write_edit *edit, struct ext4_inode *inode,
 {
 	struct ext4_allocation *allocation = &edit->allocation;
 	struct ext4_fs *fs = allocation->fs;
-	void *snapshot;
 	uint64_t logical = range->offset / fs->info.block_size;
 	uint64_t physical;
 	uint32_t index;
@@ -1108,14 +1117,11 @@ ext4_write_stage(struct ext4_write_edit *edit, struct ext4_inode *inode,
 		if (chunk > range->length - consumed) {
 			chunk = range->length - consumed;
 		}
-		/* A new or completely overwritten block needs no previous contents. */
-		error = ext4_write_snapshot(allocation, &edit->targets, (uint32_t)(logical + index),
-		    physical, zero || chunk == fs->info.block_size, &snapshot);
-		if (error != EXT4_OK) {
-			return error;
-		}
-		error = ext4_data_change(fs, inode, (uint32_t)(logical + index), snapshot,
-		    zero || chunk == fs->info.block_size, within, range->data + consumed, chunk);
+		/* map_allocate already validated existing backing or allocated it from
+		 * a checked bitmap. The data edit still guards aliases between targets. */
+		error =
+		    ext4_write_data(allocation, &edit->targets, inode, (uint32_t)(logical + index),
+			physical, zero, within, range->data + consumed, chunk);
 		if (error != EXT4_OK) {
 			return error;
 		}
