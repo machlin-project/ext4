@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
+#include "map_read.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -411,6 +412,99 @@ indirect_cases(struct model *model, struct ext4_inode *inode)
 	puts("PASS direct and single/double/triple-indirect ranges and absent ancestors");
 }
 
+/* More leaves than the cache can hold, with two external levels. Hits must
+ * avoid metadata I/O; failed traversals must not publish or damage a leaf. */
+static void
+cached_leaves(struct model *model, struct ext4_inode *inode)
+{
+	struct ext4_extent_cache cache = { 0 };
+	struct ext4_map_reader reader = { .cache = &cache };
+	uint8_t *index_node = model_block(model, MODEL_NODE_FIRST);
+	uint8_t *leaf;
+	uint64_t physical;
+	uint64_t blocks;
+	uint32_t capacity = EXT4_READ_CACHE_BYTES / model->fs.info.block_size;
+	uint32_t index;
+	uint32_t pass;
+	size_t reads;
+	size_t allocations;
+
+	model_reset(model);
+	if (capacity > EXT4_READ_CACHE_LEAVES) {
+		capacity = EXT4_READ_CACHE_LEAVES;
+	}
+	inode->flags = EXT4_INODE_EXTENTS;
+	node_header(inode->block_data, sizeof(inode->block_data), 2, 1);
+	node_index(inode->block_data, 0, 0, MODEL_NODE_FIRST);
+	node_header(index_node, model->fs.info.block_size, 1, 12);
+	for (index = 0; index < 12U; index++) {
+		node_index(index_node, index, index * 8U, MODEL_NODE_FIRST + 1U + index);
+		leaf = model_block(model, MODEL_NODE_FIRST + 1U + index);
+		node_header(leaf, model->fs.info.block_size, 0, 2);
+		node_extent(leaf, 0, index * 8U, 1, MODEL_DATA_FIRST + index);
+		node_extent(leaf, 1, index * 8U + 2U, EXT4_EXTENT_UNWRITTEN_LIMIT + 1U,
+		    MODEL_DATA_OTHER + index);
+		node_seal(model, inode, leaf);
+	}
+	node_seal(model, inode, index_node);
+	for (index = 0; index < capacity; index++) {
+		CHECK(ext4_map_reader_next(
+			  &model->fs, inode, &reader, index * 8U, &physical, &blocks) == EXT4_OK);
+		CHECK(physical == MODEL_DATA_FIRST + index && blocks == 1);
+	}
+	CHECK(model->live == capacity);
+	reads = model->reads;
+	allocations = model->allocations;
+	for (index = capacity; index != 0; index--) {
+		CHECK(ext4_map_reader_next(&model->fs, inode, &reader, (index - 1U) * 8U, &physical,
+			  &blocks) == EXT4_OK);
+		CHECK(physical == MODEL_DATA_FIRST + index - 1U && blocks == 1);
+	}
+	CHECK(model->reads == reads && model->allocations == allocations);
+	model->fail_allocation = model->allocations + 1U;
+	CHECK(ext4_map_reader_next(&model->fs, inode, &reader, capacity * 8U, &physical, &blocks) ==
+	    EXT4_NO_MEMORY);
+	model->fail_allocation = 0;
+	model->fail_read = model->reads + 2U;
+	CHECK(ext4_map_reader_next(&model->fs, inode, &reader, capacity * 8U, &physical, &blocks) ==
+	    EXT4_IO);
+	model->fail_read = 0;
+	leaf = model_block(model, MODEL_NODE_FIRST + 1U + capacity);
+	node_extent(leaf, 1, capacity * 8U + 2U, 0, MODEL_DATA_OTHER + capacity);
+	node_seal(model, inode, leaf);
+	CHECK(ext4_map_reader_next(&model->fs, inode, &reader, capacity * 8U, &physical, &blocks) ==
+	    EXT4_CORRUPT);
+	reads = model->reads;
+	/* A previous cache entry remains usable after all three failed misses. */
+	CHECK(ext4_map_reader_next(&model->fs, inode, &reader, 0, &physical, &blocks) == EXT4_OK);
+	CHECK(physical == MODEL_DATA_FIRST && model->reads == reads);
+	node_extent(leaf, 1, capacity * 8U + 2U, EXT4_EXTENT_UNWRITTEN_LIMIT + 1U,
+	    MODEL_DATA_OTHER + capacity);
+	node_seal(model, inode, leaf);
+	allocations = model->allocations;
+	for (pass = 0; pass < 3U; pass++) {
+		for (index = 0; index < 12U; index++) {
+			CHECK(ext4_map_reader_next(&model->fs, inode, &reader, index * 8U,
+				  &physical, &blocks) == EXT4_OK);
+			CHECK(physical == MODEL_DATA_FIRST + index && blocks == 1);
+			CHECK(ext4_map_reader_next(&model->fs, inode, &reader, index * 8U + 1U,
+				  &physical, &blocks) == EXT4_OK);
+			CHECK(physical == 0 && blocks == 1);
+			CHECK(ext4_map_reader_next(&model->fs, inode, &reader, index * 8U + 2U,
+				  &physical, &blocks) == EXT4_OK);
+			CHECK(physical == 0 && blocks == 1);
+		}
+	}
+	CHECK(model->live == capacity + 1U && model->allocations == allocations);
+	model->fs.aborted = true;
+	CHECK(ext4_map_reader_next(&model->fs, inode, &reader, 11U * 8U, &physical, &blocks) ==
+	    EXT4_RECOVERY_REQUIRED);
+	model->fs.aborted = false;
+	ext4_map_reader_close(&model->fs, &reader);
+	model_reset(model);
+	puts("PASS bounded leaf cache, eviction, failed misses, whole-leaf validation and abort");
+}
+
 static void
 logical_limit(struct model *model, struct ext4_inode *inode)
 {
@@ -468,6 +562,7 @@ main(void)
 			inode.generation = 1;
 			extent_cases(&model, &inode);
 			extent_cursor_cases(&model, &inode);
+			cached_leaves(&model, &inode);
 			indirect_cases(&model, &inode);
 			logical_limit(&model, &inode);
 			CHECK(model.live == 0);

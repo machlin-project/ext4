@@ -6,6 +6,7 @@
 
 struct ext4_journal;
 struct ext4_transaction;
+struct ext4_read_state;
 
 struct ext4_block_range {
 	uint64_t first;
@@ -97,6 +98,7 @@ struct ext4_inode_table_run {
 struct ext4_inode_hold {
 	struct ext4_fs *fs;
 	struct ext4_inode_hold *next;
+	struct ext4_read_state *reader;
 	uint32_t number;
 	uint32_t generation;
 	uint32_t references;
@@ -176,6 +178,8 @@ struct ext4_fs {
 	struct ext4_orphan_file *orphan_file;
 	struct ext4_inode_hold *holds;
 	uint32_t hold_count;
+	/* Advance before a transaction can change the visible inode or block map. */
+	uint64_t read_revision;
 	struct ext4_block_range *system_ranges;
 	size_t system_range_capacity;
 	size_t system_range_count;
@@ -232,6 +236,7 @@ enum ext4_result ext4_inode_decode_live(
     struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4_inode *inode);
 struct ext4_inode_hold *ext4_inode_find_hold(struct ext4_fs *fs, uint32_t number);
 void ext4_inode_holds_destroy(struct ext4_fs *fs);
+void ext4_read_cache_invalidate(struct ext4_fs *fs);
 /* Validate mutation-compatible formats. Public operation boundaries separately
  * enforce immutable/append policy; orphan cleanup must finish accepted deletion. */
 enum ext4_result ext4_inode_writable(

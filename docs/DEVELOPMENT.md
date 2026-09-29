@@ -301,6 +301,14 @@ before each sample; timed requests check a byte witness, with the final buffer
 checked in full afterward. JSON rows include elapsed/CPU time, core callbacks,
 allocations and actual virtual-device reads/bytes from guest diskstats.
 
+The core now uses `ext4_read_held`: its inode hold matches the lifetime of the
+Linux file descriptor, and the full-file warmup populates its bounded metadata
+cache. No file bytes are retained by the core. Every guest-cold pass explicitly
+discards the core snapshot and leaf cache before dropping guest caches; rebuilding
+them is included in the timed requests. The console and summary identify this API
+and cache policy. Older `read-compare-inline` results use stateless `ext4_read`, so
+the before/after comparison includes this explicit production API change.
+
 For the contiguous file only, a third reader bypasses filesystem work with a
 checked physical offset. This diagnoses the backend's achievable speed; it is
 never a core result. `tests/check_read_benchmark.py CONSOLE --output REPORT`

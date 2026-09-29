@@ -287,11 +287,17 @@ held_files(struct device *device)
 			   &completed),
 		    EXT4_OK);
 		CHECK(completed == device->block_size);
+		EXPECT(ext4_read_held(hold, (uint64_t)block * device->block_size, observed,
+			   device->block_size, &completed),
+		    EXT4_OK);
+		CHECK(completed == device->block_size && memcmp(bytes, observed, completed) == 0);
 	}
 	EXPECT(remove_inode(fs, &root, "held-file", &file, false, &result), EXT4_OK);
 	CHECK(result.links == 0 && hold->unlinked && fs->last_orphan == file.number);
 	missing(fs, &root, "held-file");
 	EXPECT(ext4_get_inode(fs, file.number, &result), EXT4_NOT_FOUND);
+	EXPECT(ext4_read_held(hold, 0, observed, device->block_size, &completed), EXT4_OK);
+	CHECK(completed == device->block_size && memcmp(bytes, observed, completed) == 0);
 	EXPECT(ext4_refresh_inode(hold, &result), EXT4_OK);
 	CHECK(result.links == 0 && result.size == TEST_REMOVAL_DATA_BLOCKS * device->block_size);
 	EXPECT(ext4_read(fs, &result, 0, observed, device->block_size, &completed), EXT4_OK);
@@ -326,11 +332,16 @@ held_files(struct device *device)
 	EXPECT(ext4_mount(&device->environment, &reader), EXT4_RECOVERY_REQUIRED);
 	EXPECT(ext4_truncate(fs, file.number, file.generation, 1, &update, &result), EXT4_OK);
 	CHECK(result.links == 0 && result.size == 1 && fs->last_orphan == other.number);
+	EXPECT(ext4_read_held(hold, 0, observed, device->block_size, &completed), EXT4_OK);
+	CHECK(completed == 1 && observed[0] == bytes[0]);
 	memset(bytes, 0x36, device->block_size);
 	EXPECT(ext4_write(fs, file.number, file.generation, device->block_size + 7, bytes, 13,
 		   &update, &completed),
 	    EXT4_OK);
 	CHECK(completed == 13);
+	EXPECT(
+	    ext4_read_held(duplicate, device->block_size + 7, observed, 13, &completed), EXT4_OK);
+	CHECK(completed == 13 && memcmp(bytes, observed, completed) == 0);
 	EXPECT(ext4_refresh_inode(hold, &result), EXT4_OK);
 	EXPECT(ext4_read(fs, &result, 1, observed, device->block_size - 1, &completed), EXT4_OK);
 	CHECK(completed == device->block_size - 1);

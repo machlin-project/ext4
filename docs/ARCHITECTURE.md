@@ -1160,20 +1160,46 @@ Read-only inode queries inside the visitor are permitted.
 File reads and native mapping queries return contiguous physical ranges or hole
 ranges. Extent runs stop at extent and ancestor-index boundaries; legacy runs
 stop at their pointer-table boundary, while an absent ancestor represents its
-remaining sparse subtree. Unwritten extents return zeros. A read allocates mapping
+remaining sparse subtree. `core/map_read.c` owns traversal, validation and mapping
+state; `core/read.c` owns byte delivery, EOF, decryption and verity routing.
+Unwritten extents return zeros. An ordinary `ext4_read` allocates mapping
 scratch only when it reaches an external node and reuses that one block for the
 rest of the call. Once an extent leaf's checksum and every record have passed
 validation, the read retains that private leaf and locates subsequent data/hole
 ranges with binary search. An ancestor's next-index boundary limits reuse; crossing
 it restarts the checked descent before overwriting scratch. Inline extent maps and
-direct pointers need no scratch buffer. No leaf or validation state survives the
-read, so later calls observe changed mapping nodes and validate them again. Native
+direct pointers need no scratch buffer. No leaf or validation state survives an
+ordinary read, so later calls observe changed mapping nodes and validate them again. Native
 mappings end at the block containing EOF even if later blocks are preallocated. The platform
 owner zeroes padding in that final block before exposing it through its page cache.
 The range tests cover holes, unwritten extents, ancestor transitions, partial
 failure, allocation failure, changed nodes between calls and corrupt records outside
 the requested range. Performance and current regression evidence belong in
 [CORE-REVIEW.md](CORE-REVIEW.md).
+
+`ext4_read_held` uses the existing inode hold as the owner of an optional read
+snapshot and bounded extent-leaf cache. Repeated holds share it. Fully checked
+external leaves retain their ancestor interval; hits use binary search without
+metadata reads or allocations. Misses use the same checked descent as ordinary
+reads and transfer its buffer into the cache without copying. Round-robin eviction
+reuses the displaced buffer as scratch. At most eight leaf blocks, capped at
+64 KiB, plus one scratch block and fixed bookkeeping belong to a hold. File data
+always passes through the environment and current journal overlay; this is not
+a file-data/page cache. Legacy indirect maps reuse scratch but not cached leaves.
+
+A mount revision advances before every nonempty transaction commit attempt,
+covering direct writes, ordered data, deferred publication and failed commits.
+The next held read discards an older snapshot and refreshes inode identity, size,
+flags and mapping, including an inode unlinked while held. This conservative
+invalidation is constant time and includes unrelated inode mutations. Revision
+wrap explicitly discards all retained states before the value can repeat.
+Explicit `ext4_refresh_inode` discards the cache even if refresh fails; owners can
+use `ext4_drop_read_cache` for memory pressure or a changed external device view.
+Final hold release and unmount free the state. All these operations require the
+same owner serialization as mutations. The backing view must otherwise remain
+stable; the ordinary snapshot API is still available for stateless reads.
+Encryption resolves keys and decrypts on each request, and verity still verifies
+data through its existing path; mapping reuse does not replace those checks.
 
 An indexed insertion reuses record slack, compacts a fragmented leaf, or splits
 the leaf at a balanced record boundary. Equal hashes retain the collision

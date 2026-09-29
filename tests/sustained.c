@@ -1510,8 +1510,10 @@ verify_content(struct state *state, const struct object *object, const struct ex
 	}
 	if (object->kind == KIND_FILE) {
 		if (object->size != 0) {
-			EXPECT(
-			    ext4_read(state->fs, inode, 0, state->buffer, object->size, &completed),
+			EXPECT(object->hold != NULL ? ext4_read_held(object->hold, 0, state->buffer,
+							  object->size, &completed)
+						    : ext4_read(state->fs, inode, 0, state->buffer,
+							  object->size, &completed),
 			    EXT4_OK);
 			CHECK(completed == object->size &&
 			    memcmp(state->buffer, object->data, object->size) == 0);
@@ -1683,6 +1685,7 @@ verify(struct state *state)
 	uint8_t variant[EXT4_NAME_MAX];
 	uint64_t cookie;
 	uint32_t index;
+	size_t completed;
 
 	for (index = 0; index < OBJECT_LIMIT; index++) {
 		object = &state->objects[index];
@@ -1720,8 +1723,25 @@ verify(struct state *state)
 	for (index = 0; index < OBJECT_LIMIT; index++) {
 		object = &state->objects[index];
 		if (object->hold != NULL) {
+			/* Check the retained snapshot before an explicit refresh discards it.
+			 * The model includes writes, range mutations and unlinked lifetimes,
+			 * under journaled, deferred, ordered and unjournaled publication. */
+			if (object->kind == KIND_FILE) {
+				EXPECT(ext4_read_held(
+					   object->hold, 0, state->buffer, FILE_LIMIT, &completed),
+				    EXT4_OK);
+				CHECK(completed == object->size &&
+				    memcmp(state->buffer, object->data, completed) == 0);
+			}
 			EXPECT(ext4_refresh_inode(object->hold, &inode), EXT4_OK);
 			verify_content(state, object, &inode, object->names != 0);
+			/* Empty files also need a cached size before a later growth. */
+			if (object->kind == KIND_FILE && object->size == 0) {
+				EXPECT(
+				    ext4_read_held(object->hold, 0, state->buffer, 1, &completed),
+				    EXT4_OK);
+				CHECK(completed == 0);
+			}
 		}
 	}
 	state->verifications++;

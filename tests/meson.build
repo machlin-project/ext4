@@ -499,6 +499,7 @@ if paths['group_checksum_fixtures'] != ''
 endif
 test('image-reader', programs['reader'], args: reader_images, timeout: 300, suite: 'core')
 test('file-read-ranges', programs['read-ranges'], timeout: 60, suite: 'core')
+test('held-file-reads', programs['read-held'], args: write_images, timeout: 120, suite: 'core')
 test('malformed-images', programs['corruption'], args: paths['fixtures'] / 'ext4-4k.img',
   timeout: 300, suite: 'core')
 foreach profile : ['4k', '1k']

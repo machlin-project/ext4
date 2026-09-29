@@ -215,17 +215,17 @@ snapshots. Both require ownership/error-path tests before changing behavior.
 Larger journal decomposition should follow these ownership boundaries and have a
 separate behavioral acceptance; moving code between files alone is not a speedup.
 
-## Same-guest ordinary reads
+## Stateless ordinary-read baseline
 
 The first matched read comparison exposed repeated extent-tree walks as a major
-cost on sparse files. A read now retains its checked extent leaf for the duration
-of that call and uses binary search for subsequent ranges. Crossing an ancestor's
+cost on sparse files. That implementation retained its checked extent leaf for the
+duration of each call and used binary search for subsequent ranges. Crossing an ancestor's
 index boundary restarts validation; no mapping cache survives the call. The wire
 decode/encode helpers have their unchanged byte-based bodies inlined, allowing
 metadata scans to avoid an external call for each field. The change adds neither
 platform instructions nor a data cache and uses the existing single scratch block.
 
-The final probe runs both readers in the qualified Linux guest: two CPUs,
+The baseline probe ran both readers in the qualified Linux guest: two CPUs,
 512 MiB, CPU 0 affinity, Linux 6.12.94-0-virt aarch64. Both read the same immutable,
 checksummed 4 KiB-block ext4 device. The core uses exact buffered raw-device `pread`;
 Linux uses its mounted ext4 file `pread`. Files are 16 MiB: one contiguous extent,
@@ -297,12 +297,87 @@ tests in 21 minutes 12 seconds, with no failures or whole-test skips. The existi
 inodes and 27 directory-split transitions assigned to other fixture profiles.
 Unsigned arm64e and x86_64 kext compilation, including the 2 KiB frame check, and
 the final style/diff checks pass. No extension was installed or booted for this
-batch. GitHub CI for this optimized source is still running at report collection;
-earlier green CI does not close that run.
+batch. GitHub CI subsequently completed successfully for this baseline: all nine jobs
+passed.
 
 Commands, raw console, all samples, CPU/I/O counters, source/binary identities and
 checks are in the lab's `artifacts/ext4-journal/read-compare-baseline-2/`,
-`read-compare-cursor/` and `read-compare-inline/`. The last directory is the final
-implementation; earlier measurements remain preserved. Local test/build logs are
+`read-compare-cursor/` and `read-compare-inline/`. The last directory records the stateless
+baseline; earlier measurements remain preserved. Local test/build logs are
 under this repository's `artifacts/checks/read-performance/`. The preparation and
 analysis commands are documented in [DEVELOPMENT.md](DEVELOPMENT.md).
+
+
+## Held inode read cache
+
+The next pass separates block-map traversal and validation (`core/map_read.c`)
+from byte delivery, EOF and cryptographic routing (`core/read.c`). The stateless
+`ext4_read` contract remains intact. The new `ext4_read_held` uses existing inode
+lifetime ownership to retain a current snapshot and bounded, fully validated
+extent leaves across requests. It shares the original parser and descent; hits
+use binary search, and eviction transfers buffers without copying leaf contents.
+
+The cache retains no file data. It owns at most eight leaves, capped at 64 KiB,
+one scratch block and fixed bookkeeping per held inode. Each nonempty transaction
+commit attempt advances a mount revision before writes or deferred publication;
+an older snapshot is discarded and refreshed on the next read. Explicit refresh,
+cache discard, final release and unmount cover external-view changes and memory
+lifetime. Revision wrap discards every retained state. This deliberately invalidates
+unrelated inodes too: write-heavy workloads can lose cache reuse. Native owners
+must keep their existing serialization and can discard caches under memory pressure.
+The adapters do not yet call the new held-read API; this run measures the portable
+core API and does not establish an FSKit or LXNU improvement.
+
+The same image, kernel, request sizes, iteration counts, interleaving and output
+verification were used for the next comparison. The core now retains an inode hold
+for the Linux file descriptor's lifetime. Full-file warmup populates its metadata
+cache. Before **every guest-cold pass**, the core explicitly discards that snapshot
+and cache; lazy reconstruction is charged inside timed requests. Thus the cold
+comparison does not silently preserve the new core cache across guest cache drops.
+All warm core/Linux samples again recorded zero actual virtual-device I/O.
+
+| File | Cache | Access | Linux MiB/s | Core MiB/s | Core / Linux | Paired range |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| Contiguous | Warm | Sequential | 32,229.6 | 31,166.0 | 0.967 | 0.957–0.981 |
+| Contiguous | Warm | Random | 4,107.7 | 3,995.2 | 0.973 | 0.960–0.983 |
+| Contiguous | Guest-cold | Sequential | 8,393.6 | 7,793.8 | 0.929 | 0.847–0.973 |
+| Contiguous | Guest-cold | Random | 165.7 | 163.9 | 0.989 | 0.961–1.023 |
+| Sparse | Warm | Sequential | 23,179.7 | 16,412.6 | 0.708 | 0.703–0.729 |
+| Sparse | Warm | Random | 9,654.0 | 15,222.5 | **1.577** | **1.554–1.668** |
+| Sparse | Guest-cold | Sequential | 6,193.4 | 7,484.4 | **1.208** | **1.173–1.239** |
+| Sparse | Guest-cold | Random | 310.2 | 327.4 | 1.055 | 1.023–1.081 |
+
+Sparse warm random reading now clears the 15% target in every pair; its median
+throughput is **57.7% above Linux**, and **8.11 times the previous core run**. Per
+logical GiB, callbacks fall from 655,360 to 131,072, callback bytes from 2.5 GiB to
+0.5 GiB and allocations from 262,144 to zero. The improvement comes from removing
+repeated mapping I/O, checksum scans and scratch allocation, with all file data
+still read through the same backend. Sparse cold sequential reading also clears
+the target in every pair. **The general eight-profile target remains open.**
+
+Absolute rates in several other profiles fell between boots, including Linux's:
+contiguous warm random core throughput fell 8.5%, while its core/Linux ratio moved
+from 0.977 to 0.973. Sparse warm sequential throughput changed only 0.3%; it still
+trails Linux. Report these results rather than attributing all between-boot changes
+to the implementation. The cold API now also pays for rebuilding its inode snapshot.
+Possible next work is within-request batching of physically adjacent data across
+logical holes; saved debugfs output shows 2,040 of 2,047 successive sparse-file
+extent pairs are physically adjacent. That opportunity is not an implemented or
+measured batching optimization, and any implementation must preserve prefix-error,
+memory-bound and untrusted-metadata contracts.
+
+Focused ASan/UBSan checks passed all eight selected tests, including synthetic
+cache eviction and failed misses, held-read allocation/read failures, explicit
+refresh failure, EOF, revision wrap, abort and lifetime. Existing removal tests
+now read through held snapshots across growth, unlink and truncation. Sustained
+model tests also verify retained reads before explicit refresh across range
+mutations, deferred/ordered/direct publication, encryption and verity. The O2
+freestanding core compiled within the 2 KiB frame budget. The full regression
+and unsigned native compilation results are pending collection for this batch.
+
+The single guest boot passed all 140 sample rows, completed byte verification,
+powered off cleanly and left the image unchanged. Its exact preparation, source
+hashes, console, run record and comparison are in the lab's
+`artifacts/ext4-journal/read-compare-held/`. Before/after analysis and local checks
+are in this repository's `artifacts/checks/read-held/`. The earlier baseline
+remains preserved in `read-compare-inline/`.

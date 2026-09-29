@@ -23,16 +23,22 @@ and filesystem workload with equivalent durability. SHA/AES results are separate
 old/new core measurements cannot establish the Linux target. Read the current
 review report for evidence, remaining coverage and the comparison protocol.
 
-The same-guest ordinary-read comparison is now implemented. Checked extent leaves
-are reused within each read, and wire accessors are inline. The overall Linux target
-remains open: one sparse sequential profile exceeds it, while random sparse reads
-still repeat mapping work across API calls. The contiguous raw-backend diagnostic
-shows that this harness has no demonstrated 15% headroom even without filesystem
-work. Preserve all eight reported profiles and keep the raw diagnostic separate
-from core results. Do not rerun VM timing qualification or the initial baseline
-without a change that invalidates them. Further cross-request mapping reuse must
-have an explicit mutation/journal invalidation contract; native cache and I/O costs
-belong to the adapters. See the ordinary-read section of the review for exact data.
+The same-guest ordinary-read comparison now includes `ext4_read_held`, with an
+explicit inode lifetime and bounded metadata cache. Mapping traversal/validation
+is separate from byte delivery. Transactions invalidate cached snapshots before
+publication; explicit refresh, memory-pressure discard, release and unmount own
+cleanup. Stateless `ext4_read` retains its original contract. Native adapters do
+not yet use this API; integrate it only with their owning lifetime/serialization.
+
+Sparse warm random core throughput is 15,222.5 MiB/s versus Linux's 9,654.0 MiB/s:
+57.7% faster, with every pair at least 55.4% faster. It is 8.11 times the prior core
+run. Sparse guest-cold sequential reading is 20.8% faster than Linux. The other six
+profiles do not clear the 15% target; keep all eight results and raw-backend
+diagnostics in the review. Cold passes explicitly drop the core's new metadata
+cache and charge reconstruction. Do not claim an overall Linux or native-adapter
+win, or rerun timing qualification without an invalidating change. Sparse warm
+sequential I/O still makes one backend call per data extent; physical adjacency
+across holes is a possible bounded batching opportunity, not an accepted change.
 
 Both adapters remain read-only. FSKit integration precedes LXNU policy; signing
 is deferred. No host kernel, boot-policy, NVRAM or system-file changes are authorized.

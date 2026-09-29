@@ -55,6 +55,8 @@ ext4_refresh_inode(struct ext4_inode_hold *hold, struct ext4_inode *result)
 		return EXT4_INVALID_ARGUMENT;
 	}
 	fs = hold->fs;
+	/* Explicit refresh also observes changes from a replaced backing view. */
+	ext4_drop_read_cache(hold);
 	if (fs->aborted) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
@@ -134,6 +136,7 @@ ext4_hold_inode(
 		return EXT4_NO_MEMORY;
 	}
 	hold->fs = fs;
+	hold->reader = NULL;
 	hold->number = number;
 	hold->generation = generation;
 	hold->references = 1;
@@ -173,6 +176,7 @@ ext4_release_inode(struct ext4_inode_hold *hold)
 	}
 	*link = hold->next;
 	fs->hold_count--;
+	ext4_drop_read_cache(hold);
 	fs->environment.release(fs->environment.context, hold, sizeof(*hold));
 	return error;
 }
@@ -185,6 +189,7 @@ ext4_inode_holds_destroy(struct ext4_fs *fs)
 	while (fs->holds != NULL) {
 		hold = fs->holds;
 		fs->holds = hold->next;
+		ext4_drop_read_cache(hold);
 		fs->environment.release(fs->environment.context, hold, sizeof(*hold));
 	}
 	fs->hold_count = 0;

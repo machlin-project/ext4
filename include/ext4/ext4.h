@@ -758,6 +758,19 @@ enum ext4_result ext4_refresh_inode(struct ext4_inode_hold *hold, struct ext4_in
 enum ext4_result ext4_release_inode(struct ext4_inode_hold *hold);
 enum ext4_result ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset,
     void *buffer, size_t length, size_t *completed);
+/* Read the held inode's current contents under the owner's serialization. Retain
+ * its snapshot and validated extent leaves between requests, never file data.
+ * Every transaction invalidates the snapshot before publication; the next read
+ * refreshes it, including size and an unlinked inode's map. Encryption and verity
+ * retain the same checks as ext4_read. The device view must remain stable except
+ * for core mutations. After an external view change, explicitly refresh the hold
+ * or drop its cache. Ordinary ext4_read retains no state between calls.
+ * Each hold lazily owns at most eight leaf blocks (at most 64 KiB), one scratch
+ * block and fixed bookkeeping. Duplicate holds share this state. Final release
+ * and unmount free it; the owner can also discard it under memory pressure. */
+enum ext4_result ext4_read_held(
+    struct ext4_inode_hold *hold, uint64_t offset, void *buffer, size_t length, size_t *completed);
+void ext4_drop_read_cache(struct ext4_inode_hold *hold);
 /* Return a contiguous physical or zero-filled range from a fresh regular-file
  * snapshot. The range can include padding in the block containing EOF, but no
  * later blocks. The owner zeroes EOF padding before exposing it through a native

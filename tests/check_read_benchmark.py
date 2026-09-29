@@ -33,6 +33,10 @@ def main():
                         'same guest, CPU, immutable image and logical requests; '
                         'guest-cold does not mean host/storage-cold; no native-adapter claim',
                   samples=rows, profiles=[])
+    report['core_read_contract'] = next(
+        (line.removeprefix('CORE_READ_API=') for line in text.splitlines()
+         if line.startswith('CORE_READ_API=')),
+        'ext4_read; mapping state retained only within each request')
     for key in sorted(groups):
         contenders = groups[key]
         if set(contenders) not in ({'core', 'linux'}, {'core', 'linux', 'raw'}):

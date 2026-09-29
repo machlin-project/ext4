@@ -2,482 +2,41 @@
 #include "internal.h"
 #include "fscrypt.h"
 #include "inline.h"
-#include "journal.h"
+#include "map_read.h"
 #include "verity.h"
 
-/* A private, verified leaf lives only for one read. Crossing an ancestor's
- * logical boundary discards it before the scratch block is reused. */
-struct ext4_extent_cursor {
-	const uint8_t *leaf;
-	uint64_t first;
-	uint64_t limit;
-	uint16_t entries;
+struct ext4_read_state {
+	struct ext4_inode inode;
+	struct ext4_map_reader mapping;
+	struct ext4_extent_cache cache;
+	uint64_t revision;
 };
 
-static enum ext4_result ext4_map_blocks(struct ext4_fs *fs, const struct ext4_inode *inode,
-    uint32_t logical, uint8_t **scratch, uint64_t *physical, uint64_t *blocks,
-    struct ext4_block_path *path);
-
 static enum ext4_result
-ext4_mapping_node(struct ext4_fs *fs, uint64_t block, uint8_t **scratch)
+ext4_read_mapping(struct ext4_fs *fs, const struct ext4_inode *inode,
+    struct ext4_map_reader *reader, uint64_t offset, void *buffer, size_t length, bool require_data,
+    size_t *completed)
 {
-	if (*scratch == NULL) {
-		*scratch = fs->environment.allocate(fs->environment.context, fs->info.block_size);
-		if (*scratch == NULL) {
-			return EXT4_NO_MEMORY;
-		}
-	}
-	return ext4_block_read(fs, block, *scratch);
-}
-
-enum ext4_result
-ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, size_t length,
-    struct ext4_mapping *mapping)
-{
-	uint8_t *scratch = NULL;
-	uint64_t block;
-	uint64_t logical;
-	uint64_t blocks;
-	uint64_t file_blocks;
-	uint64_t bytes;
-	size_t within;
-	enum ext4_result error;
-
-	if (fs == NULL || inode == NULL || mapping == NULL || length == 0 ||
-	    (inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR) {
-		return EXT4_INVALID_ARGUMENT;
-	}
-	if (fs->aborted) {
-		return EXT4_RECOVERY_REQUIRED;
-	}
-	if (inode->flags & EXT4_INODE_ENCRYPT) {
-		return EXT4_ENCRYPTED;
-	}
-	/* Native mappings would bypass Merkle verification; use ext4_read. */
-	if (inode->flags & EXT4_INODE_VERITY) {
-		return EXT4_UNSUPPORTED;
-	}
-	if (offset >= inode->size) {
-		return EXT4_NOT_FOUND;
-	}
-	logical = offset / fs->info.block_size;
-	if (logical > UINT32_MAX) {
-		return EXT4_RANGE;
-	}
-	error = ext4_map_blocks(fs, inode, (uint32_t)logical, &scratch, &block, &blocks, NULL);
-	if (scratch != NULL) {
-		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
-	}
-	if (error != EXT4_OK) {
-		return error;
-	}
-	file_blocks = inode->size / fs->info.block_size;
-	if (inode->size % fs->info.block_size != 0) {
-		file_blocks++;
-	}
-	if (blocks > file_blocks - logical) {
-		blocks = file_blocks - logical;
-	}
-	/* Native reads see only home blocks; the journal holds newer contents of some. */
-	if (block != 0 && fs->journal != NULL) {
-		blocks = ext4_journal_home_prefix(fs->journal, block, blocks);
-		if (blocks == 0) {
-			return EXT4_BUSY;
-		}
-	}
-	within = (size_t)(offset % fs->info.block_size);
-	bytes = blocks * fs->info.block_size - within;
-	mapping->hole = block == 0;
-	mapping->device_offset = block == 0 ? 0 : block * fs->info.block_size + within;
-	mapping->length = bytes < length ? (size_t)bytes : length;
-	/* Native I/O may include padding in the final filesystem block only. */
-	return EXT4_OK;
-}
-
-/* leaf_end, when requested, receives the end of the selected leaf's last extent. */
-static enum ext4_result
-ext4_extent_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
-    uint8_t **scratch, uint64_t *physical, uint64_t *blocks, struct ext4_block_path *path,
-    uint64_t *leaf_end, struct ext4_extent_cursor *cursor)
-{
-	const uint8_t *node = inode->block_data;
-	const struct ext4_extent_header_disk *header;
-	const struct ext4_extent_disk *extent;
-	const struct ext4_extent_index_disk *index;
-	const struct ext4_le32 *tail;
-	size_t node_size = sizeof(inode->block_data);
-	size_t capacity;
-	size_t tail_offset;
-	uint64_t start;
-	uint64_t end = 0;
-	uint64_t disk_block;
-	uint64_t child;
-	uint64_t boundary = (uint64_t)UINT32_MAX + 1U;
-	uint64_t first = 0;
-	uint64_t leaf_limit;
-	uint32_t length;
-	uint16_t entries;
-	uint16_t maximum;
-	uint16_t depth;
-	uint16_t expected_depth = UINT16_MAX;
-	uint16_t position;
-	bool external = false;
-	bool unwritten;
-	enum ext4_result error;
-
-	*physical = 0;
-	if (cursor != NULL) {
-		cursor->leaf = NULL;
-	}
-	for (;;) {
-		header = (const struct ext4_extent_header_disk *)node;
-		entries = ext4_le16(&header->entries);
-		maximum = ext4_le16(&header->maximum);
-		depth = ext4_le16(&header->depth);
-		capacity = (node_size - sizeof(*header)) / sizeof(*extent);
-		if (ext4_le16(&header->magic) != EXT4_EXTENT_MAGIC || maximum == 0 ||
-		    maximum > capacity || entries > maximum || depth > EXT4_EXTENT_MAX_DEPTH ||
-		    (expected_depth != UINT16_MAX && depth != expected_depth) ||
-		    (depth != 0 && entries == 0)) {
-			return EXT4_CORRUPT;
-		}
-		if (external && fs->metadata_checksum) {
-			tail_offset = sizeof(*header) + maximum * sizeof(*extent);
-			if (tail_offset > node_size - sizeof(*tail)) {
-				return EXT4_CORRUPT;
-			}
-			tail = (const struct ext4_le32 *)(node + tail_offset);
-			if (ext4_crc32c(ext4_inode_seed(fs, inode), node, tail_offset) !=
-			    ext4_le32(tail)) {
-				return EXT4_CORRUPT;
-			}
-		}
-		child = 0;
-		end = 0;
-		leaf_limit = boundary;
-		for (position = 0; position < entries; position++) {
-			if (depth == 0) {
-				extent = (const struct ext4_extent_disk *)(node + sizeof(*header) +
-				    position * sizeof(*extent));
-				start = ext4_le32(&extent->logical);
-				length = ext4_le16(&extent->length);
-				unwritten = length > EXT4_EXTENT_UNWRITTEN_LIMIT;
-				if (unwritten) {
-					length -= EXT4_EXTENT_UNWRITTEN_LIMIT;
-				}
-				disk_block = ext4_le32(&extent->physical_lo) |
-				    ((uint64_t)ext4_le16(&extent->physical_hi) << 32);
-				if (length == 0 || (position != 0 && start < end) ||
-				    start + length > (uint64_t)UINT32_MAX + 1 || disk_block == 0 ||
-				    disk_block >= fs->info.blocks ||
-				    length > fs->info.blocks - disk_block ||
-				    disk_block % fs->cluster_blocks != start % fs->cluster_blocks) {
-					return EXT4_CORRUPT;
-				}
-				end = start + length;
-				if (logical >= start && logical < end) {
-					if (!unwritten) {
-						*physical = disk_block + (logical - start);
-					}
-					if (end < boundary) {
-						boundary = end;
-					}
-				} else if (start > logical && start < boundary) {
-					boundary = start;
-				}
-			} else {
-				index = (const struct ext4_extent_index_disk *)(node +
-				    sizeof(*header) + position * sizeof(*index));
-				start = ext4_le32(&index->logical);
-				disk_block = ext4_le32(&index->child_lo) |
-				    ((uint64_t)ext4_le16(&index->child_hi) << 32);
-				if ((position != 0 && start <= end) || disk_block == 0 ||
-				    disk_block >= fs->info.blocks) {
-					return EXT4_CORRUPT;
-				}
-				end = start;
-				if (logical >= start) {
-					child = disk_block;
-					if (start > first) {
-						first = start;
-					}
-				} else if (start < boundary) {
-					boundary = start;
-				}
-			}
-		}
-		if (depth == 0 || child == 0) {
-			if (depth == 0 && cursor != NULL) {
-				cursor->leaf = node;
-				cursor->first = first;
-				cursor->limit = leaf_limit;
-				cursor->entries = entries;
-			}
-			if (blocks != NULL) {
-				*blocks = boundary - logical;
-			}
-			if (leaf_end != NULL) {
-				*leaf_end = depth == 0 ? end : 0;
-			}
-			return EXT4_OK;
-		}
-		if (path != NULL) {
-			path->blocks[path->count++] = child;
-		}
-		error = ext4_mapping_node(fs, child, scratch);
-		if (error != EXT4_OK) {
-			return error;
-		}
-		expected_depth = depth - 1;
-		node = *scratch;
-		node_size = fs->info.block_size;
-		external = true;
-	}
-}
-
-/* All records, physical ranges and the checksum were checked before publishing
- * the leaf. Binary search now locates a run without repeating that validation. */
-static void
-ext4_extent_cursor_map(
-    const struct ext4_extent_cursor *cursor, uint32_t logical, uint64_t *physical, uint64_t *blocks)
-{
-	const struct ext4_extent_disk *extents = (const struct ext4_extent_disk *)(cursor->leaf +
-	    sizeof(struct ext4_extent_header_disk));
-	const struct ext4_extent_disk *extent;
-	uint64_t boundary = cursor->limit;
-	uint64_t end;
-	uint32_t start;
-	uint32_t length;
-	uint16_t low = 0;
-	uint16_t high = cursor->entries;
-	uint16_t middle;
-	bool unwritten;
-
-	while (low < high) {
-		middle = low + (high - low) / 2U;
-		if (ext4_le32(&extents[middle].logical) <= logical) {
-			low = middle + 1U;
-		} else {
-			high = middle;
-		}
-	}
-	*physical = 0;
-	if (low < cursor->entries) {
-		start = ext4_le32(&extents[low].logical);
-		if (start < boundary) {
-			boundary = start;
-		}
-	}
-	if (low != 0) {
-		extent = &extents[low - 1U];
-		start = ext4_le32(&extent->logical);
-		length = ext4_le16(&extent->length);
-		unwritten = length > EXT4_EXTENT_UNWRITTEN_LIMIT;
-		if (unwritten) {
-			length -= EXT4_EXTENT_UNWRITTEN_LIMIT;
-		}
-		end = (uint64_t)start + length;
-		if (logical < end) {
-			if (!unwritten) {
-				*physical = ext4_le32(&extent->physical_lo) |
-				    ((uint64_t)ext4_le16(&extent->physical_hi) << 32);
-				*physical += logical - start;
-			}
-			if (end < boundary) {
-				boundary = end;
-			}
-		}
-	}
-	*blocks = boundary - logical;
-}
-
-static enum ext4_result
-ext4_indirect_map(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
-    uint8_t **scratch, uint64_t *physical, uint64_t *blocks, struct ext4_block_path *path)
-{
-	const struct ext4_le32 *pointers = (const struct ext4_le32 *)inode->block_data;
-	uint64_t remaining;
-	uint64_t span = 1;
-	uint64_t block;
-	uint64_t next;
-	uint64_t run;
-	uint64_t limit = (uint64_t)UINT32_MAX + 1U - logical;
-	uint32_t per_block = fs->info.block_size / sizeof(*pointers);
-	uint32_t position = 0;
-	uint32_t available;
-	unsigned int depth;
-	unsigned int level;
-	enum ext4_result error;
-
-	if (logical < EXT4_DIRECT_BLOCKS) {
-		position = logical;
-		available = EXT4_DIRECT_BLOCKS - position;
-		block = ext4_le32(&pointers[position]);
-	} else {
-		remaining = logical - EXT4_DIRECT_BLOCKS;
-		for (depth = 1; depth <= EXT4_INDIRECT_LEVELS; depth++) {
-			span *= per_block;
-			if (remaining < span) {
-				break;
-			}
-			remaining -= span;
-		}
-		if (depth > EXT4_INDIRECT_LEVELS) {
-			return EXT4_CORRUPT;
-		}
-		block = ext4_le32(&pointers[EXT4_DIRECT_BLOCKS + depth - 1]);
-		for (level = depth; level != 0 && block != 0; level--) {
-			if (path != NULL) {
-				path->blocks[path->count++] = block;
-			}
-			error = ext4_mapping_node(fs, block, scratch);
-			if (error != EXT4_OK) {
-				return error;
-			}
-			span /= per_block;
-			pointers = (const struct ext4_le32 *)*scratch;
-			position = (uint32_t)(remaining / span);
-			block = ext4_le32(&pointers[position]);
-			remaining %= span;
-		}
-		if (level != 0) {
-			/* An absent ancestor covers the rest of its logical subtree. */
-			*physical = 0;
-			if (blocks != NULL) {
-				run = span - remaining;
-				*blocks = run < limit ? run : limit;
-			}
-			return EXT4_OK;
-		}
-		available = per_block - position;
-	}
-	if (block >= fs->info.blocks) {
-		return EXT4_CORRUPT;
-	}
-	*physical = block;
-	if (blocks != NULL) {
-		for (run = 1; run < available && run < limit; run++) {
-			next = ext4_le32(&pointers[position + (uint32_t)run]);
-			if (next >= fs->info.blocks ||
-			    (block == 0 ? next != 0 : next != block + run)) {
-				break;
-			}
-		}
-		*blocks = run;
-	}
-	return EXT4_OK;
-}
-
-static enum ext4_result
-ext4_map_blocks(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
-    uint8_t **scratch, uint64_t *physical, uint64_t *blocks, struct ext4_block_path *path)
-{
-	if (fs->aborted) {
-		return EXT4_RECOVERY_REQUIRED;
-	}
-	if (path != NULL) {
-		path->count = 0;
-	}
-	if (inode->flags & EXT4_INODE_INLINE_DATA) {
-		return EXT4_UNSUPPORTED;
-	}
-	if (inode->flags & EXT4_INODE_EXTENTS) {
-		return ext4_extent_map(
-		    fs, inode, logical, scratch, physical, blocks, path, NULL, NULL);
-	}
-	return ext4_indirect_map(fs, inode, logical, scratch, physical, blocks, path);
-}
-
-enum ext4_result
-ext4_extent_last_end(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t *end)
-{
-	uint8_t *scratch = NULL;
-	uint64_t physical;
-	enum ext4_result error;
-
-	*end = 0;
-	if (fs->aborted) {
-		return EXT4_RECOVERY_REQUIRED;
-	}
-	if ((inode->flags & (EXT4_INODE_EXTENTS | EXT4_INODE_INLINE_DATA)) != EXT4_INODE_EXTENTS) {
-		return EXT4_UNSUPPORTED;
-	}
-	/* The largest logical address descends the rightmost path to the last leaf. */
-	error = ext4_extent_map(fs, inode, UINT32_MAX, &scratch, &physical, NULL, NULL, end, NULL);
-	if (scratch != NULL) {
-		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
-	}
-	return error;
-}
-
-enum ext4_result
-ext4_map_block(
-    struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical, uint64_t *physical)
-{
-	return ext4_map_block_path(fs, inode, logical, physical, NULL);
-}
-
-enum ext4_result
-ext4_map_block_path(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
-    uint64_t *physical, struct ext4_block_path *path)
-{
-	return ext4_map_blocks_path(fs, inode, logical, physical, NULL, path);
-}
-
-enum ext4_result
-ext4_map_blocks_path(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
-    uint64_t *physical, uint64_t *blocks, struct ext4_block_path *path)
-{
-	uint8_t *scratch = NULL;
-	enum ext4_result error;
-
-	error = ext4_map_blocks(fs, inode, logical, &scratch, physical, blocks, path);
-	if (scratch != NULL) {
-		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
-	}
-	return error;
-}
-
-enum ext4_result
-ext4_read_mapped(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, void *buffer,
-    size_t length, bool require_data, size_t *completed)
-{
-	struct ext4_extent_cursor cursor = { 0 };
 	uint8_t *output = buffer;
-	uint8_t *scratch = NULL;
 	uint64_t physical;
 	uint64_t logical;
 	uint64_t blocks;
 	uint64_t bytes;
 	size_t chunk;
 	size_t in_block;
-	enum ext4_result error = EXT4_OK;
+	enum ext4_result error;
 
 	*completed = 0;
 	while (*completed < length) {
 		logical = offset / fs->info.block_size;
 		if (logical > UINT32_MAX) {
-			error = EXT4_RANGE;
-			goto out;
+			return EXT4_RANGE;
 		}
 		in_block = (size_t)(offset % fs->info.block_size);
-		if ((inode->flags & (EXT4_INODE_EXTENTS | EXT4_INODE_INLINE_DATA)) ==
-			EXT4_INODE_EXTENTS &&
-		    !fs->aborted) {
-			if (cursor.leaf != NULL && logical >= cursor.first &&
-			    logical < cursor.limit) {
-				ext4_extent_cursor_map(
-				    &cursor, (uint32_t)logical, &physical, &blocks);
-			} else {
-				error = ext4_extent_map(fs, inode, (uint32_t)logical, &scratch,
-				    &physical, &blocks, NULL, NULL, &cursor);
-			}
-		} else {
-			error = ext4_map_blocks(
-			    fs, inode, (uint32_t)logical, &scratch, &physical, &blocks, NULL);
-		}
+		error =
+		    ext4_map_reader_next(fs, inode, reader, (uint32_t)logical, &physical, &blocks);
 		if (error != EXT4_OK) {
-			goto out;
+			return error;
 		}
 		bytes = blocks * fs->info.block_size - in_block;
 		chunk = length - *completed;
@@ -486,24 +45,32 @@ ext4_read_mapped(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t of
 		}
 		if (physical == 0) {
 			if (require_data) {
-				error = EXT4_CORRUPT;
-				goto out;
+				return EXT4_CORRUPT;
 			}
 			ext4_zero(output + *completed, chunk);
 		} else {
 			error = ext4_device_read(fs, physical * fs->info.block_size + in_block,
 			    output + *completed, chunk);
 			if (error != EXT4_OK) {
-				goto out;
+				return error;
 			}
 		}
 		*completed += chunk;
 		offset += chunk;
 	}
-out:
-	if (scratch != NULL) {
-		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
-	}
+	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_read_mapped(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, void *buffer,
+    size_t length, bool require_data, size_t *completed)
+{
+	struct ext4_map_reader reader = { 0 };
+	enum ext4_result error;
+
+	error =
+	    ext4_read_mapping(fs, inode, &reader, offset, buffer, length, require_data, completed);
+	ext4_map_reader_close(fs, &reader);
 	return error;
 }
 
@@ -511,11 +78,11 @@ out:
  * zeros, as in Linux; every other block is decrypted with the file's key and its
  * logical block number as the IV. */
 static enum ext4_result
-ext4_read_encrypted(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset,
-    uint8_t *output, size_t length, size_t *completed)
+ext4_read_encrypted(struct ext4_fs *fs, const struct ext4_inode *inode,
+    struct ext4_map_reader *reader, uint64_t offset, uint8_t *output, size_t length,
+    size_t *completed)
 {
 	struct ext4_fscrypt_key key;
-	uint8_t *scratch = NULL;
 	uint8_t *blocks = NULL;
 	uint64_t logical;
 	uint64_t physical = 0;
@@ -539,9 +106,9 @@ ext4_read_encrypted(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t
 		if (chunk > length - *completed) {
 			chunk = length - *completed;
 		}
-		error = logical > UINT32_MAX ? EXT4_RANGE
-					     : ext4_map_blocks(fs, inode, (uint32_t)logical,
-						   &scratch, &physical, &run, NULL);
+		error = logical > UINT32_MAX
+		    ? EXT4_RANGE
+		    : ext4_map_reader_next(fs, inode, reader, (uint32_t)logical, &physical, &run);
 		if (error != EXT4_OK) {
 			break;
 		}
@@ -561,9 +128,6 @@ ext4_read_encrypted(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t
 			    output + *completed, blocks + fs->info.block_size + within, chunk);
 		}
 		*completed += chunk;
-	}
-	if (scratch != NULL) {
-		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
 	}
 	fs->environment.release(fs->environment.context, blocks, 2U * fs->info.block_size);
 	return error;
@@ -633,9 +197,9 @@ ext4_read_encrypted_link(struct ext4_fs *fs, const struct ext4_inode *inode, uin
 	return error;
 }
 
-enum ext4_result
-ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, void *buffer,
-    size_t length, size_t *completed)
+static enum ext4_result
+ext4_read_with_mapping(struct ext4_fs *fs, const struct ext4_inode *inode,
+    struct ext4_map_reader *reader, uint64_t offset, void *buffer, size_t length, size_t *completed)
 {
 	struct ext4_fscrypt_key key;
 	enum ext4_result error;
@@ -676,7 +240,7 @@ ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, v
 		if (length > inode->size - offset) {
 			length = (size_t)(inode->size - offset);
 		}
-		return ext4_read_encrypted(fs, inode, offset, buffer, length, completed);
+		return ext4_read_encrypted(fs, inode, reader, offset, buffer, length, completed);
 	}
 	if (inode->flags & EXT4_INODE_VERITY) {
 		return ext4_verity_read(fs, inode, offset, buffer, length, completed);
@@ -702,5 +266,92 @@ ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, v
 		*completed = length;
 		return EXT4_OK;
 	}
-	return ext4_read_mapped(fs, inode, offset, buffer, length, false, completed);
+	return ext4_read_mapping(fs, inode, reader, offset, buffer, length, false, completed);
+}
+
+enum ext4_result
+ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, void *buffer,
+    size_t length, size_t *completed)
+{
+	struct ext4_map_reader reader = { 0 };
+	enum ext4_result error;
+
+	error = ext4_read_with_mapping(fs, inode, &reader, offset, buffer, length, completed);
+	/* Invalid arguments cannot have allocated mapping state. */
+	if (fs != NULL) {
+		ext4_map_reader_close(fs, &reader);
+	}
+	return error;
+}
+
+void
+ext4_drop_read_cache(struct ext4_inode_hold *hold)
+{
+	struct ext4_fs *fs;
+
+	if (hold == NULL || hold->reader == NULL) {
+		return;
+	}
+	fs = hold->fs;
+	ext4_map_reader_close(fs, &hold->reader->mapping);
+	fs->environment.release(fs->environment.context, hold->reader, sizeof(*hold->reader));
+	hold->reader = NULL;
+}
+
+void
+ext4_read_cache_invalidate(struct ext4_fs *fs)
+{
+	struct ext4_inode_hold *hold;
+
+	/* Wrapping must not make an old snapshot current again. Normal invalidation
+	 * is constant time regardless of the number of open inodes. */
+	if (fs->read_revision == UINT64_MAX) {
+		for (hold = fs->holds; hold != NULL; hold = hold->next) {
+			ext4_drop_read_cache(hold);
+		}
+	}
+	fs->read_revision++;
+}
+
+enum ext4_result
+ext4_read_held(
+    struct ext4_inode_hold *hold, uint64_t offset, void *buffer, size_t length, size_t *completed)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode inode;
+	struct ext4_read_state *reader;
+	enum ext4_result error;
+
+	if (completed == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	*completed = 0;
+	if (hold == NULL || hold->references == 0 || (buffer == NULL && length != 0)) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	fs = hold->fs;
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
+	if (hold->reader != NULL && hold->reader->revision != fs->read_revision) {
+		ext4_drop_read_cache(hold);
+	}
+	if (hold->reader == NULL) {
+		error = ext4_refresh_inode(hold, &inode);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		reader = fs->environment.allocate(fs->environment.context, sizeof(*reader));
+		if (reader == NULL) {
+			return EXT4_NO_MEMORY;
+		}
+		ext4_zero(reader, sizeof(*reader));
+		reader->inode = inode;
+		reader->revision = fs->read_revision;
+		reader->mapping.cache = &reader->cache;
+		hold->reader = reader;
+	}
+	reader = hold->reader;
+	return ext4_read_with_mapping(
+	    fs, &reader->inode, &reader->mapping, offset, buffer, length, completed);
 }

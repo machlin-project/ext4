@@ -10,7 +10,7 @@ if cc.get_id() in ['clang', 'apple-clang']
 endif
 
 core_sources = files(
-  'core/support.c', 'core/mount.c', 'core/inode.c', 'core/read.c', 'core/directory.c',
+  'core/support.c', 'core/mount.c', 'core/inode.c', 'core/read.c', 'core/map_read.c', 'core/directory.c',
   'core/directory_lookup.c', 'core/inline.c', 'core/inline_create.c',
   'core/journal.c', 'core/recovery.c', 'core/group.c', 'core/system.c',
   'core/fast_commit.c', 'core/fast_commit_replay.c',
@@ -54,7 +54,8 @@ foreach name, source : {
   'xattr': 'xattr', 'xattr-write': 'xattr_write', 'xattr-lifetime': 'xattr_lifetime', 'space': 'space',
   'ea-inode': 'ea_inode', 'inline': 'inline', 'cluster': 'cluster',
   'directory-index': 'directory_index', 'directory-lookup': 'directory_lookup', 'index-write': 'index_write',
-  'reader': 'reader', 'read-ranges': 'read_ranges', 'corruption': 'corruption', 'journal': 'journal',
+  'reader': 'reader', 'read-ranges': 'read_ranges', 'read-held': 'read_held',
+  'corruption': 'corruption', 'journal': 'journal',
   'external-journal': 'external_journal', 'unjournaled': 'unjournaled',
   'fast-commit': 'fast_commit', 'fast-commit-recovery': 'fast_commit_recovery',
   'write': 'write', 'write-partial': 'write_partial', 'write-growth': 'write_growth',

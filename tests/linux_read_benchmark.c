@@ -53,6 +53,7 @@ struct reader {
 	struct device device;
 	struct ext4_fs *fs;
 	struct ext4_inode inode;
+	struct ext4_inode_hold *hold;
 	uint64_t raw_offset;
 	int fd;
 	bool sparse;
@@ -158,8 +159,8 @@ read_file(struct reader *reader, enum reader_kind kind, uint64_t offset, size_t 
 	size_t completed;
 
 	if (kind == READER_CORE) {
-		require(ext4_read(reader->fs, &reader->inode, offset, reader->buffer, size,
-			    &completed) == EXT4_OK &&
+		require(ext4_read_held(reader->hold, offset, reader->buffer, size, &completed) ==
+			    EXT4_OK &&
 			completed == size,
 		    "core read");
 	} else if (kind == READER_RAW) {
@@ -247,7 +248,7 @@ sample(struct reader *reader, const char *name, enum reader_kind kind, bool cold
 	uint64_t cpu_start;
 	uint64_t elapsed = 0;
 	uint64_t cpu = 0;
-	uint64_t live = reader->device.live;
+	uint64_t live;
 	uint64_t index;
 	size_t byte;
 	unsigned int pass;
@@ -262,6 +263,7 @@ sample(struct reader *reader, const char *name, enum reader_kind kind, bool cold
 		    random ? POSIX_FADV_RANDOM : POSIX_FADV_SEQUENTIAL) == 0,
 	    "matching access advice");
 	verify_file(reader, kind);
+	live = reader->device.live;
 	for (index = 0; index < count; index++) {
 		offset = request_offset(index, request, random);
 		expected += (uint64_t)expected_byte(offset, reader->sparse) +
@@ -274,6 +276,11 @@ sample(struct reader *reader, const char *name, enum reader_kind kind, bool cold
 	before = device_io();
 	for (pass = 0; pass < passes; pass++) {
 		if (cold) {
+			/* The core's retained metadata must not survive the cold reset.
+			 * Lazy snapshot/leaf reconstruction is charged inside the read loop. */
+			if (kind == READER_CORE) {
+				ext4_drop_read_cache(reader->hold);
+			}
 			drop_caches();
 		}
 		cpu_start = now(CLOCK_PROCESS_CPUTIME_ID);
@@ -337,6 +344,8 @@ main(void)
 	require(uname(&identity) == 0, "uname");
 	printf("LINUX_READ_KERNEL=%s %s %s HWCAP=%lx\n", identity.sysname, identity.release,
 	    identity.machine, getauxval(AT_HWCAP));
+	puts("CORE_READ_API=ext4_read_held metadata_cache=bounded file_data_cache=none "
+	     "cold_metadata=discarded_per_pass");
 	CPU_ZERO(&cpus);
 	CPU_SET(0, &cpus);
 	require(sched_setaffinity(0, sizeof(cpus), &cpus) == 0, "pin benchmark CPU");
@@ -375,6 +384,9 @@ main(void)
 			    strlen(names[profile]), &reader.inode) == EXT4_OK &&
 			reader.inode.size == FILE_BYTES,
 		    "open core file");
+		require(ext4_hold_inode(reader.fs, reader.inode.number, reader.inode.generation,
+			    &reader.hold) == EXT4_OK,
+		    "hold core file");
 		contenders = reader.sparse ? 2U : 3U;
 		if (!reader.sparse) {
 			require(ext4_map_read(reader.fs, &reader.inode, 0, FILE_BYTES, &mapping) ==
@@ -396,6 +408,7 @@ main(void)
 			}
 		}
 		require(close(reader.fd) == 0, "close Linux file");
+		require(ext4_release_inode(reader.hold) == EXT4_OK, "release core file");
 	}
 	ext4_unmount(reader.fs);
 	require(reader.device.live == 0 && close(reader.device.fd) == 0 && umount("/mnt") == 0,
