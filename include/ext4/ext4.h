@@ -334,21 +334,31 @@ enum ext4_result ext4_mount_writable_with_journal(const struct ext4_environment 
  * leave overwritten blocks of an existing file with their new contents while its
  * size and times are old. Data reusing a block freed since the last durable commit
  * stays journaled, so a power cut never shows it through the block's old owner.
- * Without the flag every write, including its data, is atomic. */
+ * Without the flag every write, including its data, is atomic.
+ *
+ * With checkpoint_blocks zero, each commit writes its blocks home and empties the
+ * log before the next transaction. Otherwise committed transactions stay in the log,
+ * as jbd2's checkpoint list does, and the latest committed version of each of their
+ * blocks, at most checkpoint_blocks, stays in memory for reads. A checkpoint writes
+ * them home and empties the log when the next commit would not fit in the log or in
+ * that bound, and on ext4_sync; a power cut or an unmount without ext4_sync leaves
+ * them for recovery. checkpoint_blocks may not exceed the ring of the journal or
+ * 32 MiB of blocks. */
 #define EXT4_WRITE_ORDERED_DATA 0x1U
 
 struct ext4_write_options {
 	uint32_t commit_blocks;
 	uint32_t flags;
+	uint32_t checkpoint_blocks;
 };
 enum ext4_result ext4_mount_writable_with_options(const struct ext4_environment *environment,
     const struct ext4_write_environment *writer, const struct ext4_journal_environment *journal,
     const struct ext4_write_options *options, struct ext4_fs **result);
-/* Make every completed mutation durable, as fsync does, without clearing the recovery
- * marker. With synchronous commits it writes nothing. */
+/* Make every completed mutation durable, as fsync does, without checkpointing or
+ * clearing the recovery marker. With synchronous commits it writes nothing. */
 enum ext4_result ext4_commit(struct ext4_fs *fs);
-/* Commit and also clear the recovery marker. unmount only releases memory and
- * discards uncommitted mutations; call sync first for a clean shutdown. An
+/* Commit, checkpoint and also clear the recovery marker. unmount only releases memory
+ * and discards uncommitted mutations; call sync first for a clean shutdown. An
  * uncertain commit poisons the instance, including reads: unmount and recover. */
 enum ext4_result ext4_sync(struct ext4_fs *fs);
 /* Inspect fresh, generation-checked xattrs without writing. Names exclude their
@@ -375,7 +385,8 @@ enum ext4_result ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32
  * and revokes incompatible mappings before calling. This operation can clear
  * IMMUTABLE/APPEND; changing other flags on an immutable inode must also clear
  * IMMUTABLE. Ordinary mutation APIs cannot bypass their restrictions.
- * All core commits are synchronous and journal data. NOATIME governs automatic
+ * JOURNAL_DATA is recorded but does not select a mode: the mount's write options
+ * decide how data is committed. NOATIME governs automatic
  * platform updates, not an explicitly admitted timestamp change. mask may also
  * select CASEFOLD, which changes only on empty directories of casefold volumes:
  * other volumes return UNSUPPORTED, other types NOT_DIRECTORY and directories
@@ -614,7 +625,10 @@ enum ext4_result ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, u
 /* Return a contiguous physical or zero-filled range from a fresh regular-file
  * snapshot. The range can include padding in the block containing EOF, but no
  * later blocks. The owner zeroes EOF padding before exposing it through a native
- * page cache. Failure leaves mapping unchanged. */
+ * page cache. A writable owner's journal can hold the current contents of journaled
+ * data in memory until a commit or checkpoint writes them home; the range ends
+ * before such a block, and BUSY reports a range that starts at one: read it with
+ * ext4_read, or map it after ext4_sync. Failure leaves mapping unchanged. */
 enum ext4_result ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset,
     size_t length, struct ext4_mapping *mapping);
 

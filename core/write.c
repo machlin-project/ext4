@@ -72,6 +72,13 @@ ext4_mount_writable_with_options(const struct ext4_environment *environment,
 			fs->journal->compound_blocks = options->commit_blocks;
 		}
 	}
+	if (error == EXT4_OK && options != NULL && options->checkpoint_blocks != 0) {
+		if (options->checkpoint_blocks > ext4_journal_checkpoint_limit(fs->journal)) {
+			error = EXT4_RANGE;
+		} else {
+			fs->journal->checkpoint_blocks = options->checkpoint_blocks;
+		}
+	}
 	if (error == EXT4_OK && options != NULL) {
 		fs->journal->ordered_data = (options->flags & EXT4_WRITE_ORDERED_DATA) != 0;
 	}
@@ -126,7 +133,9 @@ ext4_sync(struct ext4_fs *fs)
 	if (error != EXT4_OK) {
 		return error;
 	}
-	if (fs->last_orphan != 0) {
+	/* A failed checkpoint leaves the committed transactions for recovery. */
+	error = ext4_journal_checkpoint(fs->journal);
+	if (error == EXT4_OK && fs->last_orphan != 0) {
 		error = ext4_orphan_validate_live(fs);
 		if (error == EXT4_OK &&
 		    (fs->journal->transaction_active || fs->journal->start != 0)) {
@@ -135,7 +144,7 @@ ext4_sync(struct ext4_fs *fs)
 		if (error == EXT4_OK) {
 			error = ext4_journal_flush(fs->journal);
 		}
-	} else {
+	} else if (error == EXT4_OK) {
 		error = ext4_journal_finish(fs->journal);
 	}
 	if (error != EXT4_OK) {

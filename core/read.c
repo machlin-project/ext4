@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "internal.h"
 #include "inline.h"
+#include "journal.h"
 #include "verity.h"
 
 static enum ext4_result ext4_map_blocks(struct ext4_fs *fs, const struct ext4_inode *inode,
@@ -66,6 +67,13 @@ ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offse
 	}
 	if (blocks > file_blocks - logical) {
 		blocks = file_blocks - logical;
+	}
+	/* Native reads see only home blocks; the journal holds newer contents of some. */
+	if (block != 0 && fs->journal != NULL) {
+		blocks = ext4_journal_home_prefix(fs->journal, block, blocks);
+		if (blocks == 0) {
+			return EXT4_BUSY;
+		}
 	}
 	within = (size_t)(offset % fs->info.block_size);
 	bytes = blocks * fs->info.block_size - within;

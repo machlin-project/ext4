@@ -126,8 +126,20 @@ blocks the expected image leaves free may hold data of an uncommitted mutation, 
 an overwrite of `payload.bin` is cut at every event: blocks outside it must be
 unchanged, each overwritten 512-byte sector old or new, and a durable commit must
 carry the new data. The sustained test's `--data ordered` compares images only for
-operations that write no file data. `ext4-scale --commit-blocks N --data ordered`
-measures the workloads in these modes.
+operations that write no file data. For lazy checkpointing, `ext4-deferred-test`
+repeats the atomic commit with a checkpoint set that holds the whole sequence, where
+no home block may change before `ext4_sync`, and the commit-point property with a
+48-block set, synchronously and with the compound, where checkpoints happen
+mid-sequence and cuts land in them. Native mappings from `ext4_map_read` must hold
+the current contents or report BUSY. With `--export DIRECTORY` it also writes the synchronous lazy run's final image,
+whose log holds every transaction since the last checkpoint;
+`tests/check_pending_logs.py --tools-root E2FSPROGS_BUILD --recover EXT4_RECOVER
+--exports DIRECTORY --output NEW` requires debugfs to find at least two
+consecutive commits, e2fsck's replay-only mode and `ext4-recover` to produce
+volumes that strict fsck accepts, and both to be identical outside the primary
+superblock. The sustained test's `--checkpoint-blocks N` and
+`ext4-scale --commit-blocks N --checkpoint-blocks N --data ordered` exercise and
+measure the workloads in these modes.
 
 `tests/generate_format_fixtures.py --tools-root E2FSPROGS_BUILD --output NEW`
 authors one volume per optional format feature or geometry, and the `format_fixtures`

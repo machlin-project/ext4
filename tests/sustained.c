@@ -151,6 +151,8 @@ struct state {
 	uint32_t commit_blocks;
 	/* EXT4_WRITE_* flags, such as ordered data. */
 	uint32_t write_flags;
+	/* Checkpoint set capacity; zero checkpoints every commit. */
+	uint32_t checkpoint_blocks;
 	uint32_t commits;
 	bool extents;
 	bool crashing;
@@ -1361,7 +1363,8 @@ verify(struct state *state)
 static void
 mount_writer(struct state *state)
 {
-	struct ext4_write_options options = { state->commit_blocks, state->write_flags };
+	struct ext4_write_options options = { state->commit_blocks, state->write_flags,
+		state->checkpoint_blocks };
 
 	EXPECT(ext4_mount_writable_with_options(
 		   &state->device.environment, &state->device.writer, NULL, &options, &state->fs),
@@ -1654,8 +1657,8 @@ main(int argc, char **argv)
 	if (argc < 4) {
 		fprintf(stderr,
 		    "usage: %s IMAGE SEED OPERATIONS [--objects N] [--entries N] "
-		    "[--directories N] [--commit-blocks N] [--data journal|ordered] "
-		    "[--export DIRECTORY]\n",
+		    "[--directories N] [--commit-blocks N] [--checkpoint-blocks N] "
+		    "[--data journal|ordered] [--export DIRECTORY]\n",
 		    argv[0]);
 		return 2;
 	}
@@ -1675,6 +1678,8 @@ main(int argc, char **argv)
 			state.directory_limit = parse_number(argv[argument + 1]);
 		} else if (strcmp(argv[argument], "--commit-blocks") == 0) {
 			state.commit_blocks = parse_number(argv[argument + 1]);
+		} else if (strcmp(argv[argument], "--checkpoint-blocks") == 0) {
+			state.checkpoint_blocks = parse_number(argv[argument + 1]);
 		} else if (strcmp(argv[argument], "--data") == 0) {
 			CHECK(strcmp(argv[argument + 1], "journal") == 0 ||
 			    strcmp(argv[argument + 1], "ordered") == 0);
@@ -1744,10 +1749,10 @@ main(int argc, char **argv)
 	}
 	printf("PASS %u operations seed=%" PRIu64 " objects=%u entries=%u directories=%u "
 	       "verifications=%u remounts=%u crashes=%u committed=%u torn=%u commit_blocks=%u "
-	       "commits=%u\n",
+	       "checkpoint_blocks=%u commits=%u\n",
 	    operations, seed, state.object_limit, state.entry_limit, state.directory_limit,
 	    state.verifications, state.remounts, state.crashes, state.crash_committed,
-	    state.torn_superblocks, state.commit_blocks, state.commits);
+	    state.torn_superblocks, state.commit_blocks, state.checkpoint_blocks, state.commits);
 	for (index = 0; index < OP_COUNT; index++) {
 		printf("%s performed=%u rejected=%u\n", operation_names[index],
 		    state.performed[index], state.rejected[index]);

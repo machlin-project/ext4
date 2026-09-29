@@ -121,8 +121,8 @@ transaction, all or nothing: buffers for new blocks are allocated before any cop
 The compound holds at most commit_blocks snapshots, never more than the recovery
 bound of half the ring and 32 MiB. Every device read, including file data and the
 next mutation's own reads, overlays the compound's blocks, so the owner sees its
-completed mutations; only the journal's recovery-marker update reads the committed
-superblock. The compound becomes durable as one ordinary JBD2 transaction on
+completed mutations; only the journal's recovery-marker update reads the home
+superblock, and only while the log holds no committed transaction. The compound becomes durable as one ordinary JBD2 transaction on
 `ext4_commit`, on `ext4_sync`, or when the next mutation would not fit, and a
 mutation larger than the compound commits on its own after it. A power cut loses the
 mutations after the last durable commit and never exposes part of one; recovery is
@@ -146,6 +146,24 @@ because the old owner still references it until then, or when the compound alrea
 holds the block; each transaction records the ranges it frees, the compound keeps a
 sorted set of up to 4,096, and an overflow journals all data until the next durable
 commit.
+
+`ext4_write_options.checkpoint_blocks` checkpoints lazily, as jbd2's checkpoint list
+does, in either commit mode. A committed transaction stays in the log, and its
+snapshots stay in memory as the latest committed version of their blocks, at most
+checkpoint_blocks; reads overlay them beneath the compound, and their home blocks are
+not written. The next transaction is logged after it with the next sequence without
+rewriting the journal superblock, so a commit costs its log blocks and two barriers,
+and a block changed by many commits reaches its home once. A checkpoint writes every
+held block home, flushes and empties the log with one journal-superblock update. It
+runs when the next transaction would not fit in the rest of the ring or in the
+checkpoint set, before a recovery conversion, and on `ext4_sync`, so the log never
+wraps; recovery, by this core, e2fsck or Linux, replays every transaction since the
+last checkpoint. Linux revokes a logged block before reusing it for unjournaled data,
+so that replay cannot overwrite the new data. Ordered data instead journals any data
+block the checkpoint set holds: the later logged copy supersedes the earlier one, and
+no revoke record is needed. `ext4_map_read` ends a native mapping before any block
+whose current contents the compound or the checkpoint set hold. unmount without
+`ext4_sync` leaves the committed transactions for recovery, as power loss would.
 
 Recovery checks the committed prefix before changing home blocks, records bounded
 replay locations and applies the last committed event for each block. A revoke

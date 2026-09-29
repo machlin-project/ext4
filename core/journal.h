@@ -148,6 +148,13 @@ struct ext4_journal {
 	bool freed_overflow;
 	struct ext4_block_range *freed;
 	size_t freed_count;
+	/* Lazy checkpointing: committed transactions stay in the log from first to
+	 * head, and the latest committed version of each of their blocks, at most
+	 * checkpoint_blocks, stays here until a checkpoint writes it home. Zero
+	 * checkpoints every commit before the next transaction is logged. */
+	struct ext4_transaction *checkpoint;
+	uint32_t checkpoint_blocks;
+	uint32_t head;
 };
 
 struct ext4_transaction;
@@ -218,11 +225,21 @@ bool ext4_commit_rejected(enum ext4_result error);
 /* With deferred commit, make every merged operation durable as one transaction and
  * checkpoint it. Without pending operations it writes nothing. */
 enum ext4_result ext4_journal_commit(struct ext4_journal *journal);
-/* Copy the pending operations' blocks over a device read of [offset, offset+length). */
+/* Copy the committed but not checkpointed blocks, then the pending operations'
+ * blocks, over a device read of [offset, offset+length). */
 void ext4_journal_overlay(
     const struct ext4_journal *journal, uint64_t offset, void *buffer, size_t length);
+/* Leading blocks of [block, block + count) whose current contents are at home on
+ * the device rather than only in the journal's memory. */
+uint64_t ext4_journal_home_prefix(
+    const struct ext4_journal *journal, uint64_t block, uint64_t count);
 /* The largest compound transaction the log and recovery memory bound admit. */
 uint32_t ext4_journal_compound_limit(const struct ext4_journal *journal);
+/* The largest checkpoint set: what the log can hold and the recovery memory bound. */
+uint32_t ext4_journal_checkpoint_limit(const struct ext4_journal *journal);
+/* Write every committed block home and empty the log. Without committed blocks it
+ * writes nothing. A failure poisons the journal. */
+enum ext4_result ext4_journal_checkpoint(struct ext4_journal *journal);
 void ext4_transaction_cancel(struct ext4_transaction *transaction);
 
 /* Shared journal/recovery implementation, never exported to platform adapters. */

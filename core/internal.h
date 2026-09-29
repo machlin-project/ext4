@@ -243,8 +243,9 @@ uint16_t ext4_crc16(uint16_t checksum, const void *buffer, size_t length);
 uint32_t ext4_inode_seed(const struct ext4_fs *fs, const struct ext4_inode *inode);
 enum ext4_result ext4_device_read(struct ext4_fs *fs, uint64_t offset, void *buffer, size_t length);
 enum ext4_result ext4_block_read(struct ext4_fs *fs, uint64_t block, void *buffer);
-/* Read the committed device contents, bypassing operations still pending in a
- * deferred commit. Only the journal's own home-block updates need this view. */
+/* Read a block's home contents on the device, bypassing the journal's committed and
+ * pending blocks. Only the recovery marker update needs this view, and only while
+ * the log holds no committed transaction. */
 enum ext4_result ext4_block_read_committed(struct ext4_fs *fs, uint64_t block, void *buffer);
 enum ext4_result ext4_map_block(
     struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical, uint64_t *physical);

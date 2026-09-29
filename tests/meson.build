@@ -671,3 +671,17 @@ foreach name : ['ext4-4k.img', 'ext4-1k.img']
     timeout: 900, suite: 'sustained')
   sustained_seed += 1
 endforeach
+# Lazy checkpointing: small checkpoint sets fill many times per run, synchronously
+# and under a compound, with journaled and ordered data.
+foreach name : ['ext4-4k.img', 'ext4-1k.img', 'ext4-indirect-1k.img']
+  foreach commit : ['0', '64']
+    foreach data : ['journal', 'ordered']
+      compound = commit == '0' ? [] : ['--commit-blocks', commit]
+      test('sustained-lazy-' + commit + '-' + data + '-' + name, programs['sustained'],
+        args: [paths['fixtures'] / name, sustained_seed.to_string(), '3000', '--data', data,
+          '--checkpoint-blocks', '96'] + compound,
+        timeout: 600, suite: 'sustained')
+      sustained_seed += 1
+    endforeach
+  endforeach
+endforeach

@@ -521,6 +521,8 @@ main(int argc, char **argv)
 	while (argc >= 3 && strncmp(argv[1], "--", 2) == 0) {
 		if (strcmp(argv[1], "--commit-blocks") == 0) {
 			write_options.commit_blocks = (uint32_t)strtoul(argv[2], NULL, 10);
+		} else if (strcmp(argv[1], "--checkpoint-blocks") == 0) {
+			write_options.checkpoint_blocks = (uint32_t)strtoul(argv[2], NULL, 10);
 		} else if (strcmp(argv[1], "--data") == 0 && strcmp(argv[2], "ordered") == 0) {
 			write_options.flags |= EXT4_WRITE_ORDERED_DATA;
 		} else {
@@ -532,7 +534,7 @@ main(int argc, char **argv)
 	}
 	if (argc != 4 && argc != 5) {
 		fprintf(stderr,
-		    "usage: %s [--commit-blocks N] [--data ordered] IMAGE "
+		    "usage: %s [--commit-blocks N] [--checkpoint-blocks N] [--data ordered] IMAGE "
 		    "sequential|directory|fragmented|"
 		    "reclamation SIZE [RESULT]\n"
 		    "SIZE is MiB, except entries for directory and files for fragmented.\n"

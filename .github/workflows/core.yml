@@ -450,6 +450,19 @@ jobs:
           find artifacts/write-exports artifacts/write-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
           df -h .
+      - name: Independently replay lazily checkpointed logs
+        if: matrix.suite == 'core'
+        run: |
+          mkdir artifacts/deferred-exports
+          .build/ext4-deferred-test --export artifacts/deferred-exports \
+            artifacts/fixtures/ext4-1k.img artifacts/fixtures/ext4-4k.img \
+            artifacts/fixtures/ext4-indirect-1k.img artifacts/fixtures/ext4-no-checksum.img \
+            2>&1 | tee artifacts/checks/deferred-exports.log
+          python3 tests/check_pending_logs.py --tools-root vendor/e2fsprogs/build \
+            --recover .build/ext4-recover --exports artifacts/deferred-exports \
+            --output artifacts/deferred-independent 2>&1 | tee artifacts/checks/deferred-independent.log
+          find artifacts/deferred-exports artifacts/deferred-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
       - name: Independently verify large partial writes
         if: matrix.suite == 'core'
         run: |

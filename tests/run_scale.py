@@ -27,6 +27,8 @@ def main():
     parser.add_argument("--label", required=True, help="name of the measured core revision")
     parser.add_argument("--commit-blocks", type=int, default=0,
                         help="deferred commit capacity; zero commits every mutation")
+    parser.add_argument("--checkpoint-blocks", type=int, default=0,
+                        help="lazy checkpoint set capacity; zero checkpoints every commit")
     parser.add_argument("--data", choices=("journal", "ordered"), default="journal",
                         help="journal file data or write it in place before its commit")
     args = parser.parse_args()
@@ -42,6 +44,8 @@ def main():
         result = output / f"scale-{profile}-result.img"
         for workload, size in WORKLOADS:
             options = ["--commit-blocks", str(args.commit_blocks)] if args.commit_blocks else []
+            if args.checkpoint_blocks:
+                options += ["--checkpoint-blocks", str(args.checkpoint_blocks)]
             if args.data == "ordered":
                 options += ["--data", "ordered"]
             done = subprocess.run([str(args.scale), *options, str(image), workload, str(size),
@@ -53,7 +57,8 @@ def main():
             for line in done.stdout.splitlines():
                 row = json.loads(line)
                 row.update(label=args.label, profile=profile, size=size,
-                           commit_blocks=args.commit_blocks, data=args.data,
+                           commit_blocks=args.commit_blocks,
+                           checkpoint_blocks=args.checkpoint_blocks, data=args.data,
                            machine=platform.machine())
                 rows.append(row)
         image.unlink()
