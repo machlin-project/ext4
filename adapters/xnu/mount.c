@@ -47,6 +47,10 @@ ext4_xnu_error(enum ext4_result result)
 		return ENOTEMPTY;
 	case EXT4_PERMISSION_DENIED:
 		return EPERM;
+	case EXT4_CROSS_PROJECT:
+		return EXDEV;
+	case EXT4_QUOTA_EXCEEDED:
+		return EDQUOT;
 	default:
 		return EIO;
 	}

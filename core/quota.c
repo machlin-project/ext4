@@ -34,6 +34,9 @@ struct ext4_quota_state {
 	struct ext4_quota_change *changes;
 	size_t change_count;
 	size_t change_capacity;
+	/* Seconds from the adapter's clock while its policy enforces limits. */
+	int64_t now;
+	bool enforcing;
 };
 
 /* One quota file while its usage changes inside a commit. The record is the
@@ -45,9 +48,15 @@ struct ext4_quota_file {
 	struct ext4_inode_disk *disk;
 	uint8_t *record;
 	uint32_t type;
+	/* Grace periods from the quota file's information block, when enforced. */
+	int64_t block_grace;
+	int64_t inode_grace;
+	bool enforced;
 	bool allocation_ready;
 	bool grown;
 };
+
+static enum ext4_result ext4_quota_read(struct ext4_quota_file *file, uint32_t quota_block);
 
 static uint64_t
 ext4_quota_le64(const struct ext4_le32 value[2])
@@ -620,6 +629,7 @@ static enum ext4_result
 ext4_quota_file_open(struct ext4_quota_state *state, uint32_t type, struct ext4_quota_file *file)
 {
 	struct ext4_fs *fs = state->fs;
+	const struct ext4_quota_header_disk *header;
 	uint64_t offset;
 	uint32_t number = fs->quota_inodes[type];
 	enum ext4_result error;
@@ -654,6 +664,15 @@ ext4_quota_file_open(struct ext4_quota_state *state, uint32_t type, struct ext4_
 	}
 	/* Like Linux quota writes, metadata growth may use the reserved pool. */
 	file->allocation.reserved_blocks = 0;
+	file->enforced = state->enforcing && (fs->quota_policy.types & (1U << type));
+	if (error == EXT4_OK && file->enforced) {
+		error = ext4_quota_read(file, 0);
+	}
+	if (error == EXT4_OK && file->enforced) {
+		header = (const struct ext4_quota_header_disk *)state->quota_block;
+		file->block_grace = ext4_le32(&header->block_grace);
+		file->inode_grace = ext4_le32(&header->inode_grace);
+	}
 	return error;
 }
 
@@ -1045,21 +1064,80 @@ ext4_quota_add(uint64_t value, int64_t change)
 	return magnitude > value ? 0 : value - magnitude;
 }
 
-static void
-ext4_quota_entry_update(struct ext4_quota_entry_disk *entry, int64_t space, int64_t inodes)
+static uint64_t
+ext4_quota_limit_bytes(const struct ext4_le32 limit[2])
+{
+	uint64_t blocks = ext4_quota_le64(limit);
+
+	return blocks > (UINT64_MAX >> EXT4_QUOTA_LIMIT_SHIFT) ? UINT64_MAX
+							       : blocks << EXT4_QUOTA_LIMIT_SHIFT;
+}
+
+/* Check one enforced increase against a hard and a soft limit, starting the soft
+ * limit's grace period as Linux's dquot does. */
+static enum ext4_result
+ext4_quota_limit(int64_t now, uint64_t used, uint64_t hard, uint64_t soft, int64_t grace,
+    struct ext4_le32 time[2])
+{
+	uint64_t expiry = ext4_quota_le64(time);
+
+	if (hard != 0 && used > hard) {
+		return EXT4_QUOTA_EXCEEDED;
+	}
+	if (soft != 0 && used > soft) {
+		if (expiry != 0 && expiry <= (uint64_t)INT64_MAX && now >= (int64_t)expiry) {
+			return EXT4_QUOTA_EXCEEDED;
+		}
+		if (expiry == 0) {
+			ext4_quota_encode64(time, (uint64_t)(now + grace));
+		}
+	}
+	return EXT4_OK;
+}
+
+static enum ext4_result
+ext4_quota_entry_update(const struct ext4_quota_file *file, struct ext4_quota_entry_disk *entry,
+    int64_t space, int64_t inodes)
 {
 	struct ext4_quota_entry_disk marker;
+	uint64_t used_space;
+	uint64_t used_inodes;
+	enum ext4_result error = EXT4_OK;
 
 	ext4_zero(&marker, sizeof(marker));
 	ext4_quota_encode64(marker.inode_time, EXT4_QUOTA_EMPTY_MARKER);
 	if (ext4_equal(entry, &marker, sizeof(marker))) {
 		ext4_quota_encode64(entry->inode_time, 0);
 	}
-	ext4_quota_encode64(entry->space, ext4_quota_add(ext4_quota_le64(entry->space), space));
-	ext4_quota_encode64(entry->inodes, ext4_quota_add(ext4_quota_le64(entry->inodes), inodes));
+	used_space = ext4_quota_add(ext4_quota_le64(entry->space), space);
+	used_inodes = ext4_quota_add(ext4_quota_le64(entry->inodes), inodes);
+	if (file->enforced && space > 0) {
+		error = ext4_quota_limit(file->state->now, used_space,
+		    ext4_quota_limit_bytes(entry->space_hard),
+		    ext4_quota_limit_bytes(entry->space_soft), file->block_grace,
+		    entry->space_time);
+	}
+	if (error == EXT4_OK && file->enforced && inodes > 0) {
+		error = ext4_quota_limit(file->state->now, used_inodes,
+		    ext4_quota_le64(entry->inode_hard), ext4_quota_le64(entry->inode_soft),
+		    file->inode_grace, entry->inode_time);
+	}
+	if (error != EXT4_OK) {
+		return error;
+	}
+	/* Usage back within a soft limit ends its grace period. */
+	if (space < 0 && used_space <= ext4_quota_limit_bytes(entry->space_soft)) {
+		ext4_quota_encode64(entry->space_time, 0);
+	}
+	if (inodes < 0 && used_inodes <= ext4_quota_le64(entry->inode_soft)) {
+		ext4_quota_encode64(entry->inode_time, 0);
+	}
+	ext4_quota_encode64(entry->space, used_space);
+	ext4_quota_encode64(entry->inodes, used_inodes);
 	if (ext4_quota_zero(entry, sizeof(*entry))) {
 		ext4_quota_encode64(entry->inode_time, EXT4_QUOTA_EMPTY_MARKER);
 	}
+	return EXT4_OK;
 }
 
 static enum ext4_result
@@ -1091,8 +1169,9 @@ ext4_quota_apply(struct ext4_quota_state *state)
 			error = ext4_quota_entry(
 			    &file, change->id, change->space > 0 || change->inodes > 0, &entry);
 			if (error == EXT4_OK && entry != NULL) {
-				ext4_quota_entry_update((struct ext4_quota_entry_disk *)entry,
-				    change->space, change->inodes);
+				error = ext4_quota_entry_update(&file,
+				    (struct ext4_quota_entry_disk *)entry, change->space,
+				    change->inodes);
 			}
 		}
 		if (opened) {
@@ -1119,6 +1198,10 @@ ext4_quota_commit(struct ext4_transaction *transaction)
 	ext4_zero(&state, sizeof(state));
 	state.fs = fs;
 	state.transaction = transaction;
+	state.enforcing = fs->quota_policy.types != 0 && !fs->quota_exempt;
+	if (state.enforcing) {
+		state.now = fs->quota_policy.now(fs->quota_policy.context);
+	}
 	state.previous = fs->environment.allocate(fs->environment.context, fs->info.block_size);
 	state.scratch = fs->environment.allocate(fs->environment.context, fs->info.block_size);
 	state.quota_block =
@@ -1150,4 +1233,40 @@ ext4_quota_commit(struct ext4_transaction *transaction)
 		    fs->environment.context, state.previous, fs->info.block_size);
 	}
 	return error;
+}
+
+enum ext4_result
+ext4_quota_policy_set(struct ext4_fs *fs, const struct ext4_quota_policy *policy)
+{
+	uint32_t type;
+
+	if (fs == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if (policy == NULL || policy->types == 0) {
+		ext4_zero(&fs->quota_policy, sizeof(fs->quota_policy));
+		return EXT4_OK;
+	}
+	if ((policy->types &
+		~(uint32_t)(EXT4_QUOTA_ENFORCE_USER | EXT4_QUOTA_ENFORCE_GROUP |
+		    EXT4_QUOTA_ENFORCE_PROJECT)) ||
+	    policy->now == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	for (type = 0; type < EXT4_QUOTA_TYPES; type++) {
+		if ((policy->types & (1U << type)) &&
+		    (!fs->quota_active || fs->quota_inodes[type] == 0)) {
+			return EXT4_UNSUPPORTED;
+		}
+	}
+	fs->quota_policy = *policy;
+	return EXT4_OK;
+}
+
+void
+ext4_quota_exempt(struct ext4_fs *fs, bool exempt)
+{
+	if (fs != NULL) {
+		fs->quota_exempt = exempt;
+	}
 }

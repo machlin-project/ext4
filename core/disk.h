@@ -170,6 +170,8 @@ struct ext4_xattr_entry_disk {
 #define EXT4_USER_QUOTA_INODE 3U
 #define EXT4_GROUP_QUOTA_INODE 4U
 #define EXT4_QUOTA_BLOCK_SIZE 1024U
+/* Block limits count 1 KiB quota blocks; space usage counts bytes. */
+#define EXT4_QUOTA_LIMIT_SHIFT 10U
 #define EXT4_QUOTA_BLOCK_BITS 10U
 #define EXT4_QUOTA_TREE_ROOT 1U
 #define EXT4_QUOTA_TREE_DEPTH 4U

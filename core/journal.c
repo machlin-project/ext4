@@ -1264,6 +1264,12 @@ ext4_transaction_log(
 	return EXT4_OK;
 }
 
+bool
+ext4_commit_rejected(enum ext4_result error)
+{
+	return error == EXT4_QUOTA_EXCEEDED;
+}
+
 enum ext4_result
 ext4_transaction_commit(struct ext4_transaction *transaction)
 {

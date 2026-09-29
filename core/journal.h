@@ -194,6 +194,9 @@ uint32_t ext4_journal_credits(const struct ext4_journal *journal);
 uint32_t ext4_journal_recovery_credits(const struct ext4_journal *journal);
 /* Both commit and cancel consume the transaction and release all snapshots. */
 enum ext4_result ext4_transaction_commit(struct ext4_transaction *transaction);
+/* A commit refused before any write, such as by quota enforcement, cancelled the
+ * transaction and leaves the journal and its owner usable. */
+bool ext4_commit_rejected(enum ext4_result error);
 void ext4_transaction_cancel(struct ext4_transaction *transaction);
 
 /* Shared journal/recovery implementation, never exported to platform adapters. */

@@ -320,6 +320,14 @@ file must record a freed block or entry. `ext4-quota-test --continue IMAGE EXPOR
 adds 30 owners that reuse those freed entries, restores the distant ID, removes a
 Linux-created file and changes a project; strict fsck and Linux must then agree again.
 
+`ext4-quota-test --enforce IMAGE [EXPORT]` writes limits for an existing owner and a
+project into their quota entries, as setquota does, installs an enforcement policy
+with a test clock and checks hard, partial, soft-grace, exemption, inode and project
+refusals; the `format` suite runs it on the user-and-project volumes. Passing the
+export directory to `run_linux_quota.py --enforced-exports` boots Linux with quota
+mount options: an unprivileged process of that owner must be refused with EDQUOT
+exactly where the limits e2fsprogs reads require.
+
 ## Metadata fuzzing
 
 `-Dfuzzer=true` builds `ext4-image-fuzzer` using Clang's libFuzzer runtime,

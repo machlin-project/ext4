@@ -186,7 +186,9 @@ ext4_edit_commit(struct ext4_fs *fs, struct ext4_transaction *transaction)
 
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
-		fs->aborted = true;
+		if (!ext4_commit_rejected(error)) {
+			fs->aborted = true;
+		}
 	}
 	return error;
 }
@@ -1167,7 +1169,8 @@ ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation, uin
 			continue;
 		}
 		if (fs->aborted ||
-		    !((error == EXT4_RANGE && growth.capacity_failed) || error == EXT4_NO_SPACE)) {
+		    !((error == EXT4_RANGE && growth.capacity_failed) || error == EXT4_NO_SPACE ||
+			error == EXT4_QUOTA_EXCEEDED)) {
 			return error;
 		}
 		if (error == EXT4_RANGE && growth.zeroing) {
@@ -1208,7 +1211,7 @@ ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation, uin
 			return error;
 		}
 		/* Cancelled private snapshots wrote nothing. Reduce only a proven
-		 * credit shortage or allocation shortage, never an I/O/format error.
+		 * credit, allocation or quota shortage, never an I/O/format error.
 		 * Keep the smaller bound for subsequent batches of this request. */
 		limit = (size_t)(blocks / 2U) * fs->info.block_size;
 	}

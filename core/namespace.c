@@ -406,7 +406,9 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	ext4_allocation_destroy(&allocation);
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
-		fs->aborted = true;
+		if (!ext4_commit_rejected(error)) {
+			fs->aborted = true;
+		}
 		return error;
 	}
 	fs->info.feature_compat = feature_compat;
@@ -697,7 +699,9 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 	ext4_allocation_destroy(&allocation);
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
-		fs->aborted = true;
+		if (!ext4_commit_rejected(error)) {
+			fs->aborted = true;
+		}
 		return error;
 	}
 	if (last) {
@@ -1134,7 +1138,9 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 	ready = false;
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
-		fs->aborted = true;
+		if (!ext4_commit_rejected(error)) {
+			fs->aborted = true;
+		}
 		goto out;
 	}
 	fs->info.feature_compat = feature_compat;

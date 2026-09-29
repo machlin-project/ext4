@@ -62,6 +62,12 @@ ext4_error(enum ext4_result result)
 	case EXT4_PERMISSION_DENIED:
 		error = EPERM;
 		break;
+	case EXT4_CROSS_PROJECT:
+		error = EXDEV;
+		break;
+	case EXT4_QUOTA_EXCEEDED:
+		error = EDQUOT;
+		break;
 	case EXT4_CORRUPT:
 	case EXT4_RECOVERY_REQUIRED:
 	case EXT4_IO:

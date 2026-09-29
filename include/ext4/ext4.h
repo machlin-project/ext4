@@ -40,7 +40,9 @@ enum ext4_result {
 	EXT4_ENCRYPTED,
 	/* A link or rename would place an object in a project-inheriting directory
 	 * of another project; Linux reports EXDEV. */
-	EXT4_CROSS_PROJECT
+	EXT4_CROSS_PROJECT,
+	/* An enforced quota limit refused the change; Linux reports EDQUOT. */
+	EXT4_QUOTA_EXCEEDED
 };
 
 enum ext4_file_type {
@@ -359,6 +361,33 @@ enum ext4_result ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint3
  * unchanged ID changes nothing. The owner authorizes the transition. */
 enum ext4_result ext4_set_project(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint32_t project, const struct ext4_timestamp *change_time, struct ext4_inode *result);
+
+/* Quota enforcement is the adapter's policy, as Linux's quota mount options are.
+ * Without one, a writable owner only accounts usage. With one, a transaction that
+ * would raise an enforced ID's usage above its hard limit, or above its soft limit
+ * once that limit's grace period has expired, is refused before any write with
+ * QUOTA_EXCEEDED and the owner remains usable; partial writes keep their durable
+ * prefix. Crossing a soft limit starts its grace period from the quota file's
+ * grace time. Decreases are never refused and, as in Linux, clear the grace period
+ * once usage is back within the soft limit. Block limits are 1 KiB quota blocks. */
+#define EXT4_QUOTA_ENFORCE_USER 0x1U
+#define EXT4_QUOTA_ENFORCE_GROUP 0x2U
+#define EXT4_QUOTA_ENFORCE_PROJECT 0x4U
+
+struct ext4_quota_policy {
+	void *context;
+	/* EXT4_QUOTA_ENFORCE_* types; each must be tracked by the volume. */
+	uint32_t types;
+	/* Seconds since the Unix epoch, for grace periods. */
+	int64_t (*now)(void *context);
+};
+/* Install or replace the policy of a writable owner; NULL removes it. The policy
+ * is copied. Types the volume does not track return UNSUPPORTED. */
+enum ext4_result ext4_quota_policy_set(struct ext4_fs *fs, const struct ext4_quota_policy *policy);
+/* Exempt this serialized owner's subsequent operations from limits, as Linux does
+ * for CAP_SYS_RESOURCE, until cleared. The adapter decides who is privileged;
+ * usage is still accounted. */
+void ext4_quota_exempt(struct ext4_fs *fs, bool exempt);
 /* Writes regular files, allocating holes, converting unwritten extents and
  * extending EOF in a bounded atomic transaction. Newly exposed bytes are zeroed.
  * Requests exceeding transaction capacity reject without writes. Ordinary

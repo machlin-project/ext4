@@ -109,6 +109,10 @@ if paths['quota_fixtures'] != ''
     test('quota-' + profile, programs['quota'], args: [image], timeout: 300, suite: 'format')
     test('quota-faults-' + profile, programs['quota'], args: ['--faults', image], timeout: 600,
       suite: 'format')
+    if profile != 'bigalloc'
+      test('quota-enforce-' + profile, programs['quota'], args: ['--enforce', image],
+        timeout: 300, suite: 'format')
+    endif
   endforeach
 endif
 

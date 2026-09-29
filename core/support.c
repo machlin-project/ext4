@@ -511,6 +511,8 @@ ext4_result_string(enum ext4_result result)
 		return "encrypted object requires an unavailable key";
 	case EXT4_CROSS_PROJECT:
 		return "destination directory inherits a different project";
+	case EXT4_QUOTA_EXCEEDED:
+		return "quota limit exceeded";
 	case EXT4_PERMISSION_DENIED:
 		return "inode policy forbids this operation";
 	}

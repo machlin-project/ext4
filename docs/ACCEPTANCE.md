@@ -41,7 +41,7 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Quota limit enforcement, key-based encryption and enabling verity await product decisions; unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
+| Format compatibility | Key-based encryption and enabling verity through adapter-supplied cryptography; unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | Recovering volumes whose Linux fast-commit replay was interrupted needs a replay-authority decision; until then the core refuses torn bitmap and inode checksums and leaves the log pending | Open; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay of two native captures are accepted, and the torn states of two range-heavy captures fail closed (see "Fast-commit combinations and interrupted foreign replay evidence" and "Interrupted Linux replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
 | Scale and sustained operation | Indexed operations still classify the whole index tree; decisions on larger live transactions, ordered data writes and group commit | Open; measured workloads show bounded peak memory, about 2.1 times device writes for journaled data and five barriers per operation, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence" and "Sustained operation and fuzzing evidence") |
 
@@ -262,6 +262,19 @@ strict fsck and e2fsprogs agree with Linux; the core then reuses those entries a
 blocks, and Linux and strict fsck agree again. The complete 600-test regression
 passes. Evidence is in `artifacts/checks/quota-first/`,
 `artifacts/checks/scale-regression-8/` and the lab's `artifacts/ext4-quota/exchange/`.
+
+With an enforcement policy on the 4 KiB and 1 KiB EA_INODE volumes, an atomic write
+beyond a hard limit is refused without change and leaves the owner usable, a partial
+write keeps exactly the prefix that fits, crossing the soft limit starts its grace
+time from the file's seven-day period, falling below it ends the period, an expired
+period refuses further growth, exemption lifts the limits for its duration, the
+inode limit refuses the next creation, and moving usage into a project at its hard
+limit is refused; strict fsck accepts the exported image. In the reference VM Linux
+mounts that image with `usrquota,grpquota,prjquota`, and an unprivileged process of
+the limited owner is refused with EDQUOT after exactly the 16 KiB its hard limit
+leaves and at its third inode, and Linux's usage agrees with e2fsprogs. Evidence is
+in the lab's `artifacts/ext4-quota/enforce/`; the complete 662-test regression passes
+(`artifacts/checks/scale-regression-14/`).
 
 ## Fast-commit combinations and interrupted foreign replay evidence
 

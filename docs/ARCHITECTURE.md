@@ -711,10 +711,23 @@ transaction; commit publishes free-block and free-inode counts from the committe
 superblock. Ordinary transactions carry 48 extra snapshot credits reserved for
 quota blocks, and `ext4_journal_credits` leaves room for that reserve. Entries
 whose usage returns to zero remain, as e2fsck accepts; a used entry that would be
-all zero carries the Linux inode-grace marker. Limits and grace times are
-preserved but not enforced: Linux enforces them only with quota mount options, and
-enforcement belongs to the adapter's policy. Linux's fast-commit replay runs before
+all zero carries the Linux inode-grace marker. Linux's fast-commit replay runs before
 quotas are enabled and leaves usage to fsck; the core's conversion accounts it.
+
+Enforcement is the adapter's policy, as Linux enforces limits only with quota mount
+options. `ext4_quota_policy_set` names the enforced types and a clock; without a
+policy the core only accounts. With one, the commit that applies usage differences
+also checks every increase of an enforced ID: usage above the hard limit, or above
+the soft limit once its grace time has passed, refuses the transaction with
+`EXT4_QUOTA_EXCEEDED` before any write, and the owner stays usable. The first
+increase beyond a soft limit sets its grace time from the quota file's grace period.
+Decreases are never refused and, as in Linux, clear a grace time once usage is back
+within its soft limit, with or without a policy. Space limits count 1 KiB quota
+blocks and usage counts bytes. Partial writes halve their batch, as for allocation
+shortage, and keep the durable prefix that fits. `ext4_quota_exempt` lifts limits
+for the owner's following operations, as CAP_SYS_RESOURCE does in Linux; the adapter
+decides which callers are privileged, and usage is still accounted. Adapters report
+the result as EDQUOT.
 
 `ext4_inode.project` exposes the project ID. New objects take the directory's
 project only when the directory has PROJINHERIT, and only directories inherit

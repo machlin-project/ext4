@@ -96,7 +96,9 @@ ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 	}
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
-		fs->aborted = true;
+		if (!ext4_commit_rejected(error)) {
+			fs->aborted = true;
+		}
 		return error;
 	}
 	*result = inode;
@@ -168,7 +170,9 @@ ext4_set_project(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint3
 	}
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
-		fs->aborted = true;
+		if (!ext4_commit_rejected(error)) {
+			fs->aborted = true;
+		}
 		return error;
 	}
 	*result = inode;

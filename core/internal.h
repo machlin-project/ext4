@@ -121,6 +121,9 @@ struct ext4_fs {
 	 * Writable owners account usage while quota_active is set. */
 	uint32_t quota_inodes[EXT4_QUOTA_TYPES];
 	bool quota_active;
+	/* The adapter's enforcement policy, when enforcing, and its exemption. */
+	struct ext4_quota_policy quota_policy;
+	bool quota_exempt;
 	struct ext4_inode_table_run *inode_table_runs;
 	size_t inode_table_run_count;
 	uint32_t inode_table_blocks;

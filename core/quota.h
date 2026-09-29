@@ -9,7 +9,7 @@
  * bytes and one inode, plus one inode for each attribute-value inode reference.
  * Usage changes are derived at commit from every changed inode record, so every
  * mutation path, including recovery cleanup, stays consistent with the records
- * it commits. Limits and grace times are preserved but not enforced. */
+ * it commits. The adapter's policy can enforce limits and grace times there. */
 
 /* Validate quota inode numbers named by a superblock with the QUOTA feature. */
 enum ext4_result ext4_quota_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super);

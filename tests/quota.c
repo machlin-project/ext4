@@ -26,6 +26,18 @@
 #define CONTINUED_OWNERS 30U
 /* The project Linux assigns in its mutation phase. */
 #define LINUX_PROJECT 77U
+/* Enforcement: alice may add this many blocks before her soft and hard limits,
+ * and hold this many inodes in all. */
+#define SOFT_BLOCKS 3U
+#define HARD_BLOCKS 6U
+#define INODE_SOFT 2U
+#define INODE_HARD 3U
+#define WRITE_BLOCKS 8U
+#define EXEMPT_BLOCKS 10U
+#define LIMITED_PROJECT 9U
+#define QUOTA_LIMIT_BLOCK 1024U
+
+static int64_t quota_clock = QUOTA_SECONDS;
 
 static const struct ext4_timestamp quota_time = { QUOTA_SECONDS, 0 };
 /* IDs whose index paths diverge at every tree level. */
@@ -82,19 +94,23 @@ zero(const void *buffer, size_t length)
 }
 
 /* Walk one quota file's tree through ordinary reads of its inode. */
-static struct usage
-quota_usage(struct ext4_fs *fs, uint32_t type, uint32_t id)
+/* Walk the quota tree independently of the core. Returns whether id has an entry,
+ * its contents and its byte offset within the quota file. */
+static bool
+quota_find(struct ext4_fs *fs, uint32_t type, uint32_t id, struct ext4_quota_entry_disk *result,
+    uint64_t *offset)
 {
 	const struct ext4_quota_entry_disk *entry;
 	const struct ext4_le32 *references;
 	struct ext4_inode inode;
-	struct usage result = { 0 };
 	uint8_t *file;
 	size_t completed;
+	size_t position;
 	uint32_t block = EXT4_QUOTA_TREE_ROOT;
 	uint32_t depth;
 	uint32_t slot;
 	uint32_t shift;
+	bool found = false;
 
 	CHECK(fs->quota_inodes[type] != 0);
 	EXPECT(ext4_get_inode(fs, fs->quota_inodes[type], &inode), EXT4_OK);
@@ -110,26 +126,44 @@ quota_usage(struct ext4_fs *fs, uint32_t type, uint32_t id)
 		block = ext4_le32(&references[(id >> shift) % EXT4_QUOTA_TREE_FANOUT]);
 		if (block == 0) {
 			free(file);
-			return result;
+			return false;
 		}
 	}
 	CHECK(((uint64_t)block + 1U) * EXT4_QUOTA_BLOCK_SIZE <= inode.size);
-	for (slot = 0; slot < EXT4_QUOTA_LEAF_ENTRIES; slot++) {
-		entry = (const struct ext4_quota_entry_disk *)(file +
-		    (size_t)block * EXT4_QUOTA_BLOCK_SIZE + sizeof(struct ext4_quota_leaf_disk) +
-		    (size_t)slot * sizeof(*entry));
+	for (slot = 0; slot < EXT4_QUOTA_LEAF_ENTRIES && !found; slot++) {
+		position = (size_t)block * EXT4_QUOTA_BLOCK_SIZE +
+		    sizeof(struct ext4_quota_leaf_disk) + (size_t)slot * sizeof(*entry);
+		entry = (const struct ext4_quota_entry_disk *)(file + position);
 		/* An all-zero entry is free; used empty entries carry a marker. */
 		if (!zero(entry, sizeof(*entry)) && ext4_le32(&entry->id) == id) {
-			result.space = (uint64_t)ext4_le32(&entry->space[0]) |
-			    (uint64_t)ext4_le32(&entry->space[1]) << 32;
-			result.inodes = (uint64_t)ext4_le32(&entry->inodes[0]) |
-			    (uint64_t)ext4_le32(&entry->inodes[1]) << 32;
-			result.present = true;
-			break;
+			memcpy(result, entry, sizeof(*result));
+			*offset = position;
+			found = true;
 		}
 	}
-	CHECK(result.present);
+	CHECK(found);
 	free(file);
+	return true;
+}
+
+static uint64_t
+le64(const struct ext4_le32 value[2])
+{
+	return (uint64_t)ext4_le32(&value[0]) | (uint64_t)ext4_le32(&value[1]) << 32;
+}
+
+static struct usage
+quota_usage(struct ext4_fs *fs, uint32_t type, uint32_t id)
+{
+	struct ext4_quota_entry_disk entry;
+	struct usage result = { 0 };
+	uint64_t offset;
+
+	if (quota_find(fs, type, id, &entry, &offset)) {
+		result.space = le64(entry.space);
+		result.inodes = le64(entry.inodes);
+		result.present = true;
+	}
 	return result;
 }
 
@@ -615,6 +649,210 @@ faults(struct device *device, const char *exports, const char *source)
 	printf("PASS quota faults: cuts=%u recovered=%u\n", cuts, recovered);
 }
 
+static int64_t
+clock_now(void *context)
+{
+	(void)context;
+	return quota_clock;
+}
+
+/* Write limits into id's entry while no owner is mounted, as setquota does. The
+ * entry lives in ordinary quota-file data. */
+static void
+set_limits(struct device *device, uint32_t type, uint32_t id, uint64_t space_hard,
+    uint64_t space_soft, uint64_t inode_hard, uint64_t inode_soft)
+{
+	struct ext4_quota_entry_disk entry;
+	struct ext4_mapping mapping;
+	struct ext4_inode inode;
+	struct ext4_fs *fs;
+	uint64_t offset;
+
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	CHECK(quota_find(fs, type, id, &entry, &offset));
+	EXPECT(ext4_get_inode(fs, fs->quota_inodes[type], &inode), EXT4_OK);
+	EXPECT(ext4_map_read(fs, &inode, offset, sizeof(entry), &mapping), EXT4_OK);
+	CHECK(!mapping.hole && mapping.length >= sizeof(entry));
+	ext4_unmount(fs);
+	ext4_encode32(&entry.space_hard[0], (uint32_t)space_hard);
+	ext4_encode32(&entry.space_hard[1], (uint32_t)(space_hard >> 32));
+	ext4_encode32(&entry.space_soft[0], (uint32_t)space_soft);
+	ext4_encode32(&entry.space_soft[1], (uint32_t)(space_soft >> 32));
+	ext4_encode32(&entry.inode_hard[0], (uint32_t)inode_hard);
+	ext4_encode32(&entry.inode_hard[1], (uint32_t)(inode_hard >> 32));
+	ext4_encode32(&entry.inode_soft[0], (uint32_t)inode_soft);
+	ext4_encode32(&entry.inode_soft[1], (uint32_t)(inode_soft >> 32));
+	memcpy(device->cache + mapping.device_offset, &entry, sizeof(entry));
+	memcpy(device->stable + mapping.device_offset, &entry, sizeof(entry));
+}
+
+static struct ext4_quota_entry_disk
+quota_entry(struct ext4_fs *fs, uint32_t type, uint32_t id)
+{
+	struct ext4_quota_entry_disk entry;
+	uint64_t offset;
+
+	CHECK(quota_find(fs, type, id, &entry, &offset));
+	return entry;
+}
+
+static enum ext4_result
+write_blocks(struct ext4_fs *fs, struct ext4_inode *inode, uint32_t first, uint32_t blocks,
+    bool partial, size_t *completed)
+{
+	struct ext4_inode_update update = data_update(inode);
+	size_t length = (size_t)blocks * fs->info.block_size;
+	uint8_t *data = malloc(length);
+	enum ext4_result error;
+
+	CHECK(data != NULL);
+	memset(data, 'q', length);
+	error = partial
+	    ? ext4_write_partial(fs, inode->number, inode->generation,
+		  (uint64_t)first * fs->info.block_size, data, length, &update, completed)
+	    : ext4_write(fs, inode->number, inode->generation,
+		  (uint64_t)first * fs->info.block_size, data, length, &update, completed);
+	free(data);
+	EXPECT(ext4_get_inode(fs, inode->number, inode), EXT4_OK);
+	return error;
+}
+
+/* Limits enforced by the adapter's policy: hard limits refuse without writes and
+ * keep the owner usable, partial writes stop at the limit, soft limits start and
+ * end grace periods, and exemption and decreases always proceed. */
+static void
+enforcement(struct device *device, const char *exports, const char *source)
+{
+	struct ext4_quota_policy policy = { NULL, EXT4_QUOTA_ENFORCE_USER, clock_now };
+	struct ext4_inode_update update = creation(EXISTING_OWNER, EXISTING_GROUP, 0644);
+	struct ext4_quota_entry_disk entry;
+	struct ext4_inode_update truncation;
+	struct ext4_inode root;
+	struct ext4_inode owners;
+	struct ext4_inode alice;
+	struct ext4_inode limited;
+	struct ext4_inode other;
+	struct ext4_inode result;
+	struct usage start;
+	struct usage now;
+	struct ext4_fs *fs;
+	uint64_t block;
+	uint64_t grace;
+	size_t completed;
+
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	owners = lookup(fs, &root, "owners");
+	alice = lookup(fs, &owners, "alice");
+	start = quota_usage(fs, 0, EXISTING_OWNER);
+	block = fs->info.block_size;
+	CHECK(start.present && start.inodes == 1 &&
+	    start.space == alice.blocks_512 * EXT4_SECTOR_SIZE &&
+	    start.space % QUOTA_LIMIT_BLOCK == 0);
+	CHECK(fs->quota_inodes[2] != 0);
+	ext4_unmount(fs);
+	set_limits(device, 0, EXISTING_OWNER,
+	    (start.space + HARD_BLOCKS * block) / QUOTA_LIMIT_BLOCK,
+	    (start.space + SOFT_BLOCKS * block) / QUOTA_LIMIT_BLOCK, INODE_HARD, INODE_SOFT);
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	/* Policy validation. */
+	policy.now = NULL;
+	EXPECT(ext4_quota_policy_set(fs, &policy), EXT4_INVALID_ARGUMENT);
+	policy.now = clock_now;
+	policy.types = 0x8U;
+	EXPECT(ext4_quota_policy_set(fs, &policy), EXT4_INVALID_ARGUMENT);
+	policy.types = EXT4_QUOTA_ENFORCE_USER | EXT4_QUOTA_ENFORCE_PROJECT;
+	EXPECT(ext4_quota_policy_set(fs, &policy), EXT4_OK);
+	/* Without enforcement nothing is refused; with it, a hard limit refuses an
+	 * atomic write that would cross it, without changing anything. */
+	EXPECT(ext4_create(fs, root.number, root.generation, (const uint8_t *)"e1", 2, &update,
+		   &quota_time, &limited),
+	    EXT4_OK);
+	expect_usage(fs, 0, EXISTING_OWNER, start.space, 2);
+	EXPECT(write_blocks(fs, &limited, 0, WRITE_BLOCKS, false, &completed), EXT4_QUOTA_EXCEEDED);
+	CHECK(!fs->aborted && completed == 0 && limited.size == 0);
+	expect_usage(fs, 0, EXISTING_OWNER, start.space, 2);
+	/* A partial write keeps the prefix that fits the hard limit. */
+	EXPECT(write_blocks(fs, &limited, 0, WRITE_BLOCKS, true, &completed), EXT4_QUOTA_EXCEEDED);
+	CHECK(completed == HARD_BLOCKS * block && limited.size == completed);
+	now = quota_usage(fs, 0, EXISTING_OWNER);
+	CHECK(now.space == start.space + HARD_BLOCKS * block);
+	/* Crossing the soft limit started its grace period from the file's grace time. */
+	entry = quota_entry(fs, 0, EXISTING_OWNER);
+	grace = le64(entry.space_time) - (uint64_t)quota_clock;
+	CHECK(le64(entry.space_time) > (uint64_t)quota_clock && grace != 0);
+	/* Falling back within the soft limit ends it. */
+	truncation = data_update(&limited);
+	EXPECT(ext4_truncate(
+		   fs, limited.number, limited.generation, 2U * block, &truncation, &limited),
+	    EXT4_OK);
+	CHECK(le64(quota_entry(fs, 0, EXISTING_OWNER).space_time) == 0);
+	/* Beyond the soft limit again, an expired grace period refuses more. */
+	EXPECT(write_blocks(fs, &limited, 2, 3, false, &completed), EXT4_OK);
+	entry = quota_entry(fs, 0, EXISTING_OWNER);
+	CHECK(le64(entry.space_time) == (uint64_t)quota_clock + grace);
+	quota_clock += (int64_t)grace;
+	EXPECT(write_blocks(fs, &limited, 5, 1, false, &completed), EXT4_QUOTA_EXCEEDED);
+	/* Exemption lifts limits for the owner's privileged operations only. */
+	ext4_quota_exempt(fs, true);
+	EXPECT(write_blocks(fs, &limited, 5, EXEMPT_BLOCKS, false, &completed), EXT4_OK);
+	ext4_quota_exempt(fs, false);
+	EXPECT(write_blocks(fs, &limited, 5 + EXEMPT_BLOCKS, 1, false, &completed),
+	    EXT4_QUOTA_EXCEEDED);
+	/* Inode limits: the third inode fits, a fourth does not. */
+	EXPECT(ext4_create(fs, root.number, root.generation, (const uint8_t *)"e2", 2, &update,
+		   &quota_time, &other),
+	    EXT4_OK);
+	EXPECT(ext4_create(fs, root.number, root.generation, (const uint8_t *)"e3", 2, &update,
+		   &quota_time, &result),
+	    EXT4_QUOTA_EXCEEDED);
+	CHECK(!fs->aborted);
+	EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"e3", 2, &result), EXT4_NOT_FOUND);
+	expect_usage(fs, 0, EXISTING_OWNER, quota_usage(fs, 0, EXISTING_OWNER).space, INODE_HARD);
+	/* Decreases always proceed and end the grace periods they fall below. */
+	EXPECT(ext4_unlink(fs, root.number, root.generation, (const uint8_t *)"e1", 2,
+		   limited.number, limited.generation, &quota_time, &result),
+	    EXT4_OK);
+	now = quota_usage(fs, 0, EXISTING_OWNER);
+	CHECK(now.space == start.space && now.inodes == 2);
+	CHECK(le64(quota_entry(fs, 0, EXISTING_OWNER).space_time) == 0);
+	/* Moving usage into a project at its hard limit is refused. */
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	now = quota_usage(fs, 2, LIMITED_PROJECT);
+	ext4_unmount(fs);
+	set_limits(device, 2, LIMITED_PROJECT, now.space / QUOTA_LIMIT_BLOCK, 0, 0, 0);
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(ext4_quota_policy_set(fs, &policy), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	other = lookup(fs, &root, "e2");
+	EXPECT(write_blocks(fs, &other, 0, 1, false, &completed), EXT4_OK);
+	EXPECT(ext4_set_project(
+		   fs, other.number, other.generation, LIMITED_PROJECT, &quota_time, &result),
+	    EXT4_QUOTA_EXCEEDED);
+	EXPECT(ext4_get_inode(fs, other.number, &result), EXT4_OK);
+	CHECK(result.project == 0 && !fs->aborted);
+	expect_usage(fs, 2, LIMITED_PROJECT, now.space, now.inodes);
+	/* Without a policy the same move is only accounted. */
+	EXPECT(ext4_quota_policy_set(fs, NULL), EXT4_OK);
+	EXPECT(ext4_set_project(
+		   fs, other.number, other.generation, LIMITED_PROJECT, &quota_time, &result),
+	    EXT4_OK);
+	CHECK(result.project == LIMITED_PROJECT);
+	EXPECT(
+	    ext4_set_project(fs, other.number, other.generation, 0, &quota_time, &result), EXT4_OK);
+	expect_usage(fs, 2, LIMITED_PROJECT, now.space, now.inodes);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	memcpy(device->stable, device->cache, device->size);
+	storage_export(device, exports, source, "quota-enforced-");
+	printf("PASS quota enforcement: hard, partial, soft grace start/expiry/end, exemption, "
+	       "inode and project limits, grace %llu s\n",
+	    (unsigned long long)grace);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -626,6 +864,12 @@ main(int argc, char **argv)
 		storage_close(&device);
 		return 0;
 	}
+	if ((argc == 3 || argc == 4) && strcmp(argv[1], "--enforce") == 0) {
+		storage_open(&device, argv[2]);
+		enforcement(&device, argc == 4 ? argv[3] : NULL, argv[2]);
+		storage_close(&device);
+		return 0;
+	}
 	if ((argc == 3 || argc == 4) && strcmp(argv[1], "--faults") == 0) {
 		storage_open(&device, argv[2]);
 		faults(&device, argc == 4 ? argv[3] : NULL, argv[2]);
@@ -634,7 +878,9 @@ main(int argc, char **argv)
 	}
 	if (argc != 2 && argc != 3) {
 		fprintf(stderr,
-		    "usage: %s [--faults | --continue] QUOTA_IMAGE [EXPORT_DIRECTORY]\n", argv[0]);
+		    "usage: %s [--faults | --enforce | --continue] QUOTA_IMAGE "
+		    "[EXPORT_DIRECTORY]\n",
+		    argv[0]);
 		return 2;
 	}
 	storage_open(&device, argv[1]);
