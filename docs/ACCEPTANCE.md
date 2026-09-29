@@ -318,7 +318,12 @@ encryption, verity where extents allow it and, on one, casefolding pass on the
 13 verity digests (`artifacts/checks/unjournaled-sustained-1/` and the lab's
 `artifacts/ext4-sustained/unjournaled-*`). A journaled volume whose valid state is
 clear without a pending log now also returns `EXT4_CHECK_REQUIRED` rather than asking
-for a recovery that cannot repair it. The 710-test regression passes, with the
+for a recovery that cannot repair it. Twenty-four further runs of 5,000 operations
+without a journal, with encryption and casefolding and, where extents allow it,
+verity, passed under ASan/UBSan: 120,000 operations, 624 checks without the key, 309
+verity enables and 1,966 space-exhaustion rejections, ending with 973 encrypted
+objects, 252 casefolded directories and 219 verity files
+(`artifacts/checks/sustained-soak-unjournaled-1/`). The 710-test regression passes, with the
 malformed-image test rerun after that expectation changed
 (`artifacts/checks/scale-regression-25/`).
 
