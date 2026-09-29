@@ -121,8 +121,13 @@ sequence of 24 mutations in one compound: nothing may reach the device before
 `ext4_commit`, every write and barrier of that commit is cut under three survival
 modes and recovery must yield the image before or after the whole sequence; with a
 24-block compound, capacity commits happen mid-sequence and every cut must recover
-exactly one commit-point image. `ext4-scale --commit-blocks N` measures the workloads
-with deferred commit.
+exactly one commit-point image. Both properties then run again with ordered data, where
+blocks the expected image leaves free may hold data of an uncommitted mutation, and
+an overwrite of `payload.bin` is cut at every event: blocks outside it must be
+unchanged, each overwritten 512-byte sector old or new, and a durable commit must
+carry the new data. The sustained test's `--data ordered` compares images only for
+operations that write no file data. `ext4-scale --commit-blocks N --data ordered`
+measures the workloads in these modes.
 
 `tests/generate_format_fixtures.py --tools-root E2FSPROGS_BUILD --output NEW`
 authors one volume per optional format feature or geometry, and the `format_fixtures`
@@ -154,9 +159,9 @@ flushes cost nothing, so times measure the core rather than the medium.
 `RESULT` receives the image after the workload.
 
 `tests/run_scale.py --tools-root E2FSPROGS_BUILD --scale EXT4_SCALE --output NEW
---label NAME` runs every workload on fresh 1 GiB e2fsprogs volumes with 4 KiB and
-1 KiB blocks, requires strict nonrepairing fsck of each result and writes
-`measurements.jsonl`. Compare source revisions with the same `tools/scale.c` driver
+--label NAME [--commit-blocks N] [--data ordered]` runs every workload on fresh
+1 GiB e2fsprogs volumes with 4 KiB and 1 KiB blocks, requires strict nonrepairing
+fsck of each result and writes `measurements.jsonl`. Compare source revisions with the same `tools/scale.c` driver
 on a quiet host: add it and its `meson.build` executable to a `git archive` of the
 baseline revision, build both with the same options and run them in turn.
 

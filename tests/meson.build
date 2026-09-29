@@ -653,6 +653,17 @@ foreach name : ['ext4-4k.img', 'ext4-1k.img']
     sustained_seed += 1
   endforeach
 endforeach
+foreach name : ['ext4-4k.img', 'ext4-1k.img', 'ext4-indirect-1k.img']
+  test('sustained-ordered-' + name, programs['sustained'],
+    args: [paths['fixtures'] / name, sustained_seed.to_string(), '3000', '--data', 'ordered'],
+    timeout: 600, suite: 'sustained')
+  sustained_seed += 1
+  test('sustained-ordered-deferred-' + name, programs['sustained'],
+    args: [paths['fixtures'] / name, sustained_seed.to_string(), '3000', '--data', 'ordered',
+      '--commit-blocks', '128'],
+    timeout: 600, suite: 'sustained')
+  sustained_seed += 1
+endforeach
 foreach name : ['ext4-4k.img', 'ext4-1k.img']
   test('sustained-wide-' + name, programs['sustained'],
     args: [paths['fixtures'] / name, sustained_seed.to_string(), '8000', '--objects', '1000',

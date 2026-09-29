@@ -326,9 +326,20 @@ enum ext4_result ext4_mount_writable_with_journal(const struct ext4_environment 
  * one journal transaction on ext4_commit or ext4_sync, or when the next mutation
  * would not fit. A power cut loses the mutations after the last durable commit and
  * never applies one partially. commit_blocks may not exceed the recovery bound of
- * the journal, half its ring and 32 MiB of blocks. */
+ * the journal, half its ring and 32 MiB of blocks.
+ *
+ * EXT4_WRITE_ORDERED_DATA writes regular-file data in place before the commit that
+ * references it instead of journaling it, as Linux's data=ordered does: committed
+ * metadata never exposes a block whose data is not durable, but a power cut can
+ * leave overwritten blocks of an existing file with their new contents while its
+ * size and times are old. Data reusing a block freed since the last durable commit
+ * stays journaled, so a power cut never shows it through the block's old owner.
+ * Without the flag every write, including its data, is atomic. */
+#define EXT4_WRITE_ORDERED_DATA 0x1U
+
 struct ext4_write_options {
 	uint32_t commit_blocks;
+	uint32_t flags;
 };
 enum ext4_result ext4_mount_writable_with_options(const struct ext4_environment *environment,
     const struct ext4_write_environment *writer, const struct ext4_journal_environment *journal,

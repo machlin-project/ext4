@@ -714,7 +714,7 @@ ext4_orphan_tail(struct ext4_allocation *allocation, const struct ext4_inode *in
 	if (error != EXT4_OK || run.physical == 0 || run.unwritten) {
 		return error;
 	}
-	error = ext4_transaction_buffer(allocation->transaction, run.physical, &buffer);
+	error = ext4_transaction_data(allocation->transaction, run.physical, false, &buffer);
 	if (error == EXT4_OK) {
 		ext4_zero((uint8_t *)buffer + within, block_size - within);
 	}

@@ -140,6 +140,14 @@ struct ext4_journal {
 	 * most compound_blocks snapshots. Zero commits every operation durably. */
 	struct ext4_transaction *compound;
 	uint32_t compound_blocks;
+	/* Ordered data: regular-file data is written in place before its commit.
+	 * Blocks freed since the last durable commit may still belong to their old
+	 * owner after a power cut, so data reusing them stays journaled; when this
+	 * sorted set overflows, all data does until the next durable commit. */
+	bool ordered_data;
+	bool freed_overflow;
+	struct ext4_block_range *freed;
+	size_t freed_count;
 };
 
 struct ext4_transaction;
@@ -170,6 +178,12 @@ enum ext4_result ext4_transaction_begin_recovery(struct ext4_journal *journal, u
     uint32_t credits, struct ext4_transaction **result);
 enum ext4_result ext4_transaction_buffer(
     struct ext4_transaction *transaction, uint64_t block, void **result);
+/* Snapshot a regular file's data block, blank or with its current contents. Under
+ * ordered data it is written in place before the commit instead of logged. */
+enum ext4_result ext4_transaction_data(
+    struct ext4_transaction *transaction, uint64_t block, bool blank, void **result);
+/* Record blocks this transaction frees for ordered data's reuse rule. */
+void ext4_transaction_freed(struct ext4_transaction *transaction, uint64_t block, uint64_t length);
 /* Enroll a block whose previous contents the caller replaces completely: a new
  * snapshot starts zeroed without reading the device. An enrolled block is returned
  * unchanged. */

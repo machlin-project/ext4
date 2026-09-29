@@ -129,7 +129,23 @@ mutations after the last durable commit and never exposes part of one; recovery 
 unchanged. Quota differences are applied as a mutation joins the compound, against
 the state it overlays. Recovery conversions, such as fast-commit replay, always commit
 durably. unmount discards pending mutations, as power loss would, so adapters commit
-on fsync and sync before unmount. File data stays journaled in this mode.
+on fsync and sync before unmount.
+
+`EXT4_WRITE_ORDERED_DATA` writes regular-file data in place instead of journaling
+it, in either commit mode, as Linux's data=ordered does. Writes, gap and unwritten-
+extent zeroing, punched edges and truncated tails mark their snapshots as data;
+directory, symlink and attribute blocks remain metadata. A synchronous commit writes
+eligible data home before logging, so the barrier before the commit block orders it;
+a deferred mutation writes it home when it joins the compound, after the compound's
+buffers are secured, and the compound's barrier orders it before that commit.
+Committed metadata therefore never references data that is not durable. Overwritten
+blocks of an existing file may reach the device before their commit, torn within a
+block as on any disk, so a power cut can show new contents with the old size and
+times. Data stays journaled when its block was freed since the last durable commit,
+because the old owner still references it until then, or when the compound already
+holds the block; each transaction records the ranges it frees, the compound keeps a
+sorted set of up to 4,096, and an overflow journals all data until the next durable
+commit.
 
 Recovery checks the committed prefix before changing home blocks, records bounded
 replay locations and applies the last committed event for each block. A revoke

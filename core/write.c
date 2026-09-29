@@ -61,12 +61,19 @@ ext4_mount_writable_with_options(const struct ext4_environment *environment,
 	if (error == EXT4_OK) {
 		error = ext4_quota_open(fs);
 	}
+	if (error == EXT4_OK && options != NULL &&
+	    (options->flags & ~(uint32_t)EXT4_WRITE_ORDERED_DATA) != 0) {
+		error = EXT4_INVALID_ARGUMENT;
+	}
 	if (error == EXT4_OK && options != NULL && options->commit_blocks != 0) {
 		if (options->commit_blocks > ext4_journal_compound_limit(fs->journal)) {
 			error = EXT4_RANGE;
 		} else {
 			fs->journal->compound_blocks = options->commit_blocks;
 		}
+	}
+	if (error == EXT4_OK && options != NULL) {
+		fs->journal->ordered_data = (options->flags & EXT4_WRITE_ORDERED_DATA) != 0;
 	}
 	if (error != EXT4_OK) {
 		ext4_unmount(fs);
@@ -437,9 +444,7 @@ ext4_write_snapshot(struct ext4_allocation *allocation, struct ext4_write_target
 	}
 	error = ext4_allocation_valid(allocation, physical);
 	if (error == EXT4_OK) {
-		error = blank
-		    ? ext4_transaction_buffer_blank(allocation->transaction, physical, snapshot)
-		    : ext4_transaction_buffer(allocation->transaction, physical, snapshot);
+		error = ext4_transaction_data(allocation->transaction, physical, blank, snapshot);
 	}
 	return error;
 }
@@ -775,7 +780,7 @@ ext4_unwritten_zero(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 		error = EXT4_CORRUPT;
 	}
 	for (index = position; error == EXT4_OK && index < end; index++) {
-		error = ext4_transaction_buffer(transaction, range->physical + index, &buffer);
+		error = ext4_transaction_data(transaction, range->physical + index, true, &buffer);
 		if (error == EXT4_OK) {
 			ext4_zero(buffer, fs->info.block_size);
 		}
@@ -1631,7 +1636,8 @@ ext4_file_range_step(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 			amount *= fs->info.block_size;
 		} else if (punch) {
 			if (!run.unwritten) {
-				error = ext4_transaction_buffer(transaction, run.physical, &buffer);
+				error = ext4_transaction_data(
+				    transaction, run.physical, false, &buffer);
 				if (error == EXT4_OK) {
 					ext4_zero((uint8_t *)buffer + within, (size_t)amount);
 				}

@@ -43,7 +43,7 @@ counted as portable-core implementation.
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
 | Format compatibility | Key-based encryption and enabling verity through adapter-supplied cryptography; unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | Recovering volumes whose Linux fast-commit replay was interrupted needs a replay-authority decision; until then the core refuses torn bitmap and inode checksums and leaves the log pending | Open; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay of two native captures are accepted, and the torn states of two range-heavy captures fail closed (see "Fast-commit combinations and interrupted foreign replay evidence" and "Interrupted Linux replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
-| Scale and sustained operation | Indexed operations still classify the whole index tree; ordered data writes and lazy checkpointing for the deferred commit mode | Open; measured workloads show bounded peak memory, about 2.1 times device writes for journaled data and five barriers per operation, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence" and "Sustained operation and fuzzing evidence") |
+| Scale and sustained operation | Indexed operations still classify the whole index tree; lazy checkpointing of committed transactions | Open; measured workloads show bounded peak memory; group commit and ordered data reach write amplification 1.0 and a few barriers per commit, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence", "Deferred commit evidence", "Ordered data evidence" and "Sustained operation and fuzzing evidence") |
 
 MMP, fs-verity reading with protected writable metadata, encrypted volumes without
 keys, casefolded directories and quota/project accounting are implemented. Quota
@@ -162,9 +162,34 @@ from 813,177 and 250,001 to 51,698 and 72 with 1 KiB blocks; 1,000 random 64 KiB
 overwrites need 42 barriers instead of 5,002, and truncating 256 MiB writes 18
 blocks instead of 270. Peak core allocation grows to the compound's 8 MiB of 4 KiB
 snapshots. Times on the in-memory device are unchanged within noise, because they
-exclude the device's flush latency that the barriers save. File data remains
-journaled, so writes keep their 2.1 times amplification. The complete 667-test
-regression passes (`artifacts/checks/scale-regression-15/`).
+exclude the device's flush latency that the barriers save. Journaled file data
+keeps its 2.1 times amplification; "Ordered data evidence" removes it. The complete
+667-test regression passes (`artifacts/checks/scale-regression-15/`).
+
+## Ordered data evidence
+
+With `EXT4_WRITE_ORDERED_DATA`, `ext4-deferred-test` repeats both deferred properties
+with file data written in place: every cut of the atomic commit's 27 to 31 events
+recovers the image before or after the whole sequence, allowing blocks that image
+leaves free to hold uncommitted data, and every cut around the ten commit points
+recovers exactly one of them. An overwrite of an existing file, cut at each of its 26
+to 29 events, leaves every block outside the file unchanged and every 512-byte sector
+old or new; 13 to 15 cuts show new data before its commit, and a durable commit
+always carries it. It passes on the same volumes as the journaled mode, and strict
+fsck accepts the exported results. Twenty-four sustained runs of 3,000 to 4,000
+operations on the 4 KiB, 1 KiB and indirect 1 KiB volumes, synchronous and with 48-
+to 256-block compounds, pass with 85 to 200 power cuts each; image equality is
+checked for operations that write no file data.
+
+On the 1 GiB scale volumes (`artifacts/checks/scale-measurements-4/`) ordered data
+lowers write amplification from 2.14 to 1.14 for sequential writes and from 2.38 to
+1.38 for random 64 KiB overwrites with 4 KiB blocks. With a 2,048-block compound as
+well, both reach 1.00 with 7 barriers instead of 3,841 and 5,002, fragmented writes
+reach 1.21 with 12 barriers instead of 961, and peak core allocation for sequential
+writes falls from 9.1 MiB with journaled data to 1.3 MiB, because data no longer
+occupies compound snapshots; 1 KiB blocks behave alike. Metadata workloads are
+unchanged. The complete 673-test regression passes
+(`artifacts/checks/scale-regression-16/`).
 
 ## Sustained operation and fuzzing evidence
 

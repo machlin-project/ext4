@@ -769,6 +769,7 @@ ext4_free_blocks(struct ext4_allocation *allocation, uint64_t block, uint64_t le
 	if (error != EXT4_OK) {
 		return error;
 	}
+	ext4_transaction_freed(allocation->transaction, block, length);
 	while (length != 0) {
 		relative = block - fs->first_data_block;
 		group_index = (uint32_t)(relative / fs->blocks_per_group);

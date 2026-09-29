@@ -149,6 +149,8 @@ struct state {
 	uint32_t block_size;
 	/* Deferred commit capacity; zero commits every operation durably. */
 	uint32_t commit_blocks;
+	/* EXT4_WRITE_* flags, such as ordered data. */
+	uint32_t write_flags;
 	uint32_t commits;
 	bool extents;
 	bool crashing;
@@ -665,12 +667,19 @@ plan_operation(struct state *state, struct plan *plan)
 	return false;
 }
 
+/* Ordered data writes file data in place ahead of its commit, so a power cut in an
+ * operation that writes data may leave neither the old nor the new image; those
+ * operations then run without the image comparison. */
 static bool
 crash_eligible(const struct state *state, const struct plan *plan)
 {
+	bool data = plan->operation == OP_WRITE || plan->operation == OP_TRUNCATE ||
+	    plan->operation == OP_TRUNCATE_ATOMIC;
+
 	return state->holds == 0 && plan->operation != OP_WRITE_PARTIAL &&
 	    plan->operation != OP_FALLOCATE && plan->operation != OP_HOLD &&
-	    plan->operation != OP_RELEASE && plan->operation != OP_BALLAST;
+	    plan->operation != OP_RELEASE && plan->operation != OP_BALLAST &&
+	    !(data && (state->write_flags & EXT4_WRITE_ORDERED_DATA));
 }
 
 static enum ext4_result
@@ -1352,7 +1361,7 @@ verify(struct state *state)
 static void
 mount_writer(struct state *state)
 {
-	struct ext4_write_options options = { state->commit_blocks };
+	struct ext4_write_options options = { state->commit_blocks, state->write_flags };
 
 	EXPECT(ext4_mount_writable_with_options(
 		   &state->device.environment, &state->device.writer, NULL, &options, &state->fs),
@@ -1645,7 +1654,8 @@ main(int argc, char **argv)
 	if (argc < 4) {
 		fprintf(stderr,
 		    "usage: %s IMAGE SEED OPERATIONS [--objects N] [--entries N] "
-		    "[--directories N] [--commit-blocks N] [--export DIRECTORY]\n",
+		    "[--directories N] [--commit-blocks N] [--data journal|ordered] "
+		    "[--export DIRECTORY]\n",
 		    argv[0]);
 		return 2;
 	}
@@ -1665,6 +1675,12 @@ main(int argc, char **argv)
 			state.directory_limit = parse_number(argv[argument + 1]);
 		} else if (strcmp(argv[argument], "--commit-blocks") == 0) {
 			state.commit_blocks = parse_number(argv[argument + 1]);
+		} else if (strcmp(argv[argument], "--data") == 0) {
+			CHECK(strcmp(argv[argument + 1], "journal") == 0 ||
+			    strcmp(argv[argument + 1], "ordered") == 0);
+			state.write_flags = strcmp(argv[argument + 1], "ordered") == 0
+			    ? EXT4_WRITE_ORDERED_DATA
+			    : 0;
 		} else if (strcmp(argv[argument], "--export") == 0) {
 			export_directory = argv[argument + 1];
 		} else {

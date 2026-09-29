@@ -19,8 +19,15 @@
 #define SMALL_COMMIT_BLOCKS 24U
 #define NAME_BYTES 16U
 #define PATTERN_SEED 0x5dU
+/* Ordered overwrites: blocks of the fixture's payload replaced in place. */
+#define OVERWRITE_FILE "payload.bin"
+#define OVERWRITE_FIRST 2U
+#define OVERWRITE_BLOCKS 4U
+#define OVERWRITE_BYTE 0xa7U
 
 static const struct ext4_timestamp deferred_time = { DEFERRED_SECONDS, 0 };
+/* EXT4_WRITE_* flags of the current run. */
+static uint32_t data_flags;
 static const uint8_t directory_name[] = "deferred";
 static const uint8_t attribute_name[] = "deferred";
 
@@ -227,7 +234,7 @@ verify(struct ext4_fs *fs, uint32_t block_size)
 static void
 mount_deferred(struct device *device, uint32_t blocks, struct ext4_fs **fs)
 {
-	struct ext4_write_options options = { blocks };
+	struct ext4_write_options options = { blocks, data_flags };
 
 	EXPECT(ext4_mount_writable_with_options(
 		   &device->environment, &device->writer, NULL, &options, fs),
@@ -249,13 +256,77 @@ recovered(struct device *scratch, const uint8_t *stable)
 	return image;
 }
 
+/* Blocks an image's own bitmaps allocate. Ordered data may leave data of a
+ * commit that did not become durable in blocks that stay free. */
+static uint8_t *
+allocated_blocks(struct device *scratch, const uint8_t *image)
+{
+	struct ext4_group group;
+	struct ext4_fs *fs;
+	uint8_t *allocated = calloc(scratch->blocks, 1);
+	uint8_t *bitmap;
+	uint64_t first;
+	uint64_t block;
+	uint32_t index;
+	uint32_t bit;
+
+	CHECK(allocated != NULL);
+	device_reset(scratch, image);
+	EXPECT(ext4_mount(&scratch->environment, &fs), EXT4_OK);
+	bitmap = malloc(fs->info.block_size);
+	CHECK(bitmap != NULL);
+	for (block = 0; block < fs->first_data_block; block++) {
+		allocated[block] = 1;
+	}
+	for (index = 0; index < fs->info.groups; index++) {
+		EXPECT(ext4_group_get(fs, index, &group), EXT4_OK);
+		if (group.flags & EXT4_GROUP_BLOCK_UNINIT) {
+			continue;
+		}
+		EXPECT(ext4_block_read(fs, group.block_bitmap, bitmap), EXT4_OK);
+		first = fs->first_data_block + (uint64_t)index * fs->blocks_per_group;
+		for (bit = 0; bit < fs->clusters_per_group; bit++) {
+			for (block = first + (uint64_t)bit * fs->cluster_blocks;
+			    (bitmap[bit / EXT4_BITS_PER_BYTE] >> (bit % EXT4_BITS_PER_BYTE) & 1U) &&
+			    block < first + (uint64_t)(bit + 1U) * fs->cluster_blocks &&
+			    block < scratch->blocks;
+			    block++) {
+				allocated[block] = 1;
+			}
+		}
+	}
+	free(bitmap);
+	ext4_unmount(fs);
+	return allocated;
+}
+
+/* Under journaled data every block must match; under ordered data only those the
+ * expected image allocates. */
 static bool
-matches(struct device *device, uint8_t *const *images, uint32_t count)
+equal(struct device *device, const uint8_t *expected, const uint8_t *allocated)
+{
+	uint32_t index;
+
+	if (!(data_flags & EXT4_WRITE_ORDERED_DATA)) {
+		return storage_equal(device, expected);
+	}
+	for (index = 0; index < device->blocks; index++) {
+		if (!device->journal_blocks[index] && allocated[index] &&
+		    memcmp(device->cache + (size_t)index * device->block_size,
+			expected + (size_t)index * device->block_size, device->block_size) != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
+matches(struct device *device, uint8_t *const *images, uint8_t *const *maps, uint32_t count)
 {
 	uint32_t index;
 
 	for (index = 0; index < count; index++) {
-		if (storage_equal(device, images[index])) {
+		if (equal(device, images[index], maps[index])) {
 			return true;
 		}
 	}
@@ -271,6 +342,7 @@ atomic_commit(
 	struct ext4_recovery_report report;
 	struct ext4_fs *fs;
 	uint8_t *images[2];
+	uint8_t *maps[2];
 	uint32_t index;
 	uint32_t events;
 	uint32_t cut;
@@ -284,7 +356,8 @@ atomic_commit(
 	for (index = 0; index < STEPS; index++) {
 		EXPECT(step(fs, index, device->block_size), EXT4_OK);
 	}
-	CHECK(device->writes == 0);
+	/* Only ordered data reaches the device before the commit. */
+	CHECK(device->writes == 0 || (data_flags & EXT4_WRITE_ORDERED_DATA));
 	verify(fs, device->block_size);
 	events = device->events;
 	EXPECT(ext4_commit(fs), EXT4_OK);
@@ -295,6 +368,8 @@ atomic_commit(
 	images[0] = recovered(scratch, device->base);
 	images[1] = recovered(scratch, device->stable);
 	CHECK(memcmp(images[0], images[1], device->size) != 0);
+	maps[0] = allocated_blocks(scratch, images[0]);
+	maps[1] = allocated_blocks(scratch, images[1]);
 	for (cut = 1; cut <= events; cut++) {
 		for (survival = 0; survival < 3; survival++) {
 			device_reset(device, device->base);
@@ -316,8 +391,8 @@ atomic_commit(
 				continue;
 			}
 			EXPECT(error, EXT4_OK);
-			CHECK(matches(device, images, 2));
-			committed += storage_equal(device, images[1]) ? 1U : 0U;
+			CHECK(matches(device, images, maps, 2));
+			committed += equal(device, images[1], maps[1]) ? 1U : 0U;
 			cuts++;
 		}
 	}
@@ -328,10 +403,13 @@ atomic_commit(
 	ext4_unmount(fs);
 	memcpy(device->stable, images[1], device->size);
 	storage_export(device, exports, source, "deferred-");
-	free(images[0]);
-	free(images[1]);
-	printf("PASS deferred atomic commit: %u steps, %u commit events, %u cuts, %u committed\n",
-	    STEPS, events, cuts, committed);
+	for (index = 0; index < 2; index++) {
+		free(images[index]);
+		free(maps[index]);
+	}
+	printf("PASS deferred atomic commit, %s data: %u steps, %u commit events, %u cuts, "
+	       "%u committed\n",
+	    data_flags ? "ordered" : "journaled", STEPS, events, cuts, committed);
 }
 
 /* A small compound commits whenever the next mutation would not fit; any cut
@@ -342,6 +420,7 @@ capacity_commits(struct device *device, struct device *scratch)
 	struct ext4_recovery_report report;
 	struct ext4_fs *fs;
 	uint8_t *images[STEPS + 2U];
+	uint8_t *maps[STEPS + 2U];
 	uint32_t count = 0;
 	uint32_t index;
 	uint32_t before;
@@ -367,6 +446,9 @@ capacity_commits(struct device *device, struct device *scratch)
 	events = device->events;
 	ext4_unmount(fs);
 	CHECK(count > 3U);
+	for (index = 0; index < count; index++) {
+		maps[index] = allocated_blocks(scratch, images[index]);
+	}
 	for (cut = 1; cut <= events; cut++) {
 		device_reset(device, device->base);
 		mount_deferred(device, SMALL_COMMIT_BLOCKS, &fs);
@@ -390,7 +472,8 @@ capacity_commits(struct device *device, struct device *scratch)
 		}
 		EXPECT(error, EXT4_OK);
 		index_matched = 0;
-		while (index_matched < count && !storage_equal(device, images[index_matched])) {
+		while (index_matched < count &&
+		    !equal(device, images[index_matched], maps[index_matched])) {
 			index_matched++;
 		}
 		CHECK(index_matched < count);
@@ -398,9 +481,137 @@ capacity_commits(struct device *device, struct device *scratch)
 	}
 	for (index = 0; index < count; index++) {
 		free(images[index]);
+		free(maps[index]);
 	}
-	printf("PASS deferred capacity commits: %u commit points, %u events, %u cuts\n", count,
-	    events, cuts);
+	printf("PASS deferred capacity commits, %s data: %u commit points, %u events, %u cuts\n",
+	    data_flags ? "ordered" : "journaled", count, events, cuts);
+}
+
+/* Ordered data writes overwrites of existing blocks in place before the commit: after
+ * any cut each overwritten block holds its old or new contents, never anything else,
+ * the file keeps its size, and a durable commit implies the new contents. */
+static void
+ordered_overwrites(struct device *device)
+{
+	struct ext4_recovery_report report;
+	struct ext4_inode_update update = change(0644);
+	struct ext4_inode_update creation_update = creation();
+	struct ext4_inode root;
+	struct ext4_inode file;
+	struct ext4_inode marker;
+	struct ext4_fs *fs;
+	uint8_t *original;
+	uint8_t *contents;
+	uint8_t *replacement;
+	size_t completed;
+	size_t length;
+	size_t offset;
+	size_t sector;
+	uint32_t block;
+	uint32_t events;
+	uint32_t cut;
+	uint32_t cuts = 0;
+	uint32_t mixed = 0;
+	bool committed;
+	bool fresh;
+	bool changed;
+	enum ext4_result error;
+
+	device_reset(device, device->base);
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(
+	    ext4_lookup(fs, &root, (const uint8_t *)OVERWRITE_FILE, strlen(OVERWRITE_FILE), &file),
+	    EXT4_OK);
+	length = (size_t)file.size;
+	CHECK(length >= (OVERWRITE_FIRST + OVERWRITE_BLOCKS) * device->block_size);
+	original = malloc(length);
+	contents = malloc(length);
+	replacement = malloc((size_t)OVERWRITE_BLOCKS * device->block_size);
+	CHECK(original != NULL && contents != NULL && replacement != NULL);
+	EXPECT(ext4_read(fs, &file, 0, original, length, &completed), EXT4_OK);
+	CHECK(completed == length);
+	ext4_unmount(fs);
+	memset(replacement, OVERWRITE_BYTE, (size_t)OVERWRITE_BLOCKS * device->block_size);
+	events = 0;
+	for (cut = 0; cut == 0 || cut <= events; cut++) {
+		device_reset(device, device->base);
+		mount_deferred(device, LARGE_COMMIT_BLOCKS, &fs);
+		/* Cuts cover the in-place data writes as well as the commit. */
+		device->stop_at = cut;
+		device->survival = cut % 3U;
+		device->partial = cut % 2U != 0;
+		error = ext4_write(fs, file.number, file.generation,
+		    (uint64_t)OVERWRITE_FIRST * device->block_size, replacement,
+		    (size_t)OVERWRITE_BLOCKS * device->block_size, &update, &completed);
+		if (error == EXT4_OK) {
+			error =
+			    ext4_create(fs, root.number, root.generation, (const uint8_t *)"marker",
+				6, &creation_update, &deferred_time, &marker);
+		}
+		if (error == EXT4_OK) {
+			error = ext4_commit(fs);
+		}
+		if (cut == 0) {
+			EXPECT(error, EXT4_OK);
+			events = device->events;
+			ext4_unmount(fs);
+			continue;
+		}
+		CHECK(error != EXT4_OK && device->off);
+		ext4_unmount(fs);
+		committed = device->intent_durable;
+		device_reset(device, device->stable);
+		error = ext4_recover(&device->environment, &device->writer, &report);
+		if (error == EXT4_CORRUPT) {
+			CHECK(device->metadata_checksum && device->writes == 0);
+			continue;
+		}
+		EXPECT(error, EXT4_OK);
+		EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+		EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+		fresh = ext4_lookup(fs, &root, (const uint8_t *)"marker", 6, &marker) == EXT4_OK;
+		CHECK(fresh || !committed);
+		EXPECT(ext4_get_inode(fs, file.number, &file), EXT4_OK);
+		CHECK(file.size == length);
+		EXPECT(ext4_read(fs, &file, 0, contents, length, &completed), EXT4_OK);
+		CHECK(completed == length);
+		changed = false;
+		for (block = 0; (size_t)block * device->block_size < length; block++) {
+			offset = (size_t)block * device->block_size;
+			if (block < OVERWRITE_FIRST ||
+			    block >= OVERWRITE_FIRST + OVERWRITE_BLOCKS) {
+				CHECK(memcmp(contents + offset, original + offset,
+					  length - offset < device->block_size
+					      ? length - offset
+					      : device->block_size) == 0);
+				continue;
+			}
+			/* Each sector of an overwritten block is old or new; torn blocks are
+			 * possible, as with Linux's ordered data. A durable commit implies new. */
+			for (sector = 0; sector < device->block_size; sector += EXT4_SECTOR_SIZE) {
+				if (memcmp(contents + offset + sector,
+					replacement + offset + sector -
+					    (size_t)OVERWRITE_FIRST * device->block_size,
+					EXT4_SECTOR_SIZE) == 0) {
+					changed = true;
+					continue;
+				}
+				CHECK(!fresh &&
+				    memcmp(contents + offset + sector, original + offset + sector,
+					EXT4_SECTOR_SIZE) == 0);
+			}
+		}
+		mixed += changed && !fresh ? 1U : 0U;
+		ext4_unmount(fs);
+		cuts++;
+	}
+	free(replacement);
+	free(contents);
+	free(original);
+	printf("PASS ordered overwrites: %u events, %u cuts, %u with new data before the "
+	       "commit\n",
+	    events, cuts, mixed);
 }
 
 int
@@ -423,8 +634,13 @@ main(int argc, char **argv)
 	for (index = first; index < argc; index++) {
 		storage_open(&device, argv[index]);
 		storage_open(&scratch, argv[index]);
+		data_flags = 0;
 		atomic_commit(&device, &scratch, exports, argv[index]);
 		capacity_commits(&device, &scratch);
+		data_flags = EXT4_WRITE_ORDERED_DATA;
+		atomic_commit(&device, &scratch, NULL, argv[index]);
+		capacity_commits(&device, &scratch);
+		ordered_overwrites(&device);
 		storage_close(&scratch);
 		storage_close(&device);
 		printf("PASS deferred commit: %s\n", argv[index]);
