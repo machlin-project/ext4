@@ -155,18 +155,19 @@ Continue the actual remaining queue in `docs/ACCEPTANCE.md`:
 - Fast-commit BIGALLOC, casefold, quota and 64 KiB profiles, ownership-corruption
   rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay
   of two native captures are accepted (`tests/run_linux_log_writes.py`). Torn states
-  of Linux's range-heavy fast-commit replay fail closed; recovering them needs the
-  replay-authority decision in `docs/ARCHITECTURE.md`. Preserve unresolved
+  of Linux's range-heavy fast-commit replay fail closed, by product decision (see
+  `docs/ARCHITECTURE.md`). Preserve unresolved
   native-reference failures; a repaired diagnostic image is not an accepted oracle.
 - Growth, fragmentation, allocator and recovery cost, memory and write
   amplification are measured ("Scale measurement evidence"). Remaining: whole-tree
   index classification on each indexed operation. Deferred group commit, ordered
   data and lazy checkpointing are in place (`ext4_write_options`). Back performance
   claims with equivalent measured workloads.
-- Expand required geometry/format compatibility. MMP, quota/project accounting,
-  casefold, keyless encryption and verity reading are implemented; quota limit
-  enforcement, key-based encryption and enabling verity need explicit product
-  scope decisions; do not silently remove them.
+- Expand required geometry/format compatibility. MMP, quota/project accounting and
+  limit enforcement, casefold, keyless encryption and verity reading, enabling and
+  measurement are implemented. Key-based encryption, through cipher and key
+  callbacks from the adapter as decided, and built-in verity signatures remain; do
+  not silently remove them.
 - Sustained mixed-operation/crash sequences, operations fuzzing and
   checksum-repairing journal fuzzing are in place; keep extending them. Fix
   discovered contracts at their owning layer, not in the test harness.

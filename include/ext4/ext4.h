@@ -508,6 +508,38 @@ enum ext4_fallocate_flags { EXT4_FALLOC_KEEP_SIZE = 1U << 0, EXT4_FALLOC_PUNCH_H
 enum ext4_result ext4_fallocate(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint64_t offset, uint64_t length, uint32_t flags, const struct ext4_inode_update *update,
     uint64_t *completed);
+
+/* fs-verity hash algorithms, numbered as FS_IOC_ENABLE_VERITY numbers them. */
+#define EXT4_VERITY_HASH_SHA256 1U
+#define EXT4_VERITY_HASH_SHA512 2U
+
+/* block_size is the Merkle tree block size: a power of two from 1 KiB to the
+ * filesystem block size. Linux readers also require it to be no larger than their
+ * page size. salt holds at most 32 bytes. */
+struct ext4_verity_parameters {
+	uint32_t hash_algorithm;
+	uint32_t block_size;
+	const uint8_t *salt;
+	size_t salt_size;
+};
+/* Enable fs-verity on a linked regular file, as FS_IOC_ENABLE_VERITY does. The
+ * volume must have the verity feature and the file extent mapping, which inline
+ * data is converted to; encrypted, append-only and immutable files and verity files
+ * are refused with ENCRYPTED, PERMISSION_DENIED and EXISTS. The owner authorizes
+ * the caller and excludes writers of the file, as Linux's ETXTBSY check does.
+ * Bounded transactions trim blocks past EOF and write the Merkle tree there while
+ * the inode is on the orphan list; a final transaction writes the descriptor, sets
+ * the verity flag and removes the inode from the list. A failure truncates the
+ * partial tree, and recovery does the same after a power cut, so the file either
+ * stays as it was or becomes a verity file. The file's times do not change. Built-in
+ * signatures are not supported. result receives the verity inode on success. */
+enum ext4_result ext4_enable_verity(struct ext4_fs *fs, uint32_t number, uint32_t generation,
+    const struct ext4_verity_parameters *parameters, struct ext4_inode *result);
+/* The file digest of a verity file, as FS_IOC_MEASURE_VERITY reports it: the hash of
+ * its descriptor with the signature size cleared. NOT_FOUND reports a file without
+ * verity. An insufficient capacity returns RANGE with the algorithm and size set. */
+enum ext4_result ext4_measure_verity(struct ext4_fs *fs, const struct ext4_inode *inode,
+    uint32_t *hash_algorithm, uint8_t *digest, size_t capacity, size_t *size);
 /* Namespace mutations share the writable instance's exclusive owner. The caller
  * authorizes against fresh objects and supplies admitted creation attributes and
  * one captured namespace time; this interface does not confer policy authority.

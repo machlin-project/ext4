@@ -254,7 +254,7 @@ out:
 	return error;
 }
 
-static enum ext4_result
+enum ext4_result
 ext4_orphan_record(struct ext4_fs *fs, uint32_t number, struct ext4_inode_disk *disk,
     struct ext4_inode *inode, bool *mapped)
 {
@@ -877,6 +877,100 @@ cancel:
 	}
 	ext4_transaction_cancel(transaction);
 	return error;
+}
+
+enum ext4_result
+ext4_orphan_link(struct ext4_allocation *allocation, uint32_t number, struct ext4_inode_disk *disk)
+{
+	struct ext4_fs *fs = allocation->fs;
+	enum ext4_result error;
+
+	error = ext4_allocation_super(allocation);
+	if (error == EXT4_OK && ext4_le32(&allocation->super->last_orphan) != fs->last_orphan) {
+		error = EXT4_CORRUPT;
+	}
+	if (error == EXT4_OK) {
+		ext4_encode32(&disk->deletion_time, fs->last_orphan);
+		ext4_encode32(&allocation->super->last_orphan, number);
+	}
+	return error;
+}
+
+enum ext4_result
+ext4_orphan_unlink(struct ext4_allocation *allocation, uint32_t number,
+    struct ext4_inode_disk *disk, uint32_t *last_orphan)
+{
+	struct ext4_fs *fs = allocation->fs;
+	struct ext4_inode_disk *record;
+	struct ext4_inode_disk *previous_disk;
+	struct ext4_inode inode;
+	void *buffer = NULL;
+	uint64_t offset = 0;
+	uint32_t cursor = fs->last_orphan;
+	uint32_t previous = 0;
+	uint32_t next = ext4_le32(&disk->deletion_time);
+	bool mapped;
+	enum ext4_result error;
+
+	error = ext4_orphan_validate(fs);
+	if (error == EXT4_OK) {
+		error = ext4_allocation_super(allocation);
+	}
+	if (error == EXT4_OK && ext4_le32(&allocation->super->last_orphan) != fs->last_orphan) {
+		error = EXT4_CORRUPT;
+	}
+	if (error != EXT4_OK) {
+		return error;
+	}
+	record = fs->environment.allocate(fs->environment.context, fs->inode_size);
+	if (record == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	/* The validated list is finite; find the entry that links to number. */
+	while (error == EXT4_OK && cursor != 0 && cursor != number) {
+		previous = cursor;
+		error = ext4_inode_location(fs, cursor, &offset);
+		if (error == EXT4_OK) {
+			error = ext4_device_read(fs, offset, record, fs->inode_size);
+		}
+		if (error == EXT4_OK) {
+			cursor = ext4_le32(&record->deletion_time);
+		}
+	}
+	fs->environment.release(fs->environment.context, record, fs->inode_size);
+	if (error == EXT4_OK && cursor == 0) {
+		error = EXT4_CORRUPT;
+	}
+	if (error != EXT4_OK) {
+		return error;
+	}
+	*last_orphan = fs->last_orphan;
+	if (previous == 0) {
+		ext4_encode32(&allocation->super->last_orphan, next);
+		*last_orphan = next;
+	} else {
+		error = ext4_inode_location(fs, previous, &offset);
+		if (error == EXT4_OK) {
+			error = ext4_transaction_buffer(
+			    allocation->transaction, offset / fs->info.block_size, &buffer);
+		}
+		if (error != EXT4_OK) {
+			return error;
+		}
+		previous_disk =
+		    (struct ext4_inode_disk *)((uint8_t *)buffer + offset % fs->info.block_size);
+		error = ext4_orphan_record(fs, previous, previous_disk, &inode, &mapped);
+		if (error == EXT4_OK && ext4_le32(&previous_disk->deletion_time) != number) {
+			error = EXT4_CORRUPT;
+		}
+		if (error != EXT4_OK) {
+			return error;
+		}
+		ext4_encode32(&previous_disk->deletion_time, next);
+		ext4_inode_checksum_set(fs, previous, previous_disk);
+	}
+	ext4_encode32(&disk->deletion_time, 0);
+	return EXT4_OK;
 }
 
 enum ext4_result

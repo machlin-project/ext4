@@ -219,8 +219,9 @@ does not rely on it.
 files independently of the core: Python computes the Merkle tree, root hash,
 descriptor and file digest from the documented format, and debugfs stores the data,
 tree, descriptor and size field before setting i_size and the EXTENTS|VERITY flags.
-Three images cover 4 KiB SHA-256, salted 1 KiB SHA-256 and salted 4 KiB SHA-512, with
-empty, single-block, partial, sparse and multi-level files. Each image also contains
+Four images cover 4 KiB SHA-256, salted 1 KiB SHA-256, salted 4 KiB SHA-512 and 4 KiB
+SHA-256 with inline data, with empty, single-block, partial, sparse and multi-level
+files. Each image also contains
 damaged data, a damaged level-zero hash, a wrong root hash, an unsupported descriptor
 version and an impossible descriptor size. Every image passes strict fsck; the
 manifest records sizes, SHA-256 contents, file digests and the block that must fail.
@@ -235,6 +236,23 @@ link, rename and unlink changes succeed and deletion frees all metadata blocks. 
 optional export directory receives that image and an updated manifest;
 `tests/check_verity.py --tools-root E2FSPROGS_BUILD --exports DIRECTORY --output NEW`
 requires strict fsck and checks names, flags, permissions and the new attribute.
+
+The same option adds `ext4-verity-enable-test`, which enables verity through the core
+on the four images and requires a volume without the feature to refuse. Each image
+receives empty, one-byte, one-block, sparse, preallocated, inline and multi-level
+files under both algorithms, Merkle blocks of the filesystem block size and 1 KiB,
+and salts; each must read back verified, measure, keep its times and refuse another
+enable and writes. Unsuitable files and parameters must be refused. A power cut at
+every write or barrier of a multi-transaction enable, every allocation and read
+failure of another, and a volume that runs out of space after the first tree
+transaction must each leave either the original file with its blocks and free space
+or a verity file. With `--export DIRECTORY` it writes each final image and a manifest
+in the fixtures' format, extended by each file's algorithm, Merkle block size and
+salt; `tests/check_verity_enable.py --tools-root E2FSPROGS_BUILD --exports DIRECTORY
+--output NEW` requires strict fsck, the verity flag and the dumped contents, compares
+the tree, descriptor and size field read through the file's extents past EOF with the
+generator's independent layout, rejects other mappings past EOF, compares digests and
+writes a fixtures report for the Linux harness.
 
 `tests/run_linux_verity.py` runs from the lab with `--lab`, `--prepared`, `--runner`,
 `--fixtures DIRECTORY` and a fresh `--output`. The directory needs a `report.json`

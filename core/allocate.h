@@ -62,6 +62,16 @@ enum ext4_result ext4_allocation_init(struct ext4_allocation *allocation, struct
 void ext4_allocation_destroy(struct ext4_allocation *allocation);
 /* Remove a previously validated modern orphan slot in the caller's private
  * transaction. Publish the pending-count decrement only after commit. */
+/* The legacy orphan list in the caller's transaction, for a linked inode whose
+ * record the caller holds. link puts it at the head; unlink removes it from any
+ * position without truncating it and reports the list head after the commit. */
+enum ext4_result ext4_orphan_link(
+    struct ext4_allocation *allocation, uint32_t number, struct ext4_inode_disk *disk);
+enum ext4_result ext4_orphan_unlink(struct ext4_allocation *allocation, uint32_t number,
+    struct ext4_inode_disk *disk, uint32_t *last_orphan);
+/* Decode and validate an orphan-list inode record for reclamation. */
+enum ext4_result ext4_orphan_record(struct ext4_fs *fs, uint32_t number,
+    struct ext4_inode_disk *disk, struct ext4_inode *inode, bool *mapped);
 enum ext4_result ext4_orphan_file_remove(
     struct ext4_allocation *allocation, uint32_t number, bool *removed);
 enum ext4_result ext4_allocate_block(struct ext4_allocation *allocation, uint64_t *block);

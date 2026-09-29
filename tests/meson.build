@@ -117,11 +117,17 @@ if paths['quota_fixtures'] != ''
 endif
 
 if paths['verity_fixtures'] != ''
-  foreach profile : ['4k', '1k-salted', 'sha512']
+  foreach profile : ['4k', '1k-salted', 'sha512', '4k-inline']
     stem = paths['verity_fixtures'] / ('verity-' + profile)
     test('verity-' + profile, programs['verity'], args: [stem + '.img', stem + '.manifest'],
       timeout: 300, suite: 'format')
   endforeach
+  test('verity-enable', programs['verity-enable'],
+    args: [paths['verity_fixtures'] / 'verity-4k.img',
+      paths['verity_fixtures'] / 'verity-1k-salted.img',
+      paths['verity_fixtures'] / 'verity-sha512.img',
+      paths['verity_fixtures'] / 'verity-4k-inline.img', paths['fixtures'] / 'ext4-4k.img'],
+    timeout: 900, suite: 'format')
 endif
 
 if paths['external_journal_fixtures'] != ''

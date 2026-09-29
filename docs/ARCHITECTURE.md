@@ -290,8 +290,8 @@ it and fsck can repair it. Recovering it in the core would require an explicit
 replay-authority rule: for inodes the log names and groups its ranges and inodes
 touch, the committed log would replace checksum validation of those records and
 bitmaps, and replay would rebuild their bits, checksums and counts from the replayed
-maps. That accepts unverifiable bitmaps in those groups, as Linux does, so it is a
-product decision rather than a compatibility fix.
+maps. That accepts unverifiable bitmaps in those groups, as Linux does. The product
+decision is to keep failing closed: such a volume is left to Linux or e2fsck.
 
 External journals require an explicitly supplied `ext4_journal_environment` and
 exclusive ownership of two distinct resources. The filesystem environment still
@@ -664,7 +664,27 @@ verity files. Writes, both truncate forms, preallocation, hole punching and grow
 preparation return permission denied before any write, because Merkle metadata lives
 beyond EOF. Final deletion releases the complete map, including that metadata.
 Offline cleanup refuses a linked orphan with the flag instead of truncating its tree.
-Enabling verity on a file, measurement and signature policy are not implemented.
+
+`ext4_enable_verity` enables verity as Linux's FS_IOC_ENABLE_VERITY does. It hashes
+with the core's SHA-256 and SHA-512, which verification already uses; no key is
+involved, so no adapter callback is needed. The volume must have the feature, and the
+file must be linked, regular, not encrypted, append-only, immutable or already
+verity, and extent-mapped once inline data is converted. A first transaction converts
+inline data, trims blocks past EOF, because readers find the descriptor from the
+last mapped block, and puts the inode on the legacy orphan list. The tree is then
+streamed: each data block, zero-padded to the Merkle block, is hashed after the salt,
+and each level keeps one partial hash block, so memory is one block per level plus a
+128 KiB queue of completed blocks. Bounded transactions write queued blocks past EOF
+as file data at their final positions, without changing the size or times, halving
+a batch that exceeds the journal's capacity. A final transaction writes the
+descriptor and its size in the block after the tree, sets the flag and removes the
+inode from the list. On failure the core truncates the partial tree and leaves the
+list; after a power cut, recovery does the same, because cleanup of a linked orphan
+truncates to its size. The file is therefore either unchanged or a verity file.
+Merkle blocks from 1 KiB to the filesystem block size are accepted; Linux readers also
+need them no larger than their page size. Built-in signatures are not supported.
+`ext4_measure_verity` returns the file digest, the unsalted hash of the descriptor
+with its signature size cleared, as FS_IOC_MEASURE_VERITY does.
 
 ## Encryption without keys
 

@@ -11,7 +11,26 @@ union ext4_verity_hash_context {
 	struct ext4_sha512 sha512;
 };
 
-static void
+void
+ext4_verity_file_digest(const struct ext4_verity *verity,
+    struct ext4_verity_descriptor_disk *descriptor, uint8_t *digest)
+{
+	union ext4_verity_hash_context context;
+
+	/* The file digest covers the descriptor without its signature, unsalted. */
+	ext4_encode32(&descriptor->signature_size, 0);
+	if (verity->algorithm == EXT4_VERITY_SHA256) {
+		ext4_sha256_init(&context.sha256);
+		ext4_sha256_update(&context.sha256, descriptor, sizeof(*descriptor));
+		ext4_sha256_final(&context.sha256, digest);
+	} else {
+		ext4_sha512_init(&context.sha512);
+		ext4_sha512_update(&context.sha512, descriptor, sizeof(*descriptor));
+		ext4_sha512_final(&context.sha512, digest);
+	}
+}
+
+void
 ext4_verity_hash(const struct ext4_verity *verity, const uint8_t *block, uint8_t *digest)
 {
 	union ext4_verity_hash_context context;
@@ -52,20 +71,71 @@ ext4_verity_read_exact(struct ext4_fs *fs, const struct ext4_inode *inode, uint6
 }
 
 enum ext4_result
+ext4_verity_configure(struct ext4_verity *verity, uint8_t algorithm, uint8_t log_block_size,
+    const uint8_t *salt, uint8_t salt_size)
+{
+	uint32_t hash_block;
+
+	if ((algorithm != EXT4_VERITY_SHA256 && algorithm != EXT4_VERITY_SHA512) ||
+	    log_block_size < EXT4_VERITY_MIN_LOG_BLOCK ||
+	    log_block_size > EXT4_VERITY_MAX_LOG_BLOCK) {
+		return EXT4_UNSUPPORTED;
+	}
+	if (salt_size > EXT4_VERITY_MAX_SALT) {
+		return EXT4_CORRUPT;
+	}
+	verity->algorithm = algorithm;
+	verity->block_size = 1U << log_block_size;
+	verity->digest_size =
+	    algorithm == EXT4_VERITY_SHA256 ? EXT4_SHA256_DIGEST_SIZE : EXT4_SHA512_DIGEST_SIZE;
+	hash_block =
+	    algorithm == EXT4_VERITY_SHA256 ? EXT4_SHA256_BLOCK_SIZE : EXT4_SHA512_BLOCK_SIZE;
+	verity->hashes_per_block = verity->block_size / verity->digest_size;
+	verity->padded_salt_size = 0;
+	ext4_zero(verity->padded_salt, sizeof(verity->padded_salt));
+	if (salt_size != 0) {
+		verity->padded_salt_size = (salt_size + hash_block - 1U) / hash_block * hash_block;
+		ext4_copy(verity->padded_salt, salt, salt_size);
+	}
+	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_verity_geometry(struct ext4_verity *verity, uint64_t *tree_blocks)
+{
+	uint64_t level_blocks[EXT4_VERITY_MAX_LEVELS];
+	uint64_t blocks =
+	    verity->data_size / verity->block_size + (verity->data_size % verity->block_size != 0);
+	uint64_t offset = 0;
+	unsigned int level;
+
+	verity->levels = 0;
+	while (blocks > 1U) {
+		if (verity->levels == EXT4_VERITY_MAX_LEVELS) {
+			return EXT4_UNSUPPORTED;
+		}
+		blocks = (blocks + verity->hashes_per_block - 1U) / verity->hashes_per_block;
+		level_blocks[verity->levels++] = blocks;
+	}
+	for (level = verity->levels; level > 0; level--) {
+		verity->level_start[level - 1U] = offset;
+		offset += level_blocks[level - 1U];
+	}
+	*tree_blocks = offset;
+	return EXT4_OK;
+}
+
+enum ext4_result
 ext4_verity_open(struct ext4_fs *fs, const struct ext4_inode *inode, struct ext4_verity *verity)
 {
 	struct ext4_verity_descriptor_disk descriptor;
 	struct ext4_le32 size_disk;
-	uint64_t level_blocks[EXT4_VERITY_MAX_LEVELS];
 	uint64_t end;
 	uint64_t metadata;
 	uint64_t size_position;
 	uint64_t descriptor_position;
-	uint64_t blocks;
-	uint64_t offset;
+	uint64_t tree_blocks;
 	uint32_t descriptor_size;
-	uint32_t hash_block;
-	unsigned int level;
 	enum ext4_result error;
 
 	ext4_zero(verity, sizeof(*verity));
@@ -114,44 +184,22 @@ ext4_verity_open(struct ext4_fs *fs, const struct ext4_inode *inode, struct ext4
 	    verity->data_size != inode->size || descriptor.salt_size > EXT4_VERITY_MAX_SALT) {
 		return EXT4_CORRUPT;
 	}
-	if ((descriptor.hash_algorithm != EXT4_VERITY_SHA256 &&
-		descriptor.hash_algorithm != EXT4_VERITY_SHA512) ||
-	    descriptor.log_block_size < EXT4_VERITY_MIN_LOG_BLOCK ||
-	    descriptor.log_block_size > EXT4_VERITY_MAX_LOG_BLOCK) {
-		return EXT4_UNSUPPORTED;
-	}
-	verity->algorithm = descriptor.hash_algorithm;
-	verity->block_size = 1U << descriptor.log_block_size;
-	verity->digest_size = verity->algorithm == EXT4_VERITY_SHA256 ? EXT4_SHA256_DIGEST_SIZE
-								      : EXT4_SHA512_DIGEST_SIZE;
-	hash_block = verity->algorithm == EXT4_VERITY_SHA256 ? EXT4_SHA256_BLOCK_SIZE
-							     : EXT4_SHA512_BLOCK_SIZE;
-	verity->hashes_per_block = verity->block_size / verity->digest_size;
-	if (descriptor.salt_size != 0) {
-		verity->padded_salt_size =
-		    (descriptor.salt_size + hash_block - 1U) / hash_block * hash_block;
-		ext4_copy(verity->padded_salt, descriptor.salt, descriptor.salt_size);
+	error = ext4_verity_configure(verity, descriptor.hash_algorithm, descriptor.log_block_size,
+	    descriptor.salt, descriptor.salt_size);
+	if (error != EXT4_OK) {
+		return error;
 	}
 	ext4_copy(verity->root_hash, descriptor.root_hash, verity->digest_size);
-	blocks =
-	    verity->data_size / verity->block_size + (verity->data_size % verity->block_size != 0);
-	while (blocks > 1U) {
-		if (verity->levels == EXT4_VERITY_MAX_LEVELS) {
-			return EXT4_UNSUPPORTED;
-		}
-		blocks = (blocks + verity->hashes_per_block - 1U) / verity->hashes_per_block;
-		level_blocks[verity->levels++] = blocks;
-	}
-	offset = 0;
-	for (level = verity->levels; level > 0; level--) {
-		verity->level_start[level - 1U] = offset;
-		offset += level_blocks[level - 1U];
+	error = ext4_verity_geometry(verity, &tree_blocks);
+	if (error != EXT4_OK) {
+		return error;
 	}
 	/* The whole tree lies between the metadata start and the descriptor. */
-	if (offset > (descriptor_position - metadata) / verity->block_size) {
+	if (tree_blocks > (descriptor_position - metadata) / verity->block_size) {
 		return EXT4_CORRUPT;
 	}
 	verity->tree_offset = metadata;
+	verity->descriptor_offset = descriptor_position;
 	return EXT4_OK;
 }
 
@@ -276,4 +324,43 @@ out:
 		fs->environment.release(fs->environment.context, cached, verity.block_size);
 	}
 	return error;
+}
+
+enum ext4_result
+ext4_measure_verity(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t *hash_algorithm,
+    uint8_t *digest, size_t capacity, size_t *size)
+{
+	struct ext4_verity verity;
+	struct ext4_verity_descriptor_disk descriptor;
+	enum ext4_result error;
+
+	if (fs == NULL || inode == NULL || hash_algorithm == NULL || size == NULL ||
+	    (digest == NULL && capacity != 0)) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
+	if (!(inode->flags & EXT4_INODE_VERITY)) {
+		return EXT4_NOT_FOUND;
+	}
+	/* The descriptor of an encrypted file is ciphertext. */
+	if (inode->flags & EXT4_INODE_ENCRYPT) {
+		return EXT4_ENCRYPTED;
+	}
+	error = ext4_verity_open(fs, inode, &verity);
+	if (error == EXT4_OK) {
+		error = ext4_verity_read_exact(
+		    fs, inode, verity.descriptor_offset, &descriptor, sizeof(descriptor));
+	}
+	if (error != EXT4_OK) {
+		return error;
+	}
+	*hash_algorithm = verity.algorithm;
+	*size = verity.digest_size;
+	if (capacity < verity.digest_size) {
+		return EXT4_RANGE;
+	}
+	ext4_verity_file_digest(&verity, &descriptor, digest);
+	return EXT4_OK;
 }

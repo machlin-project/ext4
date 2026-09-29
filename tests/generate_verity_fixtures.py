@@ -24,6 +24,9 @@ PROFILES = (
          sizes=(1, 1024, 2560 * 1024 + 5)),
     dict(name="sha512", block_size=4096, algorithm=2, salt=bytes(range(32, 64)),
          sizes=(4095, 700 * 1024)),
+    # Enabling verity converts small inline files to extents first.
+    dict(name="4k-inline", block_size=4096, algorithm=1, salt=b"", sizes=(100, 600 * 1024),
+         features={"inline_data"}),
 )
 
 
@@ -108,7 +111,7 @@ def main():
             result.check_returncode()
             return result.stdout
 
-        features = EXPECTED_FEATURES | {"verity"}
+        features = EXPECTED_FEATURES | {"verity"} | profile.get("features", set())
         run([tools["mke2fs"], "-F", "-t", "ext4", "-b", fs_block, "-N", 256, "-I", 256, "-m", 0,
              "-O", "none," + ",".join(sorted(features)), "-U", UUID,
              "-E", "lazy_itable_init=0,nodiscard", image, IMAGE_BYTES // fs_block])

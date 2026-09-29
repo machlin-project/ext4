@@ -1075,7 +1075,7 @@ jobs:
         if: matrix.suite == 'format'
         run: |
           exports=()
-          for profile in 4k 1k-salted sha512; do
+          for profile in 4k 1k-salted sha512 4k-inline; do
             directory="artifacts/verity-exports/$profile"
             mkdir -p "$directory"
             .build/ext4-verity-test "artifacts/verity-fixtures/verity-$profile.img" \
@@ -1086,6 +1086,19 @@ jobs:
           python3 tests/check_verity.py --tools-root vendor/e2fsprogs/build "${exports[@]}" \
             --output artifacts/verity-independent 2>&1 | tee artifacts/checks/verity-independent.log
           find artifacts/verity-exports artifacts/verity-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' ! -name '*.manifest' -delete
+      - name: Independently verify enabled fs-verity files
+        if: matrix.suite == 'format'
+        run: |
+          mkdir artifacts/verity-enable-exports
+          .build/ext4-verity-enable-test --export artifacts/verity-enable-exports \
+            artifacts/verity-fixtures/verity-4k.img artifacts/verity-fixtures/verity-1k-salted.img \
+            artifacts/verity-fixtures/verity-sha512.img artifacts/verity-fixtures/verity-4k-inline.img \
+            2>&1 | tee artifacts/checks/verity-enable-exports.log
+          python3 tests/check_verity_enable.py --tools-root vendor/e2fsprogs/build \
+            --exports artifacts/verity-enable-exports --output artifacts/verity-enable-independent \
+            2>&1 | tee artifacts/checks/verity-enable-independent.log
+          find artifacts/verity-enable-exports artifacts/verity-enable-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' ! -name '*.manifest' -delete
       - name: Independently verify casefolded directories after writable changes
         if: matrix.suite == 'format'

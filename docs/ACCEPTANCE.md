@@ -41,16 +41,15 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Key-based encryption and enabling verity through adapter-supplied cryptography; unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
-| Journal compatibility | Recovering volumes whose Linux fast-commit replay was interrupted needs a replay-authority decision; until then the core refuses torn bitmap and inode checksums and leaves the log pending | Open; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay of two native captures are accepted, and the torn states of two range-heavy captures fail closed (see "Fast-commit combinations and interrupted foreign replay evidence" and "Interrupted Linux replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
+| Format compatibility | Key-based encryption through adapter-supplied ciphers and keys; built-in verity signatures; unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity reading and enabling, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
+| Journal compatibility | None; by product decision the core keeps refusing torn bitmap and inode checksums that an interrupted Linux fast-commit replay leaves, and leaves the log pending for Linux or e2fsck | Accepted with that documented limitation; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay of two native captures are accepted, and the torn states of two range-heavy captures fail closed (see "Fast-commit combinations and interrupted foreign replay evidence" and "Interrupted Linux replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
 | Scale and sustained operation | Indexed operations still classify the whole index tree | Open; measured workloads show bounded peak memory; group commit, ordered data and lazy checkpointing reach write amplification 1.0, a few barriers per commit and two per synchronous commit, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence", "Deferred commit evidence", "Ordered data evidence", "Lazy checkpointing evidence" and "Sustained operation and fuzzing evidence") |
 
-MMP, fs-verity reading with protected writable metadata, encrypted volumes without
-keys, casefolded directories and quota/project accounting are implemented. Quota
-limits and grace times are preserved but not enforced; Linux enforces them only with
-quota mount options, so enforcement needs an adapter policy decision.
-Enabling verity, measurement, built-in signatures and any key-based decryption need
-product decisions: the core has no key source and performs no cryptography. They are not accepted merely because mounting rejects
+MMP, fs-verity reading, enabling and measurement with protected writable metadata,
+encrypted volumes without keys, casefolded directories and quota/project accounting
+with limits enforced under an adapter's policy are implemented. Key-based encryption
+needs ciphers and keys from adapter callbacks and is not implemented; built-in verity
+signatures are not supported. They are not accepted merely because mounting rejects
 them safely. They must not disappear from a future readiness claim. The core
 currently requires one serialized resource owner; native operation locking,
 page-cache coordination, ACL authorization and platform lifetime acceptance belong
@@ -284,6 +283,32 @@ fsck, and Linux still verifies the renamed file with its original digest. Eviden
 in `artifacts/verity-fixtures/`, `artifacts/checks/verity-first/` and the lab's
 `artifacts/ext4-verity/readback/` and `artifacts/ext4-verity/mutated-readback/`.
 
+## fs-verity enabling evidence
+
+`ext4-verity-enable-test` enables verity through the core on the four verity images
+(`artifacts/checks/verity-enable-2/`). Each receives empty, one-byte, one-block,
+sparse, preallocated and multi-level files, and the inline-data image a 100-byte inline
+file converted to extents, under SHA-256 and SHA-512, Merkle blocks of the filesystem
+block size and 1 KiB, and 16- and 32-byte salts. Every file reads back verified,
+measures, keeps its times and refuses another enable and writes. Directories,
+append-only, stale and unlinked files and invalid parameters are refused, and so is a
+volume without the feature. A power cut at each of 142 to 345 writes and barriers of
+enabling a 4 MiB file recovers either the original file with its blocks and free space
+(130 to 332 cuts) or the verity file (9 or 10), apart from torn primary superblocks,
+which fail closed. Each of 385 to 405 allocation and read failures of another enable
+rolls back to the original file or, when the failure makes a commit uncertain, leaves
+a volume that recovery restores. A volume with room for only the first tree
+transaction fails with NO_SPACE and returns the space; after a truncation frees more,
+the same file is enabled. `tests/check_verity_enable.py` independently recomputes the
+tree, descriptor, size field and digest of all 29 files from their dumped contents
+and finds them byte for byte past EOF, with nothing else mapped there; strict fsck
+accepts every image. Linux 6.12 in the reference VM measures every file to the
+core's digest and reads it completely through verification, without changing the
+images (the lab's `artifacts/ext4-verity/enable-readback-2/`). The fixture generator
+gained the inline-data image; Linux reads its independently authored files and
+rejects its damaged ones (`artifacts/ext4-verity/readback-2/`). The complete 687-test
+regression passes (`artifacts/checks/scale-regression-18/`).
+
 ## Encryption without keys evidence
 
 The pinned Linux 6.12 kernel creates a v2 fscrypt tree on a 4 KiB ENCRYPT volume.
@@ -438,9 +463,9 @@ with 1 KiB blocks. In the others Linux's non-atomic replay has left a bitmap who
 checksum in the group descriptor is stale or an inode record with an invalid
 checksum, and the core refuses the volume before any fast-commit write. The log
 stays pending: Linux replays such a volume again, and in one sampled case its own
-result still needs fsck for the group's unused and free inode counts. Recovering
-these states in the core needs the replay-authority decision described in
-`docs/ARCHITECTURE.md`. Evidence is in the lab's `artifacts/ext4-log-writes/`.
+result still needs fsck for the group's unused and free inode counts. By product
+decision the core keeps refusing these states instead of adopting the replay-authority
+rule described in `docs/ARCHITECTURE.md`. Evidence is in the lab's `artifacts/ext4-log-writes/`.
 
 ## Fast-commit development evidence
 
