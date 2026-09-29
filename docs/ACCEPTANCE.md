@@ -12,11 +12,11 @@ safe rejection of a feature is recorded separately from supporting it.
 
 | Contract | Required evidence | Current state |
 | --- | --- | --- |
-| Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Eleven base read profiles pass; CRC16 group variants pass targeted portable, independent and Linux checks; broader format and size coverage pending |
+| Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Accepted for the documented format/geometry matrix, including large logical files and high physical addresses; preserve the explicitly recorded exceptions |
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
-| Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Not accepted |
-| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir/rename and bounded indexed mutation pass portable, independent and Linux checks; core holds retain open-unlinked or replaced objects; platform writes and broader capacity/concurrency acceptance pending |
-| Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal and single-user external journals, legacy lists and modern orphan files pass portable faults, independent recovery, Linux reuse and the full regression; fast commit and platform write integration remain pending |
+| Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Functional core queue accepted with documented feature/mode limits; see the queue and per-feature evidence below |
+| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir/rename and bounded indexed mutation pass portable, independent and Linux checks; core holds retain open-unlinked or replaced objects; scale and sustained-operation core acceptance pass; native writes and concurrency acceptance pending |
+| Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal and single-user external journals, legacy lists and modern orphan files pass portable faults, independent recovery, Linux reuse and the full regression; fast commit is accepted with the interrupted-Linux-replay limitation below; platform write integration remains pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list, atomic attribute batches and mutation lifetime integration pass portable tests and targeted independent checks; bidirectional Linux attribute/ACL/security checks and direct replay of core attribute transactions pass eight profiles; the linked-truncate e2fsck defect remains explicit below; ACL enforcement and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds; installed tests await signing profile |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
@@ -31,6 +31,10 @@ features remain visible requirements or explicit scope decisions; they may not b
 silently reclassified to declare the project complete.
 
 ## Remaining portable-core work
+
+Every block of this queue is closed. CI run 36574519444 passed all nine suites with
+no-key names, probed index changes, the encryption, verity and casefolding
+sequences and writes without a journal.
 
 Use this queue instead of an estimated completion percentage. A block closes only
 when its behavior and independent acceptance are complete; test count is not a
@@ -61,8 +65,9 @@ Already implemented, with evidence below: ordinary reads and sparse mapping;
 transactional writes and allocation; restartable truncate and final deletion;
 create/link/symlink/mkdir/mknod/unlink/rmdir/rename and atomic whiteout; raw xattr storage and lifetime;
 internal-journal recovery and both orphan representations; HTree creation, lookup
-and mutation, including LARGEDIR and DIR_NLINK. These are working foundations, not a claim that
-the remaining blocks have equal size or that the full core is accepted.
+and mutation, including LARGEDIR and DIR_NLINK. The functional queue above is now
+accepted with its explicit limitations. Final review and performance acceptance
+are tracked in [CORE-REVIEW.md](CORE-REVIEW.md); native adapter acceptance is separate.
 
 ## Scale measurement evidence
 
