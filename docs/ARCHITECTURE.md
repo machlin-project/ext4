@@ -380,7 +380,14 @@ Per-operation costs avoid repeating work whose inputs cannot have changed. An
 allocation context reads and checksums a group's block bitmap once while validating
 ranges in that group; a bitmap its transaction already holds takes precedence.
 Inode allocation reads each group-descriptor block once while skipping consecutive
-full groups. A block that a write replaces completely, or a new block it zeroes,
+full groups. File data is placed after the block backing the file's preceding
+logical block when that is free, as Linux does, so appends extend the existing
+extent across transactions. Otherwise a write that will allocate several clusters
+starts at the first free run as long as the request, or of at least 256 clusters,
+from the inode's group onward,
+reading candidate bitmaps without enrolling them, and takes the first free cluster
+only when no group has such a run. Mapping nodes, directory and attribute blocks
+and indirect-mapped data keep first-fit placement. A block that a write replaces completely, or a new block it zeroes,
 enters the transaction without reading its old contents. Each orphan reclamation
 step releases up to half of the inode's remaining blocks, as a power of two from
 32 to 65,536, and halves within the step when it exceeds its credits. Because the

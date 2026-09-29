@@ -54,19 +54,28 @@ ext4_cluster_allocate(struct ext4_allocation *allocation, const struct ext4_inod
     const struct ext4_inode_disk *disk, uint32_t logical, uint64_t *physical)
 {
 	struct ext4_fs *fs = allocation->fs;
+	struct ext4_map_run run;
 	uint64_t base = 0;
-	bool found;
-	enum ext4_result error;
+	uint64_t goal = 0;
+	bool found = false;
+	enum ext4_result error = EXT4_OK;
 
-	if (fs->cluster_blocks == 1) {
-		return ext4_allocate_block(allocation, physical);
+	if (fs->cluster_blocks != 1) {
+		error = ext4_cluster_backing(allocation, inode, disk, logical, 0, 0, &base, &found);
 	}
-	error = ext4_cluster_backing(allocation, inode, disk, logical, 0, 0, &base, &found);
+	/* Like Linux, place new data after the block backing the preceding logical
+	 * block; allocating there extends the file's existing extent. */
+	if (error == EXT4_OK && !found && logical != 0 && !ext4_allocation_continues(allocation)) {
+		error = ext4_write_map_lookup(allocation, inode, disk, logical - 1U, &run);
+		if (error == EXT4_OK && run.physical != 0) {
+			goal = (run.physical / fs->cluster_blocks + 1U) * fs->cluster_blocks;
+		}
+	}
 	if (error == EXT4_OK && !found) {
-		error = ext4_allocate_block(allocation, &base);
+		error = ext4_allocate_data(allocation, goal, &base);
 	}
 	if (error == EXT4_OK) {
-		*physical = base + logical % fs->cluster_blocks;
+		*physical = fs->cluster_blocks == 1 ? base : base + logical % fs->cluster_blocks;
 	}
 	return error;
 }

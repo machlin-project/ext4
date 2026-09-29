@@ -5,6 +5,7 @@
 #include "journal.h"
 
 #define EXT4_ORPHAN_BATCH_BLOCKS 32U
+#define EXT4_ALLOCATION_RUN_CLUSTERS 256U
 
 /* Live mutations must leave enough journal room for one bounded reclamation
  * step, including an external attribute release and a nonhead predecessor. */
@@ -34,6 +35,10 @@ struct ext4_allocation {
 	uint32_t free_inodes;
 	uint32_t group_index;
 	uint32_t next_bit;
+	/* First cluster to examine when the next group's bitmap is loaded. */
+	uint32_t seek_bit;
+	/* Clusters of file data the caller is about to allocate consecutively. */
+	uint32_t run_clusters;
 	uint32_t allocated;
 	uint64_t freed;
 	/* Removing a mapping can retain a cluster referenced by another extent. */
@@ -60,6 +65,15 @@ void ext4_allocation_destroy(struct ext4_allocation *allocation);
 enum ext4_result ext4_orphan_file_remove(
     struct ext4_allocation *allocation, uint32_t number, bool *removed);
 enum ext4_result ext4_allocate_block(struct ext4_allocation *allocation, uint64_t *block);
+/* Whether the next allocation continues this context's previous one. */
+bool ext4_allocation_continues(const struct ext4_allocation *allocation);
+/* Allocate file data. Unless it continues the previous allocation, it takes the
+ * goal cluster when free, which extends the file's preceding extent, then the first
+ * free run of min(run_clusters, EXT4_ALLOCATION_RUN_CLUSTERS) clusters from the
+ * current group onward, and otherwise the first free cluster. A zero goal has no
+ * preference. */
+enum ext4_result ext4_allocate_data(
+    struct ext4_allocation *allocation, uint64_t goal, uint64_t *block);
 enum ext4_result ext4_allocation_valid(struct ext4_allocation *allocation, uint64_t block);
 enum ext4_result ext4_allocation_valid_range(
     struct ext4_allocation *allocation, uint64_t block, uint64_t length);

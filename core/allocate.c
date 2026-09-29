@@ -342,7 +342,8 @@ ext4_allocate_block(struct ext4_allocation *allocation, uint64_t *block)
 					return error;
 				}
 				allocation->bitmap = buffer;
-				allocation->next_bit = 0;
+				allocation->next_bit = allocation->seek_bit;
+				allocation->seek_bit = 0;
 				error = ext4_allocation_bitmap(allocation);
 				if (error != EXT4_OK) {
 					return error;
@@ -375,6 +376,202 @@ ext4_allocate_block(struct ext4_allocation *allocation, uint64_t *block)
 		}
 	}
 	return EXT4_NO_SPACE;
+}
+
+/* Find the first run of at least length clear bits in [start, end). */
+static bool
+ext4_bitmap_run(
+    const uint8_t *bitmap, uint32_t start, uint32_t end, uint32_t length, uint32_t *found)
+{
+	uint32_t bit;
+	uint32_t run = 0;
+
+	for (bit = start; bit < end; bit++) {
+		if (bit % EXT4_BITS_PER_BYTE == 0 && end - bit >= EXT4_BITS_PER_BYTE &&
+		    bitmap[bit / EXT4_BITS_PER_BYTE] == UINT8_MAX) {
+			run = 0;
+			bit += EXT4_BITS_PER_BYTE - 1U;
+			continue;
+		}
+		if (ext4_bitmap_test(bitmap, bit)) {
+			run = 0;
+			continue;
+		}
+		run++;
+		if (run == length) {
+			*found = bit + 1U - length;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool
+ext4_allocation_continues(const struct ext4_allocation *allocation)
+{
+	return allocation->bitmap != NULL &&
+	    allocation->next_bit < allocation->fs->clusters_per_group &&
+	    !ext4_bitmap_test(allocation->bitmap, allocation->next_bit);
+}
+
+/* Read a group's current block bitmap without enrolling it in the transaction. */
+static enum ext4_result
+ext4_allocation_peek_bitmap(struct ext4_allocation *allocation, uint32_t index,
+    const struct ext4_group *group, const uint8_t **bitmap)
+{
+	enum ext4_result error;
+
+	if (index == allocation->group_index && allocation->bitmap != NULL) {
+		*bitmap = allocation->bitmap;
+		return EXT4_OK;
+	}
+	*bitmap = ext4_transaction_peek(allocation->transaction, group->block_bitmap);
+	if (*bitmap != NULL) {
+		return EXT4_OK;
+	}
+	error = ext4_transaction_read(
+	    allocation->transaction, group->block_bitmap, allocation->scratch);
+	*bitmap = error == EXT4_OK ? allocation->scratch : NULL;
+	return error;
+}
+
+/* The next ext4_allocate_block examines this cluster first. */
+static void
+ext4_allocation_position(struct ext4_allocation *allocation, uint32_t index, uint32_t bit)
+{
+	if (index == allocation->group_index && allocation->bitmap != NULL) {
+		allocation->next_bit = bit;
+	} else {
+		allocation->bitmap = NULL;
+		allocation->group_index = index;
+		allocation->seek_bit = bit;
+	}
+}
+
+/* Position at a free goal cluster. A group whose bitmap is not yet initialized is
+ * left to the ordinary search, which initializes it. */
+static enum ext4_result
+ext4_allocation_goal(struct ext4_allocation *allocation, uint64_t goal, bool *positioned)
+{
+	struct ext4_fs *fs = allocation->fs;
+	struct ext4_group group;
+	const uint8_t *bitmap;
+	uint64_t offset;
+	uint32_t index;
+	uint32_t bit;
+	enum ext4_result error;
+
+	*positioned = false;
+	if (goal < fs->first_data_block || goal >= fs->info.blocks ||
+	    goal > allocation->maximum_block) {
+		return EXT4_OK;
+	}
+	index = (uint32_t)((goal - fs->first_data_block) / fs->blocks_per_group);
+	bit = (uint32_t)((goal - fs->first_data_block) % fs->blocks_per_group / fs->cluster_blocks);
+	if (index == allocation->group_index && allocation->bitmap != NULL) {
+		group = allocation->group;
+	} else {
+		error = ext4_allocation_group(allocation, index, &group, &offset);
+		if (error != EXT4_OK || (group.flags & EXT4_GROUP_BLOCK_UNINIT)) {
+			return error;
+		}
+	}
+	if (group.free_blocks == 0) {
+		return EXT4_OK;
+	}
+	error = ext4_allocation_peek_bitmap(allocation, index, &group, &bitmap);
+	if (error == EXT4_OK && !ext4_bitmap_test(bitmap, bit)) {
+		ext4_allocation_position(allocation, index, bit);
+		*positioned = true;
+	}
+	return error;
+}
+
+/* Position at the first free run long enough for the request, from the current
+ * group onward. The chosen group is loaded and fully validated by
+ * ext4_allocate_block like any other. */
+static enum ext4_result
+ext4_allocation_seek(struct ext4_allocation *allocation)
+{
+	struct ext4_fs *fs = allocation->fs;
+	struct ext4_group group;
+	const uint8_t *bitmap;
+	uint64_t offset;
+	uint64_t first;
+	uint64_t clusters;
+	uint32_t wanted = allocation->run_clusters;
+	uint32_t index = allocation->group_index;
+	uint32_t visited;
+	uint32_t start;
+	uint32_t end;
+	uint32_t found;
+	bool current;
+	enum ext4_result error;
+
+	if (wanted > EXT4_ALLOCATION_RUN_CLUSTERS) {
+		wanted = EXT4_ALLOCATION_RUN_CLUSTERS;
+	}
+	if (wanted <= 1U) {
+		return EXT4_OK;
+	}
+	for (visited = 0; visited < fs->info.groups; visited++) {
+		first = fs->first_data_block + (uint64_t)index * fs->blocks_per_group;
+		current = index == allocation->group_index && allocation->bitmap != NULL;
+		if (current) {
+			start = allocation->next_bit;
+			group = allocation->group;
+		} else {
+			error = ext4_allocation_group(allocation, index, &group, &offset);
+			if (error != EXT4_OK) {
+				return error;
+			}
+			start = 0;
+		}
+		if (first <= allocation->maximum_block &&
+		    group.free_blocks >= (uint64_t)wanted * fs->cluster_blocks) {
+			if (!current && (group.flags & EXT4_GROUP_BLOCK_UNINIT)) {
+				/* An untouched group is free beyond its own metadata. */
+				ext4_allocation_position(allocation, index, 0);
+				return EXT4_OK;
+			}
+			error = ext4_allocation_peek_bitmap(allocation, index, &group, &bitmap);
+			if (error != EXT4_OK) {
+				return error;
+			}
+			clusters = (fs->info.blocks - first) / fs->cluster_blocks;
+			end = clusters < fs->clusters_per_group ? (uint32_t)clusters
+								: fs->clusters_per_group;
+			if (ext4_bitmap_run(bitmap, start, end, wanted, &found)) {
+				ext4_allocation_position(allocation, index, found);
+				return EXT4_OK;
+			}
+		}
+		index++;
+		if (index == fs->info.groups) {
+			index = 0;
+		}
+	}
+	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_allocate_data(struct ext4_allocation *allocation, uint64_t goal, uint64_t *block)
+{
+	bool positioned = false;
+	enum ext4_result error = EXT4_OK;
+
+	if (!ext4_allocation_continues(allocation)) {
+		if (goal != 0) {
+			error = ext4_allocation_goal(allocation, goal, &positioned);
+		}
+		if (error == EXT4_OK && !positioned) {
+			error = ext4_allocation_seek(allocation);
+		}
+	}
+	if (error != EXT4_OK) {
+		return error;
+	}
+	return ext4_allocate_block(allocation, block);
 }
 
 enum ext4_result

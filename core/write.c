@@ -1030,8 +1030,12 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 	}
 	logical = offset / fs->info.block_size;
 	for (index = 0; index < block_count; index++) {
+		allocation.run_clusters =
+		    (uint32_t)((block_count - index + fs->cluster_blocks - 1U) /
+			fs->cluster_blocks);
 		error = ext4_write_map_allocate(
 		    &allocation, &inode, disk, (uint32_t)(logical + index), &physical, &zero);
+		allocation.run_clusters = 0;
 		if (error != EXT4_OK) {
 			if (growth != NULL && error == EXT4_NO_SPACE) {
 				growth->mapping_no_space = true;
