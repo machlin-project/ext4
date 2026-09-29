@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,15 +13,19 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* Guest probe: Linux reads the usage of quota files written by the core through
  * quotactl. The mutation phase also removes and creates files, moves owners and
  * changes a project, so the kernel frees and reuses quota entries and blocks
- * before the core continues from its result. /phase holds "PHASE PROJECT". */
+ * before the core continues from its result. The enforcement phase mounts with
+ * limits enabled and reports where the kernel refuses an unprivileged owner.
+ * /phase holds "PHASE PROJECT". */
 
 #define PHASE_REPORT 0U
 #define PHASE_MUTATE 1U
+#define PHASE_ENFORCE 2U
 #define QUOTA_TYPES 3U
 #define REMOVED_FIRST 2030U
 #define REMOVED_LAST 2039U
@@ -33,6 +38,12 @@
 #define PROJECT_FILE_OWNER 2015U
 #define LINUX_PROJECT 77U
 #define BLOCK_BYTES 4096U
+/* The owner whose limits the core's enforcement test wrote, and its file. */
+#define ENFORCED_OWNER 1000U
+#define ENFORCED_GROUP 100U
+#define ENFORCED_FILE "/mnt/e2"
+#define ENFORCED_DIRECTORY "/mnt/enforced"
+#define ENFORCED_ATTEMPTS 16U
 #define PATH_BYTES 128U
 
 /* Linux UAPI <linux/quota.h> and <linux/fs.h>; the musl sysroot lacks them. */
@@ -168,6 +179,52 @@ mutate(unsigned int project)
 	sync();
 }
 
+/* Linux enforces limits for a process without CAP_SYS_RESOURCE: an unprivileged
+ * child appends to the owner's file until the kernel refuses, then creates one
+ * inode beyond the owner's inode limit. */
+static void
+enforce(void)
+{
+	static uint8_t block[BLOCK_BYTES];
+	size_t written = 0;
+	unsigned int attempt;
+	int status;
+	int fd;
+	pid_t child;
+
+	require(mkdir(ENFORCED_DIRECTORY, 0755) == 0 &&
+		chown(ENFORCED_DIRECTORY, ENFORCED_OWNER, ENFORCED_GROUP) == 0,
+	    "create the owner's directory");
+	child = fork();
+	require(child >= 0, "fork unprivileged owner");
+	if (child == 0) {
+		require(setgroups(0, NULL) == 0 && setgid(ENFORCED_GROUP) == 0 &&
+			setuid(ENFORCED_OWNER) == 0,
+		    "drop privileges");
+		fd = open(ENFORCED_FILE, O_WRONLY | O_APPEND | O_CLOEXEC);
+		require(fd >= 0, "open the owner's file");
+		memset(block, 'L', sizeof(block));
+		for (attempt = 0; attempt < ENFORCED_ATTEMPTS; attempt++) {
+			if (write(fd, block, sizeof(block)) != (ssize_t)sizeof(block)) {
+				break;
+			}
+			written += sizeof(block);
+		}
+		printf("LINUX_QUOTA_ENFORCE_BYTES=%zu\n", written);
+		printf("LINUX_QUOTA_ENFORCE_WRITE_ERROR=%d\n", errno);
+		require(fsync(fd) == 0 && close(fd) == 0, "persist the owner's file");
+		fd = open(
+		    ENFORCED_DIRECTORY "/beyond", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+		printf("LINUX_QUOTA_ENFORCE_CREATE_ERROR=%d\n", fd < 0 ? errno : 0);
+		fflush(stdout);
+		_exit(0);
+	}
+	require(
+	    waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+	    "wait for unprivileged owner");
+	sync();
+}
+
 int
 main(void)
 {
@@ -197,10 +254,18 @@ main(void)
 	}
 	config = fopen("/phase", "r");
 	require(config != NULL && fscanf(config, "%u %u", &phase, &project) == 2 &&
-		fclose(config) == 0 && phase <= PHASE_MUTATE && project <= 1U,
+		fclose(config) == 0 && phase <= PHASE_ENFORCE && project <= 1U,
 	    "read probe phase");
-	/* Quota tracking starts with a writable mount of a QUOTA volume. */
-	require(mount("/dev/vda", "/mnt", "ext4", MS_NOATIME, NULL) == 0, "mount quota filesystem");
+	/* Quota tracking starts with a writable mount of a QUOTA volume; the quota
+	 * mount options also enforce limits. */
+	require(mount("/dev/vda", "/mnt", "ext4", MS_NOATIME,
+		    phase != PHASE_ENFORCE ? NULL
+			: project	   ? "usrquota,grpquota,prjquota"
+					   : "usrquota,grpquota") == 0,
+	    "mount quota filesystem");
+	if (phase == PHASE_ENFORCE) {
+		enforce();
+	}
 	if (phase == PHASE_MUTATE) {
 		mutate(project);
 		require(umount("/mnt") == 0, "unmount after Linux changes");

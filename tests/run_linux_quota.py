@@ -27,7 +27,12 @@ MODLOOP_SHA256 = '65a50040ab5129e6c1875353a8d8d91e695eb7f5fc2ba5a36809bd21539ab8
 MODULES = ('quota_tree', 'quota_v2')
 MODULE_DIRECTORY = 'modules/6.12.94-0-virt/kernel/fs/quota'
 TYPES = ('user', 'group', 'project')
-PHASE_REPORT, PHASE_MUTATE = 0, 1
+PHASE_REPORT, PHASE_MUTATE, PHASE_ENFORCE = 0, 1, 2
+# The owner whose limits ext4-quota-test --enforce wrote.
+ENFORCED_OWNER = 1000
+QUOTA_LIMIT_BLOCK = 1024
+BLOCK_BYTES = 4096
+LINUX_EDQUOT = 122
 # Quota header: magic, version, block grace, inode grace, flags, then blocks.
 QUOTA_INFO_BLOCKS = 20
 
@@ -77,6 +82,8 @@ def main():
     parser.add_argument('--core-test', type=Path, required=True,
                         help='ext4-quota-test built from the core under test')
     parser.add_argument('--exports', type=Path, required=True, action='append')
+    parser.add_argument('--enforced-exports', type=Path, action='append', default=[],
+                        help='ext4-quota-test --enforce export directories')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     lab, prepared, runner, modloop, core_test, output = (
@@ -144,6 +151,8 @@ def main():
                 raise RuntimeError(f'{label}: missing Linux quota evidence: {required}')
         shutil.rmtree(tree)
         archive.unlink()
+        if phase == PHASE_ENFORCE:
+            return console
         return linux_usage(console)
 
     def agree(row, label, disk, project):
@@ -196,6 +205,45 @@ def main():
         print(f'PASS Linux quota {profile}: {row["core_entries"]} core, '
               f'{row["linux_entries"]} Linux and {row["continued_entries"]} continued '
               'entries agree', flush=True)
+
+    for directory in args.enforced_exports:
+        exports = sorted(directory.glob('quota-enforced-*.img'))
+        if len(exports) != 1:
+            raise RuntimeError(f'{directory}: expected one enforced export')
+        source_image = exports[0]
+        profile = f'{directory.name}-enforced'
+        row = dict(profile=profile, commands=[], passed=False,
+                   image_sha256=digest(source_image))
+        rows.append(row)
+        state = run(row, [tools['dumpe2fs'], '-h', source_image])
+        project = 'project' in re.search(r'Filesystem features:(.*)', state)[1].split()
+        fields = run(row, [tools['debugfs'], '-R', f'get_quota user {ENFORCED_OWNER}',
+                           source_image]).splitlines()[-1].split()
+        space, soft, hard, inodes, inode_soft, inode_hard = (int(value) for value in fields[1:7])
+        if not hard or not inode_hard or inodes + 1 != inode_hard:
+            raise RuntimeError(f'{profile}: unexpected enforced limits {fields}')
+        # The probe first creates the owner's directory, charging one block.
+        expected = (hard * QUOTA_LIMIT_BLOCK - space - BLOCK_BYTES) // BLOCK_BYTES * BLOCK_BYTES
+        disk = output / f'{profile}.img'
+        shutil.copyfile(source_image, disk)
+        console = boot(row, profile, disk, PHASE_ENFORCE, project)
+        written = int(re.search(r'LINUX_QUOTA_ENFORCE_BYTES=(\d+)', console)[1])
+        write_error = int(re.search(r'LINUX_QUOTA_ENFORCE_WRITE_ERROR=(\d+)', console)[1])
+        create_error = int(re.search(r'LINUX_QUOTA_ENFORCE_CREATE_ERROR=(\d+)', console)[1])
+        if written != expected or write_error != LINUX_EDQUOT or create_error != LINUX_EDQUOT:
+            raise RuntimeError(f'{profile}: Linux refused after {written} bytes with '
+                               f'{write_error} and {create_error}; expected {expected} '
+                               f'bytes and EDQUOT')
+        run(row, [tools['e2fsck'], '-fn', disk])
+        seen = linux_usage(console)
+        if seen != e2fsprogs_usage(run, row, tools, disk, 3 if project else 2):
+            raise RuntimeError(f'{profile}: Linux usage differs from e2fsprogs')
+        disk.unlink()
+        row.update(passed=True, space=space, soft_kib=soft, hard_kib=hard, inodes=inodes,
+                   inode_hard=inode_hard, linux_bytes=written)
+        (output / 'report.json').write_text(json.dumps(rows, indent=2) + '\n')
+        print(f'PASS Linux quota {profile}: Linux refuses after {written} bytes and at '
+              f'{inode_hard} inodes, as the core\'s limits require', flush=True)
 
 
 if __name__ == '__main__':
