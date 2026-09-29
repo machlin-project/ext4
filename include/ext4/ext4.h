@@ -515,13 +515,39 @@ enum ext4_result ext4_fallocate(struct ext4_fs *fs, uint32_t number, uint32_t ge
 
 /* block_size is the Merkle tree block size: a power of two from 1 KiB to the
  * filesystem block size. Linux readers also require it to be no larger than their
- * page size. salt holds at most 32 bytes. */
+ * page size. salt holds at most 32 bytes. signature is an optional built-in
+ * signature of at most 16,128 bytes: a PKCS#7 signature of the formatted digest,
+ * "FSVerity", the little-endian 16-bit algorithm and digest size, then the file
+ * digest, which the core stores after the descriptor. */
+#define EXT4_VERITY_MAX_SIGNATURE 16128U
+
 struct ext4_verity_parameters {
 	uint32_t hash_algorithm;
 	uint32_t block_size;
 	const uint8_t *salt;
 	size_t salt_size;
+	const uint8_t *signature;
+	size_t signature_size;
 };
+
+/* Cryptography an adapter supplies to a mounted filesystem. verify_signature checks a
+ * built-in fs-verity signature of a formatted digest against the adapter's trusted
+ * certificates, as Linux's .fs-verity keyring does, and returns OK to accept it or
+ * an error to refuse the file: PERMISSION_DENIED for an incorrect signature,
+ * NOT_FOUND for an unknown certificate, CORRUPT for a malformed one. Without it,
+ * signatures are stored and ignored, as by a kernel without built-in signature
+ * support. require_signatures, which needs verify_signature, refuses verity files
+ * without a signature, as Linux's fs.verity.require_signatures does. Verified
+ * digests are remembered per mount. */
+struct ext4_crypto_environment {
+	void *context;
+	enum ext4_result (*verify_signature)(void *context, const uint8_t *message,
+	    size_t message_size, const uint8_t *signature, size_t signature_size);
+	bool require_signatures;
+};
+/* Install or, with NULL, remove the adapter's cryptography; the core copies it. */
+enum ext4_result ext4_set_crypto(struct ext4_fs *fs, const struct ext4_crypto_environment *crypto);
+
 /* Enable fs-verity on a linked regular file, as FS_IOC_ENABLE_VERITY does. The
  * volume must have the verity feature and the file extent mapping, which inline
  * data is converted to; encrypted, append-only and immutable files and verity files
@@ -531,13 +557,17 @@ struct ext4_verity_parameters {
  * the inode is on the orphan list; a final transaction writes the descriptor, sets
  * the verity flag and removes the inode from the list. A failure truncates the
  * partial tree, and recovery does the same after a power cut, so the file either
- * stays as it was or becomes a verity file. The file's times do not change. Built-in
- * signatures are not supported. result receives the verity inode on success. */
+ * stays as it was or becomes a verity file. The file's times do not change. A
+ * signature is verified before the descriptor is written, and an unsigned file is
+ * refused before any write when signatures are required, both as reads would.
+ * result receives the verity inode on success. */
 enum ext4_result ext4_enable_verity(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     const struct ext4_verity_parameters *parameters, struct ext4_inode *result);
 /* The file digest of a verity file, as FS_IOC_MEASURE_VERITY reports it: the hash of
  * its descriptor with the signature size cleared. NOT_FOUND reports a file without
- * verity. An insufficient capacity returns RANGE with the algorithm and size set. */
+ * verity. An insufficient capacity returns RANGE with the algorithm and size set.
+ * Reads and measurement of a signed file verify its signature under the adapter's
+ * cryptography. */
 enum ext4_result ext4_measure_verity(struct ext4_fs *fs, const struct ext4_inode *inode,
     uint32_t *hash_algorithm, uint8_t *digest, size_t capacity, size_t *size);
 /* Namespace mutations share the writable instance's exclusive owner. The caller

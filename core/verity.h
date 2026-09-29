@@ -18,6 +18,13 @@
 #define EXT4_VERITY_MAX_DIGEST 64U
 #define EXT4_VERITY_MAX_SALT 32U
 #define EXT4_VERITY_MAX_PADDED_SALT 128U
+/* Linux bounds the descriptor and its built-in signature together. */
+#define EXT4_VERITY_MAX_DESCRIPTOR 16384U
+/* The formatted digest a built-in signature signs: this magic, the little-endian
+ * 16-bit algorithm and digest size, then the file digest. */
+#define EXT4_VERITY_FORMATTED_MAGIC "FSVerity"
+#define EXT4_VERITY_FORMATTED_MAGIC_SIZE 8U
+#define EXT4_VERITY_FORMATTED_HEADER 12U
 
 struct ext4_verity_descriptor_disk {
 	uint8_t version;
@@ -33,6 +40,9 @@ struct ext4_verity_descriptor_disk {
 };
 
 _Static_assert(sizeof(struct ext4_verity_descriptor_disk) == 256, "verity descriptor size");
+_Static_assert(EXT4_VERITY_MAX_DESCRIPTOR - sizeof(struct ext4_verity_descriptor_disk) ==
+	EXT4_VERITY_MAX_SIGNATURE,
+    "verity signature bound");
 
 struct ext4_verity {
 	uint64_t data_size;
@@ -60,7 +70,13 @@ void ext4_verity_hash(const struct ext4_verity *verity, const uint8_t *block, ui
 /* The file digest of a descriptor; clears its signature size. */
 void ext4_verity_file_digest(const struct ext4_verity *verity,
     struct ext4_verity_descriptor_disk *descriptor, uint8_t *digest);
-/* Validate the descriptor and derive tree geometry for a verity inode. */
+/* Accept a verity file under the adapter's signature policy. A NULL signature is
+ * read after the descriptor at verity->descriptor_offset. */
+enum ext4_result ext4_verity_accept(struct ext4_fs *fs, const struct ext4_inode *inode,
+    const struct ext4_verity *verity, const struct ext4_verity_descriptor_disk *descriptor,
+    const uint8_t *signature);
+/* Validate the descriptor, derive tree geometry for a verity inode and apply the
+ * adapter's signature policy. */
 enum ext4_result ext4_verity_open(
     struct ext4_fs *fs, const struct ext4_inode *inode, struct ext4_verity *verity);
 /* Read bytes below EOF, verifying every covering Merkle data block. */

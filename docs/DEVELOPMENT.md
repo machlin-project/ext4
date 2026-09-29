@@ -252,14 +252,30 @@ salt; `tests/check_verity_enable.py --tools-root E2FSPROGS_BUILD --exports DIREC
 --output NEW` requires strict fsck, the verity flag and the dumped contents, compares
 the tree, descriptor and size field read through the file's extents past EOF with the
 generator's independent layout, rejects other mappings past EOF, compares digests and
-writes a fixtures report for the Linux harness.
+writes a fixtures report for the Linux harness. The test also enables files with
+signatures of a test scheme, one spanning several blocks, under a verifying
+environment: enabling verifies once, reads reuse the accepted digest until the
+environment is installed again, read-only mounts verify, forged and oversized
+signatures are refused without change, and required signatures refuse unsigned
+reads, measurement and enabling without writes.
+
+`tests/generate_verity_signatures.py --tools-root E2FSPROGS_BUILD --enable-test
+EXT4_VERITY_ENABLE_TEST --image VERITY_4K_IMAGE --output NEW` creates an RSA
+certificate with OpenSSL, signs the formatted digest of each file, computed
+independently, as a detached PKCS#7 signature without certificates or attributes,
+and has the core store the signatures through `ext4-verity-enable-test --import`.
+The image also holds an unsigned file, one signed by another certificate and one
+with a damaged signature. `check_verity_enable.py` checks the result, including the
+signature bytes after each descriptor, and the output keeps `signer.der`.
 
 `tests/run_linux_verity.py` runs from the lab with `--lab`, `--prepared`, `--runner`,
 `--fixtures DIRECTORY` and a fresh `--output`. The directory needs a `report.json`
 naming each image and manifest, as written by the generator or `check_verity.py`.
 Each image boots once: Linux mounts it read-only, requires FS_IOC_MEASURE_VERITY to
 match the manifest digest, reads every valid file and requires EIO or open failure
-for each damaged one. Linux records the invalid descriptor location in the superblock
+for each damaged one. `--certificate DER` adds a certificate to the .fs-verity
+keyring and `--require-signatures` sets fs.verity.require_signatures; files of the
+kinds "unsigned" and "badsig" must then fail to open. Linux records the invalid descriptor location in the superblock
 error fields even on a read-only mount; that primary-superblock record is the only
 permitted image change.
 

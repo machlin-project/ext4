@@ -655,9 +655,20 @@ the descriptor. A read stops before the first unverifiable block and reports the
 verified prefix. The level-zero hash block last verified through the root is reused
 within one call; nothing is cached across calls or mutations, so each call parses
 the descriptor again. `ext4_map_read` refuses verity files because a native mapping
-would bypass verification; adapters must read them through the core. Built-in
-signatures are not checked: like Linux without a keyring policy, the core establishes
-consistency with the descriptor, whose digest is the file's trust anchor.
+would bypass verification; adapters must read them through the core.
+
+A built-in signature follows the descriptor, and the size field counts both. The
+core holds no certificates and checks no PKCS#7: `ext4_set_crypto` installs an
+adapter callback that receives the formatted digest, "FSVerity", the algorithm and
+digest size as little-endian 16-bit values and the file digest, with the signature,
+and accepts or refuses the file, as Linux's .fs-verity keyring does. Opening a verity
+file for reading or measurement applies it, and the mount remembers 16 accepted file
+digests, since a signature authenticates the digest and the digest binds the root
+hash; installing the environment again forgets them. With `require_signatures`,
+unsigned verity files are refused, as with Linux's fs.verity.require_signatures.
+Without a callback, signatures are stored and ignored, as by a kernel without
+built-in signature support, and the descriptor's digest remains the trust anchor.
+Descriptors with signatures are limited to Linux's 16 KiB.
 
 Writable owners may rename, link, unlink and change attributes and permissions of
 verity files. Writes, both truncate forms, preallocation, hole punching and growth
@@ -682,8 +693,10 @@ inode from the list. On failure the core truncates the partial tree and leaves t
 list; after a power cut, recovery does the same, because cleanup of a linked orphan
 truncates to its size. The file is therefore either unchanged or a verity file.
 Merkle blocks from 1 KiB to the filesystem block size are accepted; Linux readers also
-need them no larger than their page size. Built-in signatures are not supported.
-`ext4_measure_verity` returns the file digest, the unsalted hash of the descriptor
+need them no larger than their page size. A signature is stored after the
+descriptor, across further blocks when needed; the adapter's callback accepts it
+before the descriptor is written, and an unsigned file is refused before any write
+when signatures are required. `ext4_measure_verity` returns the file digest, the unsalted hash of the descriptor
 with its signature size cleared, as FS_IOC_MEASURE_VERITY does.
 
 ## Encryption without keys

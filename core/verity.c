@@ -163,7 +163,8 @@ ext4_verity_open(struct ext4_fs *fs, const struct ext4_inode *inode, struct ext4
 		return error;
 	}
 	descriptor_size = ext4_le32(&size_disk);
-	if (descriptor_size < sizeof(descriptor) || descriptor_size > size_position - metadata) {
+	if (descriptor_size < sizeof(descriptor) || descriptor_size > EXT4_VERITY_MAX_DESCRIPTOR ||
+	    descriptor_size > size_position - metadata) {
 		return EXT4_CORRUPT;
 	}
 	descriptor_position =
@@ -200,6 +201,96 @@ ext4_verity_open(struct ext4_fs *fs, const struct ext4_inode *inode, struct ext4
 	}
 	verity->tree_offset = metadata;
 	verity->descriptor_offset = descriptor_position;
+	return ext4_verity_accept(fs, inode, verity, &descriptor, NULL);
+}
+
+enum ext4_result
+ext4_verity_accept(struct ext4_fs *fs, const struct ext4_inode *inode,
+    const struct ext4_verity *verity, const struct ext4_verity_descriptor_disk *descriptor,
+    const uint8_t *signature)
+{
+	struct ext4_verity_descriptor_disk unsigned_descriptor;
+	struct ext4_verified_signature *entry;
+	uint8_t message[EXT4_VERITY_FORMATTED_HEADER + EXT4_VERITY_MAX_DIGEST];
+	uint8_t *stored = NULL;
+	uint32_t size = ext4_le32(&descriptor->signature_size);
+	uint32_t index;
+	enum ext4_result error;
+
+	if (size == 0) {
+		return fs->crypto.require_signatures ? EXT4_PERMISSION_DENIED : EXT4_OK;
+	}
+	if (fs->crypto.verify_signature == NULL) {
+		return EXT4_OK;
+	}
+	/* A signature authenticates the file digest, which binds the root hash; once
+	 * accepted, the same digest needs no second verification. */
+	unsigned_descriptor = *descriptor;
+	ext4_copy(message, EXT4_VERITY_FORMATTED_MAGIC, EXT4_VERITY_FORMATTED_MAGIC_SIZE);
+	ext4_encode16(
+	    (struct ext4_le16 *)(message + EXT4_VERITY_FORMATTED_MAGIC_SIZE), verity->algorithm);
+	ext4_encode16((struct ext4_le16 *)(message + EXT4_VERITY_FORMATTED_MAGIC_SIZE +
+			  sizeof(struct ext4_le16)),
+	    (uint16_t)verity->digest_size);
+	ext4_verity_file_digest(
+	    verity, &unsigned_descriptor, message + EXT4_VERITY_FORMATTED_HEADER);
+	for (index = 0; index < fs->verified_signature_count; index++) {
+		entry = &fs->verified_signatures[index];
+		if (entry->number == inode->number && entry->generation == inode->generation &&
+		    entry->algorithm == verity->algorithm &&
+		    ext4_equal(entry->digest, message + EXT4_VERITY_FORMATTED_HEADER,
+			verity->digest_size)) {
+			return EXT4_OK;
+		}
+	}
+	if (signature == NULL) {
+		stored = fs->environment.allocate(fs->environment.context, size);
+		if (stored == NULL) {
+			return EXT4_NO_MEMORY;
+		}
+		error = ext4_verity_read_exact(
+		    fs, inode, verity->descriptor_offset + sizeof(*descriptor), stored, size);
+		signature = stored;
+	} else {
+		error = EXT4_OK;
+	}
+	if (error == EXT4_OK) {
+		error = fs->crypto.verify_signature(fs->crypto.context, message,
+		    EXT4_VERITY_FORMATTED_HEADER + verity->digest_size, signature, size);
+	}
+	if (stored != NULL) {
+		fs->environment.release(fs->environment.context, stored, size);
+	}
+	if (error != EXT4_OK) {
+		return error;
+	}
+	entry = &fs->verified_signatures[fs->verified_signature_next];
+	fs->verified_signature_next = (fs->verified_signature_next + 1U) % EXT4_VERIFIED_SIGNATURES;
+	if (fs->verified_signature_count < EXT4_VERIFIED_SIGNATURES) {
+		fs->verified_signature_count++;
+	}
+	entry->number = inode->number;
+	entry->generation = inode->generation;
+	entry->algorithm = verity->algorithm;
+	ext4_zero(entry->digest, sizeof(entry->digest));
+	ext4_copy(entry->digest, message + EXT4_VERITY_FORMATTED_HEADER, verity->digest_size);
+	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_set_crypto(struct ext4_fs *fs, const struct ext4_crypto_environment *crypto)
+{
+	if (fs == NULL ||
+	    (crypto != NULL && crypto->require_signatures && crypto->verify_signature == NULL)) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	ext4_zero(&fs->crypto, sizeof(fs->crypto));
+	if (crypto != NULL) {
+		fs->crypto = *crypto;
+	}
+	/* Other trusted certificates may accept or refuse other files. */
+	fs->verified_signature_count = 0;
+	fs->verified_signature_next = 0;
 	return EXT4_OK;
 }
 

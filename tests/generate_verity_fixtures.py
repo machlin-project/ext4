@@ -51,19 +51,21 @@ def merkle(data, block_size, algorithm, salt):
     return b"".join(b"".join(level) for level in reversed(levels)), digest(blocks[0])
 
 
-def descriptor(size, block_size, algorithm, salt, root):
-    return DESCRIPTOR.pack(VERITY_VERSION, algorithm, block_size.bit_length() - 1, len(salt), 0,
-                           size, root.ljust(64, b"\0"), salt.ljust(32, b"\0"), bytes(144))
+def descriptor(size, block_size, algorithm, salt, root, signature_size=0):
+    return DESCRIPTOR.pack(VERITY_VERSION, algorithm, block_size.bit_length() - 1, len(salt),
+                           signature_size, size, root.ljust(64, b"\0"), salt.ljust(32, b"\0"),
+                           bytes(144))
 
 
-def layout(data, fs_block, block_size, algorithm, salt, damage=None):
-    """Return sparse extents (offset, bytes), the file digest and tree geometry."""
+def layout(data, fs_block, block_size, algorithm, salt, damage=None, signature=b""):
+    """Return sparse extents (offset, bytes), the file digest and tree geometry. A
+    built-in signature follows the descriptor; the digest excludes it."""
     tree, root = merkle(data, block_size, algorithm, salt)
     name = ALGORITHMS[algorithm][0]
     digest = hashlib.new(name, descriptor(len(data), block_size, algorithm, salt, root)).digest()
     if damage == "root":
         root = bytes([root[0] ^ 1]) + root[1:]
-    record = descriptor(len(data), block_size, algorithm, salt, root)
+    record = descriptor(len(data), block_size, algorithm, salt, root, len(signature)) + signature
     if damage == "version":
         record = bytes([VERITY_VERSION + 1]) + record[1:]
     metadata = -(-len(data) // METADATA_ALIGNMENT) * METADATA_ALIGNMENT

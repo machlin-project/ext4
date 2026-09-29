@@ -7,7 +7,9 @@ debugfs must report the verity flag and dump the expected contents, and the Merk
 tree, descriptor and size field read through the file's extents past EOF must equal
 what generate_verity_fixtures.layout computes from those contents and the file's
 parameters, with no other blocks mapped past EOF. The core's measured digest must
-equal the independently computed file digest. The output directory then holds a
+equal the independently computed file digest. A tenth field names a built-in
+signature, next to the manifest, that must follow the descriptor. Kinds other than
+"good" name files a Linux keyring must refuse. The output directory then holds a
 report in the verity fixtures' format for tests/run_linux_verity.py."""
 import argparse
 import hashlib
@@ -20,6 +22,8 @@ from generate_fixtures import resolve_tools
 from generate_verity_fixtures import layout
 
 VERITY_FLAG = 0x00100000
+# Files Linux must verify, and files a keyring requiring signatures must refuse.
+KINDS = ("good", "unsigned", "badsig")
 EXTENT = re.compile(r"^\s*(\d+)/\s*(\d+)\s+\d+/\s*\d+\s+(\d+)\s*-\s*(\d+)\s+(\d+)\s*-\s*(\d+)"
                     r"\s+(\d+)\s*(\S*)\s*$")
 FLAGS = re.compile(r"Flags:\s+(0x[0-9a-f]+)")
@@ -83,20 +87,24 @@ def main():
         fs_block = int(re.fullmatch(r"algorithm \d+ block (\d+)", header)[1])
         fixture_lines = [header]
         for line in lines:
-            kind, name, size, sha256, digest, _, algorithm, merkle, salt = line.split()
+            kind, name, size, sha256, digest, _, algorithm, merkle, salt, *signed = line.split()
             size, algorithm, merkle = int(size), int(algorithm), int(merkle)
             salt = b"" if salt == "-" else bytes.fromhex(salt)
+            signature = b"" if not signed or signed[0] == "-" else \
+                (manifest.parent / signed[0]).read_bytes()
             dump = output / f"{manifest.stem}-{name}.data"
             run(row, [tools["debugfs"], "-R", f'dump "/{name}" "{dump}"', image])
             data = dump.read_bytes()
             dump.unlink()
-            if kind != "good" or len(data) != size or hashlib.sha256(data).hexdigest() != sha256:
+            if kind not in KINDS or len(data) != size or \
+                    hashlib.sha256(data).hexdigest() != sha256:
                 raise RuntimeError(f"{manifest.stem}/{name}: contents differ")
             flags = int(FLAGS.search(run(row, [tools["debugfs"], "-R", f'stat "/{name}"',
                                                image]))[1], 16)
             if not flags & VERITY_FLAG:
                 raise RuntimeError(f"{manifest.stem}/{name}: verity flag missing")
-            pieces, expected_digest, metadata = layout(data, fs_block, merkle, algorithm, salt)
+            pieces, expected_digest, metadata = layout(data, fs_block, merkle, algorithm, salt,
+                                                       signature=signature)
             if expected_digest != digest:
                 raise RuntimeError(f"{manifest.stem}/{name}: measured digest differs")
             mapping = extents(run(row, [tools["debugfs"], "-R", f'dump_extents "/{name}"',
@@ -116,8 +124,9 @@ def main():
                 if read_file(image, mapping, fs_block, offset, len(payload)) != bytes(payload):
                     raise RuntimeError(f"{manifest.stem}/{name}: metadata at {offset} differs")
             fixture_lines.append(" ".join((kind, name, str(size), sha256, digest, "-")))
-            row["files"].append(dict(name=name, size=size, algorithm=algorithm,
-                                     merkle_block=merkle, salt=salt.hex(), file_digest=digest))
+            row["files"].append(dict(name=name, kind=kind, size=size, algorithm=algorithm,
+                                     merkle_block=merkle, salt=salt.hex(), file_digest=digest,
+                                     signature_bytes=len(signature)))
         (output / manifest.name).write_text("\n".join(fixture_lines) + "\n")
         row["passed"] = True
         (output / "report.json").write_text(json.dumps(rows, indent=2) + "\n")

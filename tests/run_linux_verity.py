@@ -33,7 +33,13 @@ def main():
     parser.add_argument('--runner', type=Path, required=True)
     parser.add_argument('--fixtures', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--certificate', type=Path,
+                        help='DER certificate for the .fs-verity keyring')
+    parser.add_argument('--require-signatures', action='store_true',
+                        help='set fs.verity.require_signatures before mounting')
     args = parser.parse_args()
+    if args.require_signatures and args.certificate is None:
+        parser.error('--require-signatures needs --certificate')
     lab, prepared, runner, fixtures, output = (
         value.resolve() for value in (args.lab, args.prepared, args.runner, args.fixtures,
                                       args.output))
@@ -83,6 +89,10 @@ def main():
         shutil.copytree(prepared / 'root-0', tree)
         shutil.copy2(output / 'init', tree / 'init')
         shutil.copyfile(manifest, tree / 'manifest')
+        if args.certificate is not None:
+            shutil.copyfile(args.certificate, tree / 'cert.der')
+        if args.require_signatures:
+            (tree / 'require').write_text('')
         archive = output / f'{profile}.cpio'
         listing = '\n'.join(str(x.relative_to(tree)) for x in sorted(tree.rglob('*'))) + '\n'
         with archive.open('wb') as stream:
@@ -108,12 +118,17 @@ def main():
                 raise RuntimeError(f'{profile}: Linux changed more than its error record')
             row['linux_error_record'] = True
         copy.unlink()
+        if args.certificate is not None and 'LINUX_VERITY_CERTIFICATE=trusted' not in console:
+            raise RuntimeError(f'{profile}: certificate was not trusted')
+        if args.require_signatures and 'LINUX_VERITY_SIGNATURES=required' not in console:
+            raise RuntimeError(f'{profile}: signatures were not required')
         row.update(passed=True, files=files,
                    verified=console.count('LINUX_VERITY_VERIFIED='),
-                   rejected=console.count('LINUX_VERITY_REJECTED='))
+                   rejected=console.count('LINUX_VERITY_REJECTED='),
+                   refused=console.count('LINUX_VERITY_REFUSED='))
         (output / 'report.json').write_text(json.dumps(rows, indent=2) + '\n')
         print(f'PASS Linux verity {profile}: {row["verified"]} verified, '
-              f'{row["rejected"]} rejected', flush=True)
+              f'{row["rejected"]} rejected, {row["refused"]} refused', flush=True)
 
 
 if __name__ == '__main__':

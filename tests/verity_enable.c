@@ -15,9 +15,16 @@
  * of a multi-transaction enable recovers either the original file, with its blocks
  * and free space, or the verity file. Every allocation and read failure of an enable,
  * and running out of space after part of the tree is written, leave the original
- * file after the rollback, or the verity file. With --export, the final image and a manifest
+ * file after the rollback, or the verity file. Built-in signatures, one spanning
+ * several blocks, pass through the adapter's verification at enabling and after it
+ * on read-write and read-only mounts; incorrect signatures and, when signatures are
+ * required, unsigned files are refused. With --export, the final image and a manifest
  * in the verity fixtures' format, extended by each file's parameters, go to the
- * directory for independent and Linux verification. */
+ * directory for independent and Linux verification. --import DIRECTORY instead
+ * enables verity on the files that DIRECTORY/import.manifest lists, one per line:
+ * name, contents file, algorithm, Merkle block size, salt and signature file in hex
+ * or "-", storing their signatures unverified for a Linux keyring to check, and
+ * exports the image with a manifest to --export. */
 
 #define VERITY_SECONDS 1700020000
 #define NAME_BYTES 32U
@@ -32,6 +39,15 @@
 /* Merkle bytes one write transaction takes, as the core queues them. */
 #define QUEUE_BYTES (128U * 1024U)
 #define MANIFEST_LINE 512U
+/* A stand-in for a PKCS#7 signature: this magic, the SHA-256 of the formatted digest,
+ * then filler up to the signature's size. */
+#define TEST_SIGNATURE_MAGIC "TEST-SIG"
+#define TEST_SIGNATURE_MAGIC_SIZE 8U
+#define TEST_SIGNATURE_FILLER 0x5aU
+#define SMALL_SIGNATURE_BYTES 64U
+#define SIGNED_BYTES 5000U
+#define IMPORT_MANIFEST "import.manifest"
+#define IMPORT_FIELD 128U
 
 struct enable_case {
 	const char *name;
@@ -371,8 +387,8 @@ check_original(struct ext4_fs *fs, const char *name, const uint8_t *data, uint64
 static void
 faults(struct device *device)
 {
-	struct ext4_verity_parameters parameters = { EXT4_VERITY_HASH_SHA256, SMALL_MERKLE, NULL,
-		0 };
+	struct ext4_verity_parameters parameters = { EXT4_VERITY_HASH_SHA256, SMALL_MERKLE, NULL, 0,
+		NULL, 0 };
 	struct ext4_recovery_report report;
 	struct ext4_inode inode;
 	struct ext4_inode result;
@@ -463,8 +479,8 @@ faults(struct device *device)
 static void
 no_space(struct device *device)
 {
-	struct ext4_verity_parameters parameters = { EXT4_VERITY_HASH_SHA256, SMALL_MERKLE, NULL,
-		0 };
+	struct ext4_verity_parameters parameters = { EXT4_VERITY_HASH_SHA256, SMALL_MERKLE, NULL, 0,
+		NULL, 0 };
 	struct ext4_inode_update update = creation();
 	struct ext4_inode_update write = change();
 	struct ext4_inode root;
@@ -523,12 +539,296 @@ no_space(struct device *device)
 	    offset, free_blocks);
 }
 
+struct signer {
+	uint32_t calls;
+};
+
+static void
+test_sign(const uint8_t *message, size_t length, uint8_t *signature, size_t size)
+{
+	struct ext4_sha256 context;
+
+	memset(signature, TEST_SIGNATURE_FILLER, size);
+	memcpy(signature, TEST_SIGNATURE_MAGIC, TEST_SIGNATURE_MAGIC_SIZE);
+	ext4_sha256_init(&context);
+	ext4_sha256_update(&context, message, length);
+	ext4_sha256_final(&context, signature + TEST_SIGNATURE_MAGIC_SIZE);
+}
+
+static enum ext4_result
+test_verify(void *context, const uint8_t *message, size_t message_size, const uint8_t *signature,
+    size_t signature_size)
+{
+	struct signer *signer = context;
+	uint8_t *expected = malloc(signature_size);
+	bool valid;
+
+	CHECK(expected != NULL);
+	signer->calls++;
+	test_sign(message, message_size, expected, signature_size);
+	valid = signature_size >= TEST_SIGNATURE_MAGIC_SIZE + EXT4_SHA256_DIGEST_SIZE &&
+	    memcmp(expected, signature, signature_size) == 0;
+	free(expected);
+	return valid ? EXT4_OK : EXT4_PERMISSION_DENIED;
+}
+
+static void
+read_file(struct ext4_fs *fs, const char *name, const uint8_t *data, size_t size,
+    enum ext4_result expected)
+{
+	struct ext4_inode inode;
+	uint8_t *read_back = malloc(size);
+	size_t completed;
+
+	CHECK(read_back != NULL);
+	lookup(fs, name, &inode);
+	EXPECT(ext4_read(fs, &inode, 0, read_back, size, &completed), expected);
+	CHECK(expected != EXT4_OK || (completed == size && memcmp(read_back, data, size) == 0));
+	free(read_back);
+}
+
+/* Built-in signatures under a verifying adapter, with and without requiring them. */
+static void
+signatures(struct device *device)
+{
+	struct signer signer = { 0 };
+	struct ext4_crypto_environment crypto = { &signer, test_verify, false };
+	struct ext4_crypto_environment invalid = { &signer, NULL, true };
+	struct ext4_verity_parameters parameters = { EXT4_VERITY_HASH_SHA256, 0, NULL, 0, NULL, 0 };
+	struct ext4_inode inode;
+	struct ext4_inode result;
+	struct ext4_fs *fs;
+	uint8_t message[EXT4_VERITY_FORMATTED_HEADER + EXT4_VERITY_MAX_DIGEST];
+	uint8_t small[SMALL_SIGNATURE_BYTES];
+	uint8_t *large;
+	uint8_t *data;
+	uint32_t algorithm;
+	uint32_t calls;
+	uint32_t writes;
+	size_t large_size = device->block_size + 1000U;
+	size_t digest_size;
+
+	data = malloc(SIGNED_BYTES);
+	large = malloc(large_size);
+	CHECK(data != NULL && large != NULL);
+	pattern(data, SIGNED_BYTES, CASE_COUNT + 3U, 0, 0, device->block_size);
+	parameters.block_size = device->block_size;
+	device_reset(device, device->base);
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	/* The digest depends only on contents and parameters, so an unsigned copy
+	 * gives the formatted digest to sign. */
+	create_file(fs, "reference", data, SIGNED_BYTES, 0, 0, device->block_size, &inode);
+	EXPECT(
+	    ext4_enable_verity(fs, inode.number, inode.generation, &parameters, &result), EXT4_OK);
+	EXPECT(ext4_measure_verity(fs, &result, &algorithm, message + EXT4_VERITY_FORMATTED_HEADER,
+		   EXT4_VERITY_MAX_DIGEST, &digest_size),
+	    EXT4_OK);
+	memcpy(message, EXT4_VERITY_FORMATTED_MAGIC, EXT4_VERITY_FORMATTED_MAGIC_SIZE);
+	ext4_encode16(
+	    (struct ext4_le16 *)(message + EXT4_VERITY_FORMATTED_MAGIC_SIZE), (uint16_t)algorithm);
+	ext4_encode16((struct ext4_le16 *)(message + EXT4_VERITY_FORMATTED_MAGIC_SIZE +
+			  sizeof(struct ext4_le16)),
+	    (uint16_t)digest_size);
+	test_sign(message, EXT4_VERITY_FORMATTED_HEADER + digest_size, small, sizeof(small));
+	test_sign(message, EXT4_VERITY_FORMATTED_HEADER + digest_size, large, large_size);
+	EXPECT(ext4_set_crypto(fs, &invalid), EXT4_INVALID_ARGUMENT);
+	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	/* Enabling verifies once; reads then reuse the accepted digest. */
+	create_file(fs, "signed", data, SIGNED_BYTES, 0, 0, device->block_size, &inode);
+	parameters.signature = small;
+	parameters.signature_size = sizeof(small);
+	calls = signer.calls;
+	EXPECT(
+	    ext4_enable_verity(fs, inode.number, inode.generation, &parameters, &result), EXT4_OK);
+	read_file(fs, "signed", data, SIGNED_BYTES, EXT4_OK);
+	CHECK(signer.calls == calls + 1U);
+	/* A signature longer than a block continues the descriptor across blocks. */
+	create_file(fs, "large", data, SIGNED_BYTES, 0, 0, device->block_size, &inode);
+	parameters.signature = large;
+	parameters.signature_size = large_size;
+	EXPECT(
+	    ext4_enable_verity(fs, inode.number, inode.generation, &parameters, &result), EXT4_OK);
+	create_file(fs, "forged", data, SIGNED_BYTES, 0, 0, device->block_size, &inode);
+	small[sizeof(small) - 1U] ^= 1U;
+	parameters.signature = small;
+	parameters.signature_size = sizeof(small);
+	EXPECT(ext4_enable_verity(fs, inode.number, inode.generation, &parameters, &result),
+	    EXT4_PERMISSION_DENIED);
+	small[sizeof(small) - 1U] ^= 1U;
+	lookup(fs, "forged", &result);
+	CHECK(!(result.flags & EXT4_INODE_VERITY) && result.blocks_512 == inode.blocks_512 &&
+	    fs->last_orphan == 0);
+	parameters.signature_size = EXT4_VERITY_MAX_SIGNATURE + 1U;
+	EXPECT(ext4_enable_verity(fs, inode.number, inode.generation, &parameters, &result),
+	    EXT4_INVALID_ARGUMENT);
+	/* Installing the environment again forgets accepted digests: reads verify the
+	 * signatures stored on disk. */
+	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	calls = signer.calls;
+	read_file(fs, "signed", data, SIGNED_BYTES, EXT4_OK);
+	read_file(fs, "large", data, SIGNED_BYTES, EXT4_OK);
+	CHECK(signer.calls == calls + 2U);
+	/* Required signatures refuse unsigned verity files and unsigned enabling. */
+	crypto.require_signatures = true;
+	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	read_file(fs, "reference", data, SIGNED_BYTES, EXT4_PERMISSION_DENIED);
+	lookup(fs, "reference", &result);
+	EXPECT(ext4_measure_verity(fs, &result, &algorithm, message, sizeof(message), &digest_size),
+	    EXT4_PERMISSION_DENIED);
+	read_file(fs, "signed", data, SIGNED_BYTES, EXT4_OK);
+	writes = device->writes;
+	parameters.signature = NULL;
+	parameters.signature_size = 0;
+	EXPECT(ext4_enable_verity(fs, inode.number, inode.generation, &parameters, &result),
+	    EXT4_PERMISSION_DENIED);
+	CHECK(device->writes == writes);
+	EXPECT(ext4_set_crypto(fs, NULL), EXT4_OK);
+	read_file(fs, "reference", data, SIGNED_BYTES, EXT4_OK);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	/* A read-only mount verifies the stored signatures too. */
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	crypto.require_signatures = false;
+	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	calls = signer.calls;
+	read_file(fs, "signed", data, SIGNED_BYTES, EXT4_OK);
+	read_file(fs, "large", data, SIGNED_BYTES, EXT4_OK);
+	CHECK(signer.calls == calls + 2U);
+	ext4_unmount(fs);
+	free(large);
+	free(data);
+	printf("PASS verity enable signatures: %zu and %zu bytes, %u verifications\n",
+	    sizeof(small), large_size, signer.calls);
+}
+
+static uint8_t *
+load_file(const char *directory, const char *name, size_t *size)
+{
+	char path[4096];
+	FILE *stream;
+	uint8_t *data;
+	long length;
+	int written;
+
+	written = snprintf(path, sizeof(path), "%s/%s", directory, name);
+	CHECK(written > 0 && (size_t)written < sizeof(path));
+	stream = fopen(path, "rb");
+	CHECK(stream != NULL && fseek(stream, 0, SEEK_END) == 0);
+	length = ftell(stream);
+	CHECK(length >= 0 && fseek(stream, 0, SEEK_SET) == 0);
+	data = malloc((size_t)length + 1U);
+	CHECK(data != NULL && fread(data, 1, (size_t)length, stream) == (size_t)length);
+	CHECK(fclose(stream) == 0);
+	*size = (size_t)length;
+	return data;
+}
+
+static size_t
+parse_hex(const char *text, uint8_t *output, size_t capacity)
+{
+	unsigned int value;
+	size_t length = strlen(text) / 2U;
+	size_t index;
+
+	if (strcmp(text, "-") == 0) {
+		return 0;
+	}
+	CHECK(strlen(text) % 2U == 0 && length <= capacity);
+	for (index = 0; index < length; index++) {
+		CHECK(sscanf(text + 2U * index, "%2x", &value) == 1);
+		output[index] = (uint8_t)value;
+	}
+	return length;
+}
+
+/* Enable verity on listed files with their parameters and signatures. Signatures are
+ * stored without an adapter to verify them, as for a Linux keyring to check. */
+static void
+import(struct device *device, const char *directory, const char *exports, const char *source)
+{
+	struct ext4_verity_parameters parameters;
+	struct ext4_sha256 context;
+	struct ext4_inode inode;
+	struct ext4_inode result;
+	struct ext4_fs *fs;
+	uint8_t import_salt[SALT_BYTES];
+	uint8_t digest[EXT4_VERITY_MAX_DIGEST];
+	uint8_t content[EXT4_SHA256_DIGEST_SIZE];
+	char path[4096];
+	char line[MANIFEST_LINE];
+	char kind[IMPORT_FIELD];
+	char name[IMPORT_FIELD];
+	char contents[IMPORT_FIELD];
+	char salt_text[IMPORT_FIELD];
+	char signature_name[IMPORT_FIELD];
+	char text[2U * EXT4_VERITY_MAX_DIGEST + 1U];
+	char content_text[2U * EXT4_SHA256_DIGEST_SIZE + 1U];
+	unsigned int algorithm;
+	unsigned int merkle;
+	uint32_t measured;
+	uint32_t files = 0;
+	uint8_t *data;
+	uint8_t *signature;
+	size_t size;
+	size_t signature_size = 0;
+	size_t digest_size;
+	FILE *input;
+	FILE *manifest;
+	int written;
+
+	written = snprintf(path, sizeof(path), "%s/%s", directory, IMPORT_MANIFEST);
+	CHECK(written > 0 && (size_t)written < sizeof(path));
+	input = fopen(path, "r");
+	CHECK(input != NULL);
+	device_reset(device, device->base);
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	export_manifest(exports, source, path, sizeof(path), &manifest);
+	fprintf(manifest, "algorithm %u block %u\n", EXT4_VERITY_HASH_SHA256, device->block_size);
+	while (fgets(line, sizeof(line), input) != NULL) {
+		CHECK(sscanf(line, "%127s %127s %127s %u %u %127s %127s", kind, name, contents,
+			  &algorithm, &merkle, salt_text, signature_name) == 7);
+		data = load_file(directory, contents, &size);
+		signature = strcmp(signature_name, "-") == 0
+		    ? NULL
+		    : load_file(directory, signature_name, &signature_size);
+		create_file(fs, name, data, size, 0, 0, device->block_size, &inode);
+		memset(&parameters, 0, sizeof(parameters));
+		parameters.hash_algorithm = algorithm;
+		parameters.block_size = merkle;
+		parameters.salt_size = parse_hex(salt_text, import_salt, sizeof(import_salt));
+		parameters.salt = parameters.salt_size == 0 ? NULL : import_salt;
+		parameters.signature = signature;
+		parameters.signature_size = signature == NULL ? 0 : signature_size;
+		EXPECT(ext4_enable_verity(fs, inode.number, inode.generation, &parameters, &result),
+		    EXT4_OK);
+		EXPECT(ext4_measure_verity(
+			   fs, &result, &measured, digest, sizeof(digest), &digest_size),
+		    EXT4_OK);
+		CHECK(measured == algorithm);
+		ext4_sha256_init(&context);
+		ext4_sha256_update(&context, data, size);
+		ext4_sha256_final(&context, content);
+		digest_text(content, sizeof(content), content_text);
+		digest_text(digest, digest_size, text);
+		fprintf(manifest, "%s %s %zu %s %s - %u %u %s %s\n", kind, name, size, content_text,
+		    text, algorithm, merkle, salt_text, signature_name);
+		free(signature);
+		free(data);
+		files++;
+	}
+	CHECK(fclose(input) == 0 && fclose(manifest) == 0 && files != 0);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	storage_export(device, exports, source, "enable-");
+	printf("PASS verity enable import: %u files from %s\n", files, directory);
+}
+
 /* Cut every write or barrier of one multi-transaction enable. */
 static void
 power_cuts(struct device *device)
 {
-	struct ext4_verity_parameters parameters = { EXT4_VERITY_HASH_SHA256, SMALL_MERKLE, NULL,
-		0 };
+	struct ext4_verity_parameters parameters = { EXT4_VERITY_HASH_SHA256, SMALL_MERKLE, NULL, 0,
+		NULL, 0 };
 	struct ext4_recovery_report report;
 	struct ext4_inode inode;
 	struct ext4_inode result;
@@ -627,19 +927,36 @@ main(int argc, char **argv)
 	struct ext4_inode result;
 	struct ext4_fs *fs;
 	const char *exports = NULL;
+	const char *imports = NULL;
 	char path[4096];
 	FILE *manifest = NULL;
 	uint32_t index;
+	uint32_t enabled;
 	int first = 1;
 	int argument;
 
-	if (argc >= 3 && strcmp(argv[1], "--export") == 0) {
-		exports = argv[2];
-		first = 3;
+	while (argc >= first + 2 && strncmp(argv[first], "--", 2) == 0) {
+		if (strcmp(argv[first], "--export") == 0) {
+			exports = argv[first + 1];
+		} else if (strcmp(argv[first], "--import") == 0) {
+			imports = argv[first + 1];
+		} else {
+			break;
+		}
+		first += 2;
 	}
-	if (argc <= first) {
-		fprintf(stderr, "usage: %s [--export DIRECTORY] IMAGE...\n", argv[0]);
+	if (argc <= first || (imports != NULL && (exports == NULL || argc != first + 1))) {
+		fprintf(stderr,
+		    "usage: %s [--export DIRECTORY] IMAGE...\n"
+		    "       %s --import DIRECTORY --export DIRECTORY IMAGE\n",
+		    argv[0], argv[0]);
 		return 2;
+	}
+	if (imports != NULL) {
+		storage_open(&device, argv[first]);
+		import(&device, imports, exports, argv[first]);
+		storage_close(&device);
+		return 0;
 	}
 	for (index = 0; index < SALT_BYTES; index++) {
 		salt[index] = (uint8_t)(SALT_SEED + index);
@@ -666,12 +983,14 @@ main(int argc, char **argv)
 			fprintf(manifest, "algorithm %u block %u\n", EXT4_VERITY_HASH_SHA256,
 			    device.block_size);
 		}
+		enabled = 0;
 		for (index = 0; index < CASE_COUNT; index++) {
 			if (cases[index].inline_data &&
 			    !(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_INLINE_DATA)) {
 				continue;
 			}
 			enable_case(fs, index, device.block_size, manifest);
+			enabled++;
 		}
 		refusals(fs, device.block_size);
 		EXPECT(ext4_sync(fs), EXT4_OK);
@@ -684,8 +1003,9 @@ main(int argc, char **argv)
 		power_cuts(&device);
 		faults(&device);
 		no_space(&device);
+		signatures(&device);
 		storage_close(&device);
-		printf("PASS verity enable: %s, %zu files\n", argv[argument], CASE_COUNT);
+		printf("PASS verity enable: %s, %u files\n", argv[argument], enabled);
 	}
 	return 0;
 }

@@ -41,16 +41,16 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Key-based encryption through adapter-supplied ciphers and keys; built-in verity signatures; unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity reading and enabling, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
+| Format compatibility | Key-based encryption through adapter-supplied ciphers and keys; unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity reading and enabling, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | None; by product decision the core keeps refusing torn bitmap and inode checksums that an interrupted Linux fast-commit replay leaves, and leaves the log pending for Linux or e2fsck | Accepted with that documented limitation; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay of two native captures are accepted, and the torn states of two range-heavy captures fail closed (see "Fast-commit combinations and interrupted foreign replay evidence" and "Interrupted Linux replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
 | Scale and sustained operation | Indexed operations still classify the whole index tree | Open; measured workloads show bounded peak memory; group commit, ordered data and lazy checkpointing reach write amplification 1.0, a few barriers per commit and two per synchronous commit, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence", "Deferred commit evidence", "Ordered data evidence", "Lazy checkpointing evidence" and "Sustained operation and fuzzing evidence") |
 
 MMP, fs-verity reading, enabling and measurement with protected writable metadata,
 encrypted volumes without keys, casefolded directories and quota/project accounting
 with limits enforced under an adapter's policy are implemented. Key-based encryption
-needs ciphers and keys from adapter callbacks and is not implemented; built-in verity
-signatures are not supported. They are not accepted merely because mounting rejects
-them safely. They must not disappear from a future readiness claim. The core
+needs ciphers and keys from adapter callbacks and is not implemented. Built-in verity
+signatures are stored and checked by the adapter's callback. Key-based encryption is
+not accepted merely because mounting rejects it safely. They must not disappear from a future readiness claim. The core
 currently requires one serialized resource owner; native operation locking,
 page-cache coordination, ACL authorization and platform lifetime acceptance belong
 to the later adapters, with the core's metadata-transition contracts retained.
@@ -286,7 +286,7 @@ in `artifacts/verity-fixtures/`, `artifacts/checks/verity-first/` and the lab's
 ## fs-verity enabling evidence
 
 `ext4-verity-enable-test` enables verity through the core on the four verity images
-(`artifacts/checks/verity-enable-2/`). Each receives empty, one-byte, one-block,
+(`artifacts/checks/verity-enable-3/`). Each receives empty, one-byte, one-block,
 sparse, preallocated and multi-level files, and the inline-data image a 100-byte inline
 file converted to extents, under SHA-256 and SHA-512, Merkle blocks of the filesystem
 block size and 1 KiB, and 16- and 32-byte salts. Every file reads back verified,
@@ -304,10 +304,23 @@ tree, descriptor, size field and digest of all 29 files from their dumped conten
 and finds them byte for byte past EOF, with nothing else mapped there; strict fsck
 accepts every image. Linux 6.12 in the reference VM measures every file to the
 core's digest and reads it completely through verification, without changing the
-images (the lab's `artifacts/ext4-verity/enable-readback-2/`). The fixture generator
+images (the lab's `artifacts/ext4-verity/enable-readback-3/`). The fixture generator
 gained the inline-data image; Linux reads its independently authored files and
-rejects its damaged ones (`artifacts/ext4-verity/readback-2/`). The complete 687-test
-regression passes (`artifacts/checks/scale-regression-18/`).
+rejects its damaged ones (`artifacts/ext4-verity/readback-3/`).
+
+Built-in signatures pass through a verifying test environment on each image: enabling
+verifies once, reads reuse the accepted digest, a signature longer than a block reads
+back across blocks on read-write and read-only mounts, forged and oversized
+signatures are refused without change, and required signatures refuse unsigned
+reads, measurement and enabling without writes. For interoperation,
+`tests/generate_verity_signatures.py` signs independently computed formatted digests
+with an OpenSSL RSA certificate as detached PKCS#7, and the core stores those
+signatures (`artifacts/checks/verity-signatures-1/`). With the certificate in its
+.fs-verity keyring and signatures required, Linux 6.12 verifies the three signed
+files, SHA-256, salted SHA-512 and 1 KiB Merkle blocks, and refuses the unsigned file
+with EPERM, the file signed by an unknown certificate with ENOKEY and the damaged
+signature with EKEYREJECTED (the lab's `artifacts/ext4-verity/signatures-readback/`).
+The complete 687-test regression passes (`artifacts/checks/scale-regression-19/`).
 
 ## Encryption without keys evidence
 

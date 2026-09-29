@@ -37,6 +37,9 @@ struct ext4_verity_builder {
 	uint32_t batch;
 	uint8_t *data;
 	uint8_t digest[EXT4_VERITY_MAX_DIGEST];
+	/* The caller's built-in signature, stored after the descriptor. */
+	const uint8_t *signature;
+	uint32_t signature_size;
 };
 
 static enum ext4_result
@@ -50,6 +53,8 @@ ext4_verity_parameters_valid(
 		parameters->hash_algorithm != EXT4_VERITY_HASH_SHA512) ||
 	    parameters->salt_size > EXT4_VERITY_MAX_SALT ||
 	    (parameters->salt == NULL && parameters->salt_size != 0) ||
+	    parameters->signature_size > EXT4_VERITY_MAX_SIGNATURE ||
+	    (parameters->signature == NULL && parameters->signature_size != 0) ||
 	    parameters->block_size == 0 ||
 	    (parameters->block_size & (parameters->block_size - 1U)) != 0 ||
 	    parameters->block_size > fs->info.block_size) {
@@ -167,6 +172,10 @@ ext4_verity_prepare(struct ext4_verity_builder *builder, bool *trimmed)
 	/* An unlinked file is already on the orphan list for its reclamation. */
 	if (error == EXT4_OK && inode->links == 0) {
 		error = EXT4_INVALID_ARGUMENT;
+	}
+	/* Reads would refuse the result, so refuse it before building a tree. */
+	if (error == EXT4_OK && builder->signature_size == 0 && fs->crypto.require_signatures) {
+		error = EXT4_PERMISSION_DENIED;
 	}
 	if (error == EXT4_OK) {
 		error = ext4_allocation_init(&allocation, fs, transaction, inode);
@@ -427,8 +436,45 @@ ext4_verity_build(struct ext4_verity_builder *builder)
 	return ext4_verity_flush(builder);
 }
 
-/* Write the descriptor and its size in the block after the tree, set the verity
- * flag and leave the orphan list in one transaction. */
+/* Blocks from the descriptor's block through the one whose last four bytes hold the
+ * size of the descriptor and signature, as Linux lays them out. */
+static uint32_t
+ext4_verity_descriptor_blocks(uint32_t block_size, uint32_t signature_size)
+{
+	uint32_t bytes = (uint32_t)sizeof(struct ext4_verity_descriptor_disk) + signature_size +
+	    (uint32_t)sizeof(struct ext4_le32);
+
+	return (bytes + block_size - 1U) / block_size;
+}
+
+/* Copy the part of the descriptor and signature that one descriptor block holds. */
+static void
+ext4_verity_descriptor_block(
+    const struct ext4_verity_builder *builder, uint32_t index, uint32_t block_size, uint8_t *block)
+{
+	const uint8_t *descriptor = (const uint8_t *)&builder->descriptor;
+	uint32_t descriptor_size = (uint32_t)sizeof(builder->descriptor);
+	uint32_t total = descriptor_size + builder->signature_size;
+	uint32_t start = index * block_size;
+	uint32_t end = start + block_size;
+	uint32_t from;
+	uint32_t to;
+
+	ext4_zero(block, block_size);
+	if (start < descriptor_size) {
+		to = descriptor_size < end ? descriptor_size : end;
+		ext4_copy(block, descriptor + start, to - start);
+	}
+	from = start > descriptor_size ? start : descriptor_size;
+	to = total < end ? total : end;
+	if (from < to) {
+		ext4_copy(block + (from - start), builder->signature + (from - descriptor_size),
+		    to - from);
+	}
+}
+
+/* Write the descriptor, signature and their size in the blocks after the tree, set
+ * the verity flag and leave the orphan list in one transaction. */
 static enum ext4_result
 ext4_verity_finish(struct ext4_verity_builder *builder, struct ext4_inode *result)
 {
@@ -441,6 +487,9 @@ ext4_verity_finish(struct ext4_verity_builder *builder, struct ext4_inode *resul
 	void *snapshot = NULL;
 	uint64_t position;
 	uint64_t physical;
+	uint32_t blocks =
+	    ext4_verity_descriptor_blocks(fs->info.block_size, builder->signature_size);
+	uint32_t index;
 	uint32_t last_orphan = 0;
 	bool zero;
 	enum ext4_result error;
@@ -451,22 +500,29 @@ ext4_verity_finish(struct ext4_verity_builder *builder, struct ext4_inode *resul
 	if (error != EXT4_OK) {
 		return error;
 	}
-	error = ext4_write_map_allocate(
-	    &allocation, &builder->inode, disk, (uint32_t)position, &physical, &zero);
-	if (error == EXT4_OK) {
-		error = ext4_allocation_valid(&allocation, physical);
-	}
-	if (error == EXT4_OK) {
-		error = ext4_transaction_data(transaction, physical, true, &snapshot);
-	}
-	if (error == EXT4_OK) {
+	for (index = 0; error == EXT4_OK && index < blocks; index++) {
+		error = ext4_write_map_allocate(&allocation, &builder->inode, disk,
+		    (uint32_t)(position + index), &physical, &zero);
+		if (error == EXT4_OK) {
+			error = ext4_allocation_valid(&allocation, physical);
+		}
+		if (error == EXT4_OK) {
+			error = ext4_transaction_data(transaction, physical, true, &snapshot);
+		}
+		if (error != EXT4_OK) {
+			break;
+		}
+		ext4_verity_descriptor_block(builder, index, fs->info.block_size, snapshot);
 		/* Linux records the size in the last four bytes of the block that holds the
-		 * end of the descriptor and room for the size. */
-		ext4_zero(snapshot, fs->info.block_size);
-		ext4_copy(snapshot, &builder->descriptor, sizeof(builder->descriptor));
-		ext4_encode32(&size, sizeof(builder->descriptor));
-		ext4_copy(
-		    (uint8_t *)snapshot + fs->info.block_size - sizeof(size), &size, sizeof(size));
+		 * end of the signature and room for the size. */
+		if (index + 1U == blocks) {
+			ext4_encode32(
+			    &size, (uint32_t)sizeof(builder->descriptor) + builder->signature_size);
+			ext4_copy((uint8_t *)snapshot + fs->info.block_size - sizeof(size), &size,
+			    sizeof(size));
+		}
+	}
+	if (error == EXT4_OK) {
 		error = ext4_orphan_unlink(&allocation, builder->number, disk, &last_orphan);
 	}
 	if (error == EXT4_OK) {
@@ -525,10 +581,12 @@ ext4_verity_setup(struct ext4_verity_builder *builder,
 	}
 	verity->tree_offset = (builder->inode.size + EXT4_VERITY_METADATA_ALIGNMENT - 1U) &
 	    ~(uint64_t)(EXT4_VERITY_METADATA_ALIGNMENT - 1U);
-	/* The descriptor's block must have a logical block number. */
-	end = verity->tree_offset / fs->info.block_size;
-	if (builder->tree_blocks >
-	    (UINT32_MAX - 1U - end) * fs->info.block_size / verity->block_size) {
+	/* The descriptor's blocks must have logical block numbers. */
+	end = verity->tree_offset / fs->info.block_size +
+	    ext4_verity_descriptor_blocks(fs->info.block_size, builder->signature_size);
+	if (end >= UINT32_MAX ||
+	    builder->tree_blocks >
+		(UINT32_MAX - 1U - end) * fs->info.block_size / verity->block_size) {
 		return EXT4_RANGE;
 	}
 	builder->queue_capacity = EXT4_VERITY_QUEUE_BYTES / verity->block_size;
@@ -565,6 +623,7 @@ ext4_verity_describe(struct ext4_verity_builder *builder,
 	descriptor->hash_algorithm = verity->algorithm;
 	descriptor->log_block_size = log_block_size;
 	descriptor->salt_size = (uint8_t)parameters->salt_size;
+	ext4_encode32(&descriptor->signature_size, (uint32_t)parameters->signature_size);
 	ext4_encode32(&descriptor->data_size_lo, (uint32_t)verity->data_size);
 	ext4_encode32(&descriptor->data_size_hi, (uint32_t)(verity->data_size >> 32));
 	ext4_copy(descriptor->root_hash, verity->root_hash, verity->digest_size);
@@ -632,6 +691,8 @@ ext4_enable_verity(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	builder->fs = fs;
 	builder->number = number;
 	builder->generation = generation;
+	builder->signature = parameters->signature;
+	builder->signature_size = (uint32_t)parameters->signature_size;
 	error = ext4_verity_prepare(builder, &trimmed);
 	listed = error == EXT4_OK;
 	if (error == EXT4_OK) {
@@ -645,6 +706,11 @@ ext4_enable_verity(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	}
 	if (error == EXT4_OK) {
 		ext4_verity_describe(builder, parameters, log_block_size);
+		/* The adapter's policy accepts the signature before it is written. */
+		error = ext4_verity_accept(fs, &builder->inode, &builder->verity,
+		    &builder->descriptor, builder->signature);
+	}
+	if (error == EXT4_OK) {
 		error = ext4_verity_finish(builder, result);
 	}
 	/* Truncate the partial tree and leave the orphan list, as recovery would. */

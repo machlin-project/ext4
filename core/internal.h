@@ -63,6 +63,17 @@ struct ext4_validated_map {
 	struct ext4_map_record record;
 };
 
+/* A verity file whose built-in signature the adapter accepted, by file digest. */
+#define EXT4_VERIFIED_SIGNATURES 16U
+#define EXT4_VERITY_DIGEST_BYTES 64U
+
+struct ext4_verified_signature {
+	uint32_t number;
+	uint32_t generation;
+	uint8_t algorithm;
+	uint8_t digest[EXT4_VERITY_DIGEST_BYTES];
+};
+
 /* Consecutive inode tables: groups first_group through first_group + groups - 1
  * each occupy the filesystem's inode_table_blocks, starting at block. */
 struct ext4_inode_table_run {
@@ -134,6 +145,12 @@ struct ext4_fs {
 	struct ext4_validated_map validated_maps[EXT4_VALIDATED_MAPS];
 	uint32_t validated_map_next;
 	bool validated_maps_enabled;
+	/* The adapter's cryptography, and verity files whose signatures it accepted.
+	 * A changed descriptor has another digest and is verified again. */
+	struct ext4_crypto_environment crypto;
+	struct ext4_verified_signature verified_signatures[EXT4_VERIFIED_SIGNATURES];
+	uint32_t verified_signature_count;
+	uint32_t verified_signature_next;
 	struct ext4_journal *journal;
 	struct ext4_orphan_file *orphan_file;
 	struct ext4_inode_hold *holds;

@@ -1100,6 +1100,11 @@ jobs:
             2>&1 | tee artifacts/checks/verity-enable-independent.log
           find artifacts/verity-enable-exports artifacts/verity-enable-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' ! -name '*.manifest' -delete
+          python3 tests/generate_verity_signatures.py --tools-root vendor/e2fsprogs/build \
+            --enable-test .build/ext4-verity-enable-test --image artifacts/verity-fixtures/verity-4k.img \
+            --output artifacts/verity-signatures 2>&1 | tee artifacts/checks/verity-signatures.log
+          find artifacts/verity-signatures -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.manifest' ! -name '*.der' -delete
       - name: Independently verify casefolded directories after writable changes
         if: matrix.suite == 'format'
         run: |

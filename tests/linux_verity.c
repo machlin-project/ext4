@@ -18,13 +18,18 @@
 /* Guest probe: Linux reads independently authored fs-verity files read-only.
  * Valid files must measure to the manifest's digest and read completely.
  * Damaged data or tree blocks must fail with EIO; invalid descriptors must fail
- * to open or read. */
+ * to open or read. With /cert.der, that certificate joins the .fs-verity keyring;
+ * with /require, fs.verity.require_signatures is set. Unsigned files and files
+ * with incorrect built-in signatures must then fail to open. */
 
 #define MANIFEST_LINE 512U
 #define DIGEST_MAX 64U
 #define BLOCK_MAX 65536U
 #define FSVERITY_IOCTL_TYPE 'f'
 #define FSVERITY_MEASURE_NUMBER 134
+#define CERTIFICATE_MAX 8192U
+#define KEYRING_NAME ".fs-verity:"
+#define REQUIRE_SIGNATURES "/proc/sys/fs/verity/require_signatures"
 
 /* Linux UAPI <linux/fsverity.h> header; the musl sysroot has no kernel headers. */
 struct fsverity_digest_header {
@@ -76,6 +81,44 @@ measure(int fd, const char *expected)
 	require(strcmp(text, expected) == 0, "compare Linux verity digest");
 }
 
+/* Add the DER certificate to the .fs-verity keyring, found by name in /proc/keys. */
+static void
+trust_certificate(void)
+{
+	static uint8_t certificate[CERTIFICATE_MAX];
+	char line[256];
+	long keyring = -1;
+	ssize_t length;
+	FILE *keys;
+	int fd = open("/cert.der", O_RDONLY | O_CLOEXEC);
+
+	if (fd < 0) {
+		return;
+	}
+	length = read(fd, certificate, sizeof(certificate));
+	require(length > 0 && (size_t)length < sizeof(certificate) && close(fd) == 0,
+	    "read certificate");
+	keys = fopen("/proc/keys", "r");
+	require(keys != NULL, "open key list");
+	while (fgets(line, sizeof(line), keys) != NULL) {
+		if (strstr(line, " keyring ") != NULL && strstr(line, KEYRING_NAME) != NULL) {
+			keyring = strtol(line, NULL, 16);
+		}
+	}
+	require(fclose(keys) == 0 && keyring > 0, "find .fs-verity keyring");
+	require(syscall(SYS_add_key, "asymmetric", "", certificate, (size_t)length, keyring) >= 0,
+	    "add fs-verity certificate");
+	printf("LINUX_VERITY_CERTIFICATE=trusted\n");
+	fd = open("/require", O_RDONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		require(close(fd) == 0, "close marker");
+		fd = open(REQUIRE_SIGNATURES, O_WRONLY | O_CLOEXEC);
+		require(fd >= 0 && write(fd, "1\n", 2) == 2 && close(fd) == 0,
+		    "require fs-verity signatures");
+		printf("LINUX_VERITY_SIGNATURES=required\n");
+	}
+}
+
 static int
 read_at(int fd, off_t offset, uint8_t *bytes, size_t length)
 {
@@ -115,6 +158,8 @@ main(void)
 	printf(
 	    "LINUX_VERITY_KERNEL=%s %s %s\n", identity.sysname, identity.release, identity.machine);
 	require(mount("devtmpfs", "/dev", "devtmpfs", 0, NULL) == 0, "mount devtmpfs");
+	mkdir("/proc", 0555);
+	require(mount("proc", "/proc", "proc", 0, NULL) == 0, "mount proc");
 	for (index = 0; index < sizeof(modules) / sizeof(modules[0]); index++) {
 		snprintf(path, sizeof(path), "/modules/%s.ko", modules[index]);
 		fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -123,6 +168,7 @@ main(void)
 		require(result == 0 || errno == EEXIST, path);
 		require(close(fd) == 0, "close module");
 	}
+	trust_certificate();
 	require(mount("/dev/vda", "/mnt", "ext4", MS_RDONLY | MS_NOATIME, NULL) == 0,
 	    "mount verity filesystem read-only");
 	manifest = fopen("/manifest", "r");
@@ -136,6 +182,13 @@ main(void)
 		    "parse manifest entry");
 		snprintf(path, sizeof(path), "/mnt/%s", name);
 		fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (strcmp(kind, "unsigned") == 0 || strcmp(kind, "badsig") == 0) {
+			/* The keyring refuses the file when it is opened. */
+			require(fd < 0, "refuse file without a trusted signature");
+			printf("LINUX_VERITY_REFUSED=%s %s\n", name, strerror(errno));
+			checked++;
+			continue;
+		}
 		if (strcmp(kind, "version") == 0 || strcmp(kind, "size") == 0) {
 			/* Invalid descriptors fail at open, or at the latest on read. */
 			require(
