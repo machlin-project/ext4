@@ -50,7 +50,7 @@ posix_dependency = declare_dependency(link_with: ext4_posix,
 # Keep executable paths stable for the independent image and VM harnesses.
 programs = {}
 foreach name, source : {
-  'checksum': 'checksum', 'geometry': 'geometry', 'ranges': 'ranges',
+  'checksum': 'checksum', 'geometry': 'geometry', 'ranges': 'ranges', 'hash': 'hash',
   'xattr': 'xattr', 'xattr-write': 'xattr_write', 'xattr-lifetime': 'xattr_lifetime', 'space': 'space',
   'ea-inode': 'ea_inode', 'inline': 'inline', 'cluster': 'cluster',
   'directory-index': 'directory_index', 'directory-lookup': 'directory_lookup', 'index-write': 'index_write',
@@ -79,6 +79,9 @@ executable('ext4-read-benchmark', ['tools/benchmark_read.c', 'adapters/posix/ima
 # Scale measurements run the optimized freestanding core on an in-memory image.
 executable('ext4-scale', 'tools/scale.c', include_directories: public_headers,
   c_args: posix_arguments, link_with: freestanding_core,
+  override_options: ['optimization=2', 'b_sanitize=none', 'b_coverage=false', 'b_lto=false'])
+executable('ext4-hash-benchmark', 'tools/benchmark_hash.c',
+  include_directories: [public_headers, internal_headers], link_with: freestanding_core,
   override_options: ['optimization=2', 'b_sanitize=none', 'b_coverage=false', 'b_lto=false'])
 
 threads = dependency('threads')

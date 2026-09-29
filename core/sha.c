@@ -2,7 +2,9 @@
 #include "sha.h"
 
 /* FIPS 180-4 SHA-256 and SHA-512 with immutable round constants, byte-wise
- * big-endian message decoding and no allocation or mutable global state. */
+ * big-endian message decoding and no allocation or mutable global state.
+ * Full input blocks are consumed directly, including unaligned input; only a
+ * partial block is copied into the context's streaming buffer. */
 
 static const uint32_t ext4_sha256_rounds[64] = { 0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U,
 	0x3956c25bU, 0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U, 0xd807aa98U, 0x12835b01U, 0x243185beU,
@@ -56,6 +58,23 @@ ext4_rotate64(uint64_t value, unsigned int count)
 	return (value >> count) | (value << (64U - count));
 }
 
+/* One FIPS 180-4 round. Eight calls rotate the roles of the working words,
+ * removing the seven explicit word moves from each loop iteration. */
+static inline void
+ext4_sha256_round(uint32_t a, uint32_t b, uint32_t c, uint32_t *d, uint32_t e, uint32_t f,
+    uint32_t g, uint32_t *h, uint32_t word)
+{
+	uint32_t first;
+	uint32_t second;
+
+	first = *h + (ext4_rotate32(e, 6) ^ ext4_rotate32(e, 11) ^ ext4_rotate32(e, 25)) +
+	    ((e & f) ^ (~e & g)) + word;
+	second = (ext4_rotate32(a, 2) ^ ext4_rotate32(a, 13) ^ ext4_rotate32(a, 22)) +
+	    ((a & b) ^ (a & c) ^ (b & c));
+	*d += first;
+	*h = first + second;
+}
+
 static void
 ext4_sha256_block(struct ext4_sha256 *context, const uint8_t *block)
 {
@@ -80,27 +99,44 @@ ext4_sha256_block(struct ext4_sha256 *context, const uint8_t *block)
 	for (index = 0; index < 8U; index++) {
 		work[index] = context->state[index];
 	}
-	for (index = 0; index < 64U; index++) {
-		first = work[7] +
-		    (ext4_rotate32(work[4], 6) ^ ext4_rotate32(work[4], 11) ^
-			ext4_rotate32(work[4], 25)) +
-		    ((work[4] & work[5]) ^ (~work[4] & work[6])) + ext4_sha256_rounds[index] +
-		    schedule[index];
-		second = (ext4_rotate32(work[0], 2) ^ ext4_rotate32(work[0], 13) ^
-			     ext4_rotate32(work[0], 22)) +
-		    ((work[0] & work[1]) ^ (work[0] & work[2]) ^ (work[1] & work[2]));
-		work[7] = work[6];
-		work[6] = work[5];
-		work[5] = work[4];
-		work[4] = work[3] + first;
-		work[3] = work[2];
-		work[2] = work[1];
-		work[1] = work[0];
-		work[0] = first + second;
+	for (index = 0; index < 64U; index += 8U) {
+		ext4_sha256_round(work[0], work[1], work[2], &work[3], work[4], work[5], work[6],
+		    &work[7], schedule[index] + ext4_sha256_rounds[index]);
+		ext4_sha256_round(work[7], work[0], work[1], &work[2], work[3], work[4], work[5],
+		    &work[6], schedule[index + 1U] + ext4_sha256_rounds[index + 1U]);
+		ext4_sha256_round(work[6], work[7], work[0], &work[1], work[2], work[3], work[4],
+		    &work[5], schedule[index + 2U] + ext4_sha256_rounds[index + 2U]);
+		ext4_sha256_round(work[5], work[6], work[7], &work[0], work[1], work[2], work[3],
+		    &work[4], schedule[index + 3U] + ext4_sha256_rounds[index + 3U]);
+		ext4_sha256_round(work[4], work[5], work[6], &work[7], work[0], work[1], work[2],
+		    &work[3], schedule[index + 4U] + ext4_sha256_rounds[index + 4U]);
+		ext4_sha256_round(work[3], work[4], work[5], &work[6], work[7], work[0], work[1],
+		    &work[2], schedule[index + 5U] + ext4_sha256_rounds[index + 5U]);
+		ext4_sha256_round(work[2], work[3], work[4], &work[5], work[6], work[7], work[0],
+		    &work[1], schedule[index + 6U] + ext4_sha256_rounds[index + 6U]);
+		ext4_sha256_round(work[1], work[2], work[3], &work[4], work[5], work[6], work[7],
+		    &work[0], schedule[index + 7U] + ext4_sha256_rounds[index + 7U]);
 	}
 	for (index = 0; index < 8U; index++) {
 		context->state[index] += work[index];
 	}
+}
+
+/* One FIPS 180-4 round. Eight calls rotate the roles of the working words,
+ * removing the seven explicit word moves from each loop iteration. */
+static inline void
+ext4_sha512_round(uint64_t a, uint64_t b, uint64_t c, uint64_t *d, uint64_t e, uint64_t f,
+    uint64_t g, uint64_t *h, uint64_t word)
+{
+	uint64_t first;
+	uint64_t second;
+
+	first = *h + (ext4_rotate64(e, 14) ^ ext4_rotate64(e, 18) ^ ext4_rotate64(e, 41)) +
+	    ((e & f) ^ (~e & g)) + word;
+	second = (ext4_rotate64(a, 28) ^ ext4_rotate64(a, 34) ^ ext4_rotate64(a, 39)) +
+	    ((a & b) ^ (a & c) ^ (b & c));
+	*d += first;
+	*h = first + second;
 }
 
 static void
@@ -129,23 +165,23 @@ ext4_sha512_block(struct ext4_sha512 *context, const uint8_t *block)
 	for (index = 0; index < 8U; index++) {
 		work[index] = context->state[index];
 	}
-	for (index = 0; index < 80U; index++) {
-		first = work[7] +
-		    (ext4_rotate64(work[4], 14) ^ ext4_rotate64(work[4], 18) ^
-			ext4_rotate64(work[4], 41)) +
-		    ((work[4] & work[5]) ^ (~work[4] & work[6])) + ext4_sha512_rounds[index] +
-		    schedule[index];
-		second = (ext4_rotate64(work[0], 28) ^ ext4_rotate64(work[0], 34) ^
-			     ext4_rotate64(work[0], 39)) +
-		    ((work[0] & work[1]) ^ (work[0] & work[2]) ^ (work[1] & work[2]));
-		work[7] = work[6];
-		work[6] = work[5];
-		work[5] = work[4];
-		work[4] = work[3] + first;
-		work[3] = work[2];
-		work[2] = work[1];
-		work[1] = work[0];
-		work[0] = first + second;
+	for (index = 0; index < 80U; index += 8U) {
+		ext4_sha512_round(work[0], work[1], work[2], &work[3], work[4], work[5], work[6],
+		    &work[7], schedule[index] + ext4_sha512_rounds[index]);
+		ext4_sha512_round(work[7], work[0], work[1], &work[2], work[3], work[4], work[5],
+		    &work[6], schedule[index + 1U] + ext4_sha512_rounds[index + 1U]);
+		ext4_sha512_round(work[6], work[7], work[0], &work[1], work[2], work[3], work[4],
+		    &work[5], schedule[index + 2U] + ext4_sha512_rounds[index + 2U]);
+		ext4_sha512_round(work[5], work[6], work[7], &work[0], work[1], work[2], work[3],
+		    &work[4], schedule[index + 3U] + ext4_sha512_rounds[index + 3U]);
+		ext4_sha512_round(work[4], work[5], work[6], &work[7], work[0], work[1], work[2],
+		    &work[3], schedule[index + 4U] + ext4_sha512_rounds[index + 4U]);
+		ext4_sha512_round(work[3], work[4], work[5], &work[6], work[7], work[0], work[1],
+		    &work[2], schedule[index + 5U] + ext4_sha512_rounds[index + 5U]);
+		ext4_sha512_round(work[2], work[3], work[4], &work[5], work[6], work[7], work[0],
+		    &work[1], schedule[index + 6U] + ext4_sha512_rounds[index + 6U]);
+		ext4_sha512_round(work[1], work[2], work[3], &work[4], work[5], work[6], work[7],
+		    &work[0], schedule[index + 7U] + ext4_sha512_rounds[index + 7U]);
 	}
 	for (index = 0; index < 8U; index++) {
 		context->state[index] += work[index];
@@ -171,6 +207,12 @@ ext4_sha256_update(struct ext4_sha256 *context, const void *buffer, size_t lengt
 
 	context->length += (uint64_t)length;
 	while (length != 0) {
+		if (context->used == 0 && length >= EXT4_SHA256_BLOCK_SIZE) {
+			ext4_sha256_block(context, bytes);
+			bytes += EXT4_SHA256_BLOCK_SIZE;
+			length -= EXT4_SHA256_BLOCK_SIZE;
+			continue;
+		}
 		part = EXT4_SHA256_BLOCK_SIZE - context->used;
 		if (part > length) {
 			part = length;
@@ -231,6 +273,12 @@ ext4_sha512_update(struct ext4_sha512 *context, const void *buffer, size_t lengt
 
 	context->length += (uint64_t)length;
 	while (length != 0) {
+		if (context->used == 0 && length >= EXT4_SHA512_BLOCK_SIZE) {
+			ext4_sha512_block(context, bytes);
+			bytes += EXT4_SHA512_BLOCK_SIZE;
+			length -= EXT4_SHA512_BLOCK_SIZE;
+			continue;
+		}
 		part = EXT4_SHA512_BLOCK_SIZE - context->used;
 		if (part > length) {
 			part = length;

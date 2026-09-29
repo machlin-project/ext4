@@ -7,11 +7,6 @@
  * block is hashed after the salt, which is zero-padded to the hash input block;
  * the final data block is zero-padded to the Merkle block size. */
 
-union ext4_verity_hash_context {
-	struct ext4_sha256 sha256;
-	struct ext4_sha512 sha512;
-};
-
 void
 ext4_verity_file_digest(const struct ext4_verity *verity,
     struct ext4_verity_descriptor_disk *descriptor, uint8_t *digest)
@@ -37,13 +32,11 @@ ext4_verity_hash(const struct ext4_verity *verity, const uint8_t *block, uint8_t
 	union ext4_verity_hash_context context;
 
 	if (verity->algorithm == EXT4_VERITY_SHA256) {
-		ext4_sha256_init(&context.sha256);
-		ext4_sha256_update(&context.sha256, verity->padded_salt, verity->padded_salt_size);
+		context.sha256 = verity->hash_context.sha256;
 		ext4_sha256_update(&context.sha256, block, verity->block_size);
 		ext4_sha256_final(&context.sha256, digest);
 	} else {
-		ext4_sha512_init(&context.sha512);
-		ext4_sha512_update(&context.sha512, verity->padded_salt, verity->padded_salt_size);
+		context.sha512 = verity->hash_context.sha512;
 		ext4_sha512_update(&context.sha512, block, verity->block_size);
 		ext4_sha512_final(&context.sha512, digest);
 	}
@@ -75,7 +68,9 @@ enum ext4_result
 ext4_verity_configure(struct ext4_verity *verity, uint8_t algorithm, uint8_t log_block_size,
     const uint8_t *salt, uint8_t salt_size)
 {
+	uint8_t padded_salt[EXT4_VERITY_MAX_PADDED_SALT];
 	uint32_t hash_block;
+	size_t salt_length;
 
 	if ((algorithm != EXT4_VERITY_SHA256 && algorithm != EXT4_VERITY_SHA512) ||
 	    log_block_size < EXT4_VERITY_MIN_LOG_BLOCK ||
@@ -92,11 +87,16 @@ ext4_verity_configure(struct ext4_verity *verity, uint8_t algorithm, uint8_t log
 	hash_block =
 	    algorithm == EXT4_VERITY_SHA256 ? EXT4_SHA256_BLOCK_SIZE : EXT4_SHA512_BLOCK_SIZE;
 	verity->hashes_per_block = verity->block_size / verity->digest_size;
-	verity->padded_salt_size = 0;
-	ext4_zero(verity->padded_salt, sizeof(verity->padded_salt));
-	if (salt_size != 0) {
-		verity->padded_salt_size = (salt_size + hash_block - 1U) / hash_block * hash_block;
-		ext4_copy(verity->padded_salt, salt, salt_size);
+	salt_length = salt_size == 0 ? 0 : hash_block;
+	ext4_zero(padded_salt, sizeof(padded_salt));
+	ext4_copy(padded_salt, salt, salt_size);
+	ext4_zero(&verity->hash_context, sizeof(verity->hash_context));
+	if (algorithm == EXT4_VERITY_SHA256) {
+		ext4_sha256_init(&verity->hash_context.sha256);
+		ext4_sha256_update(&verity->hash_context.sha256, padded_salt, salt_length);
+	} else {
+		ext4_sha512_init(&verity->hash_context.sha512);
+		ext4_sha512_update(&verity->hash_context.sha512, padded_salt, salt_length);
 	}
 	return EXT4_OK;
 }

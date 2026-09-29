@@ -7,6 +7,11 @@
 #include "sha.h"
 #include "xattr.h"
 
+union ext4_fscrypt_context_disk {
+	struct ext4_fscrypt_context_v1_disk v1;
+	struct ext4_fscrypt_context_v2_disk v2;
+};
+
 /* The core implements fscrypt's formats, key derivation inputs, IVs and padding as
  * Linux defines them; the adapter supplies master keys, derivation and ciphers. */
 
@@ -15,6 +20,25 @@ static const uint8_t ext4_base64url[] =
 
 #define EXT4_BASE64_BITS 6U
 #define EXT4_BASE64_ALPHABET 64U
+
+/* Public filename bytes, not key material. Decode each alphabet range directly. */
+static uint32_t
+ext4_base64url_value(uint8_t byte)
+{
+	if (byte >= 'A' && byte <= 'Z') {
+		return byte - 'A';
+	}
+	if (byte >= 'a' && byte <= 'z') {
+		return byte - 'a' + 26U;
+	}
+	if (byte >= '0' && byte <= '9') {
+		return byte - '0' + 52U;
+	}
+	if (byte == '-') {
+		return 62U;
+	}
+	return byte == '_' ? 63U : EXT4_BASE64_ALPHABET;
+}
 
 size_t
 ext4_fscrypt_nokey_encode(
@@ -74,9 +98,7 @@ ext4_fscrypt_nokey_decode(const uint8_t *name, size_t length, struct ext4_fscryp
 		return false;
 	}
 	for (index = 0; index < length; index++) {
-		for (value = 0;
-		    value < EXT4_BASE64_ALPHABET && ext4_base64url[value] != name[index]; value++) {
-		}
+		value = ext4_base64url_value(name[index]);
 		if (value == EXT4_BASE64_ALPHABET) {
 			return false;
 		}
@@ -140,10 +162,7 @@ enum ext4_result
 ext4_fscrypt_policy(
     struct ext4_fs *fs, const struct ext4_inode *inode, struct ext4_fscrypt_policy *policy)
 {
-	union {
-		struct ext4_fscrypt_context_v1_disk v1;
-		struct ext4_fscrypt_context_v2_disk v2;
-	} context;
+	union ext4_fscrypt_context_disk context;
 
 	size_t size;
 	enum ext4_result error;
@@ -420,10 +439,7 @@ ext4_fscrypt_store(struct ext4_allocation *allocation, struct ext4_inode *inode,
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_xattr_change change;
 
-	union {
-		struct ext4_fscrypt_context_v1_disk v1;
-		struct ext4_fscrypt_context_v2_disk v2;
-	} context;
+	union ext4_fscrypt_context_disk context;
 
 	uint8_t nonce[EXT4_FSCRYPT_NONCE_SIZE];
 	enum ext4_result error;

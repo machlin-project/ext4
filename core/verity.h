@@ -2,7 +2,7 @@
 #ifndef MACHLIN_EXT4_VERITY_H
 #define MACHLIN_EXT4_VERITY_H
 
-#include "internal.h"
+#include "sha.h"
 
 /* fs-verity metadata follows the file data. ext4 starts the Merkle tree at the
  * first 64 KiB boundary at or after EOF, stores its levels from the root toward
@@ -44,6 +44,11 @@ _Static_assert(EXT4_VERITY_MAX_DESCRIPTOR - sizeof(struct ext4_verity_descriptor
 	EXT4_VERITY_MAX_SIGNATURE,
     "verity signature bound");
 
+union ext4_verity_hash_context {
+	struct ext4_sha256 sha256;
+	struct ext4_sha512 sha512;
+};
+
 struct ext4_verity {
 	uint64_t data_size;
 	uint64_t tree_offset;
@@ -52,11 +57,11 @@ struct ext4_verity {
 	uint32_t block_size;
 	uint32_t digest_size;
 	uint32_t hashes_per_block;
-	uint32_t padded_salt_size;
 	uint8_t algorithm;
 	uint8_t levels;
 	uint8_t root_hash[EXT4_VERITY_MAX_DIGEST];
-	uint8_t padded_salt[EXT4_VERITY_MAX_PADDED_SALT];
+	/* Initial hash state after the block-padded salt, reused for every leaf/node. */
+	union ext4_verity_hash_context hash_context;
 };
 
 /* Set the hash geometry of an algorithm, Merkle block size and salt. */
