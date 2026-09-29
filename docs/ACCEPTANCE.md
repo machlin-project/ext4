@@ -43,7 +43,7 @@ counted as portable-core implementation.
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
 | Format compatibility | Unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity reading and enabling, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. Encryption with keys and Linux's no-key names without them match Linux 6.12 (see "Encrypted writing evidence" and "No-key names evidence"). 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | None; by product decision the core keeps refusing torn bitmap and inode checksums that an interrupted Linux fast-commit replay leaves, and leaves the log pending for Linux or e2fsck | Accepted with that documented limitation; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay of two native captures are accepted, and the torn states of two range-heavy captures fail closed (see "Fast-commit combinations and interrupted foreign replay evidence" and "Interrupted Linux replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
-| Scale and sustained operation | None; keep extending sustained operation and fuzzing as formats expand | Accepted; indexed changes probe one path after one classification per mount, and measured workloads show bounded peak memory; group commit, ordered data and lazy checkpointing reach write amplification 1.0, a few barriers per commit and two per synchronous commit, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence", "Deferred commit evidence", "Ordered data evidence", "Lazy checkpointing evidence" and "Sustained operation and fuzzing evidence") |
+| Scale and sustained operation | None; keep extending sustained operation and fuzzing as formats expand | Accepted; indexed changes probe one path after one classification per mount, and measured workloads show bounded peak memory; group commit, ordered data and lazy checkpointing reach write amplification 1.0, a few barriers per commit and two per synchronous commit, and the sustained suite, two further soaks and checksum-repairing operations fuzzing pass, with encryption, verity and casefolding in the sequences (see "Scale measurement evidence", "Deferred commit evidence", "Ordered data evidence", "Lazy checkpointing evidence" and "Sustained operation and fuzzing evidence") |
 
 MMP, fs-verity reading, enabling and measurement with protected writable metadata,
 encrypted volumes without keys and reading, writing and encrypting them with keys
@@ -267,6 +267,33 @@ edges and 32,515 features to 10,295 and 41,976. Four more 25-minute campaigns on
 checksum-free volumes with inline data, a casefolded directory, quota and project
 accounting, and value inodes executed about 2.35 million inputs without a finding.
 This remains bounded coverage.
+
+Encryption, verity and casefolding now take part in both. The `sustained` suite runs
+each feature alone on the 4 KiB and 1 KiB base volumes, all three with ordered data,
+a compound and lazy checkpoints on those and the indirect 1 KiB volume, and each
+format fixture with its feature in use. Sixty further runs of 5,000 operations with
+all three features passed under ASan/UBSan, a third of them with ordered data, a
+64-block compound and 96-block lazy checkpoints and a sixth with a 256-block compound:
+300,000 operations, 11,179 power cuts (2,982 after a durable commit), 197
+torn-superblock rejections, 1,560 checks without the key, 865 verity enables and
+14,734 space-exhaustion rejections, ending with 2,326 encrypted objects, 653
+casefolded directories and 639 verity files
+(`artifacts/checks/sustained-soak-features-1/`). These runs found that a failed
+commit of an encrypted symlink's creation leaked its encrypted target; the core now
+releases it before the commit, and the encryption test cuts power at each of the 25
+events of that creation. Four exported runs pass strict e2fsck and debugfs comparison
+by inode, including 346 ciphertext names against their no-key names, 16 verity files
+by recomputed digest, Merkle tree and descriptor, and 16 casefolded directories.
+Linux 6.12 mounts the three without casefolding read-only, lists exactly their 286
+no-key names without the key, and with the key reads all 476 objects, including 172
+encrypted files and symlinks, and measures 7 verity digests
+(`artifacts/checks/sustained-features-exports-1/` and the lab's
+`artifacts/ext4-sustained/`). Three 25-minute operations-fuzzer campaigns, which walk
+each image without and with the key and encrypt, casefold and enable verity in the
+writable sequence, executed about 701,000 inputs on a checksum-free volume holding
+encrypted, casefolded and verity objects, the checksum-free base volume and the
+indirect 1 KiB volume without a finding (`artifacts/fuzz-operations/features-*`). The
+complete 704-test regression passes (`artifacts/checks/scale-regression-24/`).
 
 ## Multi-mount protection evidence
 

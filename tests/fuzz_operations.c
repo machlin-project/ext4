@@ -3,6 +3,8 @@
 #include "internal.h"
 #include "journal.h"
 
+#include "keyring.h"
+
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +21,10 @@
  * A mutation can instead select a nonzero journal block and request checksum
  * repair: the log's descriptor, data-tag, revoke and commit checksums and the
  * fast-commit tail CRCs are then recomputed over the mutated bytes, so malformed
- * but authentic-looking records reach replay validation. */
+ * but authentic-looking records reach replay validation. The walk runs without and
+ * then with the Linux probe's fscrypt key, and the writable sequence also encrypts,
+ * casefolds and enables verity on new objects; every key handle must be released
+ * by unmount. */
 
 #define FUZZ_READ_BUDGET 8192U
 #define FUZZ_WRITE_BUDGET 8192U
@@ -34,6 +39,10 @@
 #define FUZZ_MUTATION_REPAIR 4U
 #define FUZZ_EMPTY UINT64_MAX
 #define FUZZ_SECONDS 1700003000
+/* The Linux probe's master key opens fuzzed images' encrypted objects. */
+#define FUZZ_KEYRING_OFFSET 3U
+#define FUZZ_FSCRYPT_PAD_32 0x03U
+#define FUZZ_VERITY_DIGEST 64U
 
 struct fuzz_mutation {
 	struct ext4_le32 selector;
@@ -73,6 +82,7 @@ struct fuzz_walk {
 static struct fuzz_device device;
 static struct ext4_environment environment;
 static struct ext4_write_environment writer;
+static struct keyring keyring;
 static uint8_t scratch[FUZZ_READ_BYTES];
 static uint8_t repair_block[EXT4_MAX_BLOCK_SIZE];
 static uint8_t repair_data[EXT4_MAX_BLOCK_SIZE];
@@ -556,6 +566,66 @@ fuzz_update(uint32_t fields)
 	return update;
 }
 
+/* Encrypt a new directory and fill it, casefold another and enable verity on the new
+ * file; any result is admissible. */
+static void
+fuzz_features(struct ext4_fs *fs, const struct ext4_inode *root, const struct ext4_inode *file)
+{
+	static const uint8_t vault_name[] = "fuzz-vault";
+	static const uint8_t folded_name[] = "fuzz-folded";
+	static const uint8_t inner_name[] = "fuzz-inner";
+	static const uint8_t folded_variant[] = "FUZZ-INNER";
+	static const uint8_t link_name[] = "fuzz-link";
+	static const uint8_t target[] = "fuzz-target";
+	struct ext4_inode_update creation = fuzz_update(EXT4_ATTR_PERMISSIONS | EXT4_ATTR_UID |
+	    EXT4_ATTR_GID | EXT4_ATTR_ACCESS_TIME | EXT4_ATTR_MODIFY_TIME | EXT4_ATTR_CHANGE_TIME);
+	struct ext4_inode_update data =
+	    fuzz_update(EXT4_ATTR_PERMISSIONS | EXT4_ATTR_MODIFY_TIME | EXT4_ATTR_CHANGE_TIME);
+	struct ext4_encryption_policy policy = { FSCRYPT_V2, EXT4_FSCRYPT_MODE_AES_256_XTS,
+		EXT4_FSCRYPT_MODE_AES_256_CTS, FUZZ_FSCRYPT_PAD_32, { 0 } };
+	struct ext4_verity_parameters parameters = { EXT4_VERITY_HASH_SHA256, fs->info.block_size,
+		NULL, 0, NULL, 0 };
+	struct ext4_timestamp time = { FUZZ_SECONDS, 0 };
+	struct ext4_inode directory;
+	struct ext4_inode inner;
+	struct ext4_inode result;
+	uint8_t digest[FUZZ_VERITY_DIGEST];
+	uint32_t algorithm;
+	size_t completed;
+	size_t size;
+
+	memcpy(policy.identifier, keyring.identifier, sizeof(policy.identifier));
+	if (ext4_mkdir(fs, root->number, root->generation, vault_name, sizeof(vault_name) - 1U,
+		&creation, &time, &directory) == EXT4_OK &&
+	    ext4_set_encryption_policy(
+		fs, directory.number, directory.generation, &policy, &directory) == EXT4_OK) {
+		if (ext4_create(fs, directory.number, directory.generation, inner_name,
+			sizeof(inner_name) - 1U, &creation, &time, &inner) == EXT4_OK) {
+			(void)ext4_write(fs, inner.number, inner.generation, 0, scratch, 5000,
+			    &data, &completed);
+			(void)ext4_truncate(
+			    fs, inner.number, inner.generation, 1000, &data, &result);
+		}
+		(void)ext4_symlink(fs, directory.number, directory.generation, link_name,
+		    sizeof(link_name) - 1U, target, sizeof(target) - 1U, &creation, &time, &result);
+	}
+	if (ext4_mkdir(fs, root->number, root->generation, folded_name, sizeof(folded_name) - 1U,
+		&creation, &time, &directory) == EXT4_OK &&
+	    ext4_set_inode_flags(fs, directory.number, directory.generation, EXT4_INODE_CASEFOLD,
+		EXT4_INODE_CASEFOLD, &time, &directory) == EXT4_OK &&
+	    ext4_create(fs, directory.number, directory.generation, inner_name,
+		sizeof(inner_name) - 1U, &creation, &time, &inner) == EXT4_OK) {
+		(void)ext4_lookup(
+		    fs, &directory, folded_variant, sizeof(folded_variant) - 1U, &result);
+	}
+	if (file != NULL &&
+	    ext4_enable_verity(fs, file->number, file->generation, &parameters, &result) ==
+		EXT4_OK) {
+		(void)ext4_measure_verity(fs, &result, &algorithm, digest, sizeof(digest), &size);
+		(void)ext4_read(fs, &result, 0, scratch, sizeof(scratch), &completed);
+	}
+}
+
 /* Fixed mutations on new and existing objects; any result is admissible. */
 static void
 fuzz_mutations(struct ext4_fs *fs, const struct fuzz_walk *walk)
@@ -619,6 +689,7 @@ fuzz_mutations(struct ext4_fs *fs, const struct fuzz_walk *walk)
 		(void)ext4_unlink(fs, root.number, root.generation, link_name,
 		    sizeof(link_name) - 1U, file.number, 0, &time, &result);
 	}
+	fuzz_features(fs, &root, have_file ? &file : NULL);
 	for (index = 1; index < walk->count && index < 8U; index++) {
 		if (ext4_get_inode(fs, walk->numbers[index], &existing) != EXT4_OK) {
 			continue;
@@ -678,6 +749,7 @@ LLVMFuzzerInitialize(int *argc, char ***argv)
 		fuzz_allocate, fuzz_release };
 	writer = (struct ext4_write_environment){ &device, fuzz_write, fuzz_flush, NULL };
 	device.block_size = EXT4_MIN_BLOCK_SIZE;
+	keyring_init(&keyring, FUZZ_KEYRING_OFFSET);
 	fuzz_reset(&device);
 	if (ext4_mount(&environment, &fs) == EXT4_OK) {
 		device.block_size = fs->info.block_size;
@@ -723,6 +795,7 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t length)
 {
 	struct ext4_fs *fs = NULL;
 	struct ext4_recovery_report report;
+	struct ext4_crypto_environment crypto = keyring_environment(&keyring);
 	struct fuzz_walk walk;
 
 	fuzz_reset(&device);
@@ -741,18 +814,22 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t length)
 	walk.count = 0;
 	if (ext4_mount(&environment, &fs) == EXT4_OK) {
 		fuzz_walk(fs, &walk);
+		if (ext4_set_crypto(fs, &crypto) == EXT4_OK) {
+			fuzz_walk(fs, &walk);
+		}
 		ext4_unmount(fs);
 	}
-	if (device.live_bytes != 0) {
+	if (device.live_bytes != 0 || keyring.handles != 0) {
 		abort();
 	}
 	device.reads = 0;
 	if (ext4_mount_writable(&environment, &writer, &fs) == EXT4_OK) {
+		(void)ext4_set_crypto(fs, &crypto);
 		fuzz_mutations(fs, &walk);
 		(void)ext4_sync(fs);
 		ext4_unmount(fs);
 	}
-	if (device.live_bytes != 0) {
+	if (device.live_bytes != 0 || keyring.handles != 0) {
 		abort();
 	}
 	return 0;

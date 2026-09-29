@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
-#include "crypto.h"
 #include "storage.h"
+
+#include "keyring.h"
 
 #include <inttypes.h>
 
@@ -32,16 +33,9 @@ static const struct ext4_timestamp encrypt_time = { ENCRYPT_SECONDS, 0 };
 #define PROBE_FILES 24U
 #define PROBE_LONG_NAME_BYTES 180U
 #define PROBE_LINK_TARGET "inner/file-01-target-x"
-#define PROBE_KEY_BYTES 64U
-#define PROBE_KEY_MULTIPLIER 7U
+/* The probe's master key is the keyring's with this offset. */
 #define PROBE_KEY_OFFSET 3U
 #define NAME_BYTES 256U
-#define FSCRYPT_HKDF_PREFIX "fscrypt"
-#define FSCRYPT_HKDF_PREFIX_SIZE 8U
-#define FSCRYPT_KEY_IDENTIFIER_CONTEXT 1U
-#define FSCRYPT_IDENTIFIER_BYTES 16U
-#define FSCRYPT_V2 2U
-#define FSCRYPT_V1_KEY_BYTES 16U
 #define FSCRYPT_PAD_16 0x02U
 #define FSCRYPT_PAD_32 0x03U
 #define FSCRYPT_MODE_ADIANTUM 9U
@@ -59,151 +53,6 @@ static const struct ext4_timestamp encrypt_time = { ENCRYPT_SECONDS, 0 };
 #define INDEXED_NAME_BYTES 200U
 /* Linux's no-key names are at most 252 base64url characters. */
 #define NOKEY_NAME_MAX 252U
-
-/* A test adapter's keyring: one master key, found by its fscrypt identifier, and a
- * counter that makes every nonce distinct. */
-struct keyring {
-	uint8_t master[PROBE_KEY_BYTES];
-	uint8_t identifier[FSCRYPT_IDENTIFIER_BYTES];
-	uint32_t handles;
-	uint32_t derivations;
-	uint64_t nonces;
-};
-
-struct key {
-	uint8_t bytes[PROBE_KEY_BYTES];
-	size_t size;
-};
-
-static void
-keyring_init(struct keyring *keyring, uint8_t offset)
-{
-	uint8_t info[FSCRYPT_HKDF_PREFIX_SIZE + 1U];
-	unsigned int index;
-
-	memset(keyring, 0, sizeof(*keyring));
-	for (index = 0; index < PROBE_KEY_BYTES; index++) {
-		keyring->master[index] = (uint8_t)(index * PROBE_KEY_MULTIPLIER + offset);
-	}
-	memcpy(info, FSCRYPT_HKDF_PREFIX, FSCRYPT_HKDF_PREFIX_SIZE);
-	info[FSCRYPT_HKDF_PREFIX_SIZE] = FSCRYPT_KEY_IDENTIFIER_CONTEXT;
-	test_hkdf_sha512(keyring->master, sizeof(keyring->master), info, sizeof(info),
-	    keyring->identifier, sizeof(keyring->identifier));
-}
-
-static struct key *
-key_new(struct keyring *keyring)
-{
-	struct key *key = calloc(1, sizeof(*key));
-
-	CHECK(key != NULL);
-	keyring->handles++;
-	return key;
-}
-
-static enum ext4_result
-find_key(void *context, uint8_t version, const uint8_t *identifier, size_t size, void **master)
-{
-	struct keyring *keyring = context;
-	struct key *key;
-
-	if (version != FSCRYPT_V2 || size != sizeof(keyring->identifier) ||
-	    memcmp(identifier, keyring->identifier, size) != 0) {
-		return EXT4_NOT_FOUND;
-	}
-	key = key_new(keyring);
-	memcpy(key->bytes, keyring->master, sizeof(keyring->master));
-	key->size = sizeof(keyring->master);
-	*master = key;
-	return EXT4_OK;
-}
-
-static enum ext4_result
-derive_key(void *context, void *master, uint8_t version, const uint8_t *info, size_t info_size,
-    size_t key_size, void **result)
-{
-	struct keyring *keyring = context;
-	struct key *source = master;
-	struct key *key;
-	struct test_aes aes;
-	size_t offset;
-
-	CHECK(key_size <= sizeof(key->bytes) && key_size <= source->size);
-	key = key_new(keyring);
-	key->size = key_size;
-	if (version == FSCRYPT_V2) {
-		test_hkdf_sha512(
-		    source->bytes, source->size, info, info_size, key->bytes, key_size);
-	} else {
-		/* Version 1: the master key encrypted with AES-128-ECB under the nonce. */
-		CHECK(info_size == FSCRYPT_V1_KEY_BYTES);
-		test_aes_init(&aes, info, FSCRYPT_V1_KEY_BYTES);
-		for (offset = 0; offset < key_size; offset += TEST_AES_BLOCK) {
-			test_aes_encrypt(&aes, source->bytes + offset, key->bytes + offset);
-		}
-	}
-	keyring->derivations++;
-	*result = key;
-	return EXT4_OK;
-}
-
-static enum ext4_result
-cipher(void *context, void *handle, uint8_t mode, bool encrypt, const uint8_t *iv,
-    const void *input, void *output, size_t length)
-{
-	struct key *key = handle;
-
-	(void)context;
-	CHECK(input != output);
-	if (mode == EXT4_FSCRYPT_MODE_AES_256_XTS) {
-		test_aes_xts(key->bytes, key->size, iv, encrypt, input, output, length);
-	} else if (mode == EXT4_FSCRYPT_MODE_AES_256_CTS) {
-		test_aes_cts(key->bytes, key->size, iv, encrypt, input, output, length);
-	} else {
-		return EXT4_UNSUPPORTED;
-	}
-	return EXT4_OK;
-}
-
-static void
-release_key(void *context, void *handle)
-{
-	struct keyring *keyring = context;
-
-	CHECK(keyring->handles != 0);
-	keyring->handles--;
-	free(handle);
-}
-
-static enum ext4_result
-random_bytes(void *context, void *buffer, size_t length)
-{
-	struct keyring *keyring = context;
-	uint8_t counter[sizeof(keyring->nonces)];
-	uint8_t digest[EXT4_SHA256_DIGEST_SIZE];
-	struct ext4_sha256 hash;
-	unsigned int index;
-
-	CHECK(length <= sizeof(digest));
-	keyring->nonces++;
-	for (index = 0; index < sizeof(counter); index++) {
-		counter[index] = (uint8_t)(keyring->nonces >> (8U * index));
-	}
-	ext4_sha256_init(&hash);
-	ext4_sha256_update(&hash, counter, sizeof(counter));
-	ext4_sha256_final(&hash, digest);
-	memcpy(buffer, digest, length);
-	return EXT4_OK;
-}
-
-static struct ext4_crypto_environment
-keyring_environment(struct keyring *keyring)
-{
-	struct ext4_crypto_environment crypto = { keyring, NULL, false, find_key, derive_key,
-		cipher, release_key, random_bytes };
-
-	return crypto;
-}
 
 /* Matches the Linux probe so both fixture kinds share the plain file check. */
 static uint8_t
@@ -1272,6 +1121,101 @@ keyed_power_cuts(struct device *device, enum cut_operation operation)
 	    operation == CUT_OVERWRITE ? "overwrite" : "truncation", events, original, changed);
 }
 
+/* A power cut at every write or barrier of an encrypted block symlink's creation,
+ * including its commit, leaves no core allocation behind and recovers either no link
+ * or the complete target. */
+static void
+keyed_symlink_cuts(struct device *device)
+{
+	struct keyring keyring;
+	struct ext4_crypto_environment crypto;
+	struct ext4_encryption_policy policy = { FSCRYPT_V2, EXT4_FSCRYPT_MODE_AES_256_XTS,
+		EXT4_FSCRYPT_MODE_AES_256_CTS, FSCRYPT_PAD_32, { 0 } };
+	struct ext4_recovery_report report;
+	struct ext4_inode_update update = creation();
+	struct ext4_inode vault;
+	struct ext4_inode link;
+	struct ext4_fs *fs;
+	uint8_t *before = malloc(device->size);
+	char target[LONG_TARGET_BYTES + 1U];
+	char read_back[LONG_TARGET_BYTES + 1U];
+	uint32_t events;
+	uint32_t cut;
+	uint32_t absent = 0;
+	uint32_t present = 0;
+	size_t completed;
+	size_t index;
+	enum ext4_result error;
+
+	CHECK(before != NULL);
+	for (index = 0; index < LONG_TARGET_BYTES; index++) {
+		target[index] = (char)('a' + index % 26U);
+	}
+	target[LONG_TARGET_BYTES] = 0;
+	enable_encryption(device);
+	device_reset(device, device->base);
+	keyring_init(&keyring, PROBE_KEY_OFFSET);
+	crypto = keyring_environment(&keyring);
+	memcpy(policy.identifier, keyring.identifier, sizeof(keyring.identifier));
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	EXPECT(ext4_mkdir(fs, EXT4_ROOT_INODE, 0, (const uint8_t *)"links", 5, &update,
+		   &encrypt_time, &vault),
+	    EXT4_OK);
+	EXPECT(ext4_set_encryption_policy(fs, vault.number, vault.generation, &policy, &vault),
+	    EXT4_OK);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	memcpy(before, device->stable, device->size);
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	events = device->events;
+	EXPECT(ext4_symlink(fs, vault.number, vault.generation, (const uint8_t *)"link", 4,
+		   (const uint8_t *)target, LONG_TARGET_BYTES, &update, &encrypt_time, &link),
+	    EXT4_OK);
+	events = device->events - events;
+	ext4_unmount(fs);
+	for (cut = 1; cut <= events; cut++) {
+		device_reset(device, before);
+		EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+		EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+		device->stop_at = device->events + cut;
+		device->survival = cut % 3U;
+		device->partial = cut % 2U != 0;
+		error = ext4_symlink(fs, vault.number, vault.generation, (const uint8_t *)"link", 4,
+		    (const uint8_t *)target, LONG_TARGET_BYTES, &update, &encrypt_time, &link);
+		CHECK(error != EXT4_OK && device->off);
+		ext4_unmount(fs);
+		CHECK(device->live == 0 && keyring.handles == 0);
+		device_reset(device, device->stable);
+		error = ext4_recover(&device->environment, &device->writer, &report);
+		if (error == EXT4_CORRUPT) {
+			CHECK(device->metadata_checksum && device->writes == 0);
+			continue;
+		}
+		EXPECT(error, EXT4_OK);
+		EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+		EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+		error = ext4_lookup(fs, &vault, (const uint8_t *)"link", 4, &link);
+		if (error == EXT4_NOT_FOUND) {
+			absent++;
+		} else {
+			EXPECT(error, EXT4_OK);
+			EXPECT(ext4_read(fs, &link, 0, read_back, sizeof(read_back), &completed),
+			    EXT4_OK);
+			CHECK(completed == LONG_TARGET_BYTES &&
+			    memcmp(read_back, target, LONG_TARGET_BYTES) == 0);
+			present++;
+		}
+		ext4_unmount(fs);
+		CHECK(keyring.handles == 0);
+	}
+	CHECK(absent != 0 && present != 0);
+	free(before);
+	printf("PASS encrypted symlink power cuts: %u events, %u absent, %u present\n", events,
+	    absent, present);
+}
+
 /* Encrypt a directory through the core and shape objects in it with a model. */
 static void
 keyed_write(struct device *device, const char *exports, const char *source)
@@ -1635,6 +1579,7 @@ main(int argc, char **argv)
 		keyed_write(&device, exports, image);
 		keyed_power_cuts(&device, CUT_OVERWRITE);
 		keyed_power_cuts(&device, CUT_TRUNCATE);
+		keyed_symlink_cuts(&device);
 		storage_close(&device);
 		return 0;
 	}

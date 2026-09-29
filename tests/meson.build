@@ -701,3 +701,29 @@ foreach name : ['ext4-4k.img', 'ext4-1k.img', 'ext4-indirect-1k.img']
     endforeach
   endforeach
 endforeach
+# Encryption, verity and casefolding in the sequence, each alone and together with
+# ordered data, a compound and lazy checkpoints; the test sets missing features.
+foreach name : ['ext4-4k.img', 'ext4-1k.img']
+  foreach feature : ['encrypt', 'verity', 'casefold']
+    test('sustained-' + feature + '-' + name, programs['sustained'],
+      args: [paths['fixtures'] / name, sustained_seed.to_string(), '3000', '--' + feature],
+      timeout: 600, suite: 'sustained')
+    sustained_seed += 1
+  endforeach
+endforeach
+foreach name : ['ext4-4k.img', 'ext4-1k.img', 'ext4-indirect-1k.img']
+  test('sustained-combined-' + name, programs['sustained'],
+    args: [paths['fixtures'] / name, sustained_seed.to_string(), '4000', '--encrypt', '--verity',
+      '--casefold', '--data', 'ordered', '--commit-blocks', '64', '--checkpoint-blocks', '96'],
+    timeout: 900, suite: 'sustained')
+  sustained_seed += 1
+endforeach
+if paths['format_fixtures'] != ''
+  foreach feature : ['encrypt', 'verity', 'casefold']
+    test('sustained-format-' + feature + '-used', programs['sustained'],
+      args: [paths['format_fixtures'] / ('format-' + feature + '.img'),
+        sustained_seed.to_string(), '1500', '--' + feature],
+      timeout: 600, suite: 'sustained')
+    sustained_seed += 1
+  endforeach
+endif

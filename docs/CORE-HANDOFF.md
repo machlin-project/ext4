@@ -170,8 +170,9 @@ Continue the actual remaining queue in `docs/ACCEPTANCE.md`:
   names without them, are implemented. Unjournaled writes on journal-less volumes
   remain refused.
 - Sustained mixed-operation/crash sequences, operations fuzzing and
-  checksum-repairing journal fuzzing are in place; keep extending them. Fix
-  discovered contracts at their owning layer, not in the test harness.
+  checksum-repairing journal fuzzing are in place, with encryption, verity and
+  casefolding in both and exports checked by e2fsprogs and Linux; keep extending
+  them. Fix discovered contracts at their owning layer, not in the test harness.
 
 The core currently has a serialized resource owner. Native locking, page-cache
 coordination, authorization and adapter lifetime acceptance come later. FSKit and

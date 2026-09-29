@@ -145,13 +145,55 @@ measure the workloads in these modes.
 authors one volume per optional format feature or geometry, and the `format_fixtures`
 option adds a sustained case for each.
 
+`--encrypt`, `--verity` and `--casefold` also exercise those features and set them
+on the volume when it lacks them. `--encrypt` encrypts a directory under the Linux
+probe's master key from the test keyring in `tests/keyring.h`. Objects created in it
+inherit its policy, except special files, and it admits only its policy's objects
+and special files; links and renames of other objects must return
+`EXT4_CROSS_POLICY`, and encrypted symlink targets longer than the block size less
+three bytes `EXT4_NAME_TOO_LONG`. A power-cut repetition restores the keyring's nonce
+counter, so it writes the same ciphertext. Every remount also checks the tree
+without the key: each encrypted directory lists as many no-key names as the model
+has entries, each looks up its inode, encrypted contents are refused and targets
+read as no-key names. `--verity` adds an operation that enables verity on a file
+with either algorithm, the filesystem or a 1 KiB Merkle block and an optional salt;
+verity files must refuse writes, truncation and preallocation with
+`EXT4_PERMISSION_DENIED`, measure the same digest until removed and refuse enabling
+again, and encrypted files refuse it with `EXT4_ENCRYPTED`. Enabling spans several
+transactions and does not take part in the power-cut byte comparison. `--casefold`
+adds a casefolded directory whose new subdirectories inherit the flag; the model
+matches names in it without regard to case, reuses names in other spellings, and
+requires listings to keep each name's spelling and case variants to look up the same
+inode. With any of these, half of the directory choices fall in encrypted or
+casefolded directories, and the encrypted and casefolded directories created at the
+start may move but are not removed. `--no-ballast` leaves out ballast files for
+compact exports such as fuzzing seeds. The `sustained` suite runs each feature on the
+4 KiB and 1 KiB base volumes, all three with ordered data, a compound and lazy
+checkpoints on those and the indirect 1 KiB volume, and each format fixture with its
+feature in use.
+
 `--objects`, `--entries` and `--directories` raise the model's limits; the wide
 cases keep up to 2,000 names in three directories to exercise indexed growth and
 splits. `--export DIRECTORY` writes the final clean image, a manifest and expected
-file/symlink bytes. `tests/check_sustained.py --tools-root E2FSPROGS_BUILD --exports
-DIRECTORY --output NEW_DIRECTORY` then requires strict nonrepairing e2fsck and
-compares every directory, inode identity, type, link count, permission, file byte,
-symlink target and attribute value with debugfs. The `sustained` suite runs every
+file/symlink bytes; the manifest also marks encrypted and casefolded objects, gives
+each verity file's parameters and digest, and lists each encrypted directory's
+no-key names as a mount without the key presents them. `tests/check_sustained.py
+--tools-root E2FSPROGS_BUILD --exports DIRECTORY --output NEW_DIRECTORY` then requires
+strict nonrepairing e2fsck and compares every directory, inode identity, type, link
+count, permission, file byte, symlink target and attribute value with debugfs,
+addressing objects by inode number. An encrypted directory's raw ciphertext names
+must be those its no-key names carry; encrypted contents and targets are counted
+rather than decrypted. Encryption, casefold and verity flags must match, the fscrypt
+context must exist exactly on encrypted objects, and each verity file's digest,
+Merkle tree and descriptor are recomputed from its expected contents.
+`tests/run_linux_sustained.py --lab LAB --prepared PREPARED --runner RUNNER --export
+DIRECTORY --output NEW` runs from the lab and mounts an export read-only in the
+Linux reference guest. Without the key Linux must list exactly the exported no-key
+names of each encrypted directory, reached through no-key names of encrypted
+ancestors; with the probe's key it must read every file's expected contents and
+symlink target, find every type and measure every verity digest, and the image must
+stay unchanged and pass strict fsck. The reference kernel lacks `CONFIG_UNICODE`, so
+casefolded exports are checked by e2fsprogs only. The `sustained` suite runs every
 writable base profile and two wide profiles; CI additionally exports five runs for
 independent verification. Seeds make each failing sequence reproducible.
 
@@ -448,9 +490,10 @@ This is a bounded mutation test, not complete disk-format or concurrency coverag
 
 The same option builds `ext4-operations-fuzzer`. Each input is a list of mutations
 applied to nonzero blocks of the `--image` through a copy-on-write overlay, followed
-by offline recovery, a bounded read-only namespace walk and a fixed sequence of
-writable operations; results are admissible, while memory errors, unbounded work
-and unreleased allocations are findings. A mutation may instead select a nonzero
+by offline recovery, a bounded read-only namespace walk without and then with the
+Linux probe's fscrypt key, and a fixed sequence of writable operations that also
+encrypts, fills and casefolds new directories and enables verity on a new file; results are admissible, while memory errors, unbounded work
+and unreleased allocations or key handles are findings. A mutation may instead select a nonzero
 block of the internal journal and may request checksum repair. Repair follows the
 ordinary log from its start as the recovery scanner does, recomputing each
 descriptor's data-tag and tail checksums, revoke tails and commit checksums, and

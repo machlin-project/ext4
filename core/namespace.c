@@ -495,6 +495,11 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	    ? fs->info.feature_ro_compat
 	    : ext4_le32(&allocation.super->feature_ro_compat);
 	ext4_allocation_destroy(&allocation);
+	/* The transaction holds the stored target; a failed commit must not leak it. */
+	if (stored_target != NULL) {
+		fs->environment.release(
+		    fs->environment.context, stored_target, fs->info.block_size);
+	}
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
 		if (!ext4_commit_rejected(error)) {
@@ -504,10 +509,6 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	}
 	fs->info.feature_compat = feature_compat;
 	fs->info.feature_ro_compat |= feature_ro_compat & EXT4_FEATURE_RO_DIR_NLINK;
-	if (stored_target != NULL) {
-		fs->environment.release(
-		    fs->environment.context, stored_target, fs->info.block_size);
-	}
 	*result = child;
 	return EXT4_OK;
 cancel:

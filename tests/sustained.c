@@ -1,12 +1,23 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
+#include "fscrypt.h"
 #include "storage.h"
+
+#include "keyring.h"
 
 #include <inttypes.h>
 
 /* Long deterministic sequences of mixed public operations. A model retains the
  * expected namespace, file bytes, links, permissions and attributes. Selected
  * atomic operations also run from a clean snapshot with an injected power cut;
- * recovery must reproduce the exact old or new image outside the journal. */
+ * recovery must reproduce the exact old or new image outside the journal.
+ *
+ * --encrypt, --verity and --casefold also exercise those features, which the test
+ * sets on the volume when it lacks them. An encrypted directory, whose objects
+ * inherit its policy under a test keyring, admits only its policy's objects and
+ * special files; every remount also checks it without the key. Regular files become
+ * verity files, which measure the same digest until removed and refuse data changes.
+ * A casefolded directory, inherited by its subdirectories, matches names without
+ * regard to case and preserves their spelling. */
 
 #define SUSTAINED_SECONDS 1700002000
 #define SUSTAINED_UID 71000U
@@ -35,6 +46,17 @@
 #define ROOT_NAME "sustained"
 #define MANIFEST_NAME "manifest.txt"
 #define NO_INDEX UINT32_MAX
+#define VAULT_NAME "vault"
+#define FOLDED_NAME "folded"
+/* The Linux probe's master key, so that Linux can read an exported vault. */
+#define KEYRING_OFFSET 3U
+#define FSCRYPT_PAD_32 0x03U
+/* An encrypted symlink target takes a length before its ciphertext and a NUL. */
+#define ENCRYPTED_TARGET_OVERHEAD 3U
+#define VERITY_DIGEST_LIMIT 64U
+#define VERITY_SALT_BYTES 16U
+#define VERITY_MERKLE_SMALL 1024U
+#define CASE_DIFFERENCE ('a' - 'A')
 
 /* Ballast files are regular files whose bytes derive from their seed. They fill
  * the volume without keeping megabytes of expected data in the model. */
@@ -71,16 +93,18 @@ enum operation {
 	OP_HOLD,
 	OP_RELEASE,
 	OP_BALLAST,
+	OP_VERITY,
 	OP_COUNT
 };
 
 static const char *const operation_names[OP_COUNT] = { "create", "mkdir", "symlink", "mknod",
 	"write", "write-partial", "truncate", "truncate-atomic", "fallocate", "link", "unlink",
-	"rmdir", "rename", "xattr", "chmod", "hold", "release", "ballast" };
+	"rmdir", "rename", "xattr", "chmod", "hold", "release", "ballast", "verity" };
 
-/* Relative frequency of each operation in the random sequence. */
+/* Relative frequency of each operation in the random sequence. Verity is planned
+ * only with --verity. */
 static const uint32_t operation_weights[OP_COUNT] = { 12, 5, 3, 2, 16, 4, 5, 3, 4, 5, 9, 3, 10, 5,
-	3, 2, 2, 3 };
+	3, 2, 2, 3, 3 };
 
 static const uint8_t name_alphabet[] =
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-";
@@ -100,6 +124,18 @@ struct object {
 	uint8_t xattr_length[XATTR_KEYS];
 	uint8_t xattr_value[XATTR_KEYS][XATTR_VALUE_LIMIT];
 	struct ext4_inode_hold *hold;
+	/* Holds the vault's policy, folds names, or is a verity file with this digest. An
+	 * anchor, the vault or the casefolded directory, may move but keeps its name. */
+	bool anchor;
+	bool encrypted;
+	bool casefolded;
+	bool verity;
+	uint32_t verity_algorithm;
+	uint32_t verity_block_size;
+	size_t salt_size;
+	uint8_t salt[VERITY_SALT_BYTES];
+	size_t digest_size;
+	uint8_t digest[VERITY_DIGEST_LIMIT];
 };
 
 struct entry {
@@ -156,6 +192,14 @@ struct state {
 	uint32_t commits;
 	bool extents;
 	bool crashing;
+	/* Optional features the sequence exercises. */
+	bool encrypt;
+	bool verity;
+	bool casefold;
+	/* Compact exports, such as fuzzing seeds, leave out ballast. */
+	bool no_ballast;
+	struct keyring keyring;
+	uint32_t keyless_checks;
 	uint32_t performed[OP_COUNT];
 	uint32_t rejected[OP_COUNT];
 	uint32_t no_space;
@@ -240,6 +284,30 @@ modification(struct state *state, const struct object *object)
 	return update;
 }
 
+/* Names use an ASCII alphabet, whose casefold lowers letters. */
+static uint8_t
+fold_byte(uint8_t byte)
+{
+	return byte >= 'A' && byte <= 'Z' ? (uint8_t)(byte + CASE_DIFFERENCE) : byte;
+}
+
+static bool
+names_match(const struct state *state, uint32_t parent, const uint8_t *left, const uint8_t *right,
+    size_t length)
+{
+	size_t index;
+
+	if (!state->objects[parent].casefolded) {
+		return memcmp(left, right, length) == 0;
+	}
+	for (index = 0; index < length; index++) {
+		if (fold_byte(left[index]) != fold_byte(right[index])) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static uint32_t
 find_entry(const struct state *state, uint32_t parent, const uint8_t *name, size_t length)
 {
@@ -248,11 +316,32 @@ find_entry(const struct state *state, uint32_t parent, const uint8_t *name, size
 	for (index = 0; index < ENTRY_LIMIT; index++) {
 		if (state->entries[index].used && state->entries[index].parent == parent &&
 		    state->entries[index].name_length == length &&
-		    memcmp(state->entries[index].name, name, length) == 0) {
+		    names_match(state, parent, state->entries[index].name, name, length)) {
 			return index;
 		}
 	}
 	return NO_INDEX;
+}
+
+/* As in Linux, an encrypted directory takes only objects of its policy, of which
+ * the vault's is the only one, and special files. */
+static bool
+policy_permits(const struct state *state, uint32_t directory, uint32_t object)
+{
+	const struct object *child = &state->objects[object];
+
+	return !state->objects[directory].encrypted || child->encrypted ||
+	    child->kind == KIND_FIFO || child->kind == KIND_DEVICE;
+}
+
+static void
+install_crypto(struct state *state)
+{
+	struct ext4_crypto_environment crypto = keyring_environment(&state->keyring);
+
+	if (state->encrypt) {
+		EXPECT(ext4_set_crypto(state->fs, &crypto), EXT4_OK);
+	}
 }
 
 static uint32_t
@@ -314,6 +403,31 @@ random_object(struct state *state, uint32_t kinds, bool linked)
 	return NO_INDEX;
 }
 
+/* With features, half the choices fall in encrypted or casefolded directories,
+ * evenly between the two when both are exercised. */
+static uint32_t
+random_directory(struct state *state)
+{
+	uint32_t start;
+	uint32_t step;
+	uint32_t index;
+	bool folded;
+
+	if ((state->encrypt || state->casefold) && pick(state, 2) == 0) {
+		folded = state->casefold && (!state->encrypt || pick(state, 2) == 0);
+		start = pick(state, OBJECT_LIMIT);
+		for (step = 0; step < OBJECT_LIMIT; step++) {
+			index = (start + step) % OBJECT_LIMIT;
+			if (state->objects[index].kind == KIND_DIRECTORY &&
+			    (folded ? state->objects[index].casefolded
+				    : state->objects[index].encrypted)) {
+				return index;
+			}
+		}
+	}
+	return random_object(state, 1U << KIND_DIRECTORY, false);
+}
+
 static uint32_t
 random_entry(struct state *state, uint32_t kinds)
 {
@@ -363,6 +477,20 @@ random_name(struct state *state, struct plan *plan)
 	    (plan->name_length == 2 && plan->name[0] == '.' && plan->name[1] == '.'));
 }
 
+static void
+flip_case(uint8_t *name, size_t length)
+{
+	size_t index;
+
+	for (index = 0; index < length; index++) {
+		if (name[index] >= 'a' && name[index] <= 'z') {
+			name[index] = (uint8_t)(name[index] - CASE_DIFFERENCE);
+		} else if (name[index] >= 'A' && name[index] <= 'Z') {
+			name[index] = (uint8_t)(name[index] + CASE_DIFFERENCE);
+		}
+	}
+}
+
 /* Usually choose an absent name; occasionally reuse one to test rejection. */
 static void
 choose_name(struct state *state, struct plan *plan)
@@ -374,6 +502,10 @@ choose_name(struct state *state, struct plan *plan)
 		if (existing != NO_INDEX && state->entries[existing].parent == plan->directory) {
 			plan->name_length = state->entries[existing].name_length;
 			memcpy(plan->name, state->entries[existing].name, plan->name_length);
+			/* A casefolded directory also holds every other spelling. */
+			if (state->objects[plan->directory].casefolded) {
+				flip_case(plan->name, plan->name_length);
+			}
 			return;
 		}
 	}
@@ -483,6 +615,16 @@ directory_count(const struct state *state)
 	return count;
 }
 
+static uint32_t
+operation_weight(const struct state *state, uint32_t operation)
+{
+	if ((operation == OP_VERITY && !state->verity) ||
+	    (operation == OP_BALLAST && state->no_ballast)) {
+		return 0;
+	}
+	return operation_weights[operation];
+}
+
 static bool
 plan_operation(struct state *state, struct plan *plan)
 {
@@ -493,11 +635,11 @@ plan_operation(struct state *state, struct plan *plan)
 	struct entry *entry;
 
 	for (index = 0; index < OP_COUNT; index++) {
-		total += operation_weights[index];
+		total += operation_weight(state, index);
 	}
 	value = pick(state, total);
-	for (index = 0; value >= operation_weights[index]; index++) {
-		value -= operation_weights[index];
+	for (index = 0; value >= operation_weight(state, index); index++) {
+		value -= operation_weight(state, index);
 	}
 	memset(plan, 0, sizeof(*plan));
 	plan->operation = (enum operation)index;
@@ -513,7 +655,7 @@ plan_operation(struct state *state, struct plan *plan)
 			directory_count(state) >= state->directory_limit)) {
 			return false;
 		}
-		plan->directory = random_object(state, 1U << KIND_DIRECTORY, false);
+		plan->directory = random_directory(state);
 		plan->permissions = (uint16_t)(plan->operation == OP_MKDIR ? 0750U : 0640U);
 		plan->length =
 		    plan->operation == OP_SYMLINK ? 1U + pick(state, state->block_size - 1U) : 0;
@@ -564,7 +706,7 @@ plan_operation(struct state *state, struct plan *plan)
 		if (plan->object == NO_INDEX || free_entry(state) == NO_INDEX) {
 			return false;
 		}
-		plan->directory = random_object(state, 1U << KIND_DIRECTORY, false);
+		plan->directory = random_directory(state);
 		choose_name(state, plan);
 		return true;
 	case OP_UNLINK:
@@ -572,7 +714,8 @@ plan_operation(struct state *state, struct plan *plan)
 		return plan->entry != NO_INDEX;
 	case OP_RMDIR:
 		plan->entry = random_entry(state, 1U << KIND_DIRECTORY);
-		if (plan->entry == NO_INDEX) {
+		if (plan->entry == NO_INDEX ||
+		    state->objects[state->entries[plan->entry].object].anchor) {
 			return false;
 		}
 		/* Mostly target empty directories; a populated one must reject. */
@@ -586,7 +729,7 @@ plan_operation(struct state *state, struct plan *plan)
 		if (plan->entry == NO_INDEX) {
 			return false;
 		}
-		plan->directory = random_object(state, 1U << KIND_DIRECTORY, false);
+		plan->directory = random_directory(state);
 		value = pick(state, 20);
 		plan->flags = value < 14 ? 0
 		    : value < 17	 ? EXT4_RENAME_NOREPLACE
@@ -597,6 +740,11 @@ plan_operation(struct state *state, struct plan *plan)
 			    state->entries[plan->target_entry].parent != plan->directory) {
 				plan->target_entry = NO_INDEX;
 			}
+		}
+		/* An anchor is not replaced; an exchange only moves it. */
+		if (plan->target_entry != NO_INDEX && plan->flags != EXT4_RENAME_EXCHANGE &&
+		    state->objects[state->entries[plan->target_entry].object].anchor) {
+			return false;
 		}
 		if (plan->target_entry == NO_INDEX) {
 			if (free_entry(state) == NO_INDEX) {
@@ -663,6 +811,17 @@ plan_operation(struct state *state, struct plan *plan)
 			}
 		}
 		return plan->object != NO_INDEX;
+	case OP_VERITY:
+		/* Enabling needs extent mapping; verity and encrypted files refuse it. */
+		plan->object = random_object(state, 1U << KIND_FILE, true);
+		if (plan->object == NO_INDEX || !state->extents ||
+		    (state->objects[plan->object].verity && pick(state, 4) != 0)) {
+			return false;
+		}
+		plan->key = pick(state, 2) == 0 ? EXT4_VERITY_HASH_SHA256 : EXT4_VERITY_HASH_SHA512;
+		plan->flags = pick(state, 2) == 0 ? 0 : VERITY_MERKLE_SMALL;
+		plan->length = pick(state, 2) == 0 ? 0 : VERITY_SALT_BYTES;
+		return true;
 	case OP_COUNT:
 		break;
 	}
@@ -678,9 +837,12 @@ crash_eligible(const struct state *state, const struct plan *plan)
 	bool data = plan->operation == OP_WRITE || plan->operation == OP_TRUNCATE ||
 	    plan->operation == OP_TRUNCATE_ATOMIC;
 
+	/* Enabling verity spans several transactions; a cut may leave the original file
+	 * with its trimmed tree blocks freed but written. */
 	return state->holds == 0 && plan->operation != OP_WRITE_PARTIAL &&
 	    plan->operation != OP_FALLOCATE && plan->operation != OP_HOLD &&
 	    plan->operation != OP_RELEASE && plan->operation != OP_BALLAST &&
+	    plan->operation != OP_VERITY &&
 	    !(data && (state->write_flags & EXT4_WRITE_ORDERED_DATA));
 }
 
@@ -734,12 +896,25 @@ execute_create(struct state *state, const struct plan *plan, bool apply)
 		EXPECT(error, EXT4_EXISTS);
 		return error;
 	}
+	if (kind == KIND_SYMLINK && directory->encrypted &&
+	    plan->length > state->block_size - ENCRYPTED_TARGET_OVERHEAD) {
+		EXPECT(error, EXT4_NAME_TOO_LONG);
+		return error;
+	}
 	if (error == EXT4_NO_SPACE) {
 		return error;
 	}
 	EXPECT(error, EXT4_OK);
+	/* New objects inherit an encrypted directory's policy, except special files, and
+	 * new directories inherit casefolding. */
+	CHECK(((inode.flags & EXT4_INODE_ENCRYPT) != 0) ==
+	    (directory->encrypted && kind != KIND_FIFO && kind != KIND_DEVICE));
+	CHECK(((inode.flags & EXT4_INODE_CASEFOLD) != 0) ==
+	    (directory->casefolded && kind == KIND_DIRECTORY));
 	if (apply) {
 		object = new_object(state, kind, &inode);
+		state->objects[object].encrypted = (inode.flags & EXT4_INODE_ENCRYPT) != 0;
+		state->objects[object].casefolded = (inode.flags & EXT4_INODE_CASEFOLD) != 0;
 		if (kind == KIND_SYMLINK) {
 			memcpy(state->objects[object].data, target, plan->length);
 			state->objects[object].size = plan->length;
@@ -774,6 +949,12 @@ execute_write(struct state *state, const struct plan *plan, bool apply)
 		    plan->offset, state->buffer, plan->length, &update, &completed);
 		CHECK(completed <= plan->length && (error != EXT4_OK || completed == plan->length));
 	}
+	/* Verity files refuse every data change, as Linux's fs-verity does. */
+	if (object->verity) {
+		EXPECT(error, EXT4_PERMISSION_DENIED);
+		CHECK(completed == 0);
+		return error;
+	}
 	/* Capacity limits reject without changing visible state. */
 	if (error != EXT4_OK && error != EXT4_NO_SPACE && error != EXT4_UNSUPPORTED) {
 		EXPECT(error, EXT4_OK);
@@ -802,7 +983,14 @@ execute_truncate(struct state *state, const struct plan *plan, bool apply)
 		error = ext4_truncate(
 		    state->fs, object->number, object->generation, plan->offset, &update, &inode);
 	}
-	if (state->crashing || error == EXT4_NO_SPACE || error == EXT4_UNSUPPORTED) {
+	if (state->crashing) {
+		return error;
+	}
+	if (object->verity) {
+		EXPECT(error, EXT4_PERMISSION_DENIED);
+		return error;
+	}
+	if (error == EXT4_NO_SPACE || error == EXT4_UNSUPPORTED) {
 		return error;
 	}
 	EXPECT(error, EXT4_OK);
@@ -828,6 +1016,11 @@ execute_fallocate(struct state *state, const struct plan *plan, bool apply)
 	error = ext4_fallocate(state->fs, object->number, object->generation, plan->offset,
 	    plan->length, plan->flags, &update, &completed);
 	CHECK(completed <= plan->length && (error != EXT4_OK || completed == plan->length));
+	if (object->verity) {
+		EXPECT(error, EXT4_PERMISSION_DENIED);
+		CHECK(completed == 0);
+		return error;
+	}
 	if (error != EXT4_OK && error != EXT4_NO_SPACE && error != EXT4_UNSUPPORTED) {
 		EXPECT(error, EXT4_OK);
 	}
@@ -860,6 +1053,11 @@ execute_link(struct state *state, const struct plan *plan, bool apply)
 	error = ext4_link(state->fs, directory->number, directory->generation, plan->name,
 	    plan->name_length, object->number, object->generation, &time, &inode);
 	if (state->crashing) {
+		return error;
+	}
+	/* The core checks the policy before the name. */
+	if (!policy_permits(state, plan->directory, plan->object)) {
+		EXPECT(error, EXT4_CROSS_POLICY);
 		return error;
 	}
 	if (exists) {
@@ -929,6 +1127,11 @@ rename_valid(const struct state *state, const struct plan *plan, uint32_t *repla
 	if (target != NULL && target->object == source->object) {
 		*noop = plan->flags != EXT4_RENAME_NOREPLACE;
 		return *noop;
+	}
+	if (!policy_permits(state, plan->directory, source->object) ||
+	    (plan->flags == EXT4_RENAME_EXCHANGE && target != NULL &&
+		!policy_permits(state, source->parent, target->object))) {
+		return false;
 	}
 	if (plan->flags == EXT4_RENAME_EXCHANGE) {
 		if (target == NULL) {
@@ -1147,6 +1350,57 @@ execute_ballast(struct state *state, const struct plan *plan)
 }
 
 static enum ext4_result
+execute_verity(struct state *state, const struct plan *plan, bool apply)
+{
+	struct object *object = &state->objects[plan->object];
+	struct ext4_verity_parameters parameters = { 0 };
+	struct ext4_inode inode;
+	uint8_t salt[VERITY_SALT_BYTES];
+	uint8_t digest[VERITY_DIGEST_LIMIT];
+	uint32_t algorithm;
+	size_t size;
+	enum ext4_result error;
+
+	fill_pattern(salt, plan->seed, sizeof(salt));
+	parameters.hash_algorithm = plan->key;
+	parameters.block_size = plan->flags == 0 ? state->block_size : plan->flags;
+	parameters.salt = plan->length == 0 ? NULL : salt;
+	parameters.salt_size = plan->length;
+	error =
+	    ext4_enable_verity(state->fs, object->number, object->generation, &parameters, &inode);
+	if (object->verity) {
+		EXPECT(error, EXT4_EXISTS);
+		return error;
+	}
+	/* Encrypted verity files keep a ciphertext tree, which the core does not write. */
+	if (object->encrypted) {
+		EXPECT(error, EXT4_ENCRYPTED);
+		return error;
+	}
+	if (error == EXT4_NO_SPACE) {
+		return error;
+	}
+	EXPECT(error, EXT4_OK);
+	CHECK((inode.flags & EXT4_INODE_VERITY) && inode.size == object->size);
+	EXPECT(ext4_measure_verity(state->fs, &inode, &algorithm, digest, sizeof(digest), &size),
+	    EXT4_OK);
+	CHECK(algorithm == plan->key &&
+	    size ==
+		(plan->key == EXT4_VERITY_HASH_SHA256 ? EXT4_SHA256_DIGEST_SIZE
+						      : EXT4_SHA512_DIGEST_SIZE));
+	if (apply) {
+		object->verity = true;
+		object->verity_algorithm = algorithm;
+		object->verity_block_size = parameters.block_size;
+		object->salt_size = parameters.salt_size;
+		memcpy(object->salt, salt, parameters.salt_size);
+		object->digest_size = size;
+		memcpy(object->digest, digest, size);
+	}
+	return error;
+}
+
+static enum ext4_result
 execute(struct state *state, const struct plan *plan, bool apply)
 {
 	switch (plan->operation) {
@@ -1178,6 +1432,8 @@ execute(struct state *state, const struct plan *plan, bool apply)
 		return execute_hold(state, plan);
 	case OP_BALLAST:
 		return execute_ballast(state, plan);
+	case OP_VERITY:
+		return execute_verity(state, plan, apply);
 	case OP_COUNT:
 		break;
 	}
@@ -1214,6 +1470,8 @@ verify_content(struct state *state, const struct object *object, const struct ex
 	struct ext4_xattr_key keys[XATTR_KEYS + 2U];
 	uint8_t name[2] = { 'k', 0 };
 	uint8_t value[XATTR_VALUE_LIMIT];
+	uint8_t digest[VERITY_DIGEST_LIMIT];
+	uint32_t algorithm;
 	size_t completed;
 	size_t count;
 	size_t size;
@@ -1225,9 +1483,20 @@ verify_content(struct state *state, const struct object *object, const struct ex
 	CHECK(inode->number == object->number && inode->generation == object->generation);
 	CHECK((inode->mode & EXT4_MODE_TYPE) == expected_type(object->kind));
 	CHECK((inode->mode & 07777U) == object->permissions);
-	if (object->kind == KIND_FILE || object->kind == KIND_SYMLINK ||
-	    object->kind == KIND_BALLAST) {
+	CHECK(((inode->flags & EXT4_INODE_ENCRYPT) != 0) == object->encrypted &&
+	    ((inode->flags & EXT4_INODE_CASEFOLD) != 0) == object->casefolded &&
+	    ((inode->flags & EXT4_INODE_VERITY) != 0) == object->verity);
+	/* An encrypted symlink's size is its stored ciphertext's. */
+	if (object->kind == KIND_FILE || object->kind == KIND_BALLAST ||
+	    (object->kind == KIND_SYMLINK && !object->encrypted)) {
 		CHECK(inode->size == object->size);
+	}
+	if (object->verity) {
+		EXPECT(ext4_measure_verity(
+			   state->fs, inode, &algorithm, digest, sizeof(digest), &size),
+		    EXT4_OK);
+		CHECK(algorithm == object->verity_algorithm && size == object->digest_size &&
+		    memcmp(digest, object->digest, size) == 0);
 	}
 	if (object->kind == KIND_BALLAST && object->size != 0) {
 		EXPECT(ext4_read(state->fs, inode, 0, state->ballast + BALLAST_BYTES, object->size,
@@ -1245,7 +1514,7 @@ verify_content(struct state *state, const struct object *object, const struct ex
 			    memcmp(state->buffer, object->data, object->size) == 0);
 		}
 	} else if (object->kind == KIND_SYMLINK) {
-		if (inode->fast_symlink) {
+		if (inode->fast_symlink && !object->encrypted) {
 			CHECK(memcmp(inode->block_data, object->data, object->size) == 0);
 		} else {
 			EXPECT(
@@ -1279,10 +1548,19 @@ verify_content(struct state *state, const struct object *object, const struct ex
 		EXPECT(ext4_list_xattrs(state->fs, object->number, object->generation, keys,
 			   XATTR_KEYS + 2U, &count),
 		    EXT4_OK);
-		/* The raw list also reports an inline-data inode's internal key. */
+		/* The raw list also reports an inline-data inode's internal key and an
+		 * encrypted inode's fscrypt context. */
 		for (index = 0; index < count; index++) {
 			if (keys[index].name_index == EXT4_XATTR_USER) {
 				listed++;
+				continue;
+			}
+			if (keys[index].name_index == EXT4_XATTR_INDEX_ENCRYPTION) {
+				CHECK(object->encrypted &&
+				    keys[index].name_length ==
+					sizeof(EXT4_FSCRYPT_CONTEXT_NAME) - 1U &&
+				    memcmp(keys[index].name, EXT4_FSCRYPT_CONTEXT_NAME,
+					keys[index].name_length) == 0);
 				continue;
 			}
 			CHECK((inode->flags & EXT4_INODE_INLINE_DATA) &&
@@ -1307,10 +1585,88 @@ visit_entry(void *context, const struct ext4_dir_entry *entry, uint64_t next_coo
 		return EXT4_DIR_ACCEPT;
 	}
 	index = find_entry(state, listing->directory, entry->name, entry->name_length);
+	/* A casefolded directory keeps each name's spelling. */
 	CHECK(index != NO_INDEX &&
-	    state->objects[state->entries[index].object].number == entry->inode);
+	    state->objects[state->entries[index].object].number == entry->inode &&
+	    memcmp(state->entries[index].name, entry->name, entry->name_length) == 0);
 	listing->count++;
 	return EXT4_DIR_ACCEPT;
+}
+
+struct keyless {
+	struct state *state;
+	uint32_t directory;
+	const struct ext4_inode *inode;
+	uint32_t count;
+};
+
+/* Without the key, each listed no-key name looks up an entry of the directory. */
+static enum ext4_dir_action
+visit_keyless(void *context, const struct ext4_dir_entry *entry, uint64_t next_cookie)
+{
+	struct keyless *keyless = context;
+	struct state *state = keyless->state;
+	struct ext4_inode found;
+	uint32_t index;
+	bool known = false;
+
+	(void)next_cookie;
+	if ((entry->name_length == 1 && entry->name[0] == '.') ||
+	    (entry->name_length == 2 && entry->name[0] == '.' && entry->name[1] == '.')) {
+		return EXT4_DIR_ACCEPT;
+	}
+	for (index = 0; index < ENTRY_LIMIT && !known; index++) {
+		known = state->entries[index].used &&
+		    state->entries[index].parent == keyless->directory &&
+		    state->objects[state->entries[index].object].number == entry->inode;
+	}
+	CHECK(known && entry->name_length <= EXT4_FSCRYPT_NOKEY_NAME_MAX);
+	EXPECT(ext4_lookup(state->fs, keyless->inode, entry->name, entry->name_length, &found),
+	    EXT4_OK);
+	CHECK(found.number == entry->inode);
+	keyless->count++;
+	return EXT4_DIR_ACCEPT;
+}
+
+/* Without the key, encrypted directories list no-key names that look up their
+ * entries, encrypted file contents stay unreadable and encrypted symlink targets
+ * read as no-key names. */
+static void
+verify_keyless(struct state *state)
+{
+	struct keyless keyless;
+	struct ext4_inode inode;
+	struct object *object;
+	uint64_t cookie;
+	size_t completed;
+	uint32_t index;
+
+	EXPECT(ext4_set_crypto(state->fs, NULL), EXT4_OK);
+	for (index = 0; index < OBJECT_LIMIT; index++) {
+		object = &state->objects[index];
+		if (!object->encrypted || object->names == 0) {
+			continue;
+		}
+		EXPECT(ext4_get_inode(state->fs, object->number, &inode), EXT4_OK);
+		if (object->kind == KIND_DIRECTORY) {
+			keyless = (struct keyless){ state, index, &inode, 0 };
+			cookie = 0;
+			EXPECT(
+			    ext4_iterate_dir(state->fs, &inode, &cookie, visit_keyless, &keyless),
+			    EXT4_NOT_FOUND);
+			CHECK(keyless.count == object->children);
+		} else if (object->kind == KIND_FILE && object->size != 0) {
+			EXPECT(ext4_read(state->fs, &inode, 0, state->buffer, 1, &completed),
+			    EXT4_ENCRYPTED);
+		} else if (object->kind == KIND_SYMLINK) {
+			EXPECT(ext4_read(state->fs, &inode, 0, state->buffer,
+				   EXT4_FSCRYPT_NOKEY_NAME_MAX, &completed),
+			    EXT4_OK);
+			CHECK(completed != 0 && completed <= EXT4_FSCRYPT_NOKEY_NAME_MAX);
+		}
+	}
+	install_crypto(state);
+	state->keyless_checks++;
 }
 
 static void
@@ -1321,6 +1677,7 @@ verify(struct state *state)
 	struct listing listing;
 	struct entry *entry;
 	struct object *object;
+	uint8_t variant[EXT4_NAME_MAX];
 	uint64_t cookie;
 	uint32_t index;
 
@@ -1349,6 +1706,13 @@ verify(struct state *state)
 		EXPECT(ext4_lookup(state->fs, &parent, entry->name, entry->name_length, &inode),
 		    EXT4_OK);
 		verify_content(state, &state->objects[entry->object], &inode, true);
+		if (state->objects[entry->parent].casefolded) {
+			memcpy(variant, entry->name, entry->name_length);
+			flip_case(variant, entry->name_length);
+			EXPECT(ext4_lookup(state->fs, &parent, variant, entry->name_length, &inode),
+			    EXT4_OK);
+			CHECK(inode.number == state->objects[entry->object].number);
+		}
 	}
 	for (index = 0; index < OBJECT_LIMIT; index++) {
 		object = &state->objects[index];
@@ -1369,6 +1733,7 @@ mount_writer(struct state *state)
 	EXPECT(ext4_mount_writable_with_options(
 		   &state->device.environment, &state->device.writer, NULL, &options, &state->fs),
 	    EXT4_OK);
+	install_crypto(state);
 }
 
 /* Under deferred commit, a measured operation ends with an explicit commit, so its
@@ -1412,8 +1777,13 @@ remount(struct state *state)
 	ext4_unmount(state->fs);
 	CHECK(state->device.live == 0);
 	EXPECT(ext4_mount(&state->device.environment, &state->fs), EXT4_OK);
+	install_crypto(state);
 	verify(state);
+	if (state->encrypt) {
+		verify_keyless(state);
+	}
 	ext4_unmount(state->fs);
+	CHECK(state->keyring.handles == 0);
 	mount_writer(state);
 	state->remounts++;
 }
@@ -1438,12 +1808,14 @@ execute_with_crash(struct state *state, const struct plan *plan)
 	struct device *device = &state->device;
 	struct ext4_recovery_report report;
 	struct ext4_super_disk *super;
+	uint64_t nonces = state->keyring.nonces;
 	uint32_t clock;
 	uint32_t events;
 	bool committed;
 	enum ext4_result expected;
 	enum ext4_result error;
 
+	/* Each run repeats the plan's nonces, so its encrypted bytes are the same. */
 	clean_snapshot(state, state->pre);
 	clock = state->clock;
 	device_reset(device, state->pre);
@@ -1456,6 +1828,7 @@ execute_with_crash(struct state *state, const struct plan *plan)
 		device_reset(device, state->pre);
 		mount_writer(state);
 		state->clock = clock;
+		state->keyring.nonces = nonces;
 		device->stop_at = device->events + 1U + pick(state, events);
 		device->survival = pick(state, 3);
 		device->partial = pick(state, 2) != 0;
@@ -1487,6 +1860,7 @@ execute_with_crash(struct state *state, const struct plan *plan)
 	device_reset(device, state->pre);
 	mount_writer(state);
 	state->clock = clock;
+	state->keyring.nonces = nonces;
 	error = execute(state, plan, true);
 	CHECK(error == expected);
 	clean_snapshot(state, state->pre);
@@ -1494,6 +1868,88 @@ execute_with_crash(struct state *state, const struct plan *plan)
 	device_reset(device, state->post);
 	mount_writer(state);
 	return expected;
+}
+
+static uint32_t
+setup_directory(struct state *state, const char *name)
+{
+	struct object *root = &state->objects[state->root];
+	struct ext4_inode_update update = creation(state, 0750);
+	struct ext4_timestamp time = now(state);
+	struct ext4_inode inode;
+	uint32_t index;
+
+	EXPECT(ext4_mkdir(state->fs, root->number, root->generation, (const uint8_t *)name,
+		   strlen(name), &update, &time, &inode),
+	    EXT4_OK);
+	index = new_object(state, KIND_DIRECTORY, &inode);
+	add_entry(state, state->root, index, (const uint8_t *)name, strlen(name));
+	state->objects[index].anchor = true;
+	return index;
+}
+
+/* An encrypted directory under a version 2 AES-256-XTS/CTS policy with 32-byte name
+ * padding, the Linux probe's. */
+static void
+setup_vault(struct state *state)
+{
+	struct ext4_encryption_policy policy = { FSCRYPT_V2, EXT4_FSCRYPT_MODE_AES_256_XTS,
+		EXT4_FSCRYPT_MODE_AES_256_CTS, FSCRYPT_PAD_32, { 0 } };
+	struct ext4_inode inode;
+	uint32_t index = setup_directory(state, VAULT_NAME);
+	struct object *vault = &state->objects[index];
+
+	memcpy(policy.identifier, state->keyring.identifier, sizeof(policy.identifier));
+	EXPECT(ext4_set_encryption_policy(
+		   state->fs, vault->number, vault->generation, &policy, &inode),
+	    EXT4_OK);
+	CHECK(inode.flags & EXT4_INODE_ENCRYPT);
+	vault->encrypted = true;
+}
+
+static void
+setup_folded(struct state *state)
+{
+	struct ext4_timestamp time = now(state);
+	struct ext4_inode inode;
+	uint32_t index = setup_directory(state, FOLDED_NAME);
+	struct object *folded = &state->objects[index];
+
+	EXPECT(ext4_set_inode_flags(state->fs, folded->number, folded->generation,
+		   EXT4_INODE_CASEFOLD, EXT4_INODE_CASEFOLD, &time, &inode),
+	    EXT4_OK);
+	folded->casefolded = true;
+}
+
+/* Set the features a sequence exercises on the base image, as tune2fs -O does:
+ * ENCRYPT, VERITY and CASEFOLD with the utf8-12.1 encoding. */
+static void
+enable_features(struct state *state)
+{
+	struct device *device = &state->device;
+	struct ext4_super_disk *super =
+	    (struct ext4_super_disk *)(device->base + EXT4_SUPER_OFFSET);
+	uint32_t incompat = ext4_le32(&super->feature_incompat);
+	uint32_t ro_compat = ext4_le32(&super->feature_ro_compat);
+
+	if (state->encrypt) {
+		incompat |= EXT4_FEATURE_INCOMPAT_ENCRYPT;
+	}
+	if (state->casefold && !(incompat & EXT4_FEATURE_INCOMPAT_CASEFOLD)) {
+		incompat |= EXT4_FEATURE_INCOMPAT_CASEFOLD;
+		ext4_encode16(&super->encoding, EXT4_ENCODING_UTF8_12_1);
+		ext4_encode16(&super->encoding_flags, 0);
+	}
+	if (state->verity) {
+		ro_compat |= EXT4_FEATURE_RO_VERITY;
+	}
+	ext4_encode32(&super->feature_incompat, incompat);
+	ext4_encode32(&super->feature_ro_compat, ro_compat);
+	if (device->metadata_checksum) {
+		ext4_encode32(&super->checksum,
+		    ext4_crc32c(UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum)));
+	}
+	device_reset(device, device->base);
 }
 
 static void
@@ -1514,6 +1970,88 @@ setup_root(struct state *state)
 	state->root = new_object(state, KIND_DIRECTORY, &inode);
 	object = &state->objects[state->root];
 	object->names = 1;
+	if (state->encrypt) {
+		setup_vault(state);
+	}
+	if (state->casefold) {
+		setup_folded(state);
+	}
+}
+
+struct nokey_export {
+	FILE *stream;
+	uint32_t directory;
+};
+
+static enum ext4_dir_action
+visit_nokey_export(void *context, const struct ext4_dir_entry *entry, uint64_t next_cookie)
+{
+	struct nokey_export *export = context;
+
+	(void)next_cookie;
+	if (!(entry->name_length == 1 && entry->name[0] == '.') &&
+	    !(entry->name_length == 2 && entry->name[0] == '.' && entry->name[1] == '.')) {
+		fprintf(export->stream, "nokey %u %u %.*s\n", export->directory, entry->inode,
+		    (int)entry->name_length, (const char *)entry->name);
+	}
+	return EXT4_DIR_ACCEPT;
+}
+
+/* Feature lines follow the names: "encrypted NUMBER" and "casefold NUMBER" mark
+ * objects, "verity NUMBER ALGORITHM BLOCK SALT DIGEST" describes a verity file, with
+ * "-" for no salt, and "nokey DIRECTORY NUMBER NAME" gives each entry of an encrypted
+ * directory as a mount without the key lists it. */
+static void
+write_features(struct state *state, FILE *stream)
+{
+	struct nokey_export export = { stream, 0 };
+	struct ext4_inode inode;
+	struct object *object;
+	uint64_t cookie;
+	uint32_t index;
+	size_t byte;
+
+	for (index = 0; index < OBJECT_LIMIT; index++) {
+		object = &state->objects[index];
+		if (object->kind == KIND_FREE || object->names == 0) {
+			continue;
+		}
+		if (object->encrypted) {
+			fprintf(stream, "encrypted %u\n", object->number);
+		}
+		if (object->casefolded) {
+			fprintf(stream, "casefold %u\n", object->number);
+		}
+		if (object->verity) {
+			fprintf(stream, "verity %u %u %u ", object->number,
+			    object->verity_algorithm, object->verity_block_size);
+			for (byte = 0; byte < object->salt_size; byte++) {
+				fprintf(stream, "%02x", object->salt[byte]);
+			}
+			fprintf(stream, "%s ", object->salt_size == 0 ? "-" : "");
+			for (byte = 0; byte < object->digest_size; byte++) {
+				fprintf(stream, "%02x", object->digest[byte]);
+			}
+			fprintf(stream, "\n");
+		}
+	}
+	if (!state->encrypt) {
+		return;
+	}
+	EXPECT(ext4_mount(&state->device.environment, &state->fs), EXT4_OK);
+	for (index = 0; index < OBJECT_LIMIT; index++) {
+		object = &state->objects[index];
+		if (object->kind != KIND_DIRECTORY || !object->encrypted || object->names == 0) {
+			continue;
+		}
+		EXPECT(ext4_get_inode(state->fs, object->number, &inode), EXT4_OK);
+		export.directory = object->number;
+		cookie = 0;
+		EXPECT(ext4_iterate_dir(state->fs, &inode, &cookie, visit_nokey_export, &export),
+		    EXT4_NOT_FOUND);
+	}
+	ext4_unmount(state->fs);
+	CHECK(state->device.live == 0);
 }
 
 static void
@@ -1590,6 +2128,7 @@ write_manifest(struct state *state, const char *directory)
 			}
 		}
 	}
+	write_features(state, stream);
 	CHECK(fclose(stream) == 0);
 }
 
@@ -1603,6 +2142,9 @@ report_shape(struct state *state)
 	uint32_t entries = 0;
 	uint32_t widest = 0;
 	uint32_t indexed = 0;
+	uint32_t encrypted = 0;
+	uint32_t casefolded = 0;
+	uint32_t verity = 0;
 	uint32_t index;
 	struct object *object;
 
@@ -1611,6 +2153,9 @@ report_shape(struct state *state)
 	}
 	for (index = 0; index < OBJECT_LIMIT; index++) {
 		object = &state->objects[index];
+		encrypted += object->encrypted;
+		casefolded += object->casefolded;
+		verity += object->verity;
 		if (object->kind == KIND_DIRECTORY) {
 			EXPECT(ext4_get_inode(state->fs, object->number, &inode), EXT4_OK);
 			indexed += (inode.flags & INDEX_FLAG) != 0;
@@ -1623,8 +2168,9 @@ report_shape(struct state *state)
 	}
 	ext4_get_info(state->fs, &info);
 	printf("SHAPE entries=%u widest=%u indexed=%u file_bytes=%" PRIu64 " free_blocks=%" PRIu64
-	       " blocks=%" PRIu64 " no_space=%u\n",
-	    entries, widest, indexed, bytes, info.free_blocks, info.blocks, state->no_space);
+	       " blocks=%" PRIu64 " no_space=%u encrypted=%u casefolded=%u verity=%u\n",
+	    entries, widest, indexed, bytes, info.free_blocks, info.blocks, state->no_space,
+	    encrypted, casefolded, verity);
 }
 
 static uint32_t
@@ -1658,7 +2204,8 @@ main(int argc, char **argv)
 		fprintf(stderr,
 		    "usage: %s IMAGE SEED OPERATIONS [--objects N] [--entries N] "
 		    "[--directories N] [--commit-blocks N] [--checkpoint-blocks N] "
-		    "[--data journal|ordered] [--export DIRECTORY]\n",
+		    "[--data journal|ordered] [--encrypt] [--verity] [--casefold] "
+		    "[--no-ballast] [--export DIRECTORY]\n",
 		    argv[0]);
 		return 2;
 	}
@@ -1669,6 +2216,26 @@ main(int argc, char **argv)
 	state.entry_limit = DEFAULT_ENTRIES;
 	state.directory_limit = DEFAULT_DIRECTORIES;
 	for (argument = 4; argument < argc; argument += 2) {
+		if (strcmp(argv[argument], "--encrypt") == 0) {
+			state.encrypt = true;
+			argument--;
+			continue;
+		}
+		if (strcmp(argv[argument], "--verity") == 0) {
+			state.verity = true;
+			argument--;
+			continue;
+		}
+		if (strcmp(argv[argument], "--casefold") == 0) {
+			state.casefold = true;
+			argument--;
+			continue;
+		}
+		if (strcmp(argv[argument], "--no-ballast") == 0) {
+			state.no_ballast = true;
+			argument--;
+			continue;
+		}
 		CHECK(argument + 1 < argc);
 		if (strcmp(argv[argument], "--objects") == 0) {
 			state.object_limit = parse_number(argv[argument + 1]);
@@ -1702,6 +2269,8 @@ main(int argc, char **argv)
 	CHECK(state.pre != NULL && state.post != NULL && state.buffer != NULL &&
 	    state.ballast != NULL);
 	fill_pattern(state.ballast, seed, BALLAST_BYTES);
+	keyring_init(&state.keyring, KEYRING_OFFSET);
+	enable_features(&state);
 	mount_writer(&state);
 	ext4_get_info(state.fs, &info);
 	state.block_size = info.block_size;
@@ -1749,10 +2318,11 @@ main(int argc, char **argv)
 	}
 	printf("PASS %u operations seed=%" PRIu64 " objects=%u entries=%u directories=%u "
 	       "verifications=%u remounts=%u crashes=%u committed=%u torn=%u commit_blocks=%u "
-	       "checkpoint_blocks=%u commits=%u\n",
+	       "checkpoint_blocks=%u commits=%u encrypt=%d verity=%d casefold=%d keyless=%u\n",
 	    operations, seed, state.object_limit, state.entry_limit, state.directory_limit,
 	    state.verifications, state.remounts, state.crashes, state.crash_committed,
-	    state.torn_superblocks, state.commit_blocks, state.checkpoint_blocks, state.commits);
+	    state.torn_superblocks, state.commit_blocks, state.checkpoint_blocks, state.commits,
+	    state.encrypt, state.verity, state.casefold, state.keyless_checks);
 	for (index = 0; index < OP_COUNT; index++) {
 		printf("%s performed=%u rejected=%u\n", operation_names[index],
 		    state.performed[index], state.rejected[index]);

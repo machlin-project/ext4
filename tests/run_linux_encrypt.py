@@ -89,6 +89,7 @@ def main():
     source_index = compile_command.index(str(ROOT / 'tests/linux_external_journal.c'))
     source = output / 'probe-source.c'
     shutil.copyfile(ROOT / 'tests/linux_encrypt.c', source)
+    shutil.copyfile(ROOT / 'tests/linux_sha256.h', output / 'linux_sha256.h')
     compile_command[source_index] = str(source)
     compile_command[-1] = str(output / 'init')
     run(prep, compile_command)
