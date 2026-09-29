@@ -209,9 +209,10 @@ do not enable kernel SIMD just because userspace instructions are available. The
 current change deliberately adds no platform-instruction dependency. Optimizing the
 reference AES in `tests/crypto.h` would not accelerate a production adapter.
 
-The immediate algorithm candidates after profiling are repeated mapping walks in
-encrypted reads and avoidable base-device reads fully covered by pending journal
-snapshots. Both require ownership/error-path tests before changing behavior.
+The held-read pass below also gives encrypted reads the shared mapping cursor;
+its encryption throughput has not been benchmarked. Avoidable base-device reads
+fully covered by pending journal snapshots remain a profiling candidate, requiring
+ownership/error-path tests before changing behavior.
 Larger journal decomposition should follow these ownership boundaries and have a
 separate behavioral acceptance; moving code between files alone is not a speedup.
 
@@ -372,8 +373,25 @@ refresh failure, EOF, revision wrap, abort and lifetime. Existing removal tests
 now read through held snapshots across growth, unlink and truncation. Sustained
 model tests also verify retained reads before explicit refresh across range
 mutations, deferred/ordered/direct publication, encryption and verity. The O2
-freestanding core compiled within the 2 KiB frame budget. The full regression
-and unsigned native compilation results are pending collection for this batch.
+freestanding core compiled within the 2 KiB frame budget. The full ASan/UBSan
+regression passed **712/712 tests** in 21 minutes 30 seconds, with no failed or
+whole-test skipped cases. Tests reported 29 applicability skips separately: two
+for inode-body attributes on 128-byte inodes and 27 for directory-split transitions
+assigned to other fixture profiles. Hashes of 167 source/build-input files and
+seven selected binaries/libraries stayed unchanged across the run. Unsigned
+arm64e and x86_64 kext builds and the unsigned FSKit build passed; these are compile
+checks, not installed extension, mount or native I/O acceptance.
+
+The first GitHub run passed eight of nine jobs. The format job failed when
+independent `e2fsck -fn` rejected the mutated 1 KiB relaxed-casefold image, after
+the core's functional casefold checks passed. The checker previously lost fsck's
+stdout and did not preserve the failing image, so that run cannot establish the
+cause. Both existing local exports and eight freshly generated relaxed-casefold
+exports passed fsck. The checker now saves command results before raising errors,
+includes stdout in the failure log and preserves the rejected image as a CI
+artifact. The format-only diagnostic run passed its complete job in 15 minutes
+4 seconds, including the independent casefold step;
+the original failure remains unexplained, not a verified filesystem fix.
 
 The single guest boot passed all 140 sample rows, completed byte verification,
 powered off cleanly and left the image unchanged. Its exact preparation, source

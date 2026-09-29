@@ -29,6 +29,9 @@ is separate from byte delivery. Transactions invalidate cached snapshots before
 publication; explicit refresh, memory-pressure discard, release and unmount own
 cleanup. Stateless `ext4_read` retains its original contract. Native adapters do
 not yet use this API; integrate it only with their owning lifetime/serialization.
+FSKit byte reads can use the held-read entry point. XNU/LXNU must retain native
+UBC/cluster I/O and would need held mapping queries to share the leaf cache with
+block-map requests, rather than routing regular I/O around the native page cache.
 
 Sparse warm random core throughput is 15,222.5 MiB/s versus Linux's 9,654.0 MiB/s:
 57.7% faster, with every pair at least 55.4% faster. It is 8.11 times the prior core
@@ -39,6 +42,13 @@ cache and charge reconstruction. Do not claim an overall Linux or native-adapter
 win, or rerun timing qualification without an invalidating change. Sparse warm
 sequential I/O still makes one backend call per data extent; physical adjacency
 across holes is a possible bounded batching opportunity, not an accepted change.
+
+The held-read batch passed the full 712-test ASan/UBSan regression and unsigned
+FSKit plus arm64e/x86_64 kext compilation. Do not repeat those checks for report or
+CI-diagnostic changes. The original CI format job rejected one mutated relaxed
+casefold image; its stdout and image were lost by the old checker. Local reruns
+and the complete diagnostic CI format job passed. Preserve this as an unexplained
+failure: improved logging and a passing rerun do not prove a filesystem fix.
 
 Both adapters remain read-only. FSKit integration precedes LXNU policy; signing
 is deferred. No host kernel, boot-policy, NVRAM or system-file changes are authorized.
