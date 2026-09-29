@@ -113,6 +113,24 @@ recovery marker. Any uncertain write or barrier aborts the instance. Closing an
 aborted journal only releases memory, leaving recovery evidence on disk. The
 owner must finish or cancel its active transaction before closing the journal.
 
+A writable owner may instead defer commits through
+`ext4_write_options.commit_blocks`, as Linux's jbd2 running transaction does. Each
+mutation still builds and validates its private transaction, which a failure cancels
+without effect. When it completes, its snapshots replace their blocks in one compound
+transaction, all or nothing: buffers for new blocks are allocated before any copy.
+The compound holds at most commit_blocks snapshots, never more than the recovery
+bound of half the ring and 32 MiB. Every device read, including file data and the
+next mutation's own reads, overlays the compound's blocks, so the owner sees its
+completed mutations; only the journal's recovery-marker update reads the committed
+superblock. The compound becomes durable as one ordinary JBD2 transaction on
+`ext4_commit`, on `ext4_sync`, or when the next mutation would not fit, and a
+mutation larger than the compound commits on its own after it. A power cut loses the
+mutations after the last durable commit and never exposes part of one; recovery is
+unchanged. Quota differences are applied as a mutation joins the compound, against
+the state it overlays. Recovery conversions, such as fast-commit replay, always commit
+durably. unmount discards pending mutations, as power loss would, so adapters commit
+on fsync and sync before unmount. File data stays journaled in this mode.
+
 Recovery checks the committed prefix before changing home blocks, records bounded
 replay locations and applies the last committed event for each block. A revoke
 wins against data from its own transaction and earlier transactions; a later

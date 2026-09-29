@@ -147,6 +147,9 @@ struct state {
 	uint32_t holds;
 	uint32_t clock;
 	uint32_t block_size;
+	/* Deferred commit capacity; zero commits every operation durably. */
+	uint32_t commit_blocks;
+	uint32_t commits;
 	bool extents;
 	bool crashing;
 	uint32_t performed[OP_COUNT];
@@ -1349,8 +1352,27 @@ verify(struct state *state)
 static void
 mount_writer(struct state *state)
 {
-	EXPECT(ext4_mount_writable(&state->device.environment, &state->device.writer, &state->fs),
+	struct ext4_write_options options = { state->commit_blocks };
+
+	EXPECT(ext4_mount_writable_with_options(
+		   &state->device.environment, &state->device.writer, NULL, &options, &state->fs),
 	    EXT4_OK);
+}
+
+/* Under deferred commit, a measured operation ends with an explicit commit, so its
+ * power cuts land in the commit that makes it durable. */
+static enum ext4_result
+execute_durable(struct state *state, const struct plan *plan, bool apply)
+{
+	enum ext4_result error = execute(state, plan, apply);
+	enum ext4_result commit;
+
+	if (state->commit_blocks == 0) {
+		return error;
+	}
+	commit = ext4_commit(state->fs);
+	state->commits++;
+	return commit != EXT4_OK ? commit : error;
 }
 
 static void
@@ -1415,7 +1437,7 @@ execute_with_crash(struct state *state, const struct plan *plan)
 	device_reset(device, state->pre);
 	mount_writer(state);
 	events = device->events;
-	expected = execute(state, plan, false);
+	expected = execute_durable(state, plan, false);
 	events = device->events - events;
 	clean_snapshot(state, state->post);
 	if (events != 0) {
@@ -1426,7 +1448,7 @@ execute_with_crash(struct state *state, const struct plan *plan)
 		device->survival = pick(state, 3);
 		device->partial = pick(state, 2) != 0;
 		state->crashing = true;
-		error = execute(state, plan, false);
+		error = execute_durable(state, plan, false);
 		state->crashing = false;
 		CHECK(device->off && error != EXT4_OK && error != expected);
 		ext4_unmount(state->fs);
@@ -1623,7 +1645,7 @@ main(int argc, char **argv)
 	if (argc < 4) {
 		fprintf(stderr,
 		    "usage: %s IMAGE SEED OPERATIONS [--objects N] [--entries N] "
-		    "[--directories N] [--export DIRECTORY]\n",
+		    "[--directories N] [--commit-blocks N] [--export DIRECTORY]\n",
 		    argv[0]);
 		return 2;
 	}
@@ -1641,6 +1663,8 @@ main(int argc, char **argv)
 			state.entry_limit = parse_number(argv[argument + 1]);
 		} else if (strcmp(argv[argument], "--directories") == 0) {
 			state.directory_limit = parse_number(argv[argument + 1]);
+		} else if (strcmp(argv[argument], "--commit-blocks") == 0) {
+			state.commit_blocks = parse_number(argv[argument + 1]);
 		} else if (strcmp(argv[argument], "--export") == 0) {
 			export_directory = argv[argument + 1];
 		} else {
@@ -1703,10 +1727,11 @@ main(int argc, char **argv)
 		free(state.objects[index].data);
 	}
 	printf("PASS %u operations seed=%" PRIu64 " objects=%u entries=%u directories=%u "
-	       "verifications=%u remounts=%u crashes=%u committed=%u torn=%u\n",
+	       "verifications=%u remounts=%u crashes=%u committed=%u torn=%u commit_blocks=%u "
+	       "commits=%u\n",
 	    operations, seed, state.object_limit, state.entry_limit, state.directory_limit,
 	    state.verifications, state.remounts, state.crashes, state.crash_committed,
-	    state.torn_superblocks);
+	    state.torn_superblocks, state.commit_blocks, state.commits);
 	for (index = 0; index < OP_COUNT; index++) {
 		printf("%s performed=%u rejected=%u\n", operation_names[index],
 		    state.performed[index], state.rejected[index]);

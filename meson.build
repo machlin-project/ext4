@@ -60,6 +60,7 @@ foreach name, source : {
   'write': 'write', 'write-partial': 'write_partial', 'write-growth': 'write_growth',
   'file-range': 'file_range', 'large-file': 'large_file', 'large-volume': 'large_volume', 'inode-flags': 'inode_flags',
   'namespace': 'namespace', 'removal': 'removal', 'sustained': 'sustained', 'mmp': 'mmp',
+  'deferred': 'deferred',
   'verity': 'verity', 'encrypt': 'encrypt', 'casefold': 'casefold', 'casefold-fs': 'casefold_fs', 'quota': 'quota',
   'rename': 'rename', 'orphan': 'orphan',
 }

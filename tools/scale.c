@@ -55,6 +55,8 @@ struct sample {
 };
 
 static const struct ext4_timestamp scale_time = { SCALE_SECONDS, 0 };
+/* Zero commits every mutation durably; otherwise mutations share deferred commits. */
+static struct ext4_write_options write_options;
 static uint64_t random_state = UINT64_C(0x853c49e6748fea9b);
 
 static void
@@ -322,6 +324,14 @@ fill(struct ext4_fs *fs, const struct ext4_inode *file, uint64_t size, size_t re
 }
 
 static void
+mount_writer(struct device *device, struct ext4_fs **fs)
+{
+	expect(ext4_mount_writable_with_options(
+		   &device->environment, &device->writer, NULL, &write_options, fs),
+	    "mount");
+}
+
+static void
 sequential(struct device *device, uint64_t mebibytes, size_t request)
 {
 	struct sample sample;
@@ -338,7 +348,7 @@ sequential(struct device *device, uint64_t mebibytes, size_t request)
 	char extra[64];
 
 	require(buffer != NULL, "allocate request buffer");
-	expect(ext4_mount_writable(&device->environment, &device->writer, &fs), "mount");
+	mount_writer(device, &fs);
 	directory = root(fs);
 	file = make_file(fs, &directory, "sequential");
 	snprintf(extra, sizeof(extra), ", \"request_bytes\": %zu", request);
@@ -383,7 +393,7 @@ directories(struct device *device, uint32_t entries)
 	char extra[64];
 	uint32_t index;
 
-	expect(ext4_mount_writable(&device->environment, &device->writer, &fs), "mount");
+	mount_writer(device, &fs);
 	parent = root(fs);
 	directory = make_directory(fs, &parent, "many");
 	begin(device, &sample);
@@ -392,6 +402,8 @@ directories(struct device *device, uint32_t entries)
 		snprintf(name, sizeof(name), "entry-%07u", index);
 		make_file(fs, &directory, name);
 		if ((index + 1U) % DIRECTORY_BATCH == 0) {
+			/* Each batch report includes making its creations durable. */
+			expect(ext4_commit(fs), "commit");
 			snprintf(extra, sizeof(extra), ", \"entries_after\": %u", index + 1U);
 			report(
 			    "directory-create-batch", extra, device, &batch, DIRECTORY_BATCH, 0, 0);
@@ -433,7 +445,7 @@ fragmented(struct device *device, uint32_t files, uint64_t mebibytes)
 	size_t completed;
 
 	require(buffer != NULL, "allocate request buffer");
-	expect(ext4_mount_writable(&device->environment, &device->writer, &fs), "mount");
+	mount_writer(device, &fs);
 	parent = root(fs);
 	directory = make_directory(fs, &parent, "fragments");
 	for (index = 0; index < files; index++) {
@@ -483,7 +495,7 @@ reclamation(struct device *device, uint64_t mebibytes)
 	uint8_t *buffer = malloc(MEBIBYTE);
 
 	require(buffer != NULL, "allocate request buffer");
-	expect(ext4_mount_writable(&device->environment, &device->writer, &fs), "mount");
+	mount_writer(device, &fs);
 	parent = root(fs);
 	file = make_file(fs, &parent, "orphan");
 	fill(fs, &file, mebibytes * MEBIBYTE, MEBIBYTE, buffer);
@@ -506,9 +518,15 @@ main(int argc, char **argv)
 {
 	static struct device device;
 
+	if (argc >= 3 && strcmp(argv[1], "--commit-blocks") == 0) {
+		write_options.commit_blocks = (uint32_t)strtoul(argv[2], NULL, 10);
+		argv += 2;
+		argc -= 2;
+	}
 	if (argc != 4 && argc != 5) {
 		fprintf(stderr,
-		    "usage: %s IMAGE sequential|directory|fragmented|reclamation SIZE [RESULT]\n"
+		    "usage: %s [--commit-blocks N] IMAGE sequential|directory|fragmented|"
+		    "reclamation SIZE [RESULT]\n"
 		    "SIZE is MiB, except entries for directory and files for fragmented.\n"
 		    "RESULT receives the image after the workload.\n",
 		    argv[0]);

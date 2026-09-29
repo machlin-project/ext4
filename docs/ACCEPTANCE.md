@@ -43,7 +43,7 @@ counted as portable-core implementation.
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
 | Format compatibility | Key-based encryption and enabling verity through adapter-supplied cryptography; unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | Recovering volumes whose Linux fast-commit replay was interrupted needs a replay-authority decision; until then the core refuses torn bitmap and inode checksums and leaves the log pending | Open; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay of two native captures are accepted, and the torn states of two range-heavy captures fail closed (see "Fast-commit combinations and interrupted foreign replay evidence" and "Interrupted Linux replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
-| Scale and sustained operation | Indexed operations still classify the whole index tree; decisions on larger live transactions, ordered data writes and group commit | Open; measured workloads show bounded peak memory, about 2.1 times device writes for journaled data and five barriers per operation, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence" and "Sustained operation and fuzzing evidence") |
+| Scale and sustained operation | Indexed operations still classify the whole index tree; ordered data writes and lazy checkpointing for the deferred commit mode | Open; measured workloads show bounded peak memory, about 2.1 times device writes for journaled data and five barriers per operation, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence" and "Sustained operation and fuzzing evidence") |
 
 MMP, fs-verity reading with protected writable metadata, encrypted volumes without
 keys, casefolded directories and quota/project accounting are implemented. Quota
@@ -140,6 +140,31 @@ inline-data inode's internal `system.data` key, as its contract states. A volume
 without a journal and a revision-0 ext2 volume are read correctly and refuse
 writable mounting. Multi-mount protection needs the adapter's sleep operation and
 retains its own format tests.
+
+## Deferred commit evidence
+
+With `commit_blocks`, completed mutations share one compound JBD2 transaction.
+`ext4-deferred-test` runs 24 mutations, including a rename, links, an attribute
+change, a truncation and two removals with reclamation: no device write happens
+before `ext4_commit`, reads see every mutation, and each of the 113 to 121 writes and
+barriers of the commit, cut under three survival modes, recovers the image before or
+after the whole sequence. With a 24-block compound, four or five capacity commits
+happen mid-sequence and every one of the 155 to 202 cuts recovers exactly one
+commit-point image. It passes on the ten write fixtures, the quota, inline-data,
+64 KiB BIGALLOC and META_BG volumes, and strict fsck, which recomputes quota usage,
+accepts the exported results. Twenty-four sustained runs of 3,000 to 4,000 operations
+with 48- and 256-block compounds pass, including the model's walks through pending
+mutations and power cuts in each measured commit.
+
+On the 1 GiB scale volumes a 2,048-block compound reduces 50,000 creations from
+802,555 device writes and 250,001 barriers to 8,888 and 27 with 4 KiB blocks, and
+from 813,177 and 250,001 to 51,698 and 72 with 1 KiB blocks; 1,000 random 64 KiB
+overwrites need 42 barriers instead of 5,002, and truncating 256 MiB writes 18
+blocks instead of 270. Peak core allocation grows to the compound's 8 MiB of 4 KiB
+snapshots. Times on the in-memory device are unchanged within noise, because they
+exclude the device's flush latency that the barriers save. File data remains
+journaled, so writes keep their 2.1 times amplification. The complete 667-test
+regression passes (`artifacts/checks/scale-regression-15/`).
 
 ## Sustained operation and fuzzing evidence
 

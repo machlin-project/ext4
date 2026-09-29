@@ -318,9 +318,27 @@ enum ext4_result ext4_mount_writable(const struct ext4_environment *environment,
 enum ext4_result ext4_mount_writable_with_journal(const struct ext4_environment *environment,
     const struct ext4_write_environment *writer, const struct ext4_journal_environment *journal,
     struct ext4_fs **result);
-/* Mutations are synchronous durable transactions. sync also clears the recovery
- * marker. unmount only releases memory; call sync first for a clean shutdown.
- * An uncertain commit poisons the instance, including reads: unmount and recover. */
+
+/* Commit policy of a writable owner. With commit_blocks zero, each mutation is its
+ * own synchronous durable transaction. Otherwise completed mutations join a compound
+ * transaction of at most commit_blocks metadata snapshots, as Linux's jbd2 running
+ * transaction does, and every later read sees them. The compound becomes durable as
+ * one journal transaction on ext4_commit or ext4_sync, or when the next mutation
+ * would not fit. A power cut loses the mutations after the last durable commit and
+ * never applies one partially. commit_blocks may not exceed the recovery bound of
+ * the journal, half its ring and 32 MiB of blocks. */
+struct ext4_write_options {
+	uint32_t commit_blocks;
+};
+enum ext4_result ext4_mount_writable_with_options(const struct ext4_environment *environment,
+    const struct ext4_write_environment *writer, const struct ext4_journal_environment *journal,
+    const struct ext4_write_options *options, struct ext4_fs **result);
+/* Make every completed mutation durable, as fsync does, without clearing the recovery
+ * marker. With synchronous commits it writes nothing. */
+enum ext4_result ext4_commit(struct ext4_fs *fs);
+/* Commit and also clear the recovery marker. unmount only releases memory and
+ * discards uncommitted mutations; call sync first for a clean shutdown. An
+ * uncertain commit poisons the instance, including reads: unmount and recover. */
 enum ext4_result ext4_sync(struct ext4_fs *fs);
 /* Inspect fresh, generation-checked xattrs without writing. Names exclude their
  * namespace prefix and have no trailing NUL; values are opaque bytes, including

@@ -22,6 +22,14 @@ ext4_mount_writable_with_journal(const struct ext4_environment *environment,
     const struct ext4_write_environment *writer, const struct ext4_journal_environment *journal,
     struct ext4_fs **result)
 {
+	return ext4_mount_writable_with_options(environment, writer, journal, NULL, result);
+}
+
+enum ext4_result
+ext4_mount_writable_with_options(const struct ext4_environment *environment,
+    const struct ext4_write_environment *writer, const struct ext4_journal_environment *journal,
+    const struct ext4_write_options *options, struct ext4_fs **result)
+{
 	struct ext4_fs *fs;
 	enum ext4_result error;
 
@@ -53,6 +61,13 @@ ext4_mount_writable_with_journal(const struct ext4_environment *environment,
 	if (error == EXT4_OK) {
 		error = ext4_quota_open(fs);
 	}
+	if (error == EXT4_OK && options != NULL && options->commit_blocks != 0) {
+		if (options->commit_blocks > ext4_journal_compound_limit(fs->journal)) {
+			error = EXT4_RANGE;
+		} else {
+			fs->journal->compound_blocks = options->commit_blocks;
+		}
+	}
 	if (error != EXT4_OK) {
 		ext4_unmount(fs);
 		return error;
@@ -60,6 +75,30 @@ ext4_mount_writable_with_journal(const struct ext4_environment *environment,
 	fs->validated_maps_enabled = true;
 	*result = fs;
 	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_commit(struct ext4_fs *fs)
+{
+	enum ext4_result error;
+
+	if (fs == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
+	if (fs->journal == NULL) {
+		return EXT4_OK;
+	}
+	error = ext4_mmp_guard(fs);
+	if (error == EXT4_OK) {
+		error = ext4_journal_commit(fs->journal);
+	}
+	if (error != EXT4_OK) {
+		fs->aborted = true;
+	}
+	return error;
 }
 
 enum ext4_result
@@ -76,7 +115,7 @@ ext4_sync(struct ext4_fs *fs)
 	if (fs->journal == NULL) {
 		return EXT4_OK;
 	}
-	error = ext4_mmp_guard(fs);
+	error = ext4_commit(fs);
 	if (error != EXT4_OK) {
 		return error;
 	}

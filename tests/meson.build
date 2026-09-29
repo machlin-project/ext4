@@ -495,6 +495,8 @@ foreach profile : ['4k', '1k']
     args: ['--checksum-v1', '--async', paths['fixtures'] / ('ext4-' + profile + '.img')], timeout: 300, suite: 'core')
 endforeach
 test('inode-and-file-write', programs['write'], args: write_images, timeout: 300, suite: 'core')
+# Deferred group commit: visibility, atomic multi-operation commits and capacity commits.
+test('deferred-commit', programs['deferred'], args: write_images, timeout: 900, suite: 'core')
 test('file-write-partial', programs['write-partial'], args: write_images, timeout: 300, suite: 'core')
 foreach name : write_names
   test('file-range-' + name, programs['file-range'], args: paths['fixtures'] / name,
@@ -642,6 +644,15 @@ if paths['format_fixtures'] != ''
     sustained_seed += 1
   endforeach
 endif
+foreach name : ['ext4-4k.img', 'ext4-1k.img']
+  foreach blocks : ['48', '256']
+    test('sustained-deferred-' + blocks + '-' + name, programs['sustained'],
+      args: [paths['fixtures'] / name, sustained_seed.to_string(), '3000', '--commit-blocks',
+        blocks],
+      timeout: 600, suite: 'sustained')
+    sustained_seed += 1
+  endforeach
+endforeach
 foreach name : ['ext4-4k.img', 'ext4-1k.img']
   test('sustained-wide-' + name, programs['sustained'],
     args: [paths['fixtures'] / name, sustained_seed.to_string(), '8000', '--objects', '1000',

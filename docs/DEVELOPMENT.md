@@ -113,6 +113,17 @@ part in this byte comparison because their durable prefix or orphan lifetime is
 not one of two images. Ballast files fill the volume with seeded data, so writes,
 growth and namespace operations also run near and at allocation exhaustion.
 
+`--commit-blocks N` mounts with deferred commit of at most N snapshots; each
+power-cut case then ends with `ext4_commit`, so its cuts land in the commit, while the
+other operations accumulate between commits and the model's walks read them through
+the pending overlay. `ext4-deferred-test [--export DIRECTORY] IMAGE...` runs a fixed
+sequence of 24 mutations in one compound: nothing may reach the device before
+`ext4_commit`, every write and barrier of that commit is cut under three survival
+modes and recovery must yield the image before or after the whole sequence; with a
+24-block compound, capacity commits happen mid-sequence and every cut must recover
+exactly one commit-point image. `ext4-scale --commit-blocks N` measures the workloads
+with deferred commit.
+
 `tests/generate_format_fixtures.py --tools-root E2FSPROGS_BUILD --output NEW`
 authors one volume per optional format feature or geometry, and the `format_fixtures`
 option adds a sustained case for each.

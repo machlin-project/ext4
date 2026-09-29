@@ -136,6 +136,10 @@ struct ext4_journal {
 	bool checksum_v1;
 	bool aborted;
 	bool transaction_active;
+	/* Deferred commit: operations completed since the last durable commit, at
+	 * most compound_blocks snapshots. Zero commits every operation durably. */
+	struct ext4_transaction *compound;
+	uint32_t compound_blocks;
 };
 
 struct ext4_transaction;
@@ -197,6 +201,14 @@ enum ext4_result ext4_transaction_commit(struct ext4_transaction *transaction);
 /* A commit refused before any write, such as by quota enforcement, cancelled the
  * transaction and leaves the journal and its owner usable. */
 bool ext4_commit_rejected(enum ext4_result error);
+/* With deferred commit, make every merged operation durable as one transaction and
+ * checkpoint it. Without pending operations it writes nothing. */
+enum ext4_result ext4_journal_commit(struct ext4_journal *journal);
+/* Copy the pending operations' blocks over a device read of [offset, offset+length). */
+void ext4_journal_overlay(
+    const struct ext4_journal *journal, uint64_t offset, void *buffer, size_t length);
+/* The largest compound transaction the log and recovery memory bound admit. */
+uint32_t ext4_journal_compound_limit(const struct ext4_journal *journal);
 void ext4_transaction_cancel(struct ext4_transaction *transaction);
 
 /* Shared journal/recovery implementation, never exported to platform adapters. */

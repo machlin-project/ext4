@@ -20,6 +20,10 @@ struct ext4_transaction {
 	uint32_t sequence;
 	bool capacity_failed;
 	bool quota_phase;
+	/* Recovery conversions commit durably even under deferred commit. */
+	bool recovery;
+	/* The journal's pending deferred commit, not an operation's transaction. */
+	bool compound;
 	struct ext4_transaction_entry entries[];
 };
 
@@ -671,6 +675,11 @@ ext4_journal_close(struct ext4_journal *journal)
 		fs->environment.release(
 		    fs->environment.context, journal->data, fs->info.block_size);
 	}
+	/* Operations still pending in a deferred commit are lost, as on power loss. */
+	if (journal->compound != NULL) {
+		ext4_transaction_cancel(journal->compound);
+		journal->compound = NULL;
+	}
 	fs->writer_attached = false;
 	fs->environment.release(fs->environment.context, journal, sizeof(*journal));
 }
@@ -720,7 +729,9 @@ ext4_journal_set_recovery(struct ext4_journal *journal, bool recovery)
 	uint32_t checksum;
 	enum ext4_result error;
 
-	error = ext4_block_read(fs, EXT4_SUPER_OFFSET / fs->info.block_size, journal->data);
+	/* The recovery marker changes only the committed superblock. */
+	error =
+	    ext4_block_read_committed(fs, EXT4_SUPER_OFFSET / fs->info.block_size, journal->data);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -778,7 +789,8 @@ ext4_journal_set_recovery(struct ext4_journal *journal, bool recovery)
 enum ext4_result
 ext4_journal_finish(struct ext4_journal *journal)
 {
-	if (journal == NULL || journal->transaction_active) {
+	if (journal == NULL || journal->transaction_active ||
+	    (journal->compound != NULL && journal->compound->count != 0)) {
 		return EXT4_INVALID_ARGUMENT;
 	}
 	if (journal->aborted) {
@@ -897,6 +909,7 @@ ext4_transaction_create(struct ext4_journal *journal, uint32_t credits, bool rec
 	transaction->credits = credits;
 	transaction->capacity = capacity;
 	transaction->sequence = recovery ? sequence : journal->sequence;
+	transaction->recovery = recovery;
 	journal->transaction_active = true;
 	*result = transaction;
 	return EXT4_OK;
@@ -1140,7 +1153,9 @@ ext4_transaction_cancel(struct ext4_transaction *transaction)
 		fs->environment.release(fs->environment.context, transaction->entries[index].buffer,
 		    fs->info.block_size);
 	}
-	transaction->journal->transaction_active = false;
+	if (!transaction->compound) {
+		transaction->journal->transaction_active = false;
+	}
 	size = ext4_transaction_size(transaction->capacity);
 	fs->environment.release(fs->environment.context, transaction, size);
 }
@@ -1270,32 +1285,42 @@ ext4_commit_rejected(enum ext4_result error)
 	return error == EXT4_QUOTA_EXCEEDED;
 }
 
-enum ext4_result
-ext4_transaction_commit(struct ext4_transaction *transaction)
+/* Publish the free counters from the transaction's superblock; several allocation
+ * contexts, such as private value inodes and quota growth, can share one. */
+static void
+ext4_transaction_publish(const struct ext4_transaction *transaction)
 {
-	struct ext4_journal *journal;
-	struct ext4_jbd_commit *commit;
+	struct ext4_fs *fs = transaction->journal->fs;
 	const struct ext4_super_disk *super;
+	uint32_t index;
+
+	for (index = 0; index < transaction->count; index++) {
+		if (transaction->entries[index].block != EXT4_SUPER_OFFSET / fs->info.block_size) {
+			continue;
+		}
+		super =
+		    (const struct ext4_super_disk *)((const uint8_t *)transaction->entries[index]
+							 .buffer +
+			EXT4_SUPER_OFFSET % fs->info.block_size);
+		fs->info.free_inodes = ext4_le32(&super->free_inodes);
+		fs->info.free_blocks = ext4_le32(&super->free_blocks_lo);
+		if (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
+			fs->info.free_blocks |= (uint64_t)ext4_le32(&super->free_blocks_hi) << 32;
+		}
+	}
+}
+
+/* Log, commit and checkpoint one transaction, then release it. */
+static enum ext4_result
+ext4_transaction_durable(struct ext4_transaction *transaction)
+{
+	struct ext4_journal *journal = transaction->journal;
+	struct ext4_jbd_commit *commit;
 	uint32_t commit_block = 0;
 	uint32_t transaction_checksum = UINT32_MAX;
 	uint32_t index;
 	enum ext4_result error;
 
-	if (transaction == NULL) {
-		return EXT4_INVALID_ARGUMENT;
-	}
-	journal = transaction->journal;
-	if (transaction->count == 0) {
-		ext4_transaction_cancel(transaction);
-		return EXT4_OK;
-	}
-	/* Quota usage follows the inode records this transaction commits. */
-	transaction->quota_phase = true;
-	error = ext4_quota_commit(transaction);
-	if (error != EXT4_OK) {
-		ext4_transaction_cancel(transaction);
-		return error;
-	}
 	ext4_transaction_prepare_super(transaction);
 	error = ext4_journal_set_recovery(journal, true);
 	if (error == EXT4_OK) {
@@ -1345,25 +1370,236 @@ ext4_transaction_commit(struct ext4_transaction *transaction)
 	if (error != EXT4_OK) {
 		journal->aborted = true;
 	} else {
-		/* Several allocation contexts, such as private value inodes and quota
-		 * growth, can share one transaction. Publish the free counters from the
-		 * committed superblock only after checkpoint. */
-		for (index = 0; index < transaction->count; index++) {
-			if (transaction->entries[index].block !=
-			    EXT4_SUPER_OFFSET / journal->fs->info.block_size) {
-				continue;
-			}
-			super = (const struct ext4_super_disk
-				*)((const uint8_t *)transaction->entries[index].buffer +
-			    EXT4_SUPER_OFFSET % journal->fs->info.block_size);
-			journal->fs->info.free_inodes = ext4_le32(&super->free_inodes);
-			journal->fs->info.free_blocks = ext4_le32(&super->free_blocks_lo);
-			if (journal->fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
-				journal->fs->info.free_blocks |=
-				    (uint64_t)ext4_le32(&super->free_blocks_hi) << 32;
-			}
-		}
+		/* Publish the free counters from the committed superblock only after
+		 * checkpoint. */
+		ext4_transaction_publish(transaction);
 	}
 	ext4_transaction_cancel(transaction);
 	return error;
+}
+
+static enum ext4_result
+ext4_compound_create(struct ext4_journal *journal)
+{
+	struct ext4_transaction *compound;
+	uint32_t slots = ext4_transaction_slot_count(journal->compound_blocks);
+	uint32_t slot;
+	size_t size = ext4_transaction_size(journal->compound_blocks);
+
+	compound = journal->fs->environment.allocate(journal->fs->environment.context, size);
+	if (compound == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	ext4_zero(compound, size);
+	compound->slots = (uint32_t *)(compound->entries + journal->compound_blocks);
+	compound->slot_mask = slots - 1U;
+	for (slot = 0; slot < slots; slot++) {
+		compound->slots[slot] = UINT32_MAX;
+	}
+	compound->journal = journal;
+	compound->credits = journal->compound_blocks;
+	compound->capacity = journal->compound_blocks;
+	compound->sequence = journal->sequence;
+	compound->compound = true;
+	journal->compound = compound;
+	return EXT4_OK;
+}
+
+static enum ext4_result
+ext4_compound_commit(struct ext4_journal *journal)
+{
+	struct ext4_transaction *compound = journal->compound;
+
+	if (journal->aborted) {
+		return EXT4_IO;
+	}
+	journal->compound = NULL;
+	if (compound == NULL) {
+		return EXT4_OK;
+	}
+	if (compound->count == 0) {
+		ext4_transaction_cancel(compound);
+		return EXT4_OK;
+	}
+	return ext4_transaction_durable(compound);
+}
+
+/* Deferred commit: the operation's snapshots replace their blocks in the compound
+ * transaction, all or nothing. Buffers for new blocks are allocated before any
+ * copy, so a failure leaves the compound unchanged. */
+static enum ext4_result
+ext4_transaction_merge(struct ext4_transaction *transaction)
+{
+	struct ext4_journal *journal = transaction->journal;
+	struct ext4_fs *fs = journal->fs;
+	struct ext4_transaction *compound;
+	void **buffers = NULL;
+	uint32_t added = 0;
+	uint32_t next = 0;
+	uint32_t index;
+	uint32_t entry;
+	enum ext4_result error = EXT4_OK;
+
+	for (index = 0; journal->compound != NULL && index < transaction->count; index++) {
+		if (ext4_transaction_find(journal->compound, transaction->entries[index].block) ==
+		    journal->compound->count) {
+			added++;
+		}
+	}
+	if (journal->compound != NULL &&
+	    journal->compound->count + added > journal->compound->capacity) {
+		error = ext4_compound_commit(journal);
+	}
+	if (error != EXT4_OK) {
+		ext4_transaction_cancel(transaction);
+		return error;
+	}
+	/* An operation larger than the compound commits on its own, in order. */
+	if (transaction->count > journal->compound_blocks) {
+		return ext4_transaction_durable(transaction);
+	}
+	if (journal->compound == NULL) {
+		error = ext4_compound_create(journal);
+		added = transaction->count;
+	}
+	if (error == EXT4_OK && added != 0) {
+		buffers =
+		    fs->environment.allocate(fs->environment.context, added * sizeof(*buffers));
+		error = buffers == NULL ? EXT4_NO_MEMORY : EXT4_OK;
+	}
+	for (index = 0; error == EXT4_OK && index < added; index++) {
+		buffers[index] =
+		    fs->environment.allocate(fs->environment.context, fs->info.block_size);
+		if (buffers[index] == NULL) {
+			while (index != 0) {
+				index--;
+				fs->environment.release(
+				    fs->environment.context, buffers[index], fs->info.block_size);
+			}
+			error = EXT4_NO_MEMORY;
+		}
+	}
+	if (error != EXT4_OK) {
+		if (buffers != NULL) {
+			fs->environment.release(
+			    fs->environment.context, buffers, added * sizeof(*buffers));
+		}
+		ext4_transaction_cancel(transaction);
+		return error;
+	}
+	compound = journal->compound;
+	ext4_transaction_prepare_super(transaction);
+	for (index = 0; index < transaction->count; index++) {
+		entry = ext4_transaction_find(compound, transaction->entries[index].block);
+		if (entry == compound->count) {
+			compound->entries[entry].block = transaction->entries[index].block;
+			compound->entries[entry].buffer = buffers[next++];
+			ext4_transaction_index(compound, compound->count++);
+		}
+		ext4_copy(compound->entries[entry].buffer, transaction->entries[index].buffer,
+		    fs->info.block_size);
+	}
+	if (buffers != NULL) {
+		fs->environment.release(fs->environment.context, buffers, added * sizeof(*buffers));
+	}
+	ext4_transaction_publish(transaction);
+	ext4_transaction_cancel(transaction);
+	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_transaction_commit(struct ext4_transaction *transaction)
+{
+	struct ext4_journal *journal;
+	enum ext4_result error;
+
+	if (transaction == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	journal = transaction->journal;
+	if (transaction->count == 0) {
+		ext4_transaction_cancel(transaction);
+		return EXT4_OK;
+	}
+	/* Quota usage follows the inode records this transaction commits. */
+	transaction->quota_phase = true;
+	error = ext4_quota_commit(transaction);
+	if (error != EXT4_OK) {
+		ext4_transaction_cancel(transaction);
+		return error;
+	}
+	if (journal->compound_blocks != 0 && !transaction->recovery) {
+		return ext4_transaction_merge(transaction);
+	}
+	return ext4_transaction_durable(transaction);
+}
+
+enum ext4_result
+ext4_journal_commit(struct ext4_journal *journal)
+{
+	if (journal == NULL || journal->transaction_active) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	return ext4_compound_commit(journal);
+}
+
+/* Copy the part of one pending block that overlaps a device read. */
+static void
+ext4_journal_overlay_block(const uint8_t *source, uint64_t block, uint32_t block_size,
+    uint64_t offset, uint8_t *buffer, size_t length)
+{
+	uint64_t start = block * block_size;
+	uint64_t end = start + block_size;
+
+	if (start < offset) {
+		start = offset;
+	}
+	if (end > offset + length) {
+		end = offset + length;
+	}
+	ext4_copy(buffer + (start - offset), source + (start - block * block_size),
+	    (size_t)(end - start));
+}
+
+void
+ext4_journal_overlay(
+    const struct ext4_journal *journal, uint64_t offset, void *buffer, size_t length)
+{
+	const struct ext4_transaction *compound = journal->compound;
+	const uint8_t *source;
+	uint32_t block_size = journal->fs->info.block_size;
+	uint64_t first;
+	uint64_t last;
+	uint64_t block;
+	uint32_t index;
+
+	if (compound == NULL || compound->count == 0 || length == 0) {
+		return;
+	}
+	first = offset / block_size;
+	last = (offset + length - 1U) / block_size;
+	/* Look up each block of a short read; scan the pending blocks for a long one. */
+	if (last - first < compound->count) {
+		for (block = first; block <= last; block++) {
+			source = ext4_transaction_peek(compound, block);
+			if (source != NULL) {
+				ext4_journal_overlay_block(
+				    source, block, block_size, offset, buffer, length);
+			}
+		}
+		return;
+	}
+	for (index = 0; index < compound->count; index++) {
+		block = compound->entries[index].block;
+		if (block >= first && block <= last) {
+			ext4_journal_overlay_block(compound->entries[index].buffer, block,
+			    block_size, offset, buffer, length);
+		}
+	}
+}
+
+uint32_t
+ext4_journal_compound_limit(const struct ext4_journal *journal)
+{
+	return ext4_journal_recovery_credits(journal);
 }
