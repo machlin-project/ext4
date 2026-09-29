@@ -632,7 +632,9 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 			error = EXT4_CORRUPT;
 			goto out;
 		}
-		for (index = 0; index < entry->name_length; index++) {
+		/* Encrypted names are ciphertext and may contain any byte. */
+		for (index = 0; !(parent->flags & EXT4_INODE_ENCRYPT) && index < entry->name_length;
+		    index++) {
 			if (original[offset + sizeof(*entry) + index] == 0 ||
 			    original[offset + sizeof(*entry) + index] == '/') {
 				error = EXT4_CORRUPT;

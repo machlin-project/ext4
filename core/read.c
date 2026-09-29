@@ -475,7 +475,8 @@ ext4_read_encrypted(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t
 }
 
 /* Decrypt an encrypted symlink's target: a little-endian 16-bit ciphertext length,
- * then the ciphertext, stored in the inode or its block. */
+ * then the ciphertext, stored in the inode or its block. Without the key, the target
+ * reads as Linux presents it, the ciphertext's no-key name. */
 static enum ext4_result
 ext4_read_encrypted_link(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset,
     uint8_t *output, size_t length, size_t *completed)
@@ -488,10 +489,12 @@ ext4_read_encrypted_link(struct ext4_fs *fs, const struct ext4_inode *inode, uin
 	size_t plain_length = 0;
 	size_t read = 0;
 	size_t bytes = (size_t)inode->size;
+	bool nokey;
 	enum ext4_result error;
 
 	error = ext4_fscrypt_key(fs, inode, &key);
-	if (error != EXT4_OK) {
+	nokey = error == EXT4_ENCRYPTED;
+	if (error != EXT4_OK && !nokey) {
 		return error;
 	}
 	if (bytes < EXT4_FSCRYPT_SYMLINK_HEADER || bytes > fs->info.block_size ||
@@ -514,10 +517,17 @@ ext4_read_encrypted_link(struct ext4_fs *fs, const struct ext4_inode *inode, uin
 	if (error == EXT4_OK) {
 		ext4_copy(&stored_length, stored, sizeof(stored_length));
 		cipher_length = ext4_le16(&stored_length);
-		error = cipher_length > bytes - EXT4_FSCRYPT_SYMLINK_HEADER
-		    ? EXT4_CORRUPT
-		    : ext4_fscrypt_name_decrypt(fs, &key, stored + EXT4_FSCRYPT_SYMLINK_HEADER,
-			  cipher_length, fs->info.block_size, plain, &plain_length);
+		if (cipher_length > bytes - EXT4_FSCRYPT_SYMLINK_HEADER ||
+		    (nokey && cipher_length < EXT4_FSCRYPT_NAME_MIN)) {
+			error = EXT4_CORRUPT;
+		} else if (nokey) {
+			plain_length = ext4_fscrypt_nokey_encode(
+			    stored + EXT4_FSCRYPT_SYMLINK_HEADER, cipher_length, 0, 0, plain);
+		} else {
+			error = ext4_fscrypt_name_decrypt(fs, &key,
+			    stored + EXT4_FSCRYPT_SYMLINK_HEADER, cipher_length,
+			    fs->info.block_size, plain, &plain_length);
+		}
 	}
 	if (error == EXT4_OK && offset < plain_length) {
 		*completed =

@@ -705,11 +705,12 @@ Volumes with the ENCRYPT incompatibility, and the STABLE_INODES compatibility
 feature that some fscrypt policies require, are admitted. The core holds no keys and
 runs no cipher. Objects with the ENCRYPT inode flag keep ciphertext contents, names
 and symlink targets. Without the adapter's key, every operation needing plaintext
-returns `EXT4_ENCRYPTED`: reads and native mappings of encrypted files and symlinks,
-iteration and lookup in encrypted directories, any name addition, removal or rename
-whose parent directory is encrypted, and writes, truncation, preallocation or growth
-of encrypted files. Denials occur before any write. Raw reads of an encrypted
-directory return its blocks, whose names are ciphertext.
+returns `EXT4_ENCRYPTED`: reads and native mappings of encrypted files, any name
+addition or rename whose source or destination directory is encrypted, and writes,
+truncation, preallocation or growth of encrypted files. Encrypted directories and
+symlinks present Linux's no-key names instead, described below. Denials occur before
+any write. Raw reads of an encrypted directory return its blocks, whose names are
+ciphertext.
 
 With fscrypt callbacks installed by `ext4_set_crypto`, the core reads encrypted
 objects as Linux does. It decodes the context attribute (index 9, name "c") of
@@ -752,8 +753,26 @@ data change of an encrypted file, including writes, zeroing of gaps, unwritten a
 preallocated blocks, truncated tails and punched edges, decrypts the block's
 snapshot unless it is new or completely replaced, changes the plaintext and encrypts
 it again under the block's logical number within the same transaction, so journaled,
-ordered and deferred commits carry only ciphertext. Linux's no-key names are not
-implemented.
+ordered and deferred commits carry only ciphertext.
+
+Without the key, encrypted directories present Linux's no-key names. Each is the
+base64url encoding, without padding, of two little-endian 32-bit directory hash
+words, the stored ciphertext up to 149 bytes and, for longer ciphertext, the SHA-256
+of the rest: at most 189 bytes, or 252 characters. The hash words are those Linux's
+readdir reports on volumes with DIR_INDEX: the directory hash of the stored
+ciphertext under the index root's version, or under the superblock's default version
+for a one-block directory, with the unsigned variant of a legacy version when the
+superblock records unsigned hashing. Other directories, and legacy versions on
+volumes that record neither or both signednesses, report zero words, since Linux
+would choose by its processor. A stored name shorter than 16 bytes cannot be
+ciphertext and is corruption. A lookup decodes the name, requires its unused bits to
+be zero and scans the directory for the entry whose ciphertext it carries, or whose
+prefix and tail hash it carries; a name that cannot be decoded is not found. Unlink
+and rmdir remove the entry found this way, as Linux permits, while creation, links
+and renames into or out of the directory still return `EXT4_ENCRYPTED`. An encrypted
+symlink reads as the no-key name of its ciphertext with zero hash words. Casefolded
+encrypted directories, whose stored hashes need the key, return `EXT4_UNSUPPORTED`
+without it.
 
 Operations that need no plaintext remain available: owner, permission, timestamp and
 ordinary attribute changes on encrypted objects; rename, link and removal of an

@@ -25,6 +25,20 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+def compare_nokey(row, path, console):
+    """Require the names and targets Linux presents without the key to be the core's."""
+    lines = path.read_text().splitlines()
+    expected = sorted(line for line in lines if not line.startswith('directory '))
+    prefix = 'LINUX_ENCRYPT_NOKEY='
+    presented = sorted(line.strip()[len(prefix):] for line in console.splitlines()
+                       if line.strip().startswith(prefix))
+    row.update(nokey_expected=len(expected), nokey_presented=len(presented))
+    if not expected or presented != expected:
+        missing = sorted(set(expected) - set(presented))
+        extra = sorted(set(presented) - set(expected))
+        raise RuntimeError(f'No-key names differ: missing {missing[:4]}, extra {extra[:4]}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--lab', type=Path, required=True)
@@ -38,9 +52,13 @@ def main():
     mode.add_argument('--verify-core', type=Path,
                       help='verify a tree the core encrypted, as its manifest describes')
     parser.add_argument('--manifest', type=Path, help='manifest of --verify-core')
+    parser.add_argument('--nokey', type=Path,
+                        help='no-key names the core presents, which Linux must match')
     args = parser.parse_args()
     if (args.verify_core is None) != (args.manifest is None):
         parser.error('--verify-core needs --manifest')
+    if args.nokey is not None and args.verify_core is None:
+        parser.error('--nokey needs --verify-core')
     lab, prepared, runner, output = (
         value.resolve() for value in (args.lab, args.prepared, args.runner, args.output))
     if Path.cwd() != lab:
@@ -96,6 +114,8 @@ def main():
     (tree / 'phase').write_text(f'{phase}\n')
     if args.manifest is not None:
         shutil.copyfile(args.manifest, tree / 'manifest')
+    if args.nokey is not None:
+        shutil.copyfile(args.nokey, tree / 'nokey')
     archive = output / 'probe.cpio'
     listing = '\n'.join(str(x.relative_to(tree)) for x in sorted(tree.rglob('*'))) + '\n'
     with archive.open('wb') as stream:
@@ -110,6 +130,8 @@ def main():
     for forbidden in ('EXT4-fs error', 'Aborting journal'):
         if forbidden in console:
             raise RuntimeError(f'Guest filesystem error: {forbidden}')
+    if args.nokey is not None:
+        compare_nokey(row, args.nokey, console)
     run(row, [tools['e2fsck'], '-fn', image])
     row.update(passed=True, image_sha256=digest(image))
     (output / 'report.json').write_text(json.dumps(rows, indent=2) + '\n')

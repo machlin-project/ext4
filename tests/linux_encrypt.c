@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -19,7 +20,9 @@
  * changed only unencrypted names and requires every encrypted byte to survive.
  * Phase 2 adds the key to a tree the core encrypted and requires every object the
  * manifest lists: files by size and SHA-256, symlinks by target, and the types of
- * directories and FIFOs. */
+ * directories and FIFOs. Before adding the key it reports the no-key names and
+ * symlink targets of the directories /nokey names, for the host to compare with the
+ * core's. */
 
 #define PHASE_CREATE 0U
 #define PHASE_VERIFY 1U
@@ -40,6 +43,8 @@
 #define ENCRYPTED_FILES 24U
 #define LARGE_FILE_BYTES (3U * 65536U + 777U)
 #define LONG_NAME_BYTES 180U
+/* Linux's no-key names are at most 252 base64url characters. */
+#define NOKEY_NAME_MAX 252U
 
 /* Linux UAPI <linux/fscrypt.h> layouts; the musl sysroot has no kernel headers.
  * The ioctl numbers encode the v1 policy and the key argument without raw bytes. */
@@ -319,6 +324,54 @@ verify_core(void)
 	printf("LINUX_ENCRYPT_CORE_OBJECTS=%u\n", checked);
 }
 
+/* Without the key, list each directory /nokey names and read its symlinks' targets;
+ * every listed name must also look up. */
+static void
+report_nokey(void)
+{
+	struct dirent *entry;
+	struct stat metadata;
+	char line[MANIFEST_LINE];
+	char directory[MANIFEST_LINE];
+	char path[2U * MANIFEST_LINE];
+	char target[NOKEY_NAME_MAX + 1U];
+	unsigned int names = 0;
+	ssize_t count;
+	FILE *manifest = fopen("/nokey", "r");
+	DIR *stream;
+
+	require(manifest != NULL, "open no-key manifest");
+	while (fgets(line, sizeof(line), manifest) != NULL) {
+		if (sscanf(line, "directory %1023s", directory) != 1) {
+			continue;
+		}
+		snprintf(path, sizeof(path), "/mnt/%s", directory);
+		stream = opendir(path);
+		require(stream != NULL, path);
+		errno = 0;
+		while ((entry = readdir(stream)) != NULL) {
+			if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+				continue;
+			}
+			printf("LINUX_ENCRYPT_NOKEY=name %s %s\n", directory, entry->d_name);
+			snprintf(path, sizeof(path), "/mnt/%s/%s", directory, entry->d_name);
+			require(lstat(path, &metadata) == 0, "look up no-key name");
+			if (S_ISLNK(metadata.st_mode)) {
+				count = readlink(path, target, sizeof(target) - 1U);
+				require(count > 0, "read no-key symlink target");
+				target[count] = 0;
+				printf("LINUX_ENCRYPT_NOKEY=link %s/%s %s\n", directory,
+				    entry->d_name, target);
+			}
+			names++;
+			errno = 0;
+		}
+		require(errno == 0 && closedir(stream) == 0, "list no-key directory");
+	}
+	require(fclose(manifest) == 0 && names != 0, "complete no-key listing");
+	printf("LINUX_ENCRYPT_NOKEY_NAMES=%u\n", names);
+}
+
 static void
 write_file(const char *path, unsigned int file)
 {
@@ -398,6 +451,9 @@ main(void)
 	require(mount("/dev/vda", "/mnt", "ext4", MS_NOATIME, "data=ordered") == 0,
 	    "mount encryption filesystem");
 	if (phase == PHASE_CORE) {
+		if (access("/nokey", F_OK) == 0) {
+			report_nokey();
+		}
 		directory = open("/mnt", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 		require(directory >= 0, "open filesystem root");
 		add_key(directory, policy.master_key_identifier);

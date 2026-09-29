@@ -30,6 +30,13 @@
 #define EXT4_FSCRYPT_HKDF_PER_FILE_KEY 2U
 /* An encrypted symlink stores its ciphertext's length before it. */
 #define EXT4_FSCRYPT_SYMLINK_HEADER 2U
+/* Linux's no-key names encode, with base64url and no padding, the name's two
+ * little-endian 32-bit dirhash words, up to 149 bytes of ciphertext and, for longer
+ * ciphertext, the SHA-256 of the rest: at most 189 bytes, or 252 characters. */
+#define EXT4_FSCRYPT_NOKEY_HASHES 8U
+#define EXT4_FSCRYPT_NOKEY_BYTES 149U
+#define EXT4_FSCRYPT_NOKEY_MAX (EXT4_FSCRYPT_NOKEY_HASHES + EXT4_FSCRYPT_NOKEY_BYTES + 32U)
+#define EXT4_FSCRYPT_NOKEY_NAME_MAX 252U
 
 struct ext4_fscrypt_context_v1_disk {
 	uint8_t version;
@@ -72,6 +79,12 @@ struct ext4_fscrypt_key {
 	uint8_t flags;
 };
 
+/* A decoded no-key name: the full ciphertext, or its prefix and the rest's SHA-256. */
+struct ext4_fscrypt_nokey {
+	uint8_t bytes[EXT4_FSCRYPT_NOKEY_MAX];
+	size_t size;
+};
+
 struct ext4_allocation;
 
 /* Decode and admit an encrypted inode's policy; UNSUPPORTED for modes and flags the
@@ -106,6 +119,22 @@ enum ext4_result ext4_fscrypt_name_encrypt(struct ext4_fs *fs, const struct ext4
 enum ext4_result ext4_fscrypt_symlink_encrypt(struct ext4_fs *fs,
     const struct ext4_fscrypt_key *key, const uint8_t *target, size_t length, uint8_t *stored,
     size_t *stored_length);
+/* Encode stored ciphertext as Linux's no-key name into name, which holds 252 bytes. */
+size_t ext4_fscrypt_nokey_encode(
+    const uint8_t *cipher, size_t length, uint32_t hash, uint32_t minor_hash, uint8_t *name);
+/* Decode a no-key name; false for names that no stored name could have produced. */
+bool ext4_fscrypt_nokey_decode(
+    const uint8_t *name, size_t length, struct ext4_fscrypt_nokey *nokey);
+/* Whether stored ciphertext is the one a decoded no-key name identifies. */
+bool ext4_fscrypt_nokey_match(
+    const struct ext4_fscrypt_nokey *nokey, const uint8_t *cipher, size_t length);
+/* The full ciphertext a no-key name carries, or NULL when it holds only a prefix. */
+const uint8_t *ext4_fscrypt_nokey_cipher(const struct ext4_fscrypt_nokey *nokey, size_t *length);
+/* Scan a directory for the entry a no-key name identifies, reporting its stored
+ * ciphertext, of at most 255 bytes, and inode; NOT_FOUND without one. */
+enum ext4_result ext4_directory_nokey_find(struct ext4_fs *fs, const struct ext4_inode *directory,
+    const struct ext4_fscrypt_nokey *nokey, uint8_t *cipher, size_t *cipher_length,
+    uint32_t *number);
 /* Whether a directory entry name is the unencrypted "." or "..". */
 bool ext4_fscrypt_dot(const uint8_t *name, size_t length);
 bool ext4_fscrypt_policy_equal(

@@ -221,6 +221,7 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	    : ext4_crc32c(UINT32_MAX, super->uuid, sizeof(super->uuid));
 	fs->directory_hash_flags =
 	    ext4_le32(&super->flags) & (EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH);
+	fs->directory_default_hash_version = super->default_hash_version;
 	for (word = 0; word < 4; word++) {
 		fs->directory_hash_seed[word] = ext4_le32(&super->hash_seed[word]);
 	}

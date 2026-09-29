@@ -4,10 +4,131 @@
 #include "directory_write.h"
 #include "inline.h"
 #include "journal.h"
+#include "sha.h"
 #include "xattr.h"
 
 /* The core implements fscrypt's formats, key derivation inputs, IVs and padding as
  * Linux defines them; the adapter supplies master keys, derivation and ciphers. */
+
+static const uint8_t ext4_base64url[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+#define EXT4_BASE64_BITS 6U
+#define EXT4_BASE64_ALPHABET 64U
+
+size_t
+ext4_fscrypt_nokey_encode(
+    const uint8_t *cipher, size_t length, uint32_t hash, uint32_t minor_hash, uint8_t *name)
+{
+	struct ext4_sha256 context;
+	struct ext4_le32 word;
+	uint8_t nokey[EXT4_FSCRYPT_NOKEY_MAX];
+	uint32_t accumulator = 0;
+	size_t size;
+	size_t index;
+	size_t written = 0;
+	unsigned int bits = 0;
+
+	ext4_encode32(&word, hash);
+	ext4_copy(nokey, &word, sizeof(word));
+	ext4_encode32(&word, minor_hash);
+	ext4_copy(nokey + sizeof(word), &word, sizeof(word));
+	if (length <= EXT4_FSCRYPT_NOKEY_BYTES) {
+		ext4_copy(nokey + EXT4_FSCRYPT_NOKEY_HASHES, cipher, length);
+		size = EXT4_FSCRYPT_NOKEY_HASHES + length;
+	} else {
+		ext4_copy(nokey + EXT4_FSCRYPT_NOKEY_HASHES, cipher, EXT4_FSCRYPT_NOKEY_BYTES);
+		ext4_sha256_init(&context);
+		ext4_sha256_update(
+		    &context, cipher + EXT4_FSCRYPT_NOKEY_BYTES, length - EXT4_FSCRYPT_NOKEY_BYTES);
+		ext4_sha256_final(
+		    &context, nokey + EXT4_FSCRYPT_NOKEY_HASHES + EXT4_FSCRYPT_NOKEY_BYTES);
+		size = EXT4_FSCRYPT_NOKEY_MAX;
+	}
+	for (index = 0; index < size; index++) {
+		accumulator = (accumulator << 8) | nokey[index];
+		bits += 8U;
+		while (bits >= EXT4_BASE64_BITS) {
+			bits -= EXT4_BASE64_BITS;
+			name[written++] =
+			    ext4_base64url[(accumulator >> bits) & (EXT4_BASE64_ALPHABET - 1U)];
+		}
+	}
+	if (bits != 0) {
+		name[written++] = ext4_base64url[(accumulator << (EXT4_BASE64_BITS - bits)) &
+		    (EXT4_BASE64_ALPHABET - 1U)];
+	}
+	return written;
+}
+
+bool
+ext4_fscrypt_nokey_decode(const uint8_t *name, size_t length, struct ext4_fscrypt_nokey *nokey)
+{
+	uint32_t accumulator = 0;
+	uint32_t value;
+	size_t index;
+	unsigned int bits = 0;
+
+	nokey->size = 0;
+	if (length > EXT4_FSCRYPT_NOKEY_NAME_MAX) {
+		return false;
+	}
+	for (index = 0; index < length; index++) {
+		for (value = 0;
+		    value < EXT4_BASE64_ALPHABET && ext4_base64url[value] != name[index]; value++) {
+		}
+		if (value == EXT4_BASE64_ALPHABET) {
+			return false;
+		}
+		accumulator = (accumulator << EXT4_BASE64_BITS) | value;
+		bits += EXT4_BASE64_BITS;
+		if (bits >= 8U) {
+			bits -= 8U;
+			nokey->bytes[nokey->size++] = (uint8_t)(accumulator >> bits);
+		}
+	}
+	/* Leftover bits must be zero, and the size one Linux can produce. */
+	return (accumulator & ((1U << bits) - 1U)) == 0 &&
+	    nokey->size >= EXT4_FSCRYPT_NOKEY_HASHES + EXT4_FSCRYPT_NAME_MIN &&
+	    (nokey->size <= EXT4_FSCRYPT_NOKEY_HASHES + EXT4_FSCRYPT_NOKEY_BYTES ||
+		nokey->size == EXT4_FSCRYPT_NOKEY_MAX);
+}
+
+const uint8_t *
+ext4_fscrypt_nokey_cipher(const struct ext4_fscrypt_nokey *nokey, size_t *length)
+{
+	if (nokey->size == EXT4_FSCRYPT_NOKEY_MAX) {
+		return NULL;
+	}
+	*length = nokey->size - EXT4_FSCRYPT_NOKEY_HASHES;
+	return nokey->bytes + EXT4_FSCRYPT_NOKEY_HASHES;
+}
+
+bool
+ext4_fscrypt_nokey_match(
+    const struct ext4_fscrypt_nokey *nokey, const uint8_t *cipher, size_t length)
+{
+	struct ext4_sha256 context;
+	uint8_t digest[EXT4_SHA256_DIGEST_SIZE];
+	const uint8_t *full;
+	size_t full_length;
+
+	full = ext4_fscrypt_nokey_cipher(nokey, &full_length);
+	if (full != NULL) {
+		return length == full_length && ext4_equal(cipher, full, length);
+	}
+	if (length <= EXT4_FSCRYPT_NOKEY_BYTES ||
+	    !ext4_equal(
+		cipher, nokey->bytes + EXT4_FSCRYPT_NOKEY_HASHES, EXT4_FSCRYPT_NOKEY_BYTES)) {
+		return false;
+	}
+	ext4_sha256_init(&context);
+	ext4_sha256_update(
+	    &context, cipher + EXT4_FSCRYPT_NOKEY_BYTES, length - EXT4_FSCRYPT_NOKEY_BYTES);
+	ext4_sha256_final(&context, digest);
+	return ext4_equal(digest,
+	    nokey->bytes + EXT4_FSCRYPT_NOKEY_HASHES + EXT4_FSCRYPT_NOKEY_BYTES, sizeof(digest));
+}
 
 bool
 ext4_fscrypt_dot(const uint8_t *name, size_t length)

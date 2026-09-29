@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
+#include "directory_index.h"
 #include "fscrypt.h"
 #include "internal.h"
 #include "inline.h"
@@ -153,14 +154,64 @@ ext4_directory_block_validate(
 	return EXT4_OK;
 }
 
-enum ext4_result
-ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *cookie,
+/* How Linux hashes the names it lists without a key: through its hash tree when the
+ * volume indexes directories and the directory is indexed or one block, over the
+ * ciphertext with the index root's or the default version and the volume's seed.
+ * Otherwise, and when the volume leaves hash signedness unrecorded, Linux's choice is
+ * its own, and no-key names carry a zero hash. */
+static enum ext4_result
+ext4_directory_nokey_hashing(struct ext4_fs *fs, const struct ext4_inode *directory,
+    uint8_t *buffer, bool *hashed, uint8_t *version)
+{
+	struct ext4_index_metadata metadata;
+	size_t completed;
+	enum ext4_result error;
+
+	*hashed = false;
+	if (!(fs->info.feature_compat & EXT4_FEATURE_COMPAT_DIR_INDEX) ||
+	    fs->directory_hash_flags ==
+		(EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH)) {
+		return EXT4_OK;
+	}
+	if (directory->flags & EXT4_INODE_INDEX) {
+		error = ext4_read(fs, directory, 0, buffer, fs->info.block_size, &completed);
+		if (error == EXT4_OK && completed != fs->info.block_size) {
+			error = EXT4_CORRUPT;
+		}
+		if (error == EXT4_OK) {
+			error = ext4_index_decode(fs, directory, 0, buffer, &metadata);
+		}
+		if (error != EXT4_OK) {
+			return error;
+		}
+		*version = metadata.version;
+	} else if (directory->size == fs->info.block_size) {
+		*version = fs->directory_default_hash_version;
+	} else {
+		return EXT4_OK;
+	}
+	if (*version <= EXT4_HASH_TEA) {
+		if (fs->directory_hash_flags == 0) {
+			return EXT4_OK;
+		}
+		if (fs->directory_hash_flags == EXT4_UNSIGNED_DIRECTORY_HASH) {
+			*version += EXT4_HASH_LEGACY_UNSIGNED;
+		}
+	}
+	*hashed = true;
+	return EXT4_OK;
+}
+
+/* Visit entries with their names as stored when raw, or as presented otherwise. */
+static enum ext4_result
+ext4_directory_visit(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *cookie,
     enum ext4_dir_action (*visit)(
 	void *context, const struct ext4_dir_entry *entry, uint64_t next_cookie),
-    void *context)
+    void *context, bool raw)
 {
 	struct ext4_dir_entry decoded;
 	struct ext4_fscrypt_key key;
+	struct ext4_name_hash hash = { 0, 0 };
 	uint8_t plain[EXT4_NAME_MAX];
 	uint8_t *buffer;
 	uint64_t block_offset;
@@ -172,7 +223,10 @@ ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_
 	uint32_t offset;
 	uint32_t wanted;
 	uint32_t record_length;
-	size_t plain_length;
+	size_t plain_length = 0;
+	uint8_t version = 0;
+	bool nokey = false;
+	bool hashed = false;
 	enum ext4_result error;
 	enum ext4_dir_action action;
 
@@ -185,9 +239,15 @@ ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_
 	if ((directory->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
 		return EXT4_NOT_DIRECTORY;
 	}
-	/* Encrypted names can be neither presented nor resumed without a key. */
-	if (directory->flags & EXT4_INODE_ENCRYPT) {
+	/* Without the key, encrypted names are presented as Linux's no-key names.
+	 * Casefolded encrypted directories hash plaintext with a derived key, which
+	 * is not implemented. */
+	if ((directory->flags & EXT4_INODE_ENCRYPT) && !raw) {
 		error = ext4_fscrypt_key(fs, directory, &key);
+		if (error == EXT4_ENCRYPTED) {
+			nokey = true;
+			error = directory->flags & EXT4_INODE_CASEFOLD ? EXT4_UNSUPPORTED : EXT4_OK;
+		}
 		if (error != EXT4_OK) {
 			return error;
 		}
@@ -205,6 +265,12 @@ ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_
 	buffer = fs->environment.allocate(fs->environment.context, fs->info.block_size);
 	if (buffer == NULL) {
 		return EXT4_NO_MEMORY;
+	}
+	if (nokey) {
+		error = ext4_directory_nokey_hashing(fs, directory, buffer, &hashed, &version);
+		if (error != EXT4_OK) {
+			goto out;
+		}
 	}
 	error = EXT4_NOT_FOUND;
 	while (*cookie < size) {
@@ -243,12 +309,25 @@ ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_
 			}
 			offset += record_length;
 			/* Dot entries are stored unencrypted; other names are ciphertext. */
-			if (decoded.inode != 0 && (directory->flags & EXT4_INODE_ENCRYPT) &&
+			if (decoded.inode != 0 && (directory->flags & EXT4_INODE_ENCRYPT) && !raw &&
 			    !ext4_fscrypt_dot(decoded.name, decoded.name_length)) {
-				error = ext4_fscrypt_name_decrypt(fs, &key, decoded.name,
-				    decoded.name_length, EXT4_NAME_MAX, plain, &plain_length);
+				if (nokey && decoded.name_length < EXT4_FSCRYPT_NAME_MIN) {
+					error = EXT4_CORRUPT;
+				} else if (nokey && hashed) {
+					error =
+					    ext4_directory_hash(version, fs->directory_hash_seed,
+						decoded.name, decoded.name_length, &hash);
+				} else if (!nokey) {
+					error = ext4_fscrypt_name_decrypt(fs, &key, decoded.name,
+					    decoded.name_length, EXT4_NAME_MAX, plain,
+					    &plain_length);
+				}
 				if (error != EXT4_OK) {
 					goto out;
+				}
+				if (nokey) {
+					plain_length = ext4_fscrypt_nokey_encode(decoded.name,
+					    decoded.name_length, hash.major, hash.minor, plain);
 				}
 				ext4_copy(decoded.name, plain, plain_length);
 				decoded.name[plain_length] = 0;
@@ -291,6 +370,59 @@ ext4_directory_one(void *context, const struct ext4_dir_entry *entry, uint64_t n
 	output->name_length = entry->name_length;
 	ext4_copy(output->name, entry->name, entry->name_length + 1U);
 	return EXT4_DIR_ACCEPT_STOP;
+}
+
+enum ext4_result
+ext4_iterate_dir(struct ext4_fs *fs, const struct ext4_inode *directory, uint64_t *cookie,
+    enum ext4_dir_action (*visit)(
+	void *context, const struct ext4_dir_entry *entry, uint64_t next_cookie),
+    void *context)
+{
+	return ext4_directory_visit(fs, directory, cookie, visit, context, false);
+}
+
+struct ext4_nokey_search {
+	const struct ext4_fscrypt_nokey *nokey;
+	uint8_t *cipher;
+	size_t cipher_length;
+	uint32_t number;
+};
+
+static enum ext4_dir_action
+ext4_directory_nokey_visit(void *context, const struct ext4_dir_entry *entry, uint64_t next)
+{
+	struct ext4_nokey_search *search = context;
+
+	(void)next;
+	if (ext4_fscrypt_dot(entry->name, entry->name_length) ||
+	    !ext4_fscrypt_nokey_match(search->nokey, entry->name, entry->name_length)) {
+		return EXT4_DIR_ACCEPT;
+	}
+	search->number = entry->inode;
+	search->cipher_length = entry->name_length;
+	ext4_copy(search->cipher, entry->name, entry->name_length);
+	return EXT4_DIR_STOP;
+}
+
+enum ext4_result
+ext4_directory_nokey_find(struct ext4_fs *fs, const struct ext4_inode *directory,
+    const struct ext4_fscrypt_nokey *nokey, uint8_t *cipher, size_t *cipher_length,
+    uint32_t *number)
+{
+	struct ext4_nokey_search search = { nokey, cipher, 0, 0 };
+	uint64_t cookie = 0;
+	enum ext4_result error;
+
+	error =
+	    ext4_directory_visit(fs, directory, &cookie, ext4_directory_nokey_visit, &search, true);
+	if (error == EXT4_OK && search.number == 0) {
+		error = EXT4_NOT_FOUND;
+	}
+	if (error == EXT4_OK) {
+		*cipher_length = search.cipher_length;
+		*number = search.number;
+	}
+	return error;
 }
 
 enum ext4_result

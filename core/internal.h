@@ -113,6 +113,7 @@ struct ext4_fs {
 	uint32_t checksum_seed;
 	uint32_t directory_hash_seed[4];
 	uint32_t directory_hash_flags;
+	uint8_t directory_default_hash_version;
 	uint32_t first_inode;
 	uint32_t journal_inode;
 	uint32_t journal_device;

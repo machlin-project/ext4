@@ -360,8 +360,9 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
     size_t name_length, struct ext4_inode *inode)
 {
 	struct ext4_lookup_state state = { 0 };
-	struct ext4_inode found;
+	struct ext4_inode found = { 0 };
 	struct ext4_fscrypt_key key;
+	struct ext4_fscrypt_nokey nokey;
 	uint8_t cipher[EXT4_NAME_MAX];
 	uint8_t padded[EXT4_NAME_MAX];
 	uint8_t *buffer;
@@ -395,8 +396,24 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 	 * key derived for the directory, which is not implemented. */
 	if ((directory->flags & EXT4_INODE_ENCRYPT) && !ext4_fscrypt_dot(name, name_length)) {
 		error = ext4_fscrypt_key(fs, directory, &key);
-		if (error == EXT4_OK && (directory->flags & EXT4_INODE_CASEFOLD)) {
+		if ((error == EXT4_OK || error == EXT4_ENCRYPTED) &&
+		    (directory->flags & EXT4_INODE_CASEFOLD)) {
 			error = EXT4_UNSUPPORTED;
+		}
+		/* Without the key, names are Linux's no-key names; others do not exist. */
+		if (error == EXT4_ENCRYPTED) {
+			if (!ext4_fscrypt_nokey_decode(name, name_length, &nokey)) {
+				return EXT4_NOT_FOUND;
+			}
+			error = ext4_directory_nokey_find(
+			    fs, directory, &nokey, cipher, &cipher_length, &number);
+			if (error == EXT4_OK) {
+				error = ext4_get_inode(fs, number, &found);
+			}
+			if (error == EXT4_OK) {
+				*inode = found;
+			}
+			return error;
 		}
 		if (error == EXT4_OK) {
 			error = ext4_fscrypt_name_encrypt(fs, &key, name, name_length,

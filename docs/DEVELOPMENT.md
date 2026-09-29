@@ -285,17 +285,20 @@ permitted image change.
 then marks a directory subtree and an empty top-level directory encrypted in memory
 and sets the ENCRYPT feature. The `format` suite runs it on the 4 KiB and 1 KiB base
 images. Without `--synthetic`, IMAGE must come from the Linux probe. Both modes find
-encrypted objects by inode scan, require `EXT4_ENCRYPTED` for their names, contents,
-targets and data changes, deny changes to the fscrypt context attribute, and then
+encrypted objects by inode scan, require `EXT4_ENCRYPTED` for their contents and
+data changes and for new names in encrypted directories, deny changes to the fscrypt
+context attribute, and then
 rename the unencrypted tree, move the encrypted directory and back, remove the empty
 encrypted directory and change an encrypted file's permissions. An optional export
 directory receives the changed image. Synthetic images lack real fscrypt contexts and
-are not fsck oracles.
+are not fsck oracles. Their plaintext names are too short to be ciphertext, so
+listing them without the key is corruption; the probe's tree lists no-key names,
+each of which looks up its inode, while plaintext names are not found.
 
 `ext4-encrypt-test --key IMAGE`, with the image the Linux probe created, also
 installs a test adapter holding the probe's master key, built on the reference
 cryptography in `tests/crypto.h`. Another master key must leave the tree
-unreadable; the probe's key must list both encrypted directories exactly, read every
+unreadable and list no-key names; the probe's key must list both encrypted directories exactly, read every
 file's contents and the symlink target, keep native mappings refused and reuse a
 cached derived key, and every key handle must be released by unmount.
 `ext4-crypto-vectors-test`, in the `core` suite, checks that reference cryptography:
@@ -310,13 +313,18 @@ file must be refused, and the same policy again must change nothing. Empty, smal
 block-sized, partial, sparse, large and long-named files, a subdirectory, fast and
 block symlinks and a FIFO are then created, overwritten inside blocks, truncated into
 a block and grown, written into preallocation and punched, linked and renamed, and
-compared with a model at every stage. Unencrypted files must not enter the encrypted
-directory and an encrypted file must be able to leave it. No plaintext name, target
-or content may reach the device, the tree must be unreadable without the key, and a
-read-only mount must read it back. A power cut at every write or barrier of an
+compared with a model at every stage; 24 files with 200-byte names make the
+subdirectory indexed on volumes with DIR_INDEX. Unencrypted files must not enter the
+encrypted directory and an encrypted file must be able to leave it. No plaintext
+name, target or content may reach the device. Without the key the directory must
+list a no-key name for every entry, refuse creation and rename, read a symlink
+target as a no-key name and remove a long-named file and a directory by their no-key
+names, and a read-only mount must read the tree back with the key. A power cut at every write or barrier of an
 encrypted overwrite across three blocks and of a truncation into a block must
 recover the old or the new contents. The export directory receives
-`encrypted-NAME.img` and a manifest of every object. The `format` suite runs it on
+`encrypted-NAME.img`, a manifest of every object and `encrypted-NAME.nokey`: each
+encrypted directory by its no-key path, followed by the no-key names and symlink
+targets the core presents in it without the key. The `format` suite runs it on
 the 4 KiB and 1 KiB base images and the format fixture with ENCRYPT.
 
 `tests/run_linux_encrypt.py --create` runs from the lab with `--lab`, `--prepared`,
@@ -328,7 +336,10 @@ files; the image must pass strict fsck. After the core test changes a copy,
 target, the removed directory and the renamed plain file, followed by strict fsck.
 `--verify-core IMAGE --manifest MANIFEST` adds the same key to a tree the core
 encrypted and requires every manifest object: files by size and SHA-256, symlinks by
-target and the types of directories and FIFOs, followed by strict fsck.
+target and the types of directories and FIFOs, followed by strict fsck. With
+`--nokey NOKEY`, Linux first lists each directory the file names without the key,
+looks up every name and reads every symlink target, and the harness requires exactly
+the core's names and targets.
 
 ## Casefold tests
 

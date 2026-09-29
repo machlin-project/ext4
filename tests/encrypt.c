@@ -46,7 +46,7 @@ static const struct ext4_timestamp encrypt_time = { ENCRYPT_SECONDS, 0 };
 #define FSCRYPT_PAD_32 0x03U
 #define FSCRYPT_MODE_ADIANTUM 9U
 /* Objects the keyed write test creates, and bytes a file of it may hold. */
-#define MODEL_OBJECTS 24U
+#define MODEL_OBJECTS 48U
 #define MODEL_FILE_BYTES (96U * 1024U)
 #define MODEL_DIRECTORIES 3U
 #define MODEL_VAULT 0U
@@ -54,6 +54,11 @@ static const struct ext4_timestamp encrypt_time = { ENCRYPT_SECONDS, 0 };
 #define MODEL_PLAIN 2U
 #define LONG_TARGET_BYTES 300U
 #define PLAINTEXT_PROBE_BYTES 64U
+/* Long names that outgrow one block of the subdirectory, so that it is indexed. */
+#define INDEXED_NAMES 24U
+#define INDEXED_NAME_BYTES 200U
+/* Linux's no-key names are at most 252 base64url characters. */
+#define NOKEY_NAME_MAX 252U
 
 /* A test adapter's keyring: one master key, found by its fscrypt identifier, and a
  * counter that makes every nonce distinct. */
@@ -396,16 +401,6 @@ encrypted_objects(struct ext4_fs *fs, struct ext4_inode *file, struct ext4_inode
 	CHECK(files != 0 && links != 0);
 }
 
-static enum ext4_dir_action
-visit(void *context, const struct ext4_dir_entry *entry, uint64_t next_cookie)
-{
-	(void)context;
-	(void)entry;
-	(void)next_cookie;
-	CHECK(false);
-	return EXT4_DIR_STOP;
-}
-
 static void
 probe_name(char *name, unsigned int file)
 {
@@ -418,6 +413,7 @@ probe_name(char *name, unsigned int file)
 
 struct listing {
 	char names[PROBE_FILES + 8U][NAME_BYTES];
+	uint32_t numbers[PROBE_FILES + 8U];
 	uint32_t count;
 };
 
@@ -429,6 +425,7 @@ collect(void *context, const struct ext4_dir_entry *entry, uint64_t next_cookie)
 	(void)next_cookie;
 	CHECK(listing->count < sizeof(listing->names) / sizeof(listing->names[0]));
 	CHECK(entry->name_length < NAME_BYTES && entry->name[entry->name_length] == 0);
+	listing->numbers[listing->count] = entry->inode;
 	memcpy(listing->names[listing->count++], entry->name, (size_t)entry->name_length + 1U);
 	return EXT4_DIR_ACCEPT;
 }
@@ -444,6 +441,38 @@ listed(const struct listing *listing, const char *name)
 		}
 	}
 	return false;
+}
+
+/* Without the key an encrypted directory lists Linux's no-key names: base64url of at
+ * most 252 characters, each of which looks up the listed inode. Returns the count. */
+static uint32_t
+nokey_listing(struct ext4_fs *fs, const struct ext4_inode *directory, struct listing *listing)
+{
+	static const char alphabet[] =
+	    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+	struct ext4_inode inode;
+	uint64_t cookie = 0;
+	uint32_t index;
+	uint32_t names = 0;
+	size_t length;
+
+	listing->count = 0;
+	EXPECT(ext4_iterate_dir(fs, directory, &cookie, collect, listing), EXT4_NOT_FOUND);
+	for (index = 0; index < listing->count; index++) {
+		if (strcmp(listing->names[index], ".") == 0 ||
+		    strcmp(listing->names[index], "..") == 0) {
+			continue;
+		}
+		length = strlen(listing->names[index]);
+		CHECK(
+		    length <= NOKEY_NAME_MAX && strspn(listing->names[index], alphabet) == length);
+		EXPECT(ext4_lookup(
+			   fs, directory, (const uint8_t *)listing->names[index], length, &inode),
+		    EXT4_OK);
+		CHECK(inode.number == listing->numbers[index]);
+		names++;
+	}
+	return names;
 }
 
 /* With the probe's key every encrypted name, file and target reads back. */
@@ -475,8 +504,9 @@ keyed(struct device *device)
 	/* Another master key is not the one the policy names. */
 	crypto = keyring_environment(&other);
 	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
-	EXPECT(ext4_iterate_dir(fs, &secret, &cookie, collect, &listing), EXT4_ENCRYPTED);
-	EXPECT(ext4_lookup(fs, &secret, (const uint8_t *)"inner", 5, &inode), EXT4_ENCRYPTED);
+	CHECK(nokey_listing(fs, &secret, &listing) == 3U + PROBE_FILES / 2U);
+	EXPECT(ext4_lookup(fs, &secret, (const uint8_t *)"inner", 5, &inode), EXT4_NOT_FOUND);
+	listing.count = 0;
 	crypto = keyring_environment(&keyring);
 	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
 	EXPECT(ext4_iterate_dir(fs, &secret, &cookie, collect, &listing), EXT4_NOT_FOUND);
@@ -846,6 +876,128 @@ entry_of(const struct ext4_inode *directory, const char *name, const struct ext4
 	return entry;
 }
 
+/* Without the key, entries are removed by their no-key names, a long one included,
+ * while new names cannot be encrypted and existing ones cannot move. */
+static void
+nokey_changes(struct ext4_fs *fs, struct model *model, const struct ext4_inode *long_file,
+    const struct ext4_inode *gone, const struct ext4_inode *long_link)
+{
+	static struct listing listing;
+	struct ext4_inode_update update = creation();
+	struct ext4_inode vault = model_directory(fs, model, MODEL_VAULT);
+	struct ext4_inode link;
+	struct ext4_inode result;
+	struct ext4_rename_entry from;
+	struct ext4_rename_entry to;
+	char target[NOKEY_NAME_MAX + 1U];
+	uint32_t expected = 1;
+	uint32_t index;
+	uint32_t removed = 0;
+	size_t completed;
+
+	/* The subdirectory is named in the vault but not modeled as an object. */
+	for (index = 0; index < model->count; index++) {
+		if (model->objects[index].present &&
+		    model->objects[index].directory == MODEL_VAULT) {
+			expected++;
+		}
+	}
+	CHECK(nokey_listing(fs, &vault, &listing) == expected);
+	EXPECT(ext4_create(fs, vault.number, vault.generation, (const uint8_t *)"new", 3, &update,
+		   &encrypt_time, &result),
+	    EXT4_ENCRYPTED);
+	/* A symlink's target reads as the no-key name of its ciphertext. */
+	EXPECT(ext4_get_inode(fs, long_link->number, &link), EXT4_OK);
+	EXPECT(ext4_read(fs, &link, 0, target, sizeof(target) - 1U, &completed), EXT4_OK);
+	target[completed] = 0;
+	CHECK(completed == NOKEY_NAME_MAX && strchr(target, '/') == NULL);
+	for (index = 0; index < listing.count; index++) {
+		if (listing.numbers[index] == long_file->number) {
+			/* A long name's no-key name ends with the SHA-256 of its tail. */
+			CHECK(strlen(listing.names[index]) == NOKEY_NAME_MAX);
+			from = entry_of(&vault, listing.names[index], long_file);
+			to = entry_of(&vault, "renamed", NULL);
+			EXPECT(
+			    ext4_rename(fs, &from, &to, 0, &encrypt_time, &result), EXT4_ENCRYPTED);
+			EXPECT(
+			    ext4_unlink(fs, vault.number, vault.generation,
+				(const uint8_t *)listing.names[index], strlen(listing.names[index]),
+				long_file->number, long_file->generation, &encrypt_time, &result),
+			    EXT4_OK);
+			removed++;
+		} else if (listing.numbers[index] == gone->number) {
+			EXPECT(
+			    ext4_rmdir(fs, vault.number, vault.generation,
+				(const uint8_t *)listing.names[index], strlen(listing.names[index]),
+				gone->number, gone->generation, &encrypt_time, &result),
+			    EXT4_OK);
+			removed++;
+		}
+	}
+	CHECK(removed == 2U);
+	vault = model_directory(fs, model, MODEL_VAULT);
+	CHECK(nokey_listing(fs, &vault, &listing) == expected - 2U);
+}
+
+/* The no-key names and symlink targets a mount without the key presents, for Linux to
+ * compare: a "directory PATH" line names each directory to list by its no-key path,
+ * before its "name PATH NAME" and "link PATH/NAME TARGET" lines. */
+static void
+nokey_export(struct ext4_fs *fs, struct model *model, const char *directory, const char *source)
+{
+	static struct listing listing;
+	struct ext4_inode parent;
+	struct ext4_inode inode;
+	const char *name = strrchr(source, '/');
+	const char *extension;
+	char path[4096];
+	char paths[MODEL_SUB + 1U][NAME_BYTES + NOKEY_NAME_MAX + 1U];
+	char target[NOKEY_NAME_MAX + 1U];
+	uint32_t index;
+	uint32_t entry;
+	size_t completed;
+	FILE *manifest;
+	int length;
+
+	name = name == NULL ? source : name + 1;
+	extension = strrchr(name, '.');
+	length = snprintf(path, sizeof(path), "%s/encrypted-%.*s.nokey", directory,
+	    (int)(extension == NULL ? strlen(name) : (size_t)(extension - name)), name);
+	CHECK(length > 0 && (size_t)length < sizeof(path));
+	manifest = fopen(path, "wx");
+	CHECK(manifest != NULL);
+	/* The vault's own name is in the unencrypted root; the subdirectory's is not. */
+	snprintf(paths[MODEL_VAULT], sizeof(paths[MODEL_VAULT]), "%s", model->paths[MODEL_VAULT]);
+	paths[MODEL_SUB][0] = 0;
+	for (index = MODEL_VAULT; index <= MODEL_SUB; index++) {
+		CHECK(paths[index][0] != 0);
+		fprintf(manifest, "directory %s\n", paths[index]);
+		parent = model_directory(fs, model, index);
+		nokey_listing(fs, &parent, &listing);
+		for (entry = 0; entry < listing.count; entry++) {
+			if (strcmp(listing.names[entry], ".") == 0 ||
+			    strcmp(listing.names[entry], "..") == 0) {
+				continue;
+			}
+			fprintf(manifest, "name %s %s\n", paths[index], listing.names[entry]);
+			if (listing.numbers[entry] == model->directories[MODEL_SUB].number) {
+				snprintf(paths[MODEL_SUB], sizeof(paths[MODEL_SUB]), "%s/%s",
+				    paths[index], listing.names[entry]);
+			}
+			EXPECT(ext4_get_inode(fs, listing.numbers[entry], &inode), EXT4_OK);
+			if ((inode.mode & EXT4_MODE_TYPE) != EXT4_MODE_SYMLINK) {
+				continue;
+			}
+			EXPECT(ext4_read(fs, &inode, 0, target, sizeof(target) - 1U, &completed),
+			    EXT4_OK);
+			target[completed] = 0;
+			fprintf(manifest, "link %s/%s %s\n", paths[index], listing.names[entry],
+			    target);
+		}
+	}
+	CHECK(fclose(manifest) == 0);
+}
+
 /* Policies: invalid, unsupported, unknown keys and unsuitable directories refuse. */
 static void
 policies(struct ext4_fs *fs, struct model *model, const struct keyring *keyring,
@@ -1130,9 +1282,14 @@ keyed_write(struct device *device, const char *exports, const char *source)
 	struct ext4_crypto_environment crypto;
 	struct ext4_inode_update update = creation();
 	struct ext4_inode inode;
+	struct ext4_inode long_file;
+	struct ext4_inode long_link;
+	struct ext4_inode gone;
 	struct ext4_fs *fs;
 	struct model_object *object;
 	char name[NAME_BYTES];
+	char removal[NAME_BYTES];
+	char indexed[NAME_BYTES];
 	char target[LONG_TARGET_BYTES + 1U];
 	uint32_t block = device->block_size;
 	unsigned int index;
@@ -1181,8 +1338,21 @@ keyed_write(struct device *device, const char *exports, const char *source)
 	name[PROBE_LONG_NAME_BYTES] = 0;
 	model_create(fs, &model, MODEL_FILE, MODEL_VAULT, name, NULL);
 	model_write(fs, &model, model_find(&model, MODEL_VAULT, name), 0, 2U * block, 8);
+	for (index = 0; index < PROBE_LONG_NAME_BYTES; index++) {
+		removal[index] = (char)('z' - index % 26U);
+	}
+	removal[PROBE_LONG_NAME_BYTES] = 0;
+	model_create(fs, &model, MODEL_FILE, MODEL_VAULT, removal, NULL);
+	model_create(fs, &model, MODEL_DIRECTORY, MODEL_VAULT, "gone", NULL);
 	model_create(fs, &model, MODEL_FILE, MODEL_SUB, "inner", NULL);
 	model_write(fs, &model, model_find(&model, MODEL_SUB, "inner"), 0, block + 1U, 9);
+	for (index = 0; index < INDEXED_NAMES; index++) {
+		snprintf(indexed, sizeof(indexed), "indexed-%02u-%0*u", index,
+		    (int)INDEXED_NAME_BYTES - 11, index);
+		model_create(fs, &model, MODEL_FILE, MODEL_SUB, indexed, NULL);
+	}
+	CHECK(!(fs->info.feature_compat & EXT4_FEATURE_COMPAT_DIR_INDEX) ||
+	    (model_directory(fs, &model, MODEL_SUB).flags & EXT4_INODE_INDEX));
 	model_create(fs, &model, MODEL_SYMLINK, MODEL_VAULT, "short-link", "tiny");
 	for (index = 0; index < LONG_TARGET_BYTES; index++) {
 		target[index] = index % 50U == 49U ? '/' : (char)('A' + index % 26U);
@@ -1203,17 +1373,28 @@ keyed_write(struct device *device, const char *exports, const char *source)
 	    PLAINTEXT_PROBE_BYTES));
 	CHECK(device_contains(
 	    device, model_find(&model, MODEL_PLAIN, "visible")->data, PLAINTEXT_PROBE_BYTES));
-	/* Without the key, encrypted names and contents are unreadable again. */
+	/* Without the key, names are no-key names and contents are unreadable again. */
+	long_file = model_inode(fs, &model, model_find(&model, MODEL_VAULT, removal));
+	long_link = model_inode(fs, &model, model_find(&model, MODEL_VAULT, "long-link"));
+	gone = model_inode(fs, &model, model_find(&model, MODEL_VAULT, "gone"));
 	EXPECT(ext4_set_crypto(fs, NULL), EXT4_OK);
 	EXPECT(
 	    ext4_lookup(fs, &model.directories[MODEL_VAULT], (const uint8_t *)"large", 5, &inode),
-	    EXT4_ENCRYPTED);
+	    EXT4_NOT_FOUND);
 	inode = find(fs, model.directories[MODEL_PLAIN].number, "block-out");
 	EXPECT(ext4_read(fs, &inode, 0, target, 1, &completed), EXT4_ENCRYPTED);
+	nokey_changes(fs, &model, &long_file, &gone, &long_link);
+	model_find(&model, MODEL_VAULT, removal)->present = false;
+	model_find(&model, MODEL_VAULT, "gone")->present = false;
+	EXPECT(ext4_sync(fs), EXT4_OK);
 	ext4_unmount(fs);
 	CHECK(keyring.handles == 0 && other.handles == 0);
-	/* The committed state reads back on a read-only mount. */
+	/* The committed state reads back on a read-only mount, whose no-key names Linux
+	 * must present identically. */
 	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	if (exports != NULL) {
+		nokey_export(fs, &model, exports, source);
+	}
 	crypto = keyring_environment(&keyring);
 	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
 	model.directories[MODEL_VAULT] = find(fs, EXT4_ROOT_INODE, "vault");
@@ -1234,8 +1415,9 @@ keyed_write(struct device *device, const char *exports, const char *source)
 }
 
 static void
-read_only(struct device *device)
+read_only(struct device *device, bool synthetic)
 {
+	static struct listing listing;
 	struct ext4_fs *fs;
 	struct ext4_inode secret;
 	struct ext4_inode file;
@@ -1251,21 +1433,31 @@ read_only(struct device *device)
 	CHECK(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_ENCRYPT);
 	secret = find(fs, EXT4_ROOT_INODE, "secret");
 	CHECK(secret.flags & EXT4_INODE_ENCRYPT);
-	EXPECT(ext4_iterate_dir(fs, &secret, &cookie, visit, NULL), EXT4_ENCRYPTED);
-	EXPECT(ext4_next_dir(fs, &secret, &cookie, &entry), EXT4_ENCRYPTED);
-	EXPECT(ext4_lookup(fs, &secret, (const uint8_t *)"inner", 5, &inode), EXT4_ENCRYPTED);
+	/* Without the key names are Linux's no-key names, which a plaintext name is not.
+	 * A synthetic tree's plaintext names are too short to be ciphertext. */
+	if (synthetic) {
+		listing.count = 0;
+		EXPECT(ext4_iterate_dir(fs, &secret, &cookie, collect, &listing), EXT4_CORRUPT);
+		CHECK(listing.count == 2U);
+	} else {
+		CHECK(nokey_listing(fs, &secret, &listing) == 3U + PROBE_FILES / 2U);
+		EXPECT(ext4_next_dir(fs, &secret, &cookie, &entry), EXT4_OK);
+		CHECK(strcmp((const char *)entry.name, ".") == 0);
+	}
+	EXPECT(ext4_lookup(fs, &secret, (const uint8_t *)"inner", 5, &inode), EXT4_NOT_FOUND);
 	/* Directory blocks hold ciphertext names but no encrypted bytes. */
 	EXPECT(ext4_read(fs, &secret, 0, &byte, 1, &completed), EXT4_OK);
 	encrypted_objects(fs, &file, &link);
 	EXPECT(ext4_read(fs, &file, 0, &byte, 1, &completed), EXT4_ENCRYPTED);
 	CHECK(completed == 0);
 	EXPECT(ext4_map_read(fs, &file, 0, 1, &mapping), EXT4_ENCRYPTED);
-	EXPECT(ext4_read(fs, &link, 0, &byte, 1, &completed), EXT4_ENCRYPTED);
+	/* A symlink target reads as its ciphertext's no-key name. */
+	EXPECT(ext4_read(fs, &link, 0, &byte, 1, &completed), synthetic ? EXT4_CORRUPT : EXT4_OK);
 	inode = find(fs, find(fs, EXT4_ROOT_INODE, "plain").number, "visible");
 	verify_pattern(fs, &inode, PLAIN_FILE);
 	ext4_unmount(fs);
 	CHECK(device->live == 0 && device->writes == 0);
-	puts("PASS read-only access denies encrypted names, contents and targets");
+	puts("PASS read-only access without a key presents no-key names and denies contents");
 }
 
 /* known supplies the source identity when its encrypted name cannot be looked up. */
@@ -1332,12 +1524,13 @@ writable(struct device *device, const char *exports, const char *source)
 	EXPECT(ext4_link(fs, secret.number, secret.generation, (const uint8_t *)"new", 3,
 		   visible.number, visible.generation, &encrypt_time, &result),
 	    EXT4_ENCRYPTED);
+	/* Removals without the key name entries by no-key names, which "any" is not. */
 	EXPECT(ext4_unlink(fs, secret.number, secret.generation, (const uint8_t *)"any", 3,
 		   file.number, file.generation, &encrypt_time, &result),
-	    EXT4_ENCRYPTED);
+	    EXT4_NOT_FOUND);
 	EXPECT(ext4_rmdir(fs, secret.number, secret.generation, (const uint8_t *)"any", 3,
 		   file.number, file.generation, &encrypt_time, &result),
-	    EXT4_ENCRYPTED);
+	    EXT4_NOT_FOUND);
 	EXPECT(
 	    rename_names(fs, secret.number, "any", EXT4_ROOT_INODE, "out", &file), EXT4_ENCRYPTED);
 	EXPECT(
@@ -1448,7 +1641,7 @@ main(int argc, char **argv)
 	if (synthetic) {
 		synthesize(&device);
 	}
-	read_only(&device);
+	read_only(&device, synthetic);
 	if (key) {
 		keyed(&device);
 	}

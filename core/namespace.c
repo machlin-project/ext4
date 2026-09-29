@@ -103,14 +103,17 @@ ext4_directory_links_valid(struct ext4_fs *fs, const struct ext4_inode *inode, b
 }
 
 /* Names in an encrypted directory are stored and hashed as ciphertext: encrypt the
- * name as it would be stored. Casefolded encrypted directories hash plaintext with a
+ * name as it would be stored, or for a removal without the key, resolve a no-key name
+ * to its stored ciphertext. Casefolded encrypted directories hash plaintext with a
  * derived key, which is not implemented. Other directories keep the name. */
 static enum ext4_result
 ext4_namespace_cipher(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_t **name,
-    size_t *name_length, uint8_t *cipher)
+    size_t *name_length, uint8_t *cipher, bool removal)
 {
 	struct ext4_fscrypt_key key;
+	struct ext4_fscrypt_nokey nokey;
 	uint8_t padded[EXT4_NAME_MAX];
+	uint32_t number;
 	size_t length = 0;
 	enum ext4_result error;
 
@@ -118,8 +121,21 @@ ext4_namespace_cipher(struct ext4_fs *fs, const struct ext4_inode *directory, co
 		return EXT4_OK;
 	}
 	error = ext4_fscrypt_key(fs, directory, &key);
-	if (error == EXT4_OK && (directory->flags & EXT4_INODE_CASEFOLD)) {
+	if ((error == EXT4_OK || error == EXT4_ENCRYPTED) &&
+	    (directory->flags & EXT4_INODE_CASEFOLD)) {
 		error = EXT4_UNSUPPORTED;
+	}
+	/* As in Linux, a removal without the key names its entry by a no-key name. */
+	if (error == EXT4_ENCRYPTED && removal) {
+		if (!ext4_fscrypt_nokey_decode(*name, *name_length, &nokey)) {
+			return EXT4_NOT_FOUND;
+		}
+		error = ext4_directory_nokey_find(fs, directory, &nokey, cipher, &length, &number);
+		if (error == EXT4_OK) {
+			*name = cipher;
+			*name_length = length;
+		}
+		return error;
 	}
 	if (error == EXT4_OK) {
 		error = ext4_fscrypt_name_encrypt(
@@ -358,7 +374,7 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		goto cancel;
 	}
 	/* New names in an encrypted directory are encrypted with its key. */
-	error = ext4_namespace_cipher(fs, &parent, &name, &name_length, cipher);
+	error = ext4_namespace_cipher(fs, &parent, &name, &name_length, cipher, false);
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
@@ -683,7 +699,7 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 		error = EXT4_PERMISSION_DENIED;
 		goto cancel;
 	}
-	error = ext4_namespace_cipher(fs, &parent, &name, &name_length, cipher);
+	error = ext4_namespace_cipher(fs, &parent, &name, &name_length, cipher, true);
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
@@ -1007,7 +1023,7 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 		state->ciphered[index] = *names[index];
 		error =
 		    ext4_namespace_cipher(fs, &state->parents[index], &state->ciphered[index].name,
-			&state->ciphered[index].name_length, state->cipher[index]);
+			&state->ciphered[index].name_length, state->cipher[index], false);
 		if (error != EXT4_OK) {
 			goto cancel;
 		}

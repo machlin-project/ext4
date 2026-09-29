@@ -41,14 +41,15 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Linux's no-key names for encrypted directories without a key; unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity reading and enabling, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
+| Format compatibility | Unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity reading and enabling, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. Encryption with keys and Linux's no-key names without them match Linux 6.12 (see "Encrypted writing evidence" and "No-key names evidence"). 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | None; by product decision the core keeps refusing torn bitmap and inode checksums that an interrupted Linux fast-commit replay leaves, and leaves the log pending for Linux or e2fsck | Accepted with that documented limitation; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay of two native captures are accepted, and the torn states of two range-heavy captures fail closed (see "Fast-commit combinations and interrupted foreign replay evidence" and "Interrupted Linux replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
 | Scale and sustained operation | Indexed operations still classify the whole index tree | Open; measured workloads show bounded peak memory; group commit, ordered data and lazy checkpointing reach write amplification 1.0, a few barriers per commit and two per synchronous commit, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence", "Deferred commit evidence", "Ordered data evidence", "Lazy checkpointing evidence" and "Sustained operation and fuzzing evidence") |
 
 MMP, fs-verity reading, enabling and measurement with protected writable metadata,
 encrypted volumes without keys and reading, writing and encrypting them with keys
 from adapter callbacks, casefolded directories and quota/project accounting with
-limits enforced under an adapter's policy are implemented. No-key names are not. Built-in verity signatures are stored and checked by the
+limits enforced under an adapter's policy are implemented, and encrypted directories
+present Linux's no-key names without the key. Built-in verity signatures are stored and checked by the
 adapter's callback. Encryption is not accepted merely because mounting rejects it
 safely. They must not disappear from a future readiness claim. The core
 currently requires one serialized resource owner; native operation locking,
@@ -369,6 +370,26 @@ the same master key reads every one of their 12 remaining objects: file contents
 SHA-256, fast and block symlink targets, the directory and the FIFO (the lab's
 `artifacts/ext4-encrypt/core-verified-*/`). The complete 692-test regression passes
 (`artifacts/checks/scale-regression-21/`).
+
+## No-key names evidence
+
+Without the key, the core lists the tree Linux 6.12 encrypted as no-key names, each
+of which looks up its inode, while plaintext names are not found and another key
+behaves as none (`artifacts/checks/encrypt-nokey-1/`). The keyed write test then
+also creates 24 files with 200-byte names, which make the encrypted subdirectory
+indexed on all four volumes; converting an encrypted directory to an index no longer
+rejects ciphertext names containing NUL or slash bytes. After the key is removed, it
+lists the encrypted directory, refuses creation and a rename, reads a symlink target
+as a no-key name and removes a file with a 180-byte name and a directory by their
+no-key names. For each of the four exported trees, Linux without the key lists the
+encrypted directory and its indexed subdirectory, looks up each name and reads each
+symlink target. The harness requires exactly the core's 35 names and two targets,
+including 25 names that carry SHA-256 tails, hash words of a one-block directory and
+of an indexed one. Linux with the key then reads every remaining object, and strict
+fsck accepts each tree (the lab's `artifacts/ext4-encrypt/nokey-verified-*/`). Linux
+also reads back the tree the keyless owner changed
+(`artifacts/ext4-encrypt/nokey-owner-verified/`). The complete 692-test regression
+passes (`artifacts/checks/scale-regression-22/`).
 
 ## Casefolded directories evidence
 

@@ -166,8 +166,9 @@ Continue the actual remaining queue in `docs/ACCEPTANCE.md`:
 - Expand required geometry/format compatibility. MMP, quota/project accounting and
   limit enforcement, casefold, keyless encryption and verity reading, enabling and
   measurement, with built-in signatures checked by an adapter callback, and reading,
-  writing and encrypting objects with keys from adapter callbacks are implemented.
-  Linux's no-key names remain; do not silently remove them.
+  writing and encrypting objects with keys from adapter callbacks, and Linux's no-key
+  names without them, are implemented. Unjournaled writes on journal-less volumes
+  remain refused.
 - Sustained mixed-operation/crash sequences, operations fuzzing and
   checksum-repairing journal fuzzing are in place; keep extending them. Fix
   discovered contracts at their owning layer, not in the test harness.
