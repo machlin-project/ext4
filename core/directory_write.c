@@ -57,6 +57,22 @@ ext4_directory_checksum_set(struct ext4_fs *fs, const struct ext4_inode *inode, 
 	ext4_encode32(&tail->checksum, ext4_crc32c(ext4_inode_seed(fs, inode), buffer, usable));
 }
 
+/* The next block a scan visits: every block in turn, or each further leaf a probed
+ * index confines the requested hash to. UINT32_MAX ends the scan; error reports why
+ * it ended early. */
+static uint32_t
+ext4_directory_scan_next(struct ext4_directory_index *tree, bool probed, uint32_t hash,
+    uint32_t logical, uint64_t blocks, enum ext4_result *error)
+{
+	bool more = false;
+
+	if (!probed) {
+		return logical + 1U < blocks ? logical + 1U : UINT32_MAX;
+	}
+	*error = ext4_index_next(tree, hash, &more);
+	return *error == EXT4_OK && more ? tree->leaf_logical : UINT32_MAX;
+}
+
 static enum ext4_result
 ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4_inode *parent,
     struct ext4_inode_disk *disk, const uint8_t *name, size_t name_length,
@@ -69,6 +85,7 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 	struct ext4_directory_slot repack;
 	struct ext4_name_hash requested = { 0, 0 };
 	struct ext4_name_hash hash;
+	const struct ext4_index_range *range = NULL;
 	uint8_t *buffer = allocation->scratch;
 	uint8_t *entry_name;
 	uint64_t blocks = parent->size / fs->info.block_size;
@@ -93,7 +110,10 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 	bool dotdot;
 	bool eligible;
 	bool inline_data = (parent->flags & EXT4_INODE_INLINE_DATA) != 0;
-	enum ext4_result error;
+	bool dots = name_length != 0 && name_length <= 2 && name[0] == '.' &&
+	    (name_length == 1 || name[1] == '.');
+	bool probed = tree != NULL && action != EXT4_DIRECTORY_EMPTY && !dots;
+	enum ext4_result error = EXT4_OK;
 
 	if (inline_data) {
 		error = ext4_inline_directory(
@@ -103,9 +123,17 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 		}
 		blocks = 1;
 	}
-	if (tree != NULL && action != EXT4_DIRECTORY_EMPTY) {
+	/* As in Linux, "." and ".." are found only in an index's root block, and any
+	 * other name's hash confines it to the leaves one probed path reaches. */
+	if (tree != NULL && dots && action != EXT4_DIRECTORY_EMPTY) {
+		blocks = 1;
+	}
+	if (probed) {
 		error = ext4_directory_name_hash(
 		    key, tree->version, tree->seed, name, name_length, &requested);
+		if (error == EXT4_OK) {
+			error = ext4_index_probe(tree, requested.major);
+		}
 		if (error != EXT4_OK) {
 			return error;
 		}
@@ -118,15 +146,20 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 		slot->inline_tail = inline_tail;
 		slot->inline_hash = inline_hash;
 	}
-	for (logical = 0; logical < blocks; logical++) {
-		if (tree != NULL && tree->ranges[logical].kind == EXT4_INDEX_NODE) {
+	for (logical = probed ? tree->leaf_logical : 0; logical != UINT32_MAX;
+	    logical =
+		ext4_directory_scan_next(tree, probed, requested.major, logical, blocks, &error)) {
+		range = probed				   ? &tree->leaf
+		    : tree != NULL && tree->ranges != NULL ? &tree->ranges[logical]
+							   : NULL;
+		if (range != NULL && range->kind == EXT4_INDEX_NODE) {
 			continue;
 		}
 		usable = inline_data		   ? inline_used
 		    : tree != NULL && logical == 0 ? fs->info.block_size
 						   : ext4_directory_usable(fs);
-		eligible = tree == NULL ||
-		    (logical != 0 && ext4_index_contains(&tree->ranges[logical], requested.major));
+		eligible =
+		    tree == NULL || (logical != 0 && ext4_index_contains(range, requested.major));
 		/* A validated index confines every name to leaves containing its hash. */
 		if (tree != NULL && logical != 0 && !eligible && action != EXT4_DIRECTORY_EMPTY) {
 			continue;
@@ -211,8 +244,7 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 					error = ext4_directory_name_hash(key, tree->version,
 					    tree->seed, entry_name, names, &hash);
 					if (error != EXT4_OK ||
-					    !ext4_index_contains(
-						&tree->ranges[logical], hash.major)) {
+					    !ext4_index_contains(range, hash.major)) {
 						return EXT4_CORRUPT;
 					}
 				}
@@ -256,6 +288,9 @@ ext4_directory_scan_blocks(struct ext4_allocation *allocation, const struct ext4
 			repack.physical = run.physical;
 			repack.repack = true;
 		}
+	}
+	if (error != EXT4_OK) {
+		return error;
 	}
 	if (action == EXT4_DIRECTORY_EMPTY) {
 		return populated ? EXT4_NOT_EMPTY : EXT4_OK;
@@ -327,8 +362,9 @@ ext4_directory_scan_named(struct ext4_allocation *allocation, struct ext4_inode 
 	if (parent->size / fs->info.block_size > EXT4_DIRECTORY_MAX_BLOCKS) {
 		return EXT4_UNSUPPORTED;
 	}
-	error = indexed ? ext4_index_open(allocation, parent, disk, &tree)
-			: ext4_write_map_validate(allocation, parent, disk);
+	error = indexed
+	    ? ext4_index_open(allocation, parent, disk, &tree, action == EXT4_DIRECTORY_EMPTY)
+	    : ext4_write_map_validate(allocation, parent, disk);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -542,10 +578,11 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 	uint32_t best = UINT32_MAX;
 	uint32_t index;
 	uint32_t separator = 0;
+	bool more = true;
 	enum ext4_result error;
 
 	error = convert ? ext4_directory_index_start(allocation, parent, disk, &tree)
-			: ext4_index_open(allocation, parent, disk, &tree);
+			: ext4_index_open(allocation, parent, disk, &tree, false);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -554,10 +591,22 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 		goto out;
 	}
 	next = tree.blocks;
-	if (!convert &&
-	    (slot->logical >= tree.blocks || tree.ranges[slot->logical].kind != EXT4_INDEX_LEAF)) {
-		error = EXT4_CORRUPT;
-		goto out;
+	/* The slot's leaf is on the new name's probed path or continues its hash. */
+	if (!convert) {
+		error = ext4_directory_name_hash(
+		    &key, tree.version, tree.seed, name, name_length, &hash);
+		if (error == EXT4_OK) {
+			error = ext4_index_probe(&tree, hash.major);
+		}
+		while (error == EXT4_OK && more && tree.leaf_logical != slot->logical) {
+			error = ext4_index_next(&tree, hash.major, &more);
+		}
+		if (error == EXT4_OK && tree.leaf_logical != slot->logical) {
+			error = EXT4_CORRUPT;
+		}
+		if (error != EXT4_OK) {
+			goto out;
+		}
 	}
 	error = ext4_index_read(&tree, convert ? 0 : slot->logical, &physical);
 	if (error == EXT4_OK) {
@@ -644,7 +693,7 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 		error = ext4_directory_name_hash(&key, tree.version, tree.seed,
 		    (const uint8_t *)(entry + 1), entry->name_length, &hash);
 		if (error != EXT4_OK || count + 1U >= capacity ||
-		    (!convert && !ext4_index_contains(&tree.ranges[slot->logical], hash.major))) {
+		    (!convert && !ext4_index_contains(&tree.leaf, hash.major))) {
 			error = EXT4_CORRUPT;
 			goto out;
 		}
@@ -707,7 +756,7 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 		separator =
 		    entries[cut].hash | (entries[cut - 1].hash == entries[cut].hash ? 1U : 0);
 		if (!convert) {
-			error = ext4_index_add(&tree, slot->logical, separator, right, &next);
+			error = ext4_index_add(&tree, separator, right, &next);
 		}
 	}
 	if (error == EXT4_OK && convert) {
@@ -724,6 +773,10 @@ ext4_directory_repack(struct ext4_allocation *allocation, const struct ext4_inod
 		if (error == EXT4_OK && convert) {
 			ext4_encode32(&disk->flags, ext4_le32(&disk->flags) | EXT4_INODE_INDEX);
 		}
+	}
+	/* The split or conversion preserves a classified index. */
+	if (error == EXT4_OK) {
+		ext4_index_remember(allocation, parent, disk);
 	}
 out:
 	ext4_directory_name_close(fs, &key);

@@ -1410,6 +1410,14 @@ build. The twenty normal profiles require all their images; missing profiles fai
 the configured suite. The separate capacity fixture exercises full-root rejection
 and successful record reuse, without enabling LARGEDIR.
 
+After growing the indexed directory, `ext4-index-write-test IMAGE` remounts and links
+48 more names while counting device reads of index nodes other than the root. The
+first link classifies the index and must read every node and then its path; each
+later link, including leaf and node splits, may read each index level at most three
+times, when scanning, repacking and enrolling. On trees with at least two nodes, a
+node off the next name's path is then damaged before a remount, and that link must
+fail as corrupt without writes.
+
 The additional large-directory batch has separate fixture paths:
 
 ```sh

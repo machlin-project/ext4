@@ -32,7 +32,8 @@ edge_open(struct ext4_fs *fs, const struct ext4_inode *parent, struct edge_view 
 	    EXT4_OK);
 	EXPECT(
 	    ext4_allocation_init(&view->allocation, fs, view->transaction, &view->inode), EXT4_OK);
-	EXPECT(ext4_index_open(&view->allocation, &view->inode, view->disk, &view->tree), EXT4_OK);
+	EXPECT(ext4_index_open(&view->allocation, &view->inode, view->disk, &view->tree, true),
+	    EXT4_OK);
 }
 
 static void

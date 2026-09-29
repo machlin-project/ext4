@@ -317,7 +317,7 @@ attempt(struct ext4_fs *fs, const struct ext4_inode *parent, enum damage damage,
 		error = damage_index(&allocation, &inode, disk, damage);
 	}
 	if (error == EXT4_OK) {
-		error = ext4_index_open(&allocation, &inode, disk, &index);
+		error = ext4_index_open(&allocation, &inode, disk, &index, true);
 		if (error == EXT4_OK) {
 			if (observation != NULL) {
 				observe(&index, observation);

@@ -6,6 +6,11 @@
 #define ADDED_SMALL 700U
 #define ADDED_LARGE 160U
 #define ADDED_DEEP 32U
+/* Links after a remount whose reads show one classification per mount. */
+#define PROBED_LINKS 48U
+#define PROBED_NODES 1024U
+/* A split reads each node of its path when scanning, repacking and enrolling it. */
+#define PROBED_PATH_READS 3U
 #define TEST_NAME_PREFIX 11U
 #define TEST_HIGH_BYTE_POSITION 16U
 #define INDEX_SMALL_JOURNAL_CREDITS 4U
@@ -100,7 +105,7 @@ tree_shape(struct ext4_fs *fs, struct ext4_inode *inode, uint32_t *nodes, uint8_
 	EXPECT(ext4_edit_inode(fs, transaction, inode->number, inode->generation, &disk, inode),
 	    EXT4_OK);
 	EXPECT(ext4_allocation_init(&allocation, fs, transaction, inode), EXT4_OK);
-	EXPECT(ext4_index_open(&allocation, inode, disk, &tree), EXT4_OK);
+	EXPECT(ext4_index_open(&allocation, inode, disk, &tree, true), EXT4_OK);
 	*nodes = 0;
 	*levels = tree.levels;
 	for (logical = 0; logical < tree.blocks; logical++) {
@@ -178,6 +183,148 @@ empty_directory(struct ext4_fs *fs, const struct ext4_inode *parent)
 
 #include "index_edges.h"
 
+/* Device reads of the index nodes, other than the root, that a classification found. */
+static struct {
+	uint64_t offsets[PROBED_NODES];
+	uint32_t count;
+	uint32_t reads;
+} node_reads;
+
+static enum ext4_result
+node_counting_read(void *context, uint64_t offset, void *buffer, size_t length)
+{
+	uint32_t index;
+
+	for (index = 0; index < node_reads.count; index++) {
+		if (node_reads.offsets[index] >= offset &&
+		    node_reads.offsets[index] - offset < length) {
+			node_reads.reads++;
+		}
+	}
+	return device_read(context, offset, buffer, length);
+}
+
+static void
+index_node_offsets(struct device *device, struct ext4_fs *fs, struct ext4_inode *inode)
+{
+	struct ext4_transaction *transaction;
+	struct ext4_allocation allocation;
+	struct ext4_directory_index tree;
+	struct ext4_inode_disk *disk;
+	uint64_t physical;
+	uint32_t logical;
+
+	EXPECT(ext4_transaction_begin(fs->journal, ext4_journal_credits(fs->journal), &transaction),
+	    EXT4_OK);
+	EXPECT(ext4_edit_inode(fs, transaction, inode->number, inode->generation, &disk, inode),
+	    EXT4_OK);
+	EXPECT(ext4_allocation_init(&allocation, fs, transaction, inode), EXT4_OK);
+	EXPECT(ext4_index_open(&allocation, inode, disk, &tree, true), EXT4_OK);
+	node_reads.count = 0;
+	for (logical = 0; logical < tree.blocks; logical++) {
+		if (tree.ranges[logical].kind == EXT4_INDEX_NODE) {
+			CHECK(node_reads.count < PROBED_NODES);
+			EXPECT(ext4_map_block(fs, inode, logical, &physical), EXT4_OK);
+			node_reads.offsets[node_reads.count++] = physical * device->block_size;
+		}
+	}
+	ext4_index_close(&tree);
+	ext4_allocation_destroy(&allocation);
+	ext4_transaction_cancel(transaction);
+}
+
+/* A mount classifies an index at its first change and remembers it: that change
+ * reads every index node before probing its path, while later ones, including
+ * splits, read only the nodes of one probed path. */
+static void
+probed_links(struct ext4_fs *fs, const struct ext4_inode *parent, const struct ext4_inode *hello,
+    uint32_t first_name, uint8_t levels)
+{
+	struct ext4_inode result;
+	uint8_t name[EXT4_NAME_MAX + 1];
+	uint64_t size = parent->size;
+	uint32_t index;
+	uint32_t first = 0;
+	uint32_t most = 0;
+
+	fs->environment.read = node_counting_read;
+	for (index = 0; index < PROBED_LINKS; index++) {
+		filename(name, first_name + index);
+		node_reads.reads = 0;
+		EXPECT(ext4_link(fs, parent->number, parent->generation, name, EXT4_NAME_MAX,
+			   hello->number, hello->generation, &mutation_time, &result),
+		    EXT4_OK);
+		if (index == 0) {
+			first = node_reads.reads;
+		} else if (node_reads.reads > most) {
+			most = node_reads.reads;
+		}
+	}
+	fs->environment.read = device_read;
+	EXPECT(ext4_get_inode(fs, parent->number, &result), EXT4_OK);
+	/* Trees with index nodes split leaves during these links. */
+	CHECK((levels == 0 || result.size > size) && first >= node_reads.count + levels &&
+	    most <= PROBED_PATH_READS * levels);
+	printf("PASS indexed changes read nodes=%u first=%u later<=%u after one classification\n",
+	    node_reads.count, first, most);
+}
+
+/* An index node damaged before the mount and off a change's probed path still fails
+ * that change, the index's first in the mount, which classifies every block. */
+static struct ext4_fs *
+off_path_damage(struct device *device, struct ext4_fs *fs, struct ext4_inode *parent,
+    const struct ext4_inode *hello, uint32_t ordinal)
+{
+	struct ext4_transaction *transaction;
+	struct ext4_allocation allocation;
+	struct ext4_directory_index tree;
+	struct ext4_inode_disk *disk;
+	struct ext4_inode result;
+	struct ext4_name_hash hash;
+	uint8_t name[EXT4_NAME_MAX + 1];
+	uint64_t physical = 0;
+	uint64_t offset;
+	uint32_t logical;
+	uint32_t writes;
+
+	filename(name, ordinal);
+	EXPECT(ext4_transaction_begin(fs->journal, ext4_journal_credits(fs->journal), &transaction),
+	    EXT4_OK);
+	EXPECT(ext4_edit_inode(fs, transaction, parent->number, parent->generation, &disk, parent),
+	    EXT4_OK);
+	EXPECT(ext4_allocation_init(&allocation, fs, transaction, parent), EXT4_OK);
+	EXPECT(ext4_index_open(&allocation, parent, disk, &tree, true), EXT4_OK);
+	EXPECT(ext4_directory_hash(tree.version, tree.seed, name, EXT4_NAME_MAX, &hash), EXT4_OK);
+	for (logical = 0; logical < tree.blocks && physical == 0; logical++) {
+		if (tree.ranges[logical].kind == EXT4_INDEX_NODE &&
+		    !ext4_index_contains(&tree.ranges[logical], hash.major)) {
+			EXPECT(ext4_map_block(fs, parent, logical, &physical), EXT4_OK);
+		}
+	}
+	ext4_index_close(&tree);
+	ext4_allocation_destroy(&allocation);
+	ext4_transaction_cancel(transaction);
+	CHECK(physical != 0);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	/* The node's limit no longer matches its block size. */
+	offset = physical * device->block_size + sizeof(struct ext4_dir_header_disk) +
+	    offsetof(struct ext4_dx_count_disk, limit);
+	device->cache[offset] ^= 1;
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	writes = device->writes;
+	EXPECT(ext4_link(fs, parent->number, parent->generation, name, EXT4_NAME_MAX, hello->number,
+		   hello->generation, &mutation_time, &result),
+	    EXT4_CORRUPT);
+	CHECK(device->writes == writes && !fs->aborted);
+	ext4_unmount(fs);
+	device->cache[offset] ^= 1;
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, parent->number, parent), EXT4_OK);
+	puts("PASS off-path index damage fails the first change in a mount without writes");
+	return fs;
+}
+
 static void
 functional(struct device *device, const char *exports, const char *path)
 {
@@ -221,6 +368,20 @@ functional(struct device *device, const char *exports, const char *path)
 	if (device->block_size == EXT4_MIN_BLOCK_SIZE) {
 		CHECK(levels == ext4_index_max_levels(fs) && nodes > 2);
 	}
+	verify_names(fs, &parent, added, hello.number);
+	index_node_offsets(device, fs, &parent);
+	CHECK(node_reads.count == nodes);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, parent.number, &parent), EXT4_OK);
+	probed_links(fs, &parent, &hello, added, levels);
+	added += PROBED_LINKS;
+	if (nodes > 1) {
+		fs = off_path_damage(device, fs, &parent, &hello, added);
+	}
+	EXPECT(ext4_get_inode(fs, parent.number, &parent), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, hello.number, &hello), EXT4_OK);
 	verify_names(fs, &parent, added, hello.number);
 	writes = device->writes;
 	filename(name, 0);
@@ -714,7 +875,7 @@ changing_media_guards(struct device *device, uint32_t ordinal, bool conversion)
 		    EXT4_OK);
 		CHECK(conversion ? slot.physical == 0 : slot.repack);
 		if (!conversion) {
-			EXPECT(ext4_index_open(&allocation, &parent, disk, &tree), EXT4_OK);
+			EXPECT(ext4_index_open(&allocation, &parent, disk, &tree, true), EXT4_OK);
 		}
 		memset(&changing_read, 0, sizeof(changing_read));
 		changing_read.kind = kind;

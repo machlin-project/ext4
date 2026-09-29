@@ -221,9 +221,10 @@ credit limits, commit ordering or resource ownership.
 Creation and link replay combine name lookup with insertion-slot preparation in
 one directory scan. An existing name reports its inode identity; replay accepts
 the same identity without changing link counts and rejects a conflicting owner.
-Indexed parents use the namespace writer's hash-targeted scan described below, so
-each name operation reads the index graph and only the leaves eligible for that
-name. Linear parents still validate every record for each operation.
+Indexed parents use the namespace writer's hash-targeted scan described below.
+Replay does not remember classified indexes, so each name operation reads the index
+graph and only the leaves eligible for that name. Linear parents still validate
+every record for each operation.
 
 The complete semantic conversion commits as an ordinary journal transaction with
 the same ID as the fast prefix. Before its commit becomes durable, the original
@@ -455,14 +456,25 @@ any change to those fields, including one made behind the mount, requires anothe
 complete validation. Every mapping node read still checks its structure and
 checksum. Recovery, fast-commit replay and read-only mounts do not use this record.
 
-Indexed-directory operations still read every index node and classify every
-directory block before changing the directory, so reads per operation grow with
-the number of index nodes, and time and a temporary allocation of 24 bytes per
-block grow with directory blocks, up to the 1,048,576-block directory limit. With
-4 KiB blocks the root alone indexes about 500 leaves; with 1 KiB blocks a second
-index level appears early. Linux probes one root-to-leaf path. Replacing the whole-
-tree classification requires an equivalent guarantee against shared or misplaced
-leaves first.
+A writable mount classifies an indexed directory completely before its first
+change: it reads every index node and assigns every directory block to exactly one
+node or leaf whose hash range its parent defines, rejecting shared, unreferenced
+and misplaced blocks, with a temporary allocation of 24 bytes per block. The mount
+then remembers the directory's inode generation and map record, like validated
+maps, for 16 directories. Changes probe one root-to-leaf path, as Linux does:
+each node on it is read, checked against its range and the path above it and, when
+the same change classified the tree, against the classification, and a CRC32C of
+its entries is kept. A name is looked for in the probed leaf and in following
+leaves whose boundary marks the continuation of a colliding hash; "." and ".." only
+in the root block. A split enrolls each node it changes only if its entries still
+match that CRC, and the mount's own splits and conversions update the remembered
+record, since they preserve the classification. A changed record, another
+generation or an evicted directory is classified again, as is every emptiness
+check, which reads all leaves anyway. Reads per change therefore depend on index
+depth, not on the number of nodes. The remembered state relies on the exclusive
+owner, like validated maps: damage behind the mount to a node off a probed path is
+found only when the directory is next classified. Recovery, fast-commit replay and
+read-only mounts do not remember directories.
 
 `ext4_fallocate` reserves holes as unwritten extents, with optional EOF growth or
 KEEP_SIZE. Reservation requires extent mapping; indirect files reject before any

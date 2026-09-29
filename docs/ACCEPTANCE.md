@@ -43,7 +43,7 @@ counted as portable-core implementation.
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
 | Format compatibility | Unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity reading and enabling, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. Encryption with keys and Linux's no-key names without them match Linux 6.12 (see "Encrypted writing evidence" and "No-key names evidence"). 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | None; by product decision the core keeps refusing torn bitmap and inode checksums that an interrupted Linux fast-commit replay leaves, and leaves the log pending for Linux or e2fsck | Accepted with that documented limitation; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay of two native captures are accepted, and the torn states of two range-heavy captures fail closed (see "Fast-commit combinations and interrupted foreign replay evidence" and "Interrupted Linux replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
-| Scale and sustained operation | Indexed operations still classify the whole index tree | Open; measured workloads show bounded peak memory; group commit, ordered data and lazy checkpointing reach write amplification 1.0, a few barriers per commit and two per synchronous commit, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence", "Deferred commit evidence", "Ordered data evidence", "Lazy checkpointing evidence" and "Sustained operation and fuzzing evidence") |
+| Scale and sustained operation | None; keep extending sustained operation and fuzzing as formats expand | Accepted; indexed changes probe one path after one classification per mount, and measured workloads show bounded peak memory; group commit, ordered data and lazy checkpointing reach write amplification 1.0, a few barriers per commit and two per synchronous commit, and the sustained suite, a second soak and checksum-repairing operations fuzzing pass (see "Scale measurement evidence", "Deferred commit evidence", "Ordered data evidence", "Lazy checkpointing evidence" and "Sustained operation and fuzzing evidence") |
 
 MMP, fs-verity reading, enabling and measurement with protected writable metadata,
 encrypted volumes without keys and reading, writing and encrypting them with keys
@@ -95,6 +95,20 @@ with 4 KiB blocks and five with 1 KiB blocks at 50,000 entries. On volumes with
 with 1 KiB blocks from 40,000 to 200,000 entries; a lookup then reads five blocks,
 and peak core allocation stays below 281 KiB. Strict fsck accepts both results
 (`artifacts/checks/scale-directory-200k/`).
+
+Indexed changes now probe one root-to-leaf path after one complete classification
+per mount (`artifacts/checks/scale-directory-probe/`). Built from the previous
+revision and with the change, the same release driver creates 200,000 names in one
+directory on fresh volumes with 262,144 inodes. With 1 KiB blocks each batch of
+10,000 costs 15.0 to 20.8 reads and 4.9 to 7.6 µs per create, down from 16.1 to 86.0
+reads and 5.8 to 53.6 µs; with 4 KiB blocks 14.0 to 15.1 reads and 14.2 to 17.4 µs,
+down from 14.0 to 18.1 reads and 14.6 to 25.5 µs. Peak core allocation falls from
+286 KiB to 124 KiB and from 189 KiB to 157 KiB, lookups still read five blocks, and
+strict fsck accepts all four results, which use identical block counts. In the
+index write tests, the first change after a mount reads all 156 index nodes of a
+two-level large directory and every later change at most six, while damage to a
+node off a change's path fails that first change without writes. The complete
+692-test regression passes (`artifacts/checks/scale-regression-23/`).
 
 Peak live core allocation stays at 1.16 MiB with 4 KiB blocks and 372 KiB with
 1 KiB blocks for 256 MiB files, the bound of a 256-snapshot transaction, and at

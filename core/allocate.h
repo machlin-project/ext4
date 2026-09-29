@@ -164,6 +164,8 @@ enum ext4_result ext4_write_map_punch(struct ext4_allocation *allocation,
  * Validation reads the transaction view without enrolling mapping snapshots. */
 enum ext4_result ext4_write_map_validate(struct ext4_allocation *allocation,
     const struct ext4_inode *inode, struct ext4_inode_disk *disk);
+/* The raw inode fields that define and account for an inode's block map. */
+void ext4_map_record_read(const struct ext4_inode_disk *disk, struct ext4_map_record *record);
 /* Materialize a logged extent or hole in the private recovery transaction.
  * Recount validates ownership, claims surviving backing and derives i_blocks
  * from the resulting tree instead of trusting the logged tree shape. */

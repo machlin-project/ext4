@@ -40,6 +40,7 @@ struct ext4_orphan_file {
 
 #define EXT4_QUOTA_TYPES 3U
 #define EXT4_VALIDATED_MAPS 64U
+#define EXT4_VALIDATED_INDEXES 16U
 
 /* The raw inode fields that define and account for an inode's block map. */
 struct ext4_map_record {
@@ -156,6 +157,11 @@ struct ext4_fs {
 	 * maps from logs and never uses this cache. */
 	struct ext4_validated_map validated_maps[EXT4_VALIDATED_MAPS];
 	uint32_t validated_map_next;
+	/* Indexed directories whose every block the mount classified, or whose index
+	 * its own validated operations produced, while their map records held these
+	 * fields. The mount's changes preserve the classification. */
+	struct ext4_validated_map validated_indexes[EXT4_VALIDATED_INDEXES];
+	uint32_t validated_index_next;
 	bool validated_maps_enabled;
 	/* The adapter's cryptography, and verity files whose signatures it accepted.
 	 * A changed descriptor has another digest and is verified again. */

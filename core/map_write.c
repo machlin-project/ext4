@@ -1413,7 +1413,7 @@ ext4_write_map_inspect(struct ext4_allocation *allocation, const struct ext4_ino
 	return error;
 }
 
-static void
+void
 ext4_map_record_read(const struct ext4_inode_disk *disk, struct ext4_map_record *record)
 {
 	ext4_zero(record, sizeof(*record));

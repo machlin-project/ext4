@@ -203,37 +203,55 @@ ext4_index_close(struct ext4_directory_index *index)
 	}
 }
 
-enum ext4_result
-ext4_index_open(struct ext4_allocation *allocation, const struct ext4_inode *inode,
-    struct ext4_inode_disk *disk, struct ext4_directory_index *index)
+/* The mount's record of an index that is classified as its map record stands. */
+static struct ext4_validated_map *
+ext4_index_remembered(
+    struct ext4_fs *fs, const struct ext4_inode *inode, const struct ext4_map_record *record)
+{
+	struct ext4_validated_map *entry;
+	uint32_t index;
+
+	for (index = 0; index < EXT4_VALIDATED_INDEXES; index++) {
+		entry = &fs->validated_indexes[index];
+		if (entry->number == inode->number && entry->generation == inode->generation) {
+			return ext4_equal(&entry->record, record, sizeof(*record)) ? entry : NULL;
+		}
+	}
+	return NULL;
+}
+
+void
+ext4_index_remember(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    const struct ext4_inode_disk *disk)
 {
 	struct ext4_fs *fs = allocation->fs;
-	uint64_t blocks = inode->size / fs->info.block_size;
+	struct ext4_validated_map *entry = NULL;
+	uint32_t index;
+
+	if (!fs->validated_maps_enabled) {
+		return;
+	}
+	for (index = 0; index < EXT4_VALIDATED_INDEXES && entry == NULL; index++) {
+		if (fs->validated_indexes[index].number == inode->number) {
+			entry = &fs->validated_indexes[index];
+		}
+	}
+	if (entry == NULL) {
+		entry = &fs->validated_indexes[fs->validated_index_next++ % EXT4_VALIDATED_INDEXES];
+	}
+	entry->number = inode->number;
+	entry->generation = inode->generation;
+	ext4_map_record_read(disk, &entry->record);
+}
+
+static enum ext4_result
+ext4_index_classify(struct ext4_directory_index *index)
+{
+	struct ext4_fs *fs = index->allocation->fs;
 	uint32_t logical;
 	unsigned int level;
 	enum ext4_result error;
 
-	ext4_zero(index, sizeof(*index));
-	index->allocation = allocation;
-	index->inode = inode;
-	index->disk = disk;
-	if ((inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY ||
-	    !(inode->flags & EXT4_INODE_INDEX) ||
-	    !(fs->info.feature_compat & EXT4_FEATURE_COMPAT_DIR_INDEX) || blocks < 2 ||
-	    inode->size % fs->info.block_size != 0) {
-		return EXT4_CORRUPT;
-	}
-	if (blocks > EXT4_DIRECTORY_MAX_BLOCKS) {
-		return EXT4_UNSUPPORTED;
-	}
-	index->blocks = (uint32_t)blocks;
-	error = ext4_write_map_validate(allocation, inode, disk);
-	if (error == EXT4_OK) {
-		error = ext4_allocation_super(allocation);
-	}
-	if (error != EXT4_OK) {
-		return error;
-	}
 	index->ranges = fs->environment.allocate(
 	    fs->environment.context, (size_t)index->blocks * sizeof(*index->ranges));
 	if (index->ranges == NULL) {
@@ -265,6 +283,208 @@ ext4_index_open(struct ext4_allocation *allocation, const struct ext4_inode *ino
 fail:
 	ext4_index_close(index);
 	return error;
+}
+
+enum ext4_result
+ext4_index_open(struct ext4_allocation *allocation, const struct ext4_inode *inode,
+    struct ext4_inode_disk *disk, struct ext4_directory_index *index, bool classify)
+{
+	struct ext4_fs *fs = allocation->fs;
+	struct ext4_map_record record;
+	uint64_t blocks = inode->size / fs->info.block_size;
+	uint64_t physical;
+	enum ext4_result error;
+
+	ext4_zero(index, sizeof(*index));
+	index->allocation = allocation;
+	index->inode = inode;
+	index->disk = disk;
+	if ((inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY ||
+	    !(inode->flags & EXT4_INODE_INDEX) ||
+	    !(fs->info.feature_compat & EXT4_FEATURE_COMPAT_DIR_INDEX) || blocks < 2 ||
+	    inode->size % fs->info.block_size != 0) {
+		return EXT4_CORRUPT;
+	}
+	if (blocks > EXT4_DIRECTORY_MAX_BLOCKS) {
+		return EXT4_UNSUPPORTED;
+	}
+	index->blocks = (uint32_t)blocks;
+	error = ext4_write_map_validate(allocation, inode, disk);
+	if (error == EXT4_OK) {
+		error = ext4_allocation_super(allocation);
+	}
+	if (error != EXT4_OK) {
+		return error;
+	}
+	/* A remembered index needs only its root; probes check each node they read. */
+	ext4_map_record_read(disk, &record);
+	if (!classify && ext4_index_remembered(fs, inode, &record) != NULL) {
+		error = ext4_index_read(index, 0, &physical);
+		return error == EXT4_OK ? ext4_index_header(index, 0) : error;
+	}
+	error = ext4_index_classify(index);
+	if (error == EXT4_OK) {
+		ext4_index_remember(allocation, inode, disk);
+	}
+	return error;
+}
+
+/* Read node frames[level] and check its entries against its range, the path above
+ * it and, when this operation classified the tree, the classification. Then follow
+ * the last entry at or below hash when search is set, or the entry at the frame's
+ * position. The followed child becomes the next frame, or the leaf below the last
+ * level. */
+static enum ext4_result
+ext4_index_follow(struct ext4_directory_index *index, uint8_t level, bool search, uint32_t hash)
+{
+	struct ext4_index_frame *frame = &index->frames[level];
+	struct ext4_index_range child = { 0 };
+	const struct ext4_dx_entry_disk *entries;
+	const struct ext4_dx_count_disk *counts;
+	const struct ext4_index_range *classified;
+	uint64_t physical;
+	uint64_t upper;
+	uint32_t base = frame->logical == 0 ? sizeof(struct ext4_dx_root_prefix_disk)
+					    : sizeof(struct ext4_dir_header_disk);
+	uint32_t previous = frame->range.lower;
+	uint32_t lower;
+	uint32_t number;
+	uint16_t first = 1;
+	uint16_t end;
+	uint16_t middle;
+	uint16_t count;
+	uint16_t entry;
+	uint8_t levels = index->levels;
+	uint8_t version = index->version;
+	uint8_t above;
+	enum ext4_result error;
+
+	error = ext4_index_read(index, frame->logical, &physical);
+	if (error == EXT4_OK) {
+		error = ext4_index_header(index, frame->logical);
+	}
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (index->levels != levels || index->version != version) {
+		return EXT4_CORRUPT;
+	}
+	counts = (const struct ext4_dx_count_disk *)(index->allocation->scratch + base);
+	entries = (const struct ext4_dx_entry_disk *)counts;
+	count = ext4_le16(&counts->count);
+	for (entry = 0; entry < count; entry++) {
+		lower = entry == 0 ? frame->range.lower : ext4_le32(&entries[entry].hash);
+		upper =
+		    entry + 1U == count ? frame->range.upper : ext4_le32(&entries[entry + 1U].hash);
+		number = ext4_le32(&entries[entry].block);
+		if (lower < previous || lower >= EXT4_HASH_EOF ||
+		    (entry != 0 && lower == previous && !(lower & 1U)) ||
+		    upper > frame->range.upper || lower > upper ||
+		    (lower == upper && !(lower & 1U)) || number == 0 || number >= index->blocks) {
+			return EXT4_CORRUPT;
+		}
+		for (above = 0; above <= level; above++) {
+			if (index->frames[above].logical == number) {
+				return EXT4_CORRUPT;
+			}
+		}
+		classified = index->ranges == NULL ? NULL : &index->ranges[number];
+		if (classified != NULL &&
+		    (classified->parent != frame->logical || classified->entry != entry ||
+			classified->lower != lower || classified->upper != upper ||
+			classified->kind !=
+			    (level == index->levels ? EXT4_INDEX_LEAF : EXT4_INDEX_NODE))) {
+			return EXT4_CORRUPT;
+		}
+		previous = lower;
+	}
+	if (search) {
+		/* The first entry inherits its lower bound. A continuation's odd boundary
+		 * sorts after the even name hash, so the search stops before it. */
+		end = count;
+		while (first < end) {
+			middle = (uint16_t)(first + (end - first) / 2U);
+			if (ext4_le32(&entries[middle].hash) <= hash) {
+				first = (uint16_t)(middle + 1U);
+			} else {
+				end = middle;
+			}
+		}
+		frame->position = (uint16_t)(first - 1U);
+	} else if (frame->position >= count) {
+		return EXT4_CORRUPT;
+	}
+	frame->count = count;
+	frame->checksum = ext4_crc32c(
+	    UINT32_MAX, index->allocation->scratch + base, (size_t)count * sizeof(*entries));
+	entry = frame->position;
+	child.lower = entry == 0 ? frame->range.lower : ext4_le32(&entries[entry].hash);
+	child.upper =
+	    entry + 1U == count ? frame->range.upper : ext4_le32(&entries[entry + 1U].hash);
+	child.level = (uint8_t)(level + 1U);
+	number = ext4_le32(&entries[entry].block);
+	if (level == index->levels) {
+		child.kind = EXT4_INDEX_LEAF;
+		index->leaf = child;
+		index->leaf_logical = number;
+		return EXT4_OK;
+	}
+	child.kind = EXT4_INDEX_NODE;
+	index->frames[level + 1U].range = child;
+	index->frames[level + 1U].logical = number;
+	index->frames[level + 1U].position = 0;
+	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_index_probe(struct ext4_directory_index *index, uint32_t hash)
+{
+	uint8_t level;
+	enum ext4_result error;
+
+	ext4_zero(index->frames, sizeof(index->frames));
+	index->frames[0].range.kind = EXT4_INDEX_ROOT;
+	index->frames[0].range.upper = EXT4_DX_HASH_END;
+	for (level = 0; level <= index->levels; level++) {
+		error = ext4_index_follow(index, level, true, hash);
+		if (error != EXT4_OK) {
+			return error;
+		}
+	}
+	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_index_next(struct ext4_directory_index *index, uint32_t hash, bool *more)
+{
+	uint64_t boundary;
+	uint8_t level = (uint8_t)(index->levels + 1U);
+	enum ext4_result error;
+
+	*more = false;
+	while (level > 0 &&
+	    index->frames[level - 1U].position + 1U >= index->frames[level - 1U].count) {
+		level--;
+	}
+	if (level == 0) {
+		return EXT4_OK;
+	}
+	level--;
+	/* The followed child's upper bound is the next entry's hash. */
+	boundary =
+	    level == index->levels ? index->leaf.upper : index->frames[level + 1U].range.upper;
+	if (!(boundary & 1U) || (boundary & ~UINT64_C(1)) != hash) {
+		return EXT4_OK;
+	}
+	index->frames[level].position++;
+	for (; level <= index->levels; level++) {
+		error = ext4_index_follow(index, level, false, 0);
+		if (error != EXT4_OK) {
+			return error;
+		}
+	}
+	*more = true;
+	return EXT4_OK;
 }
 
 void
@@ -320,20 +540,24 @@ ext4_index_append(
 	return EXT4_OK;
 }
 
+/* Enroll node frames[level] in the transaction, requiring the count and entries
+ * its probe checked. */
 static enum ext4_result
-ext4_index_buffer(struct ext4_directory_index *index, uint32_t logical, uint8_t **buffer)
+ext4_index_buffer(struct ext4_directory_index *index, uint8_t level, uint8_t **buffer)
 {
 	struct ext4_allocation *allocation = index->allocation;
+	struct ext4_index_frame *frame = &index->frames[level];
+	const struct ext4_index_range *child =
+	    level == index->levels ? &index->leaf : &index->frames[level + 1U].range;
 	struct ext4_map_run run;
 	struct ext4_dx_entry_disk *entries;
 	struct ext4_dx_count_disk *counts;
-	struct ext4_index_range *child;
+	uint32_t logical = frame->logical;
 	uint32_t base = logical == 0 ? sizeof(struct ext4_dx_root_prefix_disk)
 				     : sizeof(struct ext4_dir_header_disk);
 	uint32_t parent = index->parent_number;
-	uint32_t number;
-	uint16_t count;
-	uint16_t entry;
+	uint32_t number =
+	    level == index->levels ? index->leaf_logical : index->frames[level + 1U].logical;
 	uint8_t levels = index->levels;
 	uint8_t version = index->version;
 	void *snapshot = NULL;
@@ -351,7 +575,7 @@ ext4_index_buffer(struct ext4_directory_index *index, uint32_t logical, uint8_t 
 		return error;
 	}
 	/* Snapshot enrollment may perform a fresh device read. Validate its own
-	 * bounds and require the links observed by the complete graph walk. */
+	 * bounds and require the links the probe followed. */
 	ext4_copy(allocation->scratch, snapshot, allocation->fs->info.block_size);
 	error = ext4_index_header(index, logical);
 	if (error != EXT4_OK) {
@@ -363,20 +587,12 @@ ext4_index_buffer(struct ext4_directory_index *index, uint32_t logical, uint8_t 
 	}
 	entries = (struct ext4_dx_entry_disk *)(allocation->scratch + base);
 	counts = (struct ext4_dx_count_disk *)entries;
-	count = ext4_le16(&counts->count);
-	if (count != index->ranges[logical].count) {
+	if (ext4_le16(&counts->count) != frame->count ||
+	    ext4_crc32c(UINT32_MAX, entries, (size_t)frame->count * sizeof(*entries)) !=
+		frame->checksum ||
+	    ext4_le32(&entries[frame->position].block) != number ||
+	    (frame->position != 0 && ext4_le32(&entries[frame->position].hash) != child->lower)) {
 		return EXT4_CORRUPT;
-	}
-	for (entry = 0; entry < count; entry++) {
-		number = ext4_le32(&entries[entry].block);
-		if (number == 0 || number >= index->blocks) {
-			return EXT4_CORRUPT;
-		}
-		child = &index->ranges[number];
-		if (child->parent != logical || child->entry != entry ||
-		    (entry != 0 && child->lower != ext4_le32(&entries[entry].hash))) {
-			return EXT4_CORRUPT;
-		}
 	}
 	*buffer = snapshot;
 	return EXT4_OK;
@@ -411,12 +627,11 @@ ext4_index_node_initialize(struct ext4_fs *fs, uint8_t *buffer, uint16_t count)
 }
 
 enum ext4_result
-ext4_index_add(struct ext4_directory_index *index, uint32_t leaf, uint32_t hash, uint32_t block,
-    uint32_t *next)
+ext4_index_add(struct ext4_directory_index *index, uint32_t hash, uint32_t block, uint32_t *next)
 {
 	struct ext4_allocation *allocation = index->allocation;
 	struct ext4_fs *fs = allocation->fs;
-	struct ext4_index_range *range;
+	const struct ext4_index_range *range;
 	struct ext4_dx_count_disk *counts;
 	struct ext4_dx_entry_disk *entries;
 	struct ext4_dx_entry_disk *right_entries;
@@ -425,7 +640,7 @@ ext4_index_add(struct ext4_directory_index *index, uint32_t leaf, uint32_t hash,
 	struct ext4_dx_root_prefix_disk *root;
 	uint8_t *buffer = NULL;
 	uint8_t *right_buffer = NULL;
-	uint32_t child = leaf;
+	uint32_t child = index->leaf_logical;
 	uint32_t parent;
 	uint32_t base;
 	uint32_t right;
@@ -435,18 +650,18 @@ ext4_index_add(struct ext4_directory_index *index, uint32_t leaf, uint32_t hash,
 	uint16_t total;
 	uint16_t cut;
 	uint16_t entry;
-	uint8_t level;
+	uint8_t level = (uint8_t)(index->levels + 1U);
 	enum ext4_result error;
 
-	/* Propagate a split through the checked original parent chain. New nodes
-	 * stay private to the transaction; the directory owner publishes them only
-	 * together with its final inode size and allocation accounting. */
-	for (level = 0; level <= index->levels; level++) {
-		range = &index->ranges[child];
-		parent = range->parent;
+	/* Propagate a split up the checked probed path. New nodes stay private to the
+	 * transaction; the directory owner publishes them only together with its final
+	 * inode size and allocation accounting. */
+	while (level-- > 0) {
+		range = level == index->levels ? &index->leaf : &index->frames[level + 1U].range;
+		parent = index->frames[level].logical;
 		base = parent == 0 ? sizeof(*root) : sizeof(struct ext4_dir_header_disk);
-		position = (uint16_t)(range->entry + 1U);
-		error = ext4_index_buffer(index, parent, &buffer);
+		position = (uint16_t)(index->frames[level].position + 1U);
+		error = ext4_index_buffer(index, level, &buffer);
 		if (error != EXT4_OK) {
 			return error;
 		}
