@@ -570,7 +570,14 @@ struct ext4_verity_parameters {
  * Input and output are distinct. release_key releases a handle of either kind.
  * random_bytes fills a new inode's nonce. The mount keeps up to 16 derived keys;
  * installing the environment again releases them, which is how a removed key stops
- * being used. */
+ * being used. Handles transfer to the core only on OK; a callback cleans up its
+ * partial allocations on failure. cipher and random_bytes may modify their output
+ * before returning an error; the core does not publish that incomplete result.
+ *
+ * Installation, replacement and all callbacks use the filesystem's serialized
+ * owner. Callbacks must not reenter this filesystem, and the provider context must
+ * remain valid until replacement or unmount releases its last cached key. Native
+ * adapters coordinate queued requests before revoking keys or replacing trust. */
 #define EXT4_FSCRYPT_MODE_AES_256_XTS 1U
 #define EXT4_FSCRYPT_MODE_AES_256_CTS 4U
 

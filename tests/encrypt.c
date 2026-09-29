@@ -1541,6 +1541,8 @@ writable(struct device *device, const char *exports, const char *source)
 	puts("PASS writable owner preserves ciphertext and changes unencrypted names");
 }
 
+#include "crypto_failures.h"
+
 int
 main(int argc, char **argv)
 {
@@ -1577,6 +1579,7 @@ main(int argc, char **argv)
 	storage_open(&device, image);
 	if (write) {
 		keyed_write(&device, exports, image);
+		keyed_callback_failures(&device);
 		keyed_power_cuts(&device, CUT_OVERWRITE);
 		keyed_power_cuts(&device, CUT_TRUNCATE);
 		keyed_symlink_cuts(&device);
