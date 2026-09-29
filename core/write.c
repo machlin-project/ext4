@@ -10,6 +10,23 @@ struct ext4_write_target {
 	uint32_t logical;
 };
 
+/* One atomic edit owns its allocation state and physical/logical alias guard.
+ * Both success and cancellation release these before consuming the transaction. */
+struct ext4_write_edit {
+	struct ext4_allocation allocation;
+	struct ext4_write_target *targets;
+	uint32_t count;
+	uint32_t capacity;
+	bool allocation_ready;
+};
+
+struct ext4_write_range {
+	const uint8_t *data;
+	uint64_t offset;
+	uint64_t blocks;
+	size_t length;
+};
+
 /* Only an exclusive operation can retain this preparation across transactions.
  * No position or validation result survives the public call. */
 struct ext4_growth {
@@ -986,34 +1003,140 @@ ext4_unwritten_prepare(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 }
 
 static enum ext4_result
+ext4_write_edit_open(struct ext4_fs *fs, struct ext4_transaction *transaction,
+    const struct ext4_inode *inode, uint32_t capacity, struct ext4_write_edit *edit)
+{
+	enum ext4_result error;
+
+	edit->capacity = capacity;
+	edit->targets = fs->environment.allocate(
+	    fs->environment.context, (size_t)capacity * sizeof(*edit->targets));
+	if (edit->targets == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	error = ext4_allocation_init(&edit->allocation, fs, transaction, inode);
+	edit->allocation_ready = error == EXT4_OK;
+	return error;
+}
+
+static void
+ext4_write_edit_close(struct ext4_fs *fs, struct ext4_write_edit *edit)
+{
+	if (edit->allocation_ready) {
+		ext4_allocation_destroy(&edit->allocation);
+		edit->allocation_ready = false;
+	}
+	if (edit->targets != NULL) {
+		fs->environment.release(fs->environment.context, edit->targets,
+		    (size_t)edit->capacity * sizeof(*edit->targets));
+		edit->targets = NULL;
+	}
+}
+
+/* Stage block mapping and contents under the caller's transaction. The caller
+ * owns gap/unwritten preparation and the eventual commit of the inode updates. */
+static enum ext4_result
+ext4_write_stage(struct ext4_write_edit *edit, struct ext4_inode *inode,
+    struct ext4_inode_disk *disk, const struct ext4_write_range *range, struct ext4_growth *growth)
+{
+	struct ext4_allocation *allocation = &edit->allocation;
+	struct ext4_fs *fs = allocation->fs;
+	void *snapshot;
+	uint64_t logical = range->offset / fs->info.block_size;
+	uint64_t physical;
+	uint32_t index;
+	size_t within = (size_t)(range->offset % fs->info.block_size);
+	size_t chunk;
+	size_t consumed = 0;
+	bool zero;
+	enum ext4_result error;
+
+	for (index = 0; index < range->blocks; index++) {
+		allocation->run_clusters =
+		    (uint32_t)((range->blocks - index + fs->cluster_blocks - 1U) /
+			fs->cluster_blocks);
+		error = ext4_write_map_allocate(
+		    allocation, inode, disk, (uint32_t)(logical + index), &physical, &zero);
+		allocation->run_clusters = 0;
+		if (error != EXT4_OK) {
+			if (growth != NULL && error == EXT4_NO_SPACE) {
+				growth->mapping_no_space = true;
+				growth->allocation_logical = (uint32_t)(logical + index);
+			}
+			return error;
+		}
+		chunk = fs->info.block_size - within;
+		if (chunk > range->length - consumed) {
+			chunk = range->length - consumed;
+		}
+		/* A new or completely overwritten block needs no previous contents. */
+		error = ext4_write_snapshot(allocation, edit->targets, &edit->count, edit->capacity,
+		    (uint32_t)(logical + index), physical, zero || chunk == fs->info.block_size,
+		    &snapshot);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		error = ext4_data_change(fs, inode, (uint32_t)(logical + index), snapshot,
+		    zero || chunk == fs->info.block_size, within, range->data + consumed, chunk);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		consumed += chunk;
+		within = 0;
+	}
+	return EXT4_OK;
+}
+
+/* Finalize metadata while it still belongs to the private transaction. Resource
+ * release, durability, and publication of completed bytes remain with the caller. */
+static enum ext4_result
+ext4_write_attributes(struct ext4_write_edit *edit, struct ext4_inode *inode,
+    struct ext4_inode_disk *disk, const struct ext4_inode_update *update, uint64_t end)
+{
+	struct ext4_allocation *allocation = &edit->allocation;
+	struct ext4_fs *fs = allocation->fs;
+	enum ext4_result error = EXT4_OK;
+
+	if (update->fields & EXT4_ATTR_XATTRS) {
+		error =
+		    ext4_xattr_apply(allocation, inode, disk, update->xattrs, update->xattr_count);
+	}
+	if (error == EXT4_OK) {
+		error = ext4_inode_account(
+		    allocation, inode, disk, end > inode->size ? end : inode->size);
+	}
+	if (error == EXT4_OK && inode->links == 0) {
+		error = ext4_orphan_reserve(fs, inode, disk);
+	}
+	return error;
+}
+
+static enum ext4_result
 ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t offset,
     const void *buffer, size_t length, const struct ext4_inode_update *update, size_t *completed,
     struct ext4_growth *growth)
 {
 	struct ext4_fscrypt_key key;
+	struct ext4_write_edit edit;
+	struct ext4_write_range range = { .data = buffer, .offset = offset, .length = length };
 	struct ext4_transaction *transaction;
 	struct ext4_inode_disk *disk;
 	struct ext4_inode inode;
 	struct ext4_inode zero_from;
-	struct ext4_allocation allocation;
-	struct ext4_write_target *targets = NULL;
-	void *snapshot;
-	uint64_t logical;
-	uint64_t block_count;
 	uint64_t initialized;
-	uint64_t physical;
 	uint32_t feature_compat;
 	uint32_t credits;
 	uint32_t index;
-	uint32_t target_count = 0;
 	size_t within;
-	size_t chunk;
-	size_t consumed = 0;
-	bool allocation_ready = false;
-	bool zero;
 	bool inline_done;
 	enum ext4_result error;
 
+	/* allocation is initialized only after admission; initialize its ownership
+	 * flags without redundantly clearing the allocation workspace itself. */
+	edit.targets = NULL;
+	edit.count = 0;
+	edit.capacity = 0;
+	edit.allocation_ready = false;
 	if (completed == NULL) {
 		return EXT4_INVALID_ARGUMENT;
 	}
@@ -1028,15 +1151,15 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 		return error;
 	}
 	within = (size_t)(offset % fs->info.block_size);
-	block_count = length == 0 ? 0
-				  : length / fs->info.block_size +
+	range.blocks = length == 0 ? 0
+				   : length / fs->info.block_size +
 		(within + length % fs->info.block_size + fs->info.block_size - 1) /
 		    fs->info.block_size;
-	if (block_count >= EXT4_TRANSACTION_MAX_BLOCKS) {
+	if (range.blocks >= EXT4_TRANSACTION_MAX_BLOCKS) {
 		return EXT4_RANGE;
 	}
 	credits = ext4_journal_credits(fs->journal);
-	if (credits == 0 || block_count >= credits) {
+	if (credits == 0 || range.blocks >= credits) {
 		return EXT4_RANGE;
 	}
 	error = ext4_transaction_begin(fs->journal, credits, &transaction);
@@ -1080,18 +1203,11 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
-	targets =
-	    fs->environment.allocate(fs->environment.context, (size_t)credits * sizeof(*targets));
-	if (targets == NULL) {
-		error = EXT4_NO_MEMORY;
-		goto cancel;
-	}
-	error = ext4_allocation_init(&allocation, fs, transaction, &inode);
+	error = ext4_write_edit_open(fs, transaction, &inode, credits, &edit);
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
-	allocation_ready = true;
-	error = ext4_inline_edit(&allocation, &inode, disk,
+	error = ext4_inline_edit(&edit.allocation, &inode, disk,
 	    offset + length > inode.size ? offset + length : inode.size, offset, buffer, length,
 	    &inline_done);
 	if (error != EXT4_OK) {
@@ -1100,9 +1216,9 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 	if (inline_done) {
 		goto attributes;
 	}
-	allocation.mapping_size = offset + length;
+	edit.allocation.mapping_size = offset + length;
 	if ((update->fields & EXT4_ATTR_XATTRS) || ext4_inode_has_xattrs(fs, disk)) {
-		error = ext4_write_map_validate(&allocation, &inode, disk);
+		error = ext4_write_map_validate(&edit.allocation, &inode, disk);
 		if (error != EXT4_OK) {
 			goto cancel;
 		}
@@ -1112,10 +1228,10 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 		if (growth != NULL && growth->zeroed > zero_from.size) {
 			zero_from.size = growth->zeroed;
 		}
-		error = ext4_write_gap(
-		    &allocation, &zero_from, disk, offset, targets, &target_count, credits, NULL);
+		error = ext4_write_gap(&edit.allocation, &zero_from, disk, offset, edit.targets,
+		    &edit.count, credits, NULL);
 		if (growth != NULL) {
-			growth->zeroing = target_count != 0;
+			growth->zeroing = edit.count != 0;
 		}
 		if (error != EXT4_OK) {
 			goto cancel;
@@ -1135,68 +1251,26 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 		if (initialized > growth->initialized[index]) {
 			initialized = growth->initialized[index];
 		}
-		error = ext4_write_map_initialize(
-		    &allocation, &inode, disk, &growth->deferred[index], (uint32_t)initialized);
+		error = ext4_write_map_initialize(&edit.allocation, &inode, disk,
+		    &growth->deferred[index], (uint32_t)initialized);
 		if (error != EXT4_OK) {
 			goto cancel;
 		}
 	}
-	logical = offset / fs->info.block_size;
-	for (index = 0; index < block_count; index++) {
-		allocation.run_clusters =
-		    (uint32_t)((block_count - index + fs->cluster_blocks - 1U) /
-			fs->cluster_blocks);
-		error = ext4_write_map_allocate(
-		    &allocation, &inode, disk, (uint32_t)(logical + index), &physical, &zero);
-		allocation.run_clusters = 0;
-		if (error != EXT4_OK) {
-			if (growth != NULL && error == EXT4_NO_SPACE) {
-				growth->mapping_no_space = true;
-				growth->allocation_logical = (uint32_t)(logical + index);
-			}
-			goto cancel;
-		}
-		chunk = fs->info.block_size - within;
-		if (chunk > length - consumed) {
-			chunk = length - consumed;
-		}
-		/* A new or completely overwritten block needs no previous contents. */
-		error = ext4_write_snapshot(&allocation, targets, &target_count, credits,
-		    (uint32_t)(logical + index), physical, zero || chunk == fs->info.block_size,
-		    &snapshot);
-		if (error != EXT4_OK) {
-			goto cancel;
-		}
-		error = ext4_data_change(fs, &inode, (uint32_t)(logical + index), snapshot,
-		    zero || chunk == fs->info.block_size, within,
-		    (const uint8_t *)buffer + consumed, chunk);
-		if (error != EXT4_OK) {
-			goto cancel;
-		}
-		consumed += chunk;
-		within = 0;
+	error = ext4_write_stage(&edit, &inode, disk, &range, growth);
+	if (error != EXT4_OK) {
+		goto cancel;
 	}
 attributes:
-	if (update->fields & EXT4_ATTR_XATTRS) {
-		error = ext4_xattr_apply(
-		    &allocation, &inode, disk, update->xattrs, update->xattr_count);
-	}
-	if (error == EXT4_OK) {
-		error = ext4_inode_account(&allocation, &inode, disk,
-		    offset + length > inode.size ? offset + length : inode.size);
-	}
-	if (error == EXT4_OK && inode.links == 0) {
-		error = ext4_orphan_reserve(fs, &inode, disk);
-	}
+	error = ext4_write_attributes(&edit, &inode, disk, update, offset + length);
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
 	ext4_inode_checksum_set(fs, number, disk);
-	feature_compat = allocation.super == NULL ? fs->info.feature_compat
-						  : ext4_le32(&allocation.super->feature_compat);
-	ext4_allocation_destroy(&allocation);
-	fs->environment.release(
-	    fs->environment.context, targets, (size_t)credits * sizeof(*targets));
+	feature_compat = edit.allocation.super == NULL
+	    ? fs->info.feature_compat
+	    : ext4_le32(&edit.allocation.super->feature_compat);
+	ext4_write_edit_close(fs, &edit);
 	error = ext4_edit_commit(fs, transaction);
 	if (error == EXT4_OK) {
 		fs->info.feature_compat = feature_compat;
@@ -1207,13 +1281,7 @@ cancel:
 	if (growth != NULL) {
 		growth->capacity_failed = ext4_transaction_capacity_failed(transaction);
 	}
-	if (allocation_ready) {
-		ext4_allocation_destroy(&allocation);
-	}
-	if (targets != NULL) {
-		fs->environment.release(
-		    fs->environment.context, targets, (size_t)credits * sizeof(*targets));
-	}
+	ext4_write_edit_close(fs, &edit);
 	ext4_transaction_cancel(transaction);
 	return error;
 }

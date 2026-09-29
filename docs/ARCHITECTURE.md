@@ -410,6 +410,12 @@ mapping-node snapshots consume credits alongside data. Credit exhaustion and
 allocation failure cancel the private transaction before any resource writes.
 `ext4_write` reports the full length on success and zero on error.
 
+One atomic edit owns its allocation workspace and physical/logical target guard.
+Block staging and inode metadata finalization operate on that private state;
+admission, growth preparation and commit remain at the operation boundary.
+Success and cancellation release the edit's resources before consuming its
+transaction. Only a successful commit publishes the completed byte count.
+
 `ext4_write_partial` accepts larger requests under one exclusive owner. It validates
 the complete byte range, then resolves the inode again for each bounded transaction.
 It reduces a cancelled private batch only after a proven snapshot-credit shortage

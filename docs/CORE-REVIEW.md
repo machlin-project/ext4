@@ -529,7 +529,7 @@ under `artifacts/checks/instruction-audit/`; final integration evidence belongs 
 
 ## Current-view reads and verified-read lifetime
 
-The next read/write batch removes two sources of repeated work without changing
+The read/write batch removes two sources of repeated work without changing
 journal ordering or verity's trust boundary. A verity read context owns its three
 existing data/hash buffers and separate mapping cursors for data and tree reads.
 Each cursor retains only the current validated leaf and one scratch block. Buffers
@@ -590,6 +590,52 @@ the journal router on synchronous operations; its control measurements are kept
 separately from the initial candidate. Raw reports retain all three write phases,
 including sequential writes and random overwrites, not just the final truncation.
 
-Final full regression and native compilation are tracked separately from those
-measurements. Do not treat the earlier read-batch or SHA acceptance as validation
-of this later journal/verity change.
+The complete ASan/UBSan regression passed 715/715 configured tests, including the
+fragmented verity profile, with 29 explicit in-test applicability skips and no
+Meson-level skips. The run's compiled inputs and binaries remained unchanged while
+the subsequent write refactor was developed separately. Unsigned FSKit and both
+arm64e/x86_64 kext builds also passed. These results validate this journal/verity
+batch; they do not validate the later write refactor.
+
+## Atomic write ownership and staging
+
+An atomic write now has one owner for its allocation workspace and physical/logical
+target guard. Opening and closing that state centralizes resource ownership;
+both success and cancellation release it before
+consuming the transaction. The allocation workspace is initialized at its original
+admission point, rather than clearing it once for a containing structure and again
+inside allocation initialization.
+
+Block mapping and payload staging are separate from final inode metadata updates.
+The top-level operation retains admission, gap and unwritten-extent preparation,
+commit/cancellation, and publication of the completed byte count. In particular,
+allocation-space and transaction-credit failures retain their distinct retry state,
+attributes remain private until the same commit, and an unsuccessful atomic write
+still publishes no completed bytes. This pass changes organization, not durability
+policy, public APIs, crypto dispatch or supported formats.
+
+A bounded CPU stack diagnostic used the existing in-memory scale workload with
+500,000 random overwrites. The usable synchronous and ordered/lazy samples show
+work in commit delivery, payload copying and allocation metadata; backend memory
+copies are part of this synthetic device. Sampling ran beside acceptance checks,
+so neither its elapsed times nor sample counts establish a throughput improvement.
+The first synchronous sample captured only startup and is excluded from write-path
+analysis; a replacement began at the harness's flushed sequential-phase report.
+The raw diagnostic remains under `artifacts/checks/read-write-state/cpu-profile/`.
+
+The refactor passed 110 focused ASan/UBSan tests for writes, partial progress,
+growth, ranges, encryption, inode flags and attributes, plus six mutation/fault
+profiles covering inline data, BIGALLOC and EA_INODE. One xattr-packing subcase
+explicitly skips 128-byte inodes because they have no attribute body. Freestanding
+compilation retains the 2 KiB frame budget; style, unsigned FSKit and arm64e/x86_64
+kext builds passed. Evidence is in `artifacts/checks/write-refactor/`.
+The preceding 715-test regression used the earlier read/journal implementation;
+the full Linux CI matrix for this refactor runs separately after publication.
+
+Eight before/after scale executions cover 1/4 KiB blocks and synchronous or
+ordered/lazy commits. All 24 phase reports preserve reads, writes, byte counts,
+flushes, allocations and peak live memory; each pair's final image is byte-identical
+and all eight images pass `e2fsck -fn`. These images are captured after truncation,
+so payload correctness is established by the functional tests above. This check
+establishes equivalent work and output, not a timing improvement; its reports are
+under `artifacts/checks/write-refactor/parity/`.

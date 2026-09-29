@@ -9,7 +9,7 @@ Read the workspace and repository `AGENTS.md`, `README.md`, `ARCHITECTURE.md` an
 `DEVELOPMENT.md`. Work in `/Users/darekhta/Development/machlin/ext4` on `development`;
 inspect Git state before changing it. The main agent owns implementation, review,
 test design and acceptance. Delegate prepared builds/tests to GPT-6 Luna and any VM
-operations to GPT-6 Sol with exact paths, commands and one owner per VM. Lab and VM
+operations to GPT-6.1 Sol with exact paths, commands and one owner per VM. Lab and VM
 commands use `/Users/darekhta/Development/machlin/lab` as their working directory.
 
 The user has a constrained usage budget. Develop coherent changes, then run their
@@ -78,9 +78,20 @@ external leaves; measured throughput is about 49% higher than the preceding core
 with 807-to-32 allocations per file pass. RAM write profiles show substantially
 fewer backend reads with deferred/lazy commits, unchanged writes/flushes and matching
 checked images; those timings do not establish the Linux or native-adapter target.
-See the current review section and `artifacts/checks/read-write-state/`. Final full
-regression and native builds for this batch are pending acceptance; the source
-is stable while those checks run. The ordinary Linux +15% target remains open.
+See the current review section and `artifacts/checks/read-write-state/`. This batch
+passed 715/715 ASan/UBSan tests with 29 explicit in-test applicability skips, plus
+unsigned FSKit and both kext builds. These checks used unchanged compiled binaries;
+the later write refactor is checked in a separate build. The ordinary Linux +15%
+target remains open.
+
+The write refactor centralizes ownership of allocation/target state and separates
+block staging from inode metadata finalization. Admission, growth retry state,
+commit/cancellation and publication of completed bytes remain at the operation
+boundary. It passed 116 focused ASan/UBSan tests (one in-test applicability skip),
+freestanding/style checks and unsigned FSKit plus arm64e/x86_64 kext builds.
+Its evidence is separate in `artifacts/checks/write-refactor/`; the preceding full
+715-test run does not validate this later source. The Linux CI matrix runs in the
+background after publication; inspect its outcome without holding up development.
 
 Both adapters remain read-only. FSKit integration precedes LXNU policy; signing
 is deferred. No host kernel, boot-policy, NVRAM or system-file changes are authorized.
