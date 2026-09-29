@@ -57,6 +57,7 @@ foreach name, source : {
   'directory-index': 'directory_index', 'directory-lookup': 'directory_lookup', 'index-write': 'index_write',
   'reader': 'reader', 'read-ranges': 'read_ranges', 'read-held': 'read_held',
   'corruption': 'corruption', 'journal': 'journal', 'journal-read': 'journal_read',
+  'journal-transfer': 'journal_transfer',
   'external-journal': 'external_journal', 'unjournaled': 'unjournaled',
   'fast-commit': 'fast_commit', 'fast-commit-recovery': 'fast_commit_recovery',
   'write': 'write', 'write-partial': 'write_partial', 'write-growth': 'write_growth',

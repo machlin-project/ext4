@@ -5,6 +5,7 @@ paths = {}
 test('range-index', programs['ranges'], suite: 'core')
 test('hash-streams-and-nokey-names', programs['hash'], suite: 'core')
 test('journal-live-read-ranges', programs['journal-read'], suite: 'core')
+test('journal-snapshot-ownership', programs['journal-transfer'], suite: 'core')
 test('hash-portable-streams-and-nokey-names', programs['hash-portable'], suite: 'core')
 foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'namespace_fixtures', 'xattr_fixtures', 'ea_inode_fixtures', 'inline_fixtures', 'inline_space_fixtures', 'cluster_fixtures', 'cluster_space_fixtures', 'xattr_space_fixtures', 'xattr_enable_fixtures', 'space_fixtures',

@@ -2,6 +2,8 @@
 #ifndef MACHLIN_EXT4_TEST_CRYPTO_FAILURES_H
 #define MACHLIN_EXT4_TEST_CRYPTO_FAILURES_H
 
+#define CRYPTO_BUFFER_GUARD 0x7bU
+
 /* Included by encrypt.c, sharing its filesystem and reference keyring helpers. */
 enum crypto_failure { CRYPTO_WORKING, CRYPTO_FIND, CRYPTO_DERIVE, CRYPTO_CIPHER, CRYPTO_RANDOM };
 
@@ -45,6 +47,7 @@ failing_cipher(void *context, void *key, uint8_t mode, bool encrypt, const uint8
 {
 	struct failing_crypto *crypto = context;
 
+	CHECK(input != output);
 	if (crypto_fails(crypto, CRYPTO_CIPHER)) {
 		/* A provider may have changed its output before reporting a failure. */
 		memset(output, 0xa5, length / 2U);
@@ -99,15 +102,24 @@ keyed_callback_failures(struct device *device)
 	struct ext4_inode inode;
 	struct ext4_inode result;
 	uint8_t *before = malloc(device->size);
-	uint8_t *plain = malloc(3U * device->block_size);
-	uint8_t *read_back = malloc(3U * device->block_size);
+	uint8_t *plain_storage = malloc(3U * device->block_size + 2U);
+	uint8_t *read_storage = malloc(3U * device->block_size + 2U);
+	uint8_t *plain;
+	uint8_t *read_back;
 	uint32_t writes;
+	uint32_t allocations;
 	size_t completed;
 	size_t index;
 	size_t length = 3U * device->block_size;
 	enum crypto_failure failure;
 
-	CHECK(before != NULL && plain != NULL && read_back != NULL);
+	CHECK(before != NULL && plain_storage != NULL && read_storage != NULL);
+	/* Cipher providers must accept an unaligned complete block, including direct
+	 * caller input. Guards also cover partial output on a callback failure. */
+	plain = plain_storage + 1;
+	read_back = read_storage + 1;
+	plain_storage[0] = plain_storage[length + 1U] = CRYPTO_BUFFER_GUARD;
+	read_storage[0] = read_storage[length + 1U] = CRYPTO_BUFFER_GUARD;
 	enable_encryption(device);
 	device_reset(device, device->base);
 	keyring_init(&crypto.keyring, PROBE_KEY_OFFSET);
@@ -175,13 +187,30 @@ keyed_callback_failures(struct device *device)
 	    EXT4_IO);
 	CHECK(completed == 0 && device->writes == writes &&
 	    memcmp(before, device->cache, device->size) == 0);
+	for (index = 0; index < length; index++) {
+		CHECK(read_back[index] == 0x33U);
+	}
 	crypto_failure_select(fs, &crypto, CRYPTO_WORKING, 0);
 	EXPECT(ext4_read(fs, &inode, 0, read_back, length, &completed), EXT4_OK);
 	CHECK(completed == length && memcmp(read_back, plain, length) == 0);
+	crypto_failure_select(fs, &crypto, CRYPTO_CIPHER, 0);
+	allocations = device->allocations;
+	EXPECT(
+	    ext4_write(fs, inode.number, inode.generation, 0, plain, length, &update, &completed),
+	    EXT4_OK);
+	CHECK(completed == length && crypto.calls == 3U);
+	printf("PASS unaligned encrypted full overwrite: %u allocations, %u cipher calls\n",
+	    device->allocations - allocations, crypto.calls);
+	EXPECT(ext4_read(fs, &inode, 0, read_back, length, &completed), EXT4_OK);
+	CHECK(completed == length && memcmp(read_back, plain, length) == 0);
+	CHECK(plain_storage[0] == CRYPTO_BUFFER_GUARD &&
+	    plain_storage[length + 1U] == CRYPTO_BUFFER_GUARD);
+	CHECK(read_storage[0] == CRYPTO_BUFFER_GUARD &&
+	    read_storage[length + 1U] == CRYPTO_BUFFER_GUARD);
 	ext4_unmount(fs);
 	CHECK(crypto.keyring.handles == 0 && device->live == 0);
-	free(read_back);
-	free(plain);
+	free(read_storage);
+	free(plain_storage);
 	free(before);
 	puts("PASS crypto callback errors preserve images, key ownership and completed reads");
 }

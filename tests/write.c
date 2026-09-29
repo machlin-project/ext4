@@ -13,6 +13,17 @@
 #define TEST_UNKNOWN_ATTRIBUTE (1U << 31)
 #define TEST_WIDE_UID (UINT32_MAX - 1U)
 #define TEST_WRITE_FIELDS (EXT4_ATTR_PERMISSIONS | EXT4_ATTR_MODIFY_TIME | EXT4_ATTR_CHANGE_TIME)
+#define TEST_MAPPING_BLOCKS 6U
+#define TEST_MAPPING_STRIDE 2U
+
+enum test_mapping_case {
+	TEST_MAPPING_DUPLICATE,
+	TEST_MAPPING_NODE_ALIAS,
+	TEST_MAPPING_PROTECTED,
+	TEST_MAPPING_REVERSED,
+	TEST_MAPPING_INTERLEAVED,
+	TEST_MAPPING_CASES
+};
 
 #define CHECK(expression)                                                                          \
 	do {                                                                                       \
@@ -1566,20 +1577,27 @@ truncate_sparse_limits(struct device *device)
 }
 
 static void
-truncate_mapping_corruption(struct device *device)
+mapping_operations(struct device *device)
 {
+	static const uint32_t reversed[TEST_MAPPING_BLOCKS] = { 5, 4, 3, 2, 1, 0 };
+	static const uint32_t interleaved[TEST_MAPPING_BLOCKS] = { 0, 5, 1, 4, 2, 3 };
 	struct ext4_fs *fs = mount_writer(device);
 	struct ext4_inode inode = lookup(fs, "empty");
 	struct ext4_inode after;
 	struct ext4_inode_update update = write_update(fs);
 	struct ext4_inode_disk *disk;
-	struct ext4_extent_header_disk *header;
+	struct ext4_extent_header_disk *header = NULL;
 	struct ext4_extent_index_disk *indices;
-	struct ext4_extent_disk *entries;
-	struct ext4_le32 *pointers;
+	struct ext4_extent_disk *entries = NULL;
+	struct ext4_le32 *pointers = NULL;
 	struct ext4_le32 *tail;
+	size_t length =
+	    ((TEST_MAPPING_BLOCKS - 1U) * TEST_MAPPING_STRIDE + 1U) * (size_t)device->block_size;
 	uint8_t *prepared = malloc(device->size);
 	uint8_t *before = malloc(device->size);
+	uint8_t *bytes = malloc(length);
+	uint8_t *contents = malloc(length);
+	uint64_t physical[TEST_MAPPING_BLOCKS];
 	uint64_t inode_offset;
 	uint64_t node;
 	uint64_t replacement;
@@ -1587,14 +1605,21 @@ truncate_mapping_corruption(struct device *device)
 	size_t completed;
 	uint32_t index;
 	uint32_t test;
+	uint32_t source;
+	enum ext4_result error;
 
-	CHECK(prepared != NULL && before != NULL);
+	CHECK(prepared != NULL && before != NULL && bytes != NULL && contents != NULL);
 	EXPECT(
 	    ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &after), EXT4_OK);
-	for (index = 0; index < 6; index++) {
+	for (index = 0; index < TEST_MAPPING_BLOCKS; index++) {
 		EXPECT(ext4_write(fs, inode.number, inode.generation,
-			   (uint64_t)index * 2 * device->block_size, "C", 1, &update, &completed),
+			   (uint64_t)index * TEST_MAPPING_STRIDE * device->block_size, "C", 1,
+			   &update, &completed),
 		    EXT4_OK);
+	}
+	for (index = 0; index < length / device->block_size; index++) {
+		memset(bytes + (size_t)index * device->block_size, (int)(index + 1U),
+		    device->block_size);
 	}
 	if (!(inode.flags & EXT4_INODE_EXTENTS)) {
 		EXPECT(ext4_write(fs, inode.number, inode.generation,
@@ -1607,7 +1632,7 @@ truncate_mapping_corruption(struct device *device)
 	EXPECT(ext4_sync(fs), EXT4_OK);
 	ext4_unmount(fs);
 	memcpy(prepared, device->stable, device->size);
-	for (test = 0; test < 3; test++) {
+	for (test = 0; test < TEST_MAPPING_CASES; test++) {
 		device_reset(device, prepared);
 		fs = mount_writer(device);
 		disk = (struct ext4_inode_disk *)(device->cache + inode_offset);
@@ -1620,11 +1645,38 @@ truncate_mapping_corruption(struct device *device)
 			header = (struct ext4_extent_header_disk *)(device->cache +
 			    node * device->block_size);
 			entries = (struct ext4_extent_disk *)(header + 1);
-			CHECK(ext4_le16(&header->entries) == 6);
-			replacement = test == 0 ? ext4_le32(&entries[0].physical_lo)
-						: (test == 1 ? node : fs->first_data_block);
-			ext4_encode32(&entries[5].physical_lo, (uint32_t)replacement);
-			ext4_encode16(&entries[5].physical_hi, 0);
+			CHECK(ext4_le16(&header->entries) == TEST_MAPPING_BLOCKS);
+			for (index = 0; index < TEST_MAPPING_BLOCKS; index++) {
+				physical[index] = ext4_le32(&entries[index].physical_lo) |
+				    (uint64_t)ext4_le16(&entries[index].physical_hi) << 32;
+			}
+		} else {
+			pointers = (struct ext4_le32 *)disk->block_data;
+			node = ext4_le32(&pointers[EXT4_DIRECT_BLOCKS]);
+			for (index = 0; index < TEST_MAPPING_BLOCKS; index++) {
+				physical[index] = ext4_le32(&pointers[index * TEST_MAPPING_STRIDE]);
+			}
+		}
+		for (index = 0; index < TEST_MAPPING_BLOCKS; index++) {
+			source = test == TEST_MAPPING_REVERSED ? reversed[index]
+			    : test == TEST_MAPPING_INTERLEAVED ? interleaved[index]
+							       : index;
+			replacement = physical[source];
+			if (index == TEST_MAPPING_BLOCKS - 1U && test < TEST_MAPPING_REVERSED) {
+				replacement = test == TEST_MAPPING_DUPLICATE ? physical[0]
+				    : test == TEST_MAPPING_NODE_ALIAS	     ? node
+									     : fs->first_data_block;
+			}
+			if (inode.flags & EXT4_INODE_EXTENTS) {
+				ext4_encode32(&entries[index].physical_lo, (uint32_t)replacement);
+				ext4_encode16(
+				    &entries[index].physical_hi, (uint16_t)(replacement >> 32));
+			} else {
+				ext4_encode32(
+				    &pointers[index * TEST_MAPPING_STRIDE], (uint32_t)replacement);
+			}
+		}
+		if (inode.flags & EXT4_INODE_EXTENTS) {
 			if (fs->metadata_checksum) {
 				tail_offset = sizeof(*header) +
 				    ext4_le16(&header->maximum) * sizeof(*entries);
@@ -1633,25 +1685,45 @@ truncate_mapping_corruption(struct device *device)
 				    ext4_crc32c(ext4_inode_seed(fs, &inode), header, tail_offset));
 			}
 		} else {
-			pointers = (struct ext4_le32 *)disk->block_data;
-			replacement = test == 0
-			    ? ext4_le32(&pointers[0])
-			    : (test == 1 ? ext4_le32(&pointers[EXT4_DIRECT_BLOCKS])
-					 : fs->first_data_block);
-			ext4_encode32(&pointers[10], (uint32_t)replacement);
 			ext4_inode_checksum_set(fs, inode.number, disk);
 		}
 		memcpy(before, device->cache, device->size);
-		EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation,
-			   (uint64_t)2 * device->block_size + 7, &update, &after),
-		    EXT4_CORRUPT);
-		CHECK(device->writes == 0 && memcmp(before, device->cache, device->size) == 0);
+		if (test < TEST_MAPPING_REVERSED) {
+			completed = length;
+			error = ext4_write(fs, inode.number, inode.generation, 0, bytes, length,
+			    &update, &completed);
+			if (error != EXT4_CORRUPT) {
+				fprintf(stderr, "%s: corrupt mapping case %u\n",
+				    device->source_path, test);
+			}
+			EXPECT(error, EXT4_CORRUPT);
+			CHECK(completed == 0 && device->writes == 0 &&
+			    memcmp(before, device->cache, device->size) == 0);
+			EXPECT(ext4_truncate_atomic(fs, inode.number, inode.generation,
+				   (uint64_t)TEST_MAPPING_STRIDE * device->block_size + 7, &update,
+				   &after),
+			    EXT4_CORRUPT);
+			CHECK(device->writes == 0 &&
+			    memcmp(before, device->cache, device->size) == 0);
+		} else {
+			/* Logical order is independent of physical order. Each block's pattern
+			 * differs, including the holes filled by this one atomic write. */
+			EXPECT(ext4_write(fs, inode.number, inode.generation, 0, bytes, length,
+				   &update, &completed),
+			    EXT4_OK);
+			CHECK(completed == length);
+			EXPECT(ext4_get_inode(fs, inode.number, &after), EXT4_OK);
+			EXPECT(ext4_read(fs, &after, 0, contents, length, &completed), EXT4_OK);
+			CHECK(completed == length && memcmp(contents, bytes, length) == 0);
+			EXPECT(ext4_sync(fs), EXT4_OK);
+		}
 		ext4_unmount(fs);
 	}
 	free(prepared);
 	free(before);
-	printf(
-	    "truncate malformed mappings: duplicate data, data/node alias, protected metadata\n");
+	free(bytes);
+	free(contents);
+	printf("mapping guards: alias rejection and reversed/interleaved physical write order\n");
 }
 
 static void
@@ -1780,7 +1852,7 @@ test_image(
 		device_reset(&device, device.base);
 		truncate_sparse_limits(&device);
 		device_reset(&device, device.base);
-		truncate_mapping_corruption(&device);
+		mapping_operations(&device);
 		device_reset(&device, device.base);
 		truncate_faults(&device);
 	} else if (growth) {

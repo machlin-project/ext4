@@ -639,3 +639,75 @@ and all eight images pass `e2fsck -fn`. These images are captured after truncati
 so payload correctness is established by the functional tests above. This check
 establishes equivalent work and output, not a timing improvement; its reports are
 under `artifacts/checks/write-refactor/parity/`.
+
+## Write snapshot ownership and complete blocks
+
+Deferred merge and lazy checkpoint retention now use one snapshot ownership
+transfer. Compound admission reserves its index before ordered data is written;
+after successful writes, the owner moves journaled buffers and releases superseded
+versions. The transfer cannot fail and does not duplicate payload buffers. Data
+selection is a separate shared phase, so admission and delivery use one decision
+about whether each block can go home. Capacity commits, quota accounting, barriers
+and abort/recovery rules retain their existing ordering.
+
+Complete encrypted writes pass caller plaintext directly to the cipher provider's
+distinct private output. Partial changes retain scratch for untouched plaintext.
+Full replacements and zeroing skip redundant clearing. The provider contract admits
+unaligned input, covered by guarded buffers and a cipher that can fail after
+partially modifying output; failures must leave the image, input and completed byte
+count unchanged. No cipher algorithm or native provider changes in this pass.
+
+Evidence is collected under `artifacts/checks/write-transfer/`. The journal-only
+prototype passed 12 focused checks, including deferred crash/replay coverage. Its
+24 scale executions retained identical I/O and output images, all accepted by
+`e2fsck -fn`, while reducing allocations. Ordered-mode timing exposed a repeated
+eligibility query; the separate selection phase removes it. Keep these prototype
+measurements distinct from final combined-source acceptance and timings.
+
+The combined snapshot/crypto source passed seven focused tests. The guarded,
+unaligned three-block encrypted overwrite used 21 allocations rather than 24
+against the saved preceding core, with three cipher calls in both cases. No AES
+instruction throughput claim follows from removing plaintext scratch.
+The six short scale profiles retained identical I/O and output images and passed
+all 24 filesystem checks. Deferred 4 KiB random overwrite improved, but ordered
+random overwrite regressed. A longer 500,000-operation ordered comparison against
+the preceding read/journal core confirmed about 4.5% more elapsed time, so the
+write optimization continued rather than accepting the short positive profiles
+as an overall result. These intermediate measurements remain in the same evidence
+directory, including `long-ordered/`.
+
+## Write mapping ownership and alias checks
+
+Write, growth clearing and truncate-tail clearing now share a bounded physical
+target owner. Logical order makes all but the shared gap/payload boundary unique;
+the boundary must retain the same physical block. Ascending or descending physical
+runs need no prior-target scan, while arbitrary fragmentation inside the observed
+bounds receives the exact scan. The array uses eight bytes per target instead of
+sixteen, without a persistent cache or additional heap allocations. Inode-resident
+extent leaves and direct pointers also avoid allocating unused traversal scratch;
+external mapping walks retain their existing validation and temporary ownership.
+
+New mapping coverage writes distinct patterns through reversed and interleaved
+physical layouts and rejects duplicate data, data/node aliases and protected
+metadata before device writes. It found an existing indirect-mapping defect: a
+direct slot could target an indirect root outside the requested logical path.
+The expanded test fails on the saved earlier core and passes after root exclusion
+was added to indirect lookup. This checks the inode's explicit roots and current
+ancestors; it does not imply a scan of all other inodes or unvisited descendants.
+Evidence is under `artifacts/checks/write-targets/`.
+
+## Bounded verity fault execution
+
+The Linux format job timed out after 300 seconds on the fragmented verity fixture.
+Its test restarted a complete chunked file read for every injected fault, repeating
+the verified prefix quadratically. Each chunk is a separate stateless public call,
+so faults now run directly against that chunk. Every allocation/read fault remains,
+and the test additionally verifies the exact completed prefix and an untouched
+guard byte. Whole-file, random-offset, corruption and writable-policy cases remain.
+
+All five verity profiles passed locally after this change. The fragmented profile
+still exercises 4,200 allocation and 5,384 read failures, finishing in 0.47 seconds
+in the focused run. This is a test-harness improvement, not a filesystem speedup.
+The Linux timeout is observed; the resulting GitHub job must still be checked
+after publication. Raw failure and fixed-test logs are retained in the write
+optimization evidence directories above.

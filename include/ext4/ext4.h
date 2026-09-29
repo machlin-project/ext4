@@ -567,7 +567,8 @@ struct ext4_verity_parameters {
  * first key_size bytes encrypted with AES-128-ECB under the 16-byte info. cipher runs
  * an fscrypt mode with a derived key and a 16-byte IV: AES-256-XTS over one data unit,
  * or AES-256-CBC with ciphertext stealing, as Linux's cts(cbc(aes)), over one name.
- * Input and output are distinct. release_key releases a handle of either kind.
+ * Input and output are distinct and need no special alignment. release_key
+ * releases a handle of either kind.
  * random_bytes fills a new inode's nonce. The mount keeps up to 16 derived keys;
  * installing the environment again releases them, which is how a removed key stops
  * being used. Handles transfer to the core only on OK; a callback cleans up its

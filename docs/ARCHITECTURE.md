@@ -151,7 +151,11 @@ A writable owner may instead defer commits through
 `ext4_write_options.commit_blocks`, as Linux's jbd2 running transaction does. Each
 mutation still builds and validates its private transaction, which a failure cancels
 without effect. When it completes, its snapshots replace their blocks in one compound
-transaction, all or nothing: buffers for new blocks are allocated before any copy.
+transaction. After any capacity-driven commit, the owner reserves the compound's
+index before writing ordered data, then transfers the remaining buffers without
+allocation or copying. A failed ordered write aborts before the transfer, retaining
+the earlier compound. The same non-failing transfer owns committed snapshots in
+the checkpoint set; replacing a block releases its superseded buffer.
 The compound holds at most commit_blocks snapshots, never more than the recovery
 bound of half the ring and 32 MiB. Every live read, including file data and the
 next mutation's own reads, selects the compound's blocks before committed snapshots
@@ -415,6 +419,19 @@ Block staging and inode metadata finalization operate on that private state;
 admission, growth preparation and commit remain at the operation boundary.
 Success and cancellation release the edit's resources before consuming its
 transaction. Only a successful commit publishes the completed byte count.
+
+The target guard owns one bounded array of physical blocks, shared by write,
+growth clearing and truncate-tail clearing. These operations visit logical blocks
+in increasing order; only a gap/payload boundary may revisit the last block with
+the same physical mapping. Physical bounds prove uniqueness for an ascending or
+descending allocation run without scanning prior targets. A block inside those
+bounds still receives an exact alias check, so arbitrary fragmentation remains
+valid. The guard resets at each transaction and retains no cross-operation cache.
+Legacy indirect lookup also rejects data pointing at any of the inode's indirect
+roots, including roots outside the requested logical path.
+Inode-resident extent leaves and direct block pointers need no traversal scratch;
+external mappings allocate it only for the duration of that lookup. Both paths
+retain their node validation before returning a mapping.
 
 `ext4_write_partial` accepts larger requests under one exclusive owner. It validates
 the complete byte range, then resolves the inode again for each bounded transaction.
@@ -819,6 +836,13 @@ preallocated blocks, truncated tails and punched edges, decrypts the block's
 snapshot unless it is new or completely replaced, changes the plaintext and encrypts
 it again under the block's logical number within the same transaction, so journaled,
 ordered and deferred commits carry only ciphertext.
+
+A complete block replacement encrypts the caller's plaintext directly into the
+private snapshot. It needs no intermediate plaintext allocation or copy, and the
+cipher provider accepts unaligned input with a distinct output buffer. Partial
+changes retain block-sized plaintext scratch to preserve untouched bytes. Callback
+errors can modify private ciphertext but never publish it or change caller input.
+Complete replacements and complete zeroing also avoid clearing bytes twice.
 
 Without the key, encrypted directories present Linux's no-key names. Each is the
 base64url encoding, without padding, of two little-endian 32-bit directory hash

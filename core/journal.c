@@ -1504,7 +1504,21 @@ ext4_transaction_in_place(const struct ext4_transaction *transaction, uint64_t b
 	return true;
 }
 
-/* Write eligible data blocks home and remove them from the transaction, so logging
+/* Fix the data/home decision while the owner still holds every snapshot. Compound
+ * admission consumes this decision too; writing must not repeat its map queries. */
+static void
+ext4_transaction_select_data(struct ext4_transaction *transaction)
+{
+	struct ext4_transaction_entry *entry;
+	uint32_t index;
+
+	for (index = 0; index < transaction->count; index++) {
+		entry = &transaction->entries[index];
+		entry->data = entry->data && ext4_transaction_in_place(transaction, entry->block);
+	}
+}
+
+/* Write selected data blocks home and remove them from the transaction, so logging
  * and checkpointing see only journaled blocks. The index is not used afterwards. */
 static enum ext4_result
 ext4_transaction_write_data(struct ext4_transaction *transaction)
@@ -1518,8 +1532,7 @@ ext4_transaction_write_data(struct ext4_transaction *transaction)
 
 	for (index = 0; index < transaction->count; index++) {
 		entry = &transaction->entries[index];
-		if (error == EXT4_OK && entry->data &&
-		    ext4_transaction_in_place(transaction, entry->block)) {
+		if (error == EXT4_OK && entry->data) {
 			error = ext4_journal_write_home(journal, entry->block, entry->buffer);
 			if (error == EXT4_OK) {
 				fs->environment.release(
@@ -1651,36 +1664,33 @@ ext4_journal_fits(const struct ext4_journal *journal, const struct ext4_transact
 	return added <= checkpoint->capacity - checkpoint->count;
 }
 
-/* Keep a committed transaction's snapshots as the latest committed version of their
- * blocks, moving the buffers, and leave the transaction empty. */
+/* Transfer snapshots to an admitted compound or checkpoint set without copying.
+ * Capacity is already reserved and ordered data is already removed. No fallible
+ * work remains: replace earlier versions and leave the source with no buffers. */
 static void
-ext4_journal_retain(struct ext4_journal *journal, struct ext4_transaction *transaction)
+ext4_journal_set_take(struct ext4_transaction *set, struct ext4_transaction *transaction)
 {
-	struct ext4_fs *fs = journal->fs;
-	struct ext4_transaction *checkpoint = journal->checkpoint;
+	struct ext4_fs *fs = transaction->journal->fs;
 	struct ext4_transaction_entry *entry;
 	uint32_t index;
 	uint32_t position;
 
 	for (index = 0; index < transaction->count; index++) {
 		entry = &transaction->entries[index];
-		position = ext4_transaction_find(checkpoint, entry->block);
-		if (position == checkpoint->count) {
-			checkpoint->entries[position].block = entry->block;
-			checkpoint->entries[position].data = false;
-			ext4_transaction_index(checkpoint, checkpoint->count++);
+		position = ext4_transaction_find(set, entry->block);
+		if (position == set->count) {
+			set->entries[position].block = entry->block;
+			set->entries[position].data = false;
+			ext4_transaction_index(set, set->count++);
 		} else {
 			fs->environment.release(fs->environment.context,
-			    checkpoint->entries[position].buffer, fs->info.block_size);
+			    set->entries[position].buffer, fs->info.block_size);
 		}
-		checkpoint->entries[position].buffer = entry->buffer;
+		set->entries[position].buffer = entry->buffer;
 	}
 	transaction->count = 0;
 }
 
-/* Log and commit one transaction, then release it. Without lazy checkpointing, and
- * for recovery conversions, its blocks are written home and the log emptied at once;
- * otherwise they stay in the log and the checkpoint set. */
 /* Without a journal, a commit first marks the volume in use, then writes file data
  * home and flushes, so that no written metadata references data that is not
  * durable, then writes the other blocks and flushes. */
@@ -1694,6 +1704,7 @@ ext4_transaction_direct(struct ext4_transaction *transaction)
 
 	error = ext4_journal_set_recovery(journal, true);
 	if (error == EXT4_OK) {
+		ext4_transaction_select_data(transaction);
 		error = ext4_transaction_write_data(transaction);
 	}
 	if (error == EXT4_OK && transaction->count != count) {
@@ -1718,6 +1729,9 @@ ext4_transaction_direct(struct ext4_transaction *transaction)
 	return error;
 }
 
+/* Log and commit one transaction, then release it. Without lazy checkpointing, and
+ * for recovery conversions, its blocks are written home and the log emptied at once;
+ * otherwise they stay in the log and the checkpoint set. */
 static enum ext4_result
 ext4_transaction_durable(struct ext4_transaction *transaction)
 {
@@ -1734,6 +1748,7 @@ ext4_transaction_durable(struct ext4_transaction *transaction)
 	}
 	/* Ordered data reaches its home before the barrier that precedes the commit. */
 	if (!transaction->held) {
+		ext4_transaction_select_data(transaction);
 		error = ext4_transaction_write_data(transaction);
 	}
 	if (error == EXT4_OK && transaction->count == 0) {
@@ -1807,7 +1822,7 @@ ext4_transaction_durable(struct ext4_transaction *transaction)
 		journal->head = commit_block + 1U;
 		journal->sequence++;
 		ext4_transaction_publish(transaction);
-		ext4_journal_retain(journal, transaction);
+		ext4_journal_set_take(journal->checkpoint, transaction);
 	}
 	/* The durable commit owns recovery before the first home block changes. */
 	for (index = 0; error == EXT4_OK && index < transaction->count; index++) {
@@ -1868,10 +1883,10 @@ ext4_transaction_additions(struct ext4_transaction *transaction, uint32_t *journ
 	uint32_t index;
 	uint32_t added = 0;
 
+	ext4_transaction_select_data(transaction);
 	*journaled = 0;
 	for (index = 0; index < transaction->count; index++) {
 		entry = &transaction->entries[index];
-		entry->data = entry->data && ext4_transaction_in_place(transaction, entry->block);
 		if (entry->data) {
 			continue;
 		}
@@ -1884,22 +1899,16 @@ ext4_transaction_additions(struct ext4_transaction *transaction, uint32_t *journ
 	return added;
 }
 
-/* Deferred commit: the operation's journaled snapshots replace their blocks in the
- * compound transaction, all or nothing, and ordered data is written home. Buffers
- * for new blocks are allocated before any write or copy, so a failure leaves the
- * compound and the device unchanged. */
+/* After any capacity-driven commit, reserve the compound's index before writing
+ * ordered data. An index allocation failure precedes those writes; uncertain writes
+ * abort before transferring any snapshots. The final ownership transfer cannot
+ * fail and needs no allocation or copy of the operation's journaled blocks. */
 static enum ext4_result
 ext4_transaction_merge(struct ext4_transaction *transaction)
 {
 	struct ext4_journal *journal = transaction->journal;
-	struct ext4_fs *fs = journal->fs;
-	struct ext4_transaction *compound;
-	void **buffers = NULL;
 	uint32_t journaled;
 	uint32_t added;
-	uint32_t next = 0;
-	uint32_t index;
-	uint32_t entry;
 	enum ext4_result error = EXT4_OK;
 
 	added = ext4_transaction_additions(transaction, &journaled);
@@ -1907,7 +1916,7 @@ ext4_transaction_merge(struct ext4_transaction *transaction)
 	    journal->compound->count + added > journal->compound->capacity) {
 		error = ext4_compound_commit(journal);
 		/* A durable commit also makes earlier frees durable; decide again. */
-		added = ext4_transaction_additions(transaction, &journaled);
+		ext4_transaction_additions(transaction, &journaled);
 	}
 	if (error != EXT4_OK) {
 		ext4_transaction_cancel(transaction);
@@ -1920,72 +1929,21 @@ ext4_transaction_merge(struct ext4_transaction *transaction)
 	if (journal->compound == NULL) {
 		error = ext4_compound_create(journal);
 	}
-	if (error == EXT4_OK && added != 0) {
-		buffers =
-		    fs->environment.allocate(fs->environment.context, added * sizeof(*buffers));
-		error = buffers == NULL ? EXT4_NO_MEMORY : EXT4_OK;
-	}
-	for (index = 0; error == EXT4_OK && index < added; index++) {
-		buffers[index] =
-		    fs->environment.allocate(fs->environment.context, fs->info.block_size);
-		if (buffers[index] == NULL) {
-			while (index != 0) {
-				index--;
-				fs->environment.release(
-				    fs->environment.context, buffers[index], fs->info.block_size);
-			}
-			error = EXT4_NO_MEMORY;
-		}
-	}
 	if (error != EXT4_OK) {
-		if (buffers != NULL) {
-			fs->environment.release(
-			    fs->environment.context, buffers, added * sizeof(*buffers));
-		}
 		ext4_transaction_cancel(transaction);
 		return error;
 	}
 	/* Ordered data goes home now; the compound's commit barrier orders it first. */
-	for (index = 0; error == EXT4_OK && index < transaction->count; index++) {
-		if (transaction->entries[index].data) {
-			error = ext4_journal_write_home(journal, transaction->entries[index].block,
-			    transaction->entries[index].buffer);
-		}
-	}
+	error = ext4_transaction_write_data(transaction);
 	if (error != EXT4_OK) {
 		journal->aborted = true;
-		for (index = 0; index < added; index++) {
-			fs->environment.release(
-			    fs->environment.context, buffers[index], fs->info.block_size);
-		}
-		if (buffers != NULL) {
-			fs->environment.release(
-			    fs->environment.context, buffers, added * sizeof(*buffers));
-		}
 		ext4_transaction_cancel(transaction);
 		return error;
 	}
-	compound = journal->compound;
 	ext4_transaction_prepare_super(transaction);
-	for (index = 0; index < transaction->count; index++) {
-		if (transaction->entries[index].data) {
-			continue;
-		}
-		entry = ext4_transaction_find(compound, transaction->entries[index].block);
-		if (entry == compound->count) {
-			compound->entries[entry].block = transaction->entries[index].block;
-			compound->entries[entry].buffer = buffers[next++];
-			compound->entries[entry].data = false;
-			ext4_transaction_index(compound, compound->count++);
-		}
-		ext4_copy(compound->entries[entry].buffer, transaction->entries[index].buffer,
-		    fs->info.block_size);
-	}
-	if (buffers != NULL) {
-		fs->environment.release(fs->environment.context, buffers, added * sizeof(*buffers));
-	}
 	ext4_journal_remember_freed(journal, transaction);
 	ext4_transaction_publish(transaction);
+	ext4_journal_set_take(journal->compound, transaction);
 	ext4_transaction_cancel(transaction);
 	return EXT4_OK;
 }

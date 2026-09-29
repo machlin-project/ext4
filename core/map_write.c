@@ -252,7 +252,8 @@ ext4_indirect_lookup(struct ext4_allocation *allocation, const struct ext4_inode
     uint32_t logical, uint8_t *scratch, struct ext4_map_run *run)
 {
 	struct ext4_fs *fs = allocation->fs;
-	const struct ext4_le32 *pointers = (const struct ext4_le32 *)disk->block_data;
+	const struct ext4_le32 *roots = (const struct ext4_le32 *)disk->block_data;
+	const struct ext4_le32 *pointers = roots;
 	uint64_t ancestors[EXT4_INDIRECT_LEVELS];
 	uint64_t remaining;
 	uint64_t span;
@@ -294,6 +295,13 @@ ext4_indirect_lookup(struct ext4_allocation *allocation, const struct ext4_inode
 		if (block >= fs->info.blocks || ext4_system_block(fs, block)) {
 			return EXT4_CORRUPT;
 		}
+		/* Even a direct data slot must not overwrite one of this inode's
+		 * indirect roots, including roots outside the requested logical path. */
+		for (previous = 0; previous < EXT4_INDIRECT_LEVELS; previous++) {
+			if (block == ext4_le32(&roots[EXT4_DIRECT_BLOCKS + previous])) {
+				return EXT4_CORRUPT;
+			}
+		}
 		for (previous = 0; previous < level; previous++) {
 			if (block == ancestors[previous]) {
 				return EXT4_CORRUPT;
@@ -318,20 +326,30 @@ ext4_write_map_lookup(struct ext4_allocation *allocation, const struct ext4_inod
     const struct ext4_inode_disk *disk, uint32_t logical, struct ext4_map_run *run)
 {
 	struct ext4_fs *fs = allocation->fs;
-	uint8_t *scratch;
+	const struct ext4_extent_header_disk *root =
+	    (const struct ext4_extent_header_disk *)disk->block_data;
+	uint8_t *scratch = NULL;
+	bool external = inode->flags & EXT4_INODE_EXTENTS ? ext4_le16(&root->depth) != 0
+							  : logical >= EXT4_DIRECT_BLOCKS;
 	enum ext4_result error;
 
 	ext4_zero(run, sizeof(*run));
-	scratch = fs->environment.allocate(fs->environment.context, fs->info.block_size);
-	if (scratch == NULL) {
-		return EXT4_NO_MEMORY;
+	/* Inode-resident mappings need no traversal buffer. This only chooses
+	 * scratch capacity; the selected walker still validates the entire node. */
+	if (external) {
+		scratch = fs->environment.allocate(fs->environment.context, fs->info.block_size);
+		if (scratch == NULL) {
+			return EXT4_NO_MEMORY;
+		}
 	}
 	if (inode->flags & EXT4_INODE_EXTENTS) {
 		error = ext4_extent_lookup(allocation, inode, disk, logical, scratch, run);
 	} else {
 		error = ext4_indirect_lookup(allocation, disk, logical, scratch, run);
 	}
-	fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
+	if (scratch != NULL) {
+		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
+	}
 	return error;
 }
 
