@@ -1118,6 +1118,7 @@ jobs:
             vendor/e2fsprogs/build/e2fsck/e2fsck -fn "$image" || exit 1
           done 2>&1 | tee artifacts/checks/encrypt-independent.log
           find artifacts/encrypt-exports -type f -name '*.img' -delete
+      - name: Independently verify casefolded directories after writable changes
         if: matrix.suite == 'format'
         run: |
           exports=()
