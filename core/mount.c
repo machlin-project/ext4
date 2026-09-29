@@ -69,9 +69,14 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	    (fs->info.feature_compat & EXT4_FEATURE_COMPAT_RESIZE_INODE)) {
 		return EXT4_CORRUPT;
 	}
+	/* Recorded errors, and a volume left in use without a pending journal, as a
+	 * journal-less writer leaves it, need e2fsck; journal recovery repairs neither. */
 	state = ext4_le16(&super->state);
 	if ((state & EXT4_ERROR_FS) ||
-	    (!recovery && (!(state & EXT4_VALID_FS) || ext4_le32(&super->last_orphan) != 0))) {
+	    (!(state & EXT4_VALID_FS) && !(incompat & EXT4_FEATURE_INCOMPAT_RECOVER))) {
+		return EXT4_CHECK_REQUIRED;
+	}
+	if (!recovery && (!(state & EXT4_VALID_FS) || ext4_le32(&super->last_orphan) != 0)) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
 	logarithm = ext4_le32(&super->log_block_size);

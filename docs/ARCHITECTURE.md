@@ -90,11 +90,27 @@ exceed the supplied resource. A read-only mount does not repair or replay media.
 Filesystems requiring recovery are rejected by the read-only mount. The separate
 offline recovery API requires an explicit write capability and exclusive resource
 ownership; a platform never invokes it as a side effect of a read-only mount.
+A volume that records errors, or whose valid state is clear without a pending
+journal, as a writer without a journal leaves one, returns `EXT4_CHECK_REQUIRED` from
+every mount and from recovery: journal replay repairs neither, and e2fsck must check
+it first.
 
-Writable mounts require an internal or external journal, because every write is a
-journaled transaction. Volumes without one, including revision-0 ext2 volumes,
-mount read-only and a writable mount returns unsupported; unjournaled writes would
-need a different crash contract.
+Writable mounts use an internal or external journal, so every write is a journaled
+transaction. Volumes without one, including revision-0 ext2 volumes, mount
+read-only, and a writable mount returns unsupported unless the adapter selects
+`EXT4_WRITE_UNJOURNALED`, which takes Linux's crash contract for such volumes. Each
+mutation still builds and validates a private transaction, which a failure cancels
+without effect, but its commit writes the transaction's blocks home: file data, a
+barrier, then the other blocks and a barrier, so written metadata never references
+data that is not durable. Before the first commit after a mount or a sync, the
+superblock's valid state is cleared and flushed, and every committed superblock
+keeps it clear; `ext4_sync` sets it once every change is durable and no inode is on
+the orphan list. The compound, lazy checkpoints and external journal resources do
+not apply. A power cut, or an unmount without sync, leaves a volume that returns
+`EXT4_CHECK_REQUIRED` until e2fsck repairs it. A cut within a commit can leave any
+subset of its blocks written, including a primary superblock whose sectors are torn,
+which e2fsck replaces from a backup superblock; single-group volumes have none, as
+with Linux.
 
 The write capability requires exact writes, coherent read-after-write and a flush
 that persists preceding writes through every volatile cache. Completion

@@ -167,7 +167,10 @@ requires listings to keep each name's spelling and case variants to look up the 
 inode. With any of these, half of the directory choices fall in encrypted or
 casefolded directories, and the encrypted and casefolded directories created at the
 start may move but are not removed. `--no-ballast` leaves out ballast files for
-compact exports such as fuzzing seeds. The `sustained` suite runs each feature on the
+compact exports such as fuzzing seeds. `--unjournaled` writes a volume without a
+journal under `EXT4_WRITE_UNJOURNALED`; its power cuts leave volumes for e2fsck, so
+its operations run without the power-cut repetition, while remounts still sync, check
+the tree read-only and mount again. The `sustained` suite runs each feature on the
 4 KiB and 1 KiB base volumes, all three with ordered data, a compound and lazy
 checkpoints on those and the indirect 1 KiB volume, and each format fixture with its
 feature in use.
@@ -196,6 +199,30 @@ stay unchanged and pass strict fsck. The reference kernel lacks `CONFIG_UNICODE`
 casefolded exports are checked by e2fsprogs only. The `sustained` suite runs every
 writable base profile and two wide profiles; CI additionally exports five runs for
 independent verification. Seeds make each failing sequence reproducible.
+
+## Writes without a journal
+
+`tests/generate_unjournaled_fixtures.py --tools-root E2FSPROGS_BUILD --output NEW`
+authors volumes without a journal: the base ext4 features without has_journal at
+4 KiB and 1 KiB blocks, an ext2 volume with block maps, and 16 MiB copies of each with
+a second group, whose backup superblock repairs a torn primary one. Configure
+`-Dunjournaled_fixtures=DIRECTORY` to add their tests. `ext4-unjournaled-test
+[--export DIRECTORY] [--journaled JOURNALED_IMAGE] IMAGE...` requires the option for
+writable mounts of such volumes, refuses it with a journal, a journal resource, a
+compound or lazy checkpoints, and checks that the valid state is cleared before the
+first change after a mount or sync, set by sync and left clear by an unmount without
+it, so that mounts and recovery return `EXT4_CHECK_REQUIRED` without writing. A power
+cut at every write or barrier of a create with a write, a mkdir, a rename, a
+truncation, an unlink, an attribute change and a block symlink must leave the old
+volume, when nothing changed on the device, or one that needs e2fsck, whose torn
+primary superblock may fail its checksum. The export directory receives one image
+per such cut and a manifest of the files synced before the operations;
+`tests/check_unjournaled.py --tools-root E2FSPROGS_BUILD --exports DIRECTORY --fixtures
+FIXTURES --output NEW` requires `e2fsck -fy` to repair each image, from the first
+backup superblock when the primary one is torn, then strict `e2fsck -fn` to find
+nothing and every synced file to keep its contents and target. The `format` suite
+runs the test on the three small volumes and the `sustained` suite runs 3,000
+operations with `--unjournaled` and the applicable features on the larger ones.
 
 ## Scale measurements
 

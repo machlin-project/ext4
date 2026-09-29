@@ -656,6 +656,50 @@ ext4_journal_open_external(struct ext4_fs *fs, const struct ext4_write_environme
 	return EXT4_OK;
 }
 
+enum ext4_result
+ext4_journal_open_direct(
+    struct ext4_fs *fs, const struct ext4_write_environment *writer, struct ext4_journal **result)
+{
+	struct ext4_journal *journal;
+
+	if (result == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	*result = NULL;
+	if (fs == NULL || writer == NULL || writer->write == NULL || writer->flush == NULL ||
+	    fs->writer_attached) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if ((fs->info.feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL) ||
+	    (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER) || fs->journal_inode != 0 ||
+	    fs->journal_device != 0) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if ((fs->info.feature_compat & ~EXT4_WRITABLE_COMPAT) ||
+	    (fs->info.feature_ro_compat & ~EXT4_WRITABLE_RO_COMPAT)) {
+		return EXT4_UNSUPPORTED;
+	}
+	journal = fs->environment.allocate(fs->environment.context, sizeof(*journal));
+	if (journal == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	ext4_zero(journal, sizeof(*journal));
+	journal->fs = fs;
+	journal->writer = *writer;
+	journal->direct = true;
+	/* File data reaches its home before the metadata that references it. */
+	journal->ordered_data = true;
+	fs->writer_attached = true;
+	journal->work = fs->environment.allocate(fs->environment.context, fs->info.block_size);
+	journal->data = fs->environment.allocate(fs->environment.context, fs->info.block_size);
+	if (journal->work == NULL || journal->data == NULL) {
+		ext4_journal_close(journal);
+		return EXT4_NO_MEMORY;
+	}
+	*result = journal;
+	return EXT4_OK;
+}
+
 void
 ext4_journal_close(struct ext4_journal *journal)
 {
@@ -738,6 +782,33 @@ ext4_journal_reset(struct ext4_journal *journal, uint32_t sequence)
 	return ext4_journal_publish(journal, 0, sequence);
 }
 
+/* Record whether a volume without a journal is out of use in its committed
+ * superblock, which journal->data holds. */
+static enum ext4_result
+ext4_journal_set_valid(struct ext4_journal *journal, struct ext4_super_disk *super, bool valid)
+{
+	struct ext4_fs *fs = journal->fs;
+	uint16_t state = ext4_le16(&super->state);
+	uint16_t changed = valid ? (uint16_t)(state | EXT4_VALID_FS)
+				 : (uint16_t)(state & ~(uint16_t)EXT4_VALID_FS);
+	enum ext4_result error;
+
+	if (changed == state) {
+		return EXT4_OK;
+	}
+	ext4_encode16(&super->state, changed);
+	if (fs->metadata_checksum) {
+		ext4_encode32(&super->checksum,
+		    ext4_crc32c(UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum)));
+	}
+	error = ext4_journal_write_home(
+	    journal, EXT4_SUPER_OFFSET / fs->info.block_size, journal->data);
+	if (error == EXT4_OK) {
+		error = ext4_journal_flush(journal);
+	}
+	return error;
+}
+
 enum ext4_result
 ext4_journal_set_recovery(struct ext4_journal *journal, bool recovery)
 {
@@ -764,12 +835,16 @@ ext4_journal_set_recovery(struct ext4_journal *journal, bool recovery)
 		ext4_le32(&super->checksum)) {
 		return EXT4_CORRUPT;
 	}
+	/* Without a journal, only this writer clears the valid state. */
 	if (!recovery &&
-	    (!(ext4_le16(&super->state) & EXT4_VALID_FS) ||
+	    ((!journal->direct && !(ext4_le16(&super->state) & EXT4_VALID_FS)) ||
 		(ext4_le16(&super->state) & EXT4_ERROR_FS) || ext4_le32(&super->last_orphan) != 0 ||
 		(fs->orphan_file_inode != 0 &&
 		    (fs->orphan_file == NULL || fs->orphan_file->pending != 0)))) {
 		return EXT4_RECOVERY_REQUIRED;
+	}
+	if (journal->direct) {
+		return ext4_journal_set_valid(journal, super, !recovery);
 	}
 	flags = ext4_le32(&super->feature_incompat);
 	ro_flags = ext4_le32(&super->feature_ro_compat);
@@ -909,8 +984,9 @@ ext4_transaction_create(struct ext4_journal *journal, uint32_t credits, bool rec
 	/* Ordinary transactions reserve room for their quota updates; recovery
 	 * conversions already hold the recovery bound. */
 	capacity = credits + (journal->fs->quota_active && !recovery ? EXT4_QUOTA_CREDITS : 0U);
-	/* Reserve conservatively: at worst one descriptor for every data block. */
-	if (capacity * 2U + 1U >= journal->last - journal->first) {
+	/* Reserve conservatively: at worst one descriptor for every data block. A volume
+	 * without a journal has no log to fill. */
+	if (!journal->direct && capacity * 2U + 1U >= journal->last - journal->first) {
 		return EXT4_RANGE;
 	}
 	size = ext4_transaction_size(capacity);
@@ -1147,7 +1223,8 @@ ext4_transaction_peek(const struct ext4_transaction *transaction, uint64_t block
 uint32_t
 ext4_journal_credits(const struct ext4_journal *journal)
 {
-	uint32_t credits = (journal->last - journal->first - 2U) / 2U;
+	uint32_t credits = journal->direct ? EXT4_TRANSACTION_MAX_BLOCKS
+					   : (journal->last - journal->first - 2U) / 2U;
 
 	/* Leave the quota reserve inside the same log-space bound. */
 	if (journal->fs->quota_active) {
@@ -1181,9 +1258,14 @@ ext4_transaction_prepare_super(struct ext4_transaction *transaction)
 		}
 		super = (struct ext4_super_disk *)((uint8_t *)transaction->entries[index].buffer +
 		    EXT4_SUPER_OFFSET % fs->info.block_size);
-		ext4_encode32(&super->feature_incompat,
-		    ext4_le32(&super->feature_incompat) | EXT4_FEATURE_INCOMPAT_RECOVER);
-		if (fs->orphan_file_inode != 0) {
+		if (transaction->journal->direct) {
+			ext4_encode16(
+			    &super->state, ext4_le16(&super->state) & ~(uint16_t)EXT4_VALID_FS);
+		} else {
+			ext4_encode32(&super->feature_incompat,
+			    ext4_le32(&super->feature_incompat) | EXT4_FEATURE_INCOMPAT_RECOVER);
+		}
+		if (fs->orphan_file_inode != 0 && !transaction->journal->direct) {
 			ext4_encode32(&super->feature_ro_compat,
 			    ext4_le32(&super->feature_ro_compat) | EXT4_FEATURE_RO_ORPHAN_PRESENT);
 		}
@@ -1599,6 +1681,43 @@ ext4_journal_retain(struct ext4_journal *journal, struct ext4_transaction *trans
 /* Log and commit one transaction, then release it. Without lazy checkpointing, and
  * for recovery conversions, its blocks are written home and the log emptied at once;
  * otherwise they stay in the log and the checkpoint set. */
+/* Without a journal, a commit first marks the volume in use, then writes file data
+ * home and flushes, so that no written metadata references data that is not
+ * durable, then writes the other blocks and flushes. */
+static enum ext4_result
+ext4_transaction_direct(struct ext4_transaction *transaction)
+{
+	struct ext4_journal *journal = transaction->journal;
+	uint32_t count = transaction->count;
+	uint32_t index;
+	enum ext4_result error;
+
+	error = ext4_journal_set_recovery(journal, true);
+	if (error == EXT4_OK) {
+		error = ext4_transaction_write_data(transaction);
+	}
+	if (error == EXT4_OK && transaction->count != count) {
+		error = ext4_journal_flush(journal);
+	}
+	ext4_transaction_prepare_super(transaction);
+	for (index = 0; error == EXT4_OK && index < transaction->count; index++) {
+		error = ext4_journal_write_home(
+		    journal, transaction->entries[index].block, transaction->entries[index].buffer);
+	}
+	if (error == EXT4_OK) {
+		error = ext4_journal_flush(journal);
+	}
+	if (error != EXT4_OK) {
+		journal->aborted = true;
+	} else {
+		ext4_transaction_publish(transaction);
+		journal->freed_count = 0;
+		journal->freed_overflow = false;
+	}
+	ext4_transaction_cancel(transaction);
+	return error;
+}
+
 static enum ext4_result
 ext4_transaction_durable(struct ext4_transaction *transaction)
 {
@@ -1610,6 +1729,9 @@ ext4_transaction_durable(struct ext4_transaction *transaction)
 	bool lazy;
 	enum ext4_result error = EXT4_OK;
 
+	if (journal->direct) {
+		return ext4_transaction_direct(transaction);
+	}
 	/* Ordered data reaches its home before the barrier that precedes the commit. */
 	if (!transaction->held) {
 		error = ext4_transaction_write_data(transaction);

@@ -166,9 +166,9 @@ Continue the actual remaining queue in `docs/ACCEPTANCE.md`:
 - Expand required geometry/format compatibility. MMP, quota/project accounting and
   limit enforcement, casefold, keyless encryption and verity reading, enabling and
   measurement, with built-in signatures checked by an adapter callback, and reading,
-  writing and encrypting objects with keys from adapter callbacks, and Linux's no-key
-  names without them, are implemented. Unjournaled writes on journal-less volumes
-  remain refused.
+  writing and encrypting objects with keys from adapter callbacks, Linux's no-key
+  names without them, and writes to volumes without a journal under
+  `EXT4_WRITE_UNJOURNALED`, whose power cuts e2fsck repairs, are implemented.
 - Sustained mixed-operation/crash sequences, operations fuzzing and
   checksum-repairing journal fuzzing are in place, with encryption, verity and
   casefolding in both and exports checked by e2fsprogs and Linux; keep extending

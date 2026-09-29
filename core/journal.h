@@ -136,6 +136,10 @@ struct ext4_journal {
 	bool checksum_v1;
 	bool aborted;
 	bool transaction_active;
+	/* A volume without a journal: commits write home directly, file data first,
+	 * and the superblock's cleared valid state marks the volume in use instead of
+	 * the recovery flag. There is no log. */
+	bool direct;
 	/* Deferred commit: operations completed since the last durable commit, at
 	 * most compound_blocks snapshots. Zero commits every operation durably. */
 	struct ext4_transaction *compound;
@@ -175,6 +179,9 @@ enum ext4_result ext4_journal_open(
 enum ext4_result ext4_journal_open_external(struct ext4_fs *fs,
     const struct ext4_write_environment *writer, const struct ext4_journal_environment *external,
     struct ext4_journal **result);
+/* Transactions for a volume without a journal, written home directly. */
+enum ext4_result ext4_journal_open_direct(
+    struct ext4_fs *fs, const struct ext4_write_environment *writer, struct ext4_journal **result);
 void ext4_journal_close(struct ext4_journal *journal);
 enum ext4_result ext4_journal_finish(struct ext4_journal *journal);
 enum ext4_result ext4_transaction_begin(

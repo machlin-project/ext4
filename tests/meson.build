@@ -9,7 +9,7 @@ foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
   'directory_index_64k_fixture', 'large_file_fixtures', 'large_volume_fixtures', 'external_journal_fixtures',
   'fast_commit_fixtures', 'mmp_fixtures', 'verity_fixtures', 'casefold_vectors',
-  'casefold_fixtures', 'quota_fixtures', 'format_fixtures']
+  'casefold_fixtures', 'quota_fixtures', 'format_fixtures', 'unjournaled_fixtures']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
 endforeach
@@ -723,6 +723,25 @@ if paths['format_fixtures'] != ''
     test('sustained-format-' + feature + '-used', programs['sustained'],
       args: [paths['format_fixtures'] / ('format-' + feature + '.img'),
         sustained_seed.to_string(), '1500', '--' + feature],
+      timeout: 600, suite: 'sustained')
+    sustained_seed += 1
+  endforeach
+endif
+# Writes without a journal: option misuse, the in-use state and a power cut at every
+# event of each operation, then the sustained sequence on each volume.
+if paths['unjournaled_fixtures'] != ''
+  foreach profile : ['unjournaled-small-4k', 'unjournaled-small-1k', 'ext2-small-1k']
+    test('unjournaled-' + profile, programs['unjournaled'],
+      args: ['--journaled', paths['fixtures'] / 'ext4-4k.img',
+        paths['unjournaled_fixtures'] / (profile + '.img')],
+      timeout: 600, suite: 'format')
+  endforeach
+  foreach profile : ['unjournaled-4k', 'unjournaled-1k', 'ext2-1k']
+    features = profile == 'ext2-1k' ? ['--encrypt', '--casefold'] : ['--encrypt', '--verity',
+      '--casefold']
+    test('sustained-' + profile, programs['sustained'],
+      args: [paths['unjournaled_fixtures'] / (profile + '.img'), sustained_seed.to_string(),
+        '3000', '--unjournaled'] + features,
       timeout: 600, suite: 'sustained')
     sustained_seed += 1
   endforeach

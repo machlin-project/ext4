@@ -533,6 +533,8 @@ ext4_result_string(enum ext4_result result)
 		return "destination directory inherits a different project";
 	case EXT4_CROSS_POLICY:
 		return "destination directory has a different encryption policy";
+	case EXT4_CHECK_REQUIRED:
+		return "filesystem check required";
 	case EXT4_QUOTA_EXCEEDED:
 		return "quota limit exceeded";
 	case EXT4_PERMISSION_DENIED:

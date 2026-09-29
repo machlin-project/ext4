@@ -218,13 +218,16 @@ storage_open(struct device *device, const char *path)
 	device->dirty = calloc(device->blocks, 1);
 	device->journal_blocks = calloc(device->blocks, 1);
 	CHECK(device->dirty != NULL && device->journal_blocks != NULL);
-	EXPECT(ext4_journal_load(fs, &device->writer, &journal), EXT4_OK);
-	for (index = 0; index < journal->run_count; index++) {
-		for (block = 0; block < journal->runs[index].length; block++) {
-			device->journal_blocks[journal->runs[index].physical + block] = 1;
+	/* A volume without a journal has no blocks outside the image comparison. */
+	if (fs->info.feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL) {
+		EXPECT(ext4_journal_load(fs, &device->writer, &journal), EXT4_OK);
+		for (index = 0; index < journal->run_count; index++) {
+			for (block = 0; block < journal->runs[index].length; block++) {
+				device->journal_blocks[journal->runs[index].physical + block] = 1;
+			}
 		}
+		ext4_journal_close(journal);
 	}
-	ext4_journal_close(journal);
 	ext4_unmount(fs);
 	device_reset(device, device->base);
 }

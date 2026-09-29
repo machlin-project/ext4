@@ -183,6 +183,11 @@ jobs:
         run: |
           python3 tests/generate_format_fixtures.py --tools-root vendor/e2fsprogs/build \
             --output artifacts/format-fixtures 2>&1 | tee artifacts/checks/format-fixtures.log
+      - name: Generate volumes without a journal
+        if: matrix.suite == 'format' || matrix.suite == 'sustained'
+        run: |
+          python3 tests/generate_unjournaled_fixtures.py --tools-root vendor/e2fsprogs/build \
+            --output artifacts/unjournaled-fixtures 2>&1 | tee artifacts/checks/unjournaled-fixtures.log
       - name: Build sanitized and freestanding core
         run: |
           index_options=()
@@ -212,11 +217,13 @@ jobs:
               -Dcasefold_vectors="$PWD/artifacts/casefold-vectors/vectors.txt" \
               -Dcasefold_fixtures="$PWD/artifacts/casefold-fixtures" \
               -Dquota_fixtures="$PWD/artifacts/quota-fixtures" \
-              -Dformat_fixtures="$PWD/artifacts/format-fixtures")
+              -Dformat_fixtures="$PWD/artifacts/format-fixtures" \
+              -Dunjournaled_fixtures="$PWD/artifacts/unjournaled-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == sustained ]]; then
             format_options=(-Dquota_fixtures="$PWD/artifacts/quota-fixtures" \
-              -Dformat_fixtures="$PWD/artifacts/format-fixtures")
+              -Dformat_fixtures="$PWD/artifacts/format-fixtures" \
+              -Dunjournaled_fixtures="$PWD/artifacts/unjournaled-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == core ]]; then
             group_options=(-Dgroup_checksum_fixtures="$PWD/artifacts/group-checksum-fixtures" \
@@ -1054,6 +1061,13 @@ jobs:
             --entries 2000 --directories 3 --export "$directory" \
             2>&1 | tee artifacts/checks/sustained-export-ext4-4k-wide.log
           exports+=(--exports "$directory")
+          seed=$((seed + 1))
+          directory=artifacts/sustained-exports/unjournaled-4k-features
+          mkdir -p "$directory"
+          .build/ext4-sustained-test artifacts/unjournaled-fixtures/unjournaled-4k.img "$seed" 1500 \
+            --unjournaled --encrypt --verity --casefold --export "$directory" \
+            2>&1 | tee artifacts/checks/sustained-export-unjournaled-4k-features.log
+          exports+=(--exports "$directory")
           python3 tests/check_sustained.py --tools-root vendor/e2fsprogs/build "${exports[@]}" \
             --output artifacts/sustained-independent 2>&1 | tee artifacts/checks/sustained-independent.log
           find artifacts/sustained-exports artifacts/sustained-independent -type f \
@@ -1134,6 +1148,22 @@ jobs:
             --output artifacts/casefold-independent 2>&1 | tee artifacts/checks/casefold-independent.log
           find artifacts/casefold-exports artifacts/casefold-independent artifacts/casefold-vectors \
             -type f ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Independently verify power cuts without a journal
+        if: matrix.suite == 'format'
+        run: |
+          exports=artifacts/unjournaled-exports
+          mkdir -p "$exports"
+          .build/ext4-unjournaled-test --export "$exports" \
+            --journaled artifacts/fixtures/ext4-4k.img \
+            artifacts/unjournaled-fixtures/unjournaled-small-4k.img \
+            artifacts/unjournaled-fixtures/unjournaled-small-1k.img \
+            artifacts/unjournaled-fixtures/ext2-small-1k.img \
+            2>&1 | tee artifacts/checks/unjournaled-export.log
+          python3 tests/check_unjournaled.py --tools-root vendor/e2fsprogs/build \
+            --exports "$exports" --fixtures artifacts/unjournaled-fixtures \
+            --output artifacts/unjournaled-independent 2>&1 | tee artifacts/checks/unjournaled-independent.log
+          find "$exports" artifacts/unjournaled-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' ! -name '*.manifest' -delete
       - name: Independently verify quota usage after writable changes
         if: matrix.suite == 'format'
         run: |

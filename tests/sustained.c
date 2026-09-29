@@ -17,7 +17,9 @@
  * special files; every remount also checks it without the key. Regular files become
  * verity files, which measure the same digest until removed and refuse data changes.
  * A casefolded directory, inherited by its subdirectories, matches names without
- * regard to case and preserves their spelling. */
+ * regard to case and preserves their spelling. --unjournaled writes a volume without
+ * a journal under EXT4_WRITE_UNJOURNALED, whose power cuts leave volumes for e2fsck,
+ * so its operations run without the power-cut repetition. */
 
 #define SUSTAINED_SECONDS 1700002000
 #define SUSTAINED_UID 71000U
@@ -198,6 +200,7 @@ struct state {
 	bool casefold;
 	/* Compact exports, such as fuzzing seeds, leave out ballast. */
 	bool no_ballast;
+	bool unjournaled;
 	struct keyring keyring;
 	uint32_t keyless_checks;
 	uint32_t performed[OP_COUNT];
@@ -839,7 +842,7 @@ crash_eligible(const struct state *state, const struct plan *plan)
 
 	/* Enabling verity spans several transactions; a cut may leave the original file
 	 * with its trimmed tree blocks freed but written. */
-	return state->holds == 0 && plan->operation != OP_WRITE_PARTIAL &&
+	return !state->unjournaled && state->holds == 0 && plan->operation != OP_WRITE_PARTIAL &&
 	    plan->operation != OP_FALLOCATE && plan->operation != OP_HOLD &&
 	    plan->operation != OP_RELEASE && plan->operation != OP_BALLAST &&
 	    plan->operation != OP_VERITY &&
@@ -1727,7 +1730,8 @@ verify(struct state *state)
 static void
 mount_writer(struct state *state)
 {
-	struct ext4_write_options options = { state->commit_blocks, state->write_flags,
+	struct ext4_write_options options = { state->commit_blocks,
+		state->write_flags | (state->unjournaled ? EXT4_WRITE_UNJOURNALED : 0U),
 		state->checkpoint_blocks };
 
 	EXPECT(ext4_mount_writable_with_options(
@@ -2205,7 +2209,7 @@ main(int argc, char **argv)
 		    "usage: %s IMAGE SEED OPERATIONS [--objects N] [--entries N] "
 		    "[--directories N] [--commit-blocks N] [--checkpoint-blocks N] "
 		    "[--data journal|ordered] [--encrypt] [--verity] [--casefold] "
-		    "[--no-ballast] [--export DIRECTORY]\n",
+		    "[--no-ballast] [--unjournaled] [--export DIRECTORY]\n",
 		    argv[0]);
 		return 2;
 	}
@@ -2236,6 +2240,11 @@ main(int argc, char **argv)
 			argument--;
 			continue;
 		}
+		if (strcmp(argv[argument], "--unjournaled") == 0) {
+			state.unjournaled = true;
+			argument--;
+			continue;
+		}
 		CHECK(argument + 1 < argc);
 		if (strcmp(argv[argument], "--objects") == 0) {
 			state.object_limit = parse_number(argv[argument + 1]);
@@ -2260,6 +2269,7 @@ main(int argc, char **argv)
 		}
 	}
 	CHECK(state.object_limit <= OBJECT_LIMIT && state.entry_limit <= ENTRY_LIMIT);
+	CHECK(!state.unjournaled || (state.commit_blocks == 0 && state.checkpoint_blocks == 0));
 	storage_open(&state.device, argv[1]);
 	state.random = seed;
 	state.pre = malloc(state.device.size);

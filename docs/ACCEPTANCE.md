@@ -41,7 +41,7 @@ counted as portable-core implementation.
 | Block | Concrete remaining work | State |
 | --- | --- | --- |
 | Ordinary filesystem operations | Retain accepted mutation and allocator-exhaustion behavior as formats expand | Reserved mapping capacity and partial KEEP_SIZE growth pass focused faults, 30 independent states, six Linux roundtrips and the full 412-test regression; earlier ordinary operations retain their accepted evidence below |
-| Format compatibility | Unjournaled writes are refused; retain the Linux delayed-allocation maximum-offset exception | Open; MMP, fs-verity reading and enabling, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. Encryption with keys and Linux's no-key names without them match Linux 6.12 (see "Encrypted writing evidence" and "No-key names evidence"). 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
+| Format compatibility | None; retain the Linux delayed-allocation maximum-offset exception | Accepted; volumes without a journal take writes under `EXT4_WRITE_UNJOURNALED` with Linux's crash contract, and e2fsck repairs every power-cut state (see "Writes without a journal evidence"). MMP, fs-verity reading and enabling, keyless encryption, casefolded directories and quota/project accounting are implemented with their own evidence below, and CI run 36483787970 passed every suite that includes them. Encryption with keys and Linux's no-key names without them match Linux 6.12 (see "Encrypted writing evidence" and "No-key names evidence"). 29 further format and geometry variants pass sustained operation with power cuts (see "Format and geometry variant evidence"). BIGALLOC, large logical files and high physical addresses pass the 469-test regression; high addresses also pass three native profiles and 21 independent states; INLINE_DATA and EA_INODE retain full acceptance |
 | Journal compatibility | None; by product decision the core keeps refusing torn bitmap and inode checksums that an interrupted Linux fast-commit replay leaves, and leaves the log pending for Linux or e2fsck | Accepted with that documented limitation; BIGALLOC, casefold, quota and 64 KiB fast-commit profiles, ownership-corruption rejection, interrupted e2fsck replay of ordinary logs and interrupted Linux replay of two native captures are accepted, and the torn states of two range-heavy captures fail closed (see "Fast-commit combinations and interrupted foreign replay evidence" and "Interrupted Linux replay evidence"). Fast-commit conversions may exceed 256 snapshots, and a 1,024-file 1 KiB prefix passes strict independent checks and actual Linux readback. External journals pass focused faults, 30 independent states, four native Linux roundtrips and the expanded 476-test regression. V1 and async compatibility retain their accepted evidence |
 | Scale and sustained operation | None; keep extending sustained operation and fuzzing as formats expand | Accepted; indexed changes probe one path after one classification per mount, and measured workloads show bounded peak memory; group commit, ordered data and lazy checkpointing reach write amplification 1.0, a few barriers per commit and two per synchronous commit, and the sustained suite, two further soaks and checksum-repairing operations fuzzing pass, with encryption, verity and casefolding in the sequences (see "Scale measurement evidence", "Deferred commit evidence", "Ordered data evidence", "Lazy checkpointing evidence" and "Sustained operation and fuzzing evidence") |
 
@@ -49,7 +49,8 @@ MMP, fs-verity reading, enabling and measurement with protected writable metadat
 encrypted volumes without keys and reading, writing and encrypting them with keys
 from adapter callbacks, casefolded directories and quota/project accounting with
 limits enforced under an adapter's policy are implemented, and encrypted directories
-present Linux's no-key names without the key. Built-in verity signatures are stored and checked by the
+present Linux's no-key names without the key. Volumes without a journal take writes
+when the adapter selects `EXT4_WRITE_UNJOURNALED`, and otherwise stay read-only. Built-in verity signatures are stored and checked by the
 adapter's callback. Encryption is not accepted merely because mounting rejects it
 safely. They must not disappear from a future readiness claim. The core
 currently requires one serialized resource owner; native operation locking,
@@ -294,6 +295,32 @@ writable sequence, executed about 701,000 inputs on a checksum-free volume holdi
 encrypted, casefolded and verity objects, the checksum-free base volume and the
 indirect 1 KiB volume without a finding (`artifacts/fuzz-operations/features-*`). The
 complete 704-test regression passes (`artifacts/checks/scale-regression-24/`).
+
+## Writes without a journal evidence
+
+By product decision, a volume without a journal takes writes only when the adapter
+selects `EXT4_WRITE_UNJOURNALED`, with Linux's crash contract: the valid state is
+clear while changes are not synchronized, and a power cut needs e2fsck. On 16 MiB
+volumes without a journal at 4 KiB and 1 KiB blocks and an ext2 volume with block
+maps, writable mounts without the option, and the option with a journal, a journal
+resource, a compound or lazy checkpoints, are refused without writes; the valid state
+is cleared before the first change, set by sync and left clear by an unmount without
+it, so mounts and recovery return `EXT4_CHECK_REQUIRED`. A power cut at each of the
+240 events of a create with a write, a mkdir, a rename, a truncation, an unlink, an
+attribute change and a block symlink left 7 volumes unchanged and 233 that need
+e2fsck, 15 of them with a torn primary superblock. e2fsck repaired all 233, the 4 KiB
+volume's seven torn ones from its backup superblock, strict fsck then found nothing,
+and every file synced before the operations kept its contents and target
+(`artifacts/checks/unjournaled-cuts-1/`). Sustained runs of 4,000 operations with
+encryption, verity where extents allow it and, on one, casefolding pass on the
+64 MiB volumes; their exports pass strict fsck and the debugfs comparison, and Linux
+6.12 reads the three without casefolding completely, including 424 no-key names and
+13 verity digests (`artifacts/checks/unjournaled-sustained-1/` and the lab's
+`artifacts/ext4-sustained/unjournaled-*`). A journaled volume whose valid state is
+clear without a pending log now also returns `EXT4_CHECK_REQUIRED` rather than asking
+for a recovery that cannot repair it. The 710-test regression passes, with the
+malformed-image test rerun after that expectation changed
+(`artifacts/checks/scale-regression-25/`).
 
 ## Multi-mount protection evidence
 

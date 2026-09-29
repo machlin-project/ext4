@@ -32,13 +32,19 @@ ext4_mount_writable_with_options(const struct ext4_environment *environment,
     const struct ext4_write_options *options, struct ext4_fs **result)
 {
 	struct ext4_fs *fs;
+	bool unjournaled = options != NULL && (options->flags & EXT4_WRITE_UNJOURNALED);
 	enum ext4_result error;
 
 	if (result == NULL) {
 		return EXT4_INVALID_ARGUMENT;
 	}
 	*result = NULL;
-	if (writer == NULL || writer->write == NULL || writer->flush == NULL) {
+	if (writer == NULL || writer->write == NULL || writer->flush == NULL ||
+	    (options != NULL &&
+		(options->flags & ~(uint32_t)(EXT4_WRITE_ORDERED_DATA | EXT4_WRITE_UNJOURNALED))) ||
+	    (unjournaled &&
+		(journal != NULL || options->commit_blocks != 0 ||
+		    options->checkpoint_blocks != 0))) {
 		return EXT4_INVALID_ARGUMENT;
 	}
 	error = ext4_mount(environment, &fs);
@@ -54,17 +60,14 @@ ext4_mount_writable_with_options(const struct ext4_environment *environment,
 		error = ext4_mmp_start(fs, writer, false);
 	}
 	if (error == EXT4_OK) {
-		error = ext4_journal_open_external(fs, writer, journal, &fs->journal);
+		error = unjournaled ? ext4_journal_open_direct(fs, writer, &fs->journal)
+				    : ext4_journal_open_external(fs, writer, journal, &fs->journal);
 	}
 	if (error == EXT4_OK) {
 		error = ext4_system_ranges_build(fs);
 	}
 	if (error == EXT4_OK) {
 		error = ext4_quota_open(fs);
-	}
-	if (error == EXT4_OK && options != NULL &&
-	    (options->flags & ~(uint32_t)EXT4_WRITE_ORDERED_DATA) != 0) {
-		error = EXT4_INVALID_ARGUMENT;
 	}
 	if (error == EXT4_OK && options != NULL && options->commit_blocks != 0) {
 		if (options->commit_blocks > ext4_journal_compound_limit(fs->journal)) {
@@ -80,7 +83,7 @@ ext4_mount_writable_with_options(const struct ext4_environment *environment,
 			fs->journal->checkpoint_blocks = options->checkpoint_blocks;
 		}
 	}
-	if (error == EXT4_OK && options != NULL) {
+	if (error == EXT4_OK && options != NULL && !unjournaled) {
 		fs->journal->ordered_data = (options->flags & EXT4_WRITE_ORDERED_DATA) != 0;
 	}
 	if (error != EXT4_OK) {

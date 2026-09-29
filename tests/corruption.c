@@ -190,8 +190,12 @@ main(int argc, char **argv)
 		resource.corruption = corruption;
 		resource.changed = false;
 		expected = corruption == UNKNOWN_INCOMPAT ? EXT4_UNSUPPORTED : EXT4_CORRUPT;
-		if (corruption == NEEDS_RECOVERY || corruption == UNCLEAN_VOLUME) {
+		if (corruption == NEEDS_RECOVERY) {
 			expected = EXT4_RECOVERY_REQUIRED;
+		}
+		/* Without a pending journal, only e2fsck can check a volume left in use. */
+		if (corruption == UNCLEAN_VOLUME) {
+			expected = EXT4_CHECK_REQUIRED;
 		}
 		error = ext4_mount(&environment, &fs);
 		if (corruption == BAD_DIRECTORY_CHECKSUM && error == EXT4_OK) {

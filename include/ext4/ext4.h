@@ -45,7 +45,10 @@ enum ext4_result {
 	EXT4_QUOTA_EXCEEDED,
 	/* A link or rename would place an object in an encrypted directory of another
 	 * encryption policy; Linux reports EXDEV. */
-	EXT4_CROSS_POLICY
+	EXT4_CROSS_POLICY,
+	/* The volume records errors, or was left in use without a journal whose
+	 * recovery could repair it; e2fsck must check it before it mounts. */
+	EXT4_CHECK_REQUIRED
 };
 
 enum ext4_file_type {
@@ -346,8 +349,20 @@ enum ext4_result ext4_mount_writable_with_journal(const struct ext4_environment 
  * them home and empties the log when the next commit would not fit in the log or in
  * that bound, and on ext4_sync; a power cut or an unmount without ext4_sync leaves
  * them for recovery. checkpoint_blocks may not exceed the ring of the journal or
- * 32 MiB of blocks. */
+ * 32 MiB of blocks.
+ *
+ * EXT4_WRITE_UNJOURNALED admits writes to a volume without a journal, as Linux's ext4
+ * writes one: each commit writes its file data home, flushes, writes its other
+ * blocks home and flushes again. Before the first change after a mount or ext4_sync,
+ * the superblock's valid state is cleared and flushed; ext4_sync sets it again once
+ * every change is durable. A power cut, or an unmount without ext4_sync, leaves a
+ * volume that mounts and recovers with CHECK_REQUIRED until e2fsck checks it, and a
+ * cut within a commit may leave any subset of its blocks written. The flag needs a
+ * volume without a journal and no journal resource, commit_blocks or
+ * checkpoint_blocks; a volume without a journal refuses a writable mount without it.
+ * Journaled volumes keep their atomic commits. */
 #define EXT4_WRITE_ORDERED_DATA 0x1U
+#define EXT4_WRITE_UNJOURNALED 0x2U
 
 struct ext4_write_options {
 	uint32_t commit_blocks;
