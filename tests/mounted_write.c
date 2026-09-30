@@ -10,6 +10,8 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
@@ -91,6 +93,55 @@ check_persisted(int directory)
 }
 
 static void
+check_special_files(int directory)
+{
+	struct sockaddr_un address = { .sun_len = sizeof(address), .sun_family = AF_UNIX };
+	char bytes[8];
+	int reader;
+	int writer;
+	int bound;
+	int client;
+	int previous;
+	int fifo_supported = 0;
+	int socket_supported = 0;
+
+	if (mkfifoat(directory, "fifo", 0600) == 0) {
+		fifo_supported = 1;
+		reader = openat(directory, "fifo", O_RDONLY | O_NONBLOCK | O_NOFOLLOW);
+		CHECK(reader >= 0);
+		writer = openat(directory, "fifo", O_WRONLY | O_NONBLOCK | O_NOFOLLOW);
+		CHECK(writer >= 0);
+		CHECK(write(writer, "pipe", 4) == 4);
+		CHECK(read(reader, bytes, sizeof(bytes)) == 4 && memcmp(bytes, "pipe", 4) == 0);
+		CHECK(close(reader) == 0 && close(writer) == 0);
+		CHECK(unlinkat(directory, "fifo", 0) == 0);
+	} else {
+		CHECK(errno == ENOTSUP);
+	}
+	previous = open(".", O_RDONLY | O_DIRECTORY);
+	CHECK(previous >= 0 && fchdir(directory) == 0);
+	strlcpy(address.sun_path, "socket", sizeof(address.sun_path));
+	bound = socket(AF_UNIX, SOCK_DGRAM, 0);
+	client = socket(AF_UNIX, SOCK_DGRAM, 0);
+	CHECK(bound >= 0 && client >= 0);
+	if (bind(bound, (const struct sockaddr *)&address, sizeof(address)) == 0) {
+		socket_supported = 1;
+		CHECK(connect(client, (const struct sockaddr *)&address, sizeof(address)) == 0);
+		CHECK(send(client, "socket", 6, 0) == 6);
+		CHECK(recv(bound, bytes, sizeof(bytes), MSG_DONTWAIT) == 6 &&
+		    memcmp(bytes, "socket", 6) == 0);
+		CHECK(unlinkat(directory, "socket", 0) == 0);
+	} else {
+		CHECK(errno == ENOTSUP);
+	}
+	CHECK(close(bound) == 0 && close(client) == 0);
+	CHECK(fchdir(previous) == 0 && close(previous) == 0);
+	/* Unsupported special creation is reported separately, never as a passed feature. */
+	printf("{\"fifo\":\"%s\",\"socket\":\"%s\"}\n", fifo_supported ? "passed" : "unsupported",
+	    socket_supported ? "passed" : "unsupported");
+}
+
+static void
 check_write(int directory)
 {
 	uint8_t *data = malloc(DATA_SIZE);
@@ -161,6 +212,145 @@ check_write(int directory)
 	free(data);
 }
 
+static void
+check_permissions(int root, int directory)
+{
+	struct statfs filesystem;
+	struct stat status;
+	int fd;
+
+	CHECK(geteuid() != 0);
+	CHECK(fstatfs(root, &filesystem) == 0 && (filesystem.f_flags & MNT_IGNORE_OWNERSHIP) == 0);
+	CHECK(fstatat(root, "foreign-owned", &status, AT_SYMLINK_NOFOLLOW) == 0);
+	CHECK(status.st_uid != geteuid() && (status.st_mode & 0777) == 0600);
+	errno = 0;
+	CHECK(openat(root, "foreign-owned", O_RDONLY | O_NOFOLLOW) == -1 && errno == EACCES);
+	errno = 0;
+	CHECK(openat(root, "foreign-owned", O_WRONLY | O_NOFOLLOW) == -1 && errno == EACCES);
+	errno = 0;
+	CHECK(fchmodat(root, "foreign-owned", 0666, 0) == -1 && errno == EPERM);
+	CHECK(fstatat(root, "sticky", &status, AT_SYMLINK_NOFOLLOW) == 0);
+	CHECK(status.st_uid != geteuid() && (status.st_mode & 07777) == 01777);
+	CHECK(fstatat(root, "sticky/foreign-owned", &status, AT_SYMLINK_NOFOLLOW) == 0);
+	CHECK(status.st_uid != geteuid());
+	errno = 0;
+	/* POSIX permits either errno for a sticky-directory ownership denial. */
+	CHECK(
+	    unlinkat(root, "sticky/foreign-owned", 0) == -1 && (errno == EPERM || errno == EACCES));
+	CHECK(fstatat(root, "sticky/foreign-owned", &status, AT_SYMLINK_NOFOLLOW) == 0);
+	fd = openat(directory, "payload", O_RDWR | O_NOFOLLOW);
+	CHECK(fd >= 0);
+	CHECK(fstat(fd, &status) == 0 && status.st_uid == geteuid());
+	errno = 0;
+	CHECK(fchown(fd, geteuid() + 1, (gid_t)-1) == -1 && errno == EPERM);
+	errno = 0;
+	CHECK(fchflags(fd, SF_IMMUTABLE) == -1 && errno == EPERM);
+	CHECK(fchflags(fd, UF_NODUMP) == 0);
+	CHECK(fstat(fd, &status) == 0 && (status.st_flags & UF_NODUMP) != 0);
+	CHECK(fchflags(fd, 0) == 0);
+	CHECK(fchmod(fd, 0000) == 0);
+	errno = 0;
+	CHECK(openat(directory, "payload", O_RDONLY | O_NOFOLLOW) == -1 && errno == EACCES);
+	CHECK(fchmod(fd, 0640) == 0 && fsync(fd) == 0 && close(fd) == 0);
+	puts("PASS native ownership, mode denial, sticky directories, chown/system-flag denial, "
+	     "and nodump");
+}
+
+static void
+check_set_id(int directory)
+{
+	struct statfs filesystem;
+	struct stat status;
+	mode_t live_mode;
+	mode_t reopened_mode;
+	uint8_t byte = 1;
+	int fd;
+
+	CHECK(fstatfs(directory, &filesystem) == 0);
+	fd = openat(directory, "payload", O_RDWR | O_NOFOLLOW);
+	CHECK(fd >= 0 && fchmod(fd, 06740) == 0);
+	CHECK(pwrite(fd, &byte, 1, 0) == 1 && fsync(fd) == 0);
+	errno = 0;
+	CHECK(fstat(fd, &status) == 0);
+	live_mode = status.st_mode & 07777;
+	CHECK(close(fd) == 0);
+	fd = openat(directory, "payload", O_RDWR | O_NOFOLLOW);
+	CHECK(fd >= 0 && fstat(fd, &status) == 0);
+	reopened_mode = status.st_mode & 07777;
+	/* Restore the ordinary I/O fixture before recording an independent failure. */
+	CHECK(fchmod(fd, 0640) == 0 && fsync(fd) == 0 && close(fd) == 0);
+	printf("{\"live_mode\":\"%04o\",\"reopened_mode\":\"%04o\",\"nosuid\":%s}\n", live_mode,
+	    reopened_mode, (filesystem.f_flags & MNT_NOSUID) != 0 ? "true" : "false");
+	CHECK((live_mode & (S_ISUID | S_ISGID)) == 0);
+	CHECK((reopened_mode & (S_ISUID | S_ISGID)) == 0);
+}
+
+static void
+check_space(int directory)
+{
+	const size_t chunk = 256U * 1024U;
+	struct statfs filesystem;
+	struct stat status;
+	fstore_t reservation = { .fst_posmode = F_PEOFPOSMODE, .fst_length = 65536 };
+	uint8_t *buffer = malloc(chunk);
+	uint64_t limit;
+	off_t total = 0;
+	off_t offset;
+	ssize_t amount;
+	size_t index;
+	int fd;
+	int full = 0;
+
+	CHECK(buffer != NULL && fstatfs(directory, &filesystem) == 0);
+	limit = filesystem.f_blocks * filesystem.f_bsize;
+	CHECK(limit > 0 && limit <= 256U * 1024U * 1024U);
+	fd = openat(directory, "space-pressure", O_CREAT | O_EXCL | O_RDWR, 0600);
+	CHECK(fd >= 0);
+	CHECK(fcntl(fd, F_PREALLOCATE, &reservation) == 0 && reservation.fst_bytesalloc >= 65536);
+	CHECK(fstat(fd, &status) == 0 && status.st_size == 0 && status.st_blocks * 512 >= 65536);
+	CHECK(ftruncate(fd, 16384) == 0);
+	CHECK(pread(fd, buffer, 16384, 0) == 16384);
+	for (index = 0; index < 16384; index++) {
+		CHECK(buffer[index] == 0);
+	}
+	CHECK(ftruncate(fd, 0) == 0);
+	CHECK(fcntl(fd, F_NOCACHE, 1) == 0);
+	fprintf(stderr, "pressure: preallocation and zero exposure passed; filling %llu bytes\n",
+	    (unsigned long long)limit);
+	memset(buffer, 0x6d, chunk);
+	while ((uint64_t)total <= limit) {
+		amount = pwrite(fd, buffer, chunk, total);
+		if (amount < 0) {
+			CHECK(errno == ENOSPC);
+			full = 1;
+			break;
+		}
+		CHECK(amount > 0 && (size_t)amount <= chunk);
+		total += amount;
+		if (total % (1024U * 1024U) == 0 || (size_t)amount != chunk) {
+			fprintf(stderr, "pressure: committed %lld bytes\n", (long long)total);
+		}
+	}
+	fprintf(
+	    stderr, "pressure: ENOSPC after %lld bytes, syncing and verifying\n", (long long)total);
+	CHECK(full && total > 0 && fsync(fd) == 0);
+	CHECK(fstat(fd, &status) == 0 && status.st_size == total);
+	for (offset = 0; offset < total; offset += amount) {
+		amount = pread(fd, buffer,
+		    total - offset < (off_t)chunk ? (size_t)(total - offset) : chunk, offset);
+		CHECK(amount > 0);
+		for (index = 0; index < (size_t)amount; index++) {
+			CHECK(buffer[index] == 0x6d);
+		}
+	}
+	CHECK(ftruncate(fd, 0) == 0);
+	CHECK(pwrite(fd, "space recovered", 15, 0) == 15 && fsync(fd) == 0);
+	CHECK(close(fd) == 0 && unlinkat(directory, "space-pressure", 0) == 0);
+	CHECK(fsync(directory) == 0);
+	free(buffer);
+	puts("PASS native preallocation, zero exposure, ENOSPC prefix readback and space reuse");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -169,12 +359,32 @@ main(int argc, char **argv)
 	int directory;
 	int verify;
 
-	CHECK(argc == 3 && (strcmp(argv[2], "write") == 0 || strcmp(argv[2], "verify") == 0));
+	CHECK(argc == 3 &&
+	    (strcmp(argv[2], "write") == 0 || strcmp(argv[2], "verify") == 0 ||
+		strcmp(argv[2], "special") == 0 || strcmp(argv[2], "policy") == 0 ||
+		strcmp(argv[2], "setid") == 0 || strcmp(argv[2], "pressure") == 0));
 	verify = strcmp(argv[2], "verify") == 0;
 	root = open(argv[1], O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
 	CHECK(root >= 0);
 	CHECK(fstatfs(root, &filesystem) == 0);
 	CHECK(strcmp(filesystem.f_fstypename, "machlinext4") == 0);
+	if (strcmp(argv[2], "special") == 0 || strcmp(argv[2], "policy") == 0 ||
+	    strcmp(argv[2], "setid") == 0 || strcmp(argv[2], "pressure") == 0) {
+		CHECK((filesystem.f_flags & MNT_RDONLY) == 0);
+		directory = openat(root, "acceptance-write", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+		CHECK(directory >= 0);
+		if (strcmp(argv[2], "special") == 0) {
+			check_special_files(directory);
+		} else if (strcmp(argv[2], "policy") == 0) {
+			check_permissions(root, directory);
+		} else if (strcmp(argv[2], "setid") == 0) {
+			check_set_id(directory);
+		} else {
+			check_space(directory);
+		}
+		CHECK(close(directory) == 0 && close(root) == 0);
+		return EXIT_SUCCESS;
+	}
 	if (!verify) {
 		CHECK((filesystem.f_flags & MNT_RDONLY) == 0);
 		CHECK(mkdirat(root, "acceptance-write", 0700) == 0);

@@ -15,22 +15,44 @@ struct ext4_native_crypto;
 		      filesystem:(struct ext4_fs *)filesystem
 		   resourceOwner:(id)resourceOwner
 			  crypto:(struct ext4_native_crypto *)crypto;
+/* Writable ownership starts at construction, including its MMP heartbeat. */
+- (instancetype)initWithResource:(FSBlockDeviceResource *)resource
+		      filesystem:(struct ext4_fs *)filesystem
+		   resourceOwner:(id)resourceOwner
+			  crypto:(struct ext4_native_crypto *)crypto
+			writable:(BOOL)writable;
 @property(nonatomic, strong) NSError *keyStoreError;
 @property(nonatomic, strong) NSError *writeAvailabilityError;
-/* Set only before activation, after a successful writable core mount. */
-@property(nonatomic) BOOL writable;
+@property(nonatomic, readonly) BOOL writable;
 - (NSError *)checkMountEligibility;
+/* Release a writable load used only for maintenance, before resource unload. */
+- (NSError *)finishUnloadedResource;
 - (void)invalidate;
 
 @end
 
-@interface Ext4Volume (FileIO) <FSVolumeReadWriteOperations, FSVolumeOpenCloseOperations,
-    FSVolumeXattrOperations, FSVolumeKernelOffloadedIOOperations, FSVolumeItemDeactivation>
+@interface Ext4Volume (FileIO) <FSVolumeOpenCloseOperations, FSVolumeXattrOperations,
+    FSVolumeKernelOffloadedIOOperations, FSVolumeItemDeactivation>
 @end
 
 @interface Ext4Volume (Control)
 - (NSDictionary *)controlRequest:(NSDictionary *)request;
 @end
 
-@interface Ext4Volume (Mutation) <FSVolumePreallocateOperations>
+@interface Ext4Volume (Mutation) <FSVolumePreallocateOperations, FSVolumeRenameOperations>
 @end
+
+/* Read/write protocols reuse selectors with incompatible reply blocks. Sibling
+ * classes keep each volume's reply ABI fixed for its entire lifetime. */
+@interface Ext4LegacyVolume : Ext4Volume <FSVolumeReadWriteOperations>
+@end
+
+#if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
+API_AVAILABLE(macos(27.0))
+@interface Ext4ModernVolume : Ext4Volume <FSVolumeReadWriteHandler>
+@end
+#endif
+
+/* Select the runtime API, retaining the same ownership contract as init. */
+Ext4Volume *ext4_volume_create(FSBlockDeviceResource *resource, struct ext4_fs *filesystem,
+    id resourceOwner, struct ext4_native_crypto *crypto, BOOL writable);

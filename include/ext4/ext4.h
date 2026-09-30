@@ -171,6 +171,8 @@ struct ext4_recovery_report {
 struct ext4_info {
 	uint64_t blocks;
 	uint64_t free_blocks;
+	/* Reserved blocks are excluded from ordinary allocation, even for root. */
+	uint64_t reserved_blocks;
 	uint32_t inodes;
 	uint32_t free_inodes;
 	uint32_t block_size;
@@ -313,6 +315,12 @@ struct ext4_rename_entry {
 enum ext4_rename_flags { EXT4_RENAME_NOREPLACE = 1U << 0, EXT4_RENAME_EXCHANGE = 1U << 1 };
 
 enum ext4_result ext4_mount(const struct ext4_environment *environment, struct ext4_fs **result);
+
+/* Identify a structurally valid superblock without replaying a pending journal
+ * or reading potentially partially checkpointed inodes. This is discovery only,
+ * not admission for file operations or a consistency check. Outputs change only
+ * on success; ordinary mount still requires clean media. */
+enum ext4_result ext4_inspect(const struct ext4_environment *environment, struct ext4_info *info);
 /* The owner must serialize ALL access to a writable instance, including reads,
  * inode snapshots and mapping consumers, through each operation's completion.
  * Refresh affected snapshots after mutation; never retain a mapping across it.
@@ -394,6 +402,12 @@ enum ext4_result ext4_list_xattrs(struct ext4_fs *fs, uint32_t number, uint32_t 
     struct ext4_xattr_key *keys, size_t capacity, size_t *count);
 enum ext4_result ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     const struct ext4_inode_update *update, struct ext4_inode *result);
+
+/* Replace the primary superblock label in one transaction. The byte string may
+ * be empty, but cannot contain NUL or exceed EXT4_VOLUME_NAME_SIZE. The owner
+ * authorizes renaming; deferred commits retain their normal durability policy.
+ * Backup superblocks retain their last administrative snapshot. */
+enum ext4_result ext4_set_volume_name(struct ext4_fs *fs, const uint8_t *name, size_t length);
 
 /* Atomically replace selected policy bits and ctime, preserving every other
  * field. mask must be nonzero and contain only MODIFIABLE_FLAGS; flags must be

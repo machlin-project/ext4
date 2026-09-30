@@ -18,6 +18,8 @@
 #define FSCRYPT_HKDF_PREFIX_SIZE 8U
 #define FSCRYPT_KEY_IDENTIFIER_CONTEXT 1U
 #define FSCRYPT_IDENTIFIER_BYTES 16U
+#define FSCRYPT_V1 1U
+#define FSCRYPT_DESCRIPTOR_BYTES 8U
 #define FSCRYPT_V2 2U
 #define FSCRYPT_V1_KEY_BYTES 16U
 
@@ -33,6 +35,7 @@
 struct keyring {
 	uint8_t master[KEYRING_MASTER_BYTES];
 	uint8_t identifier[FSCRYPT_IDENTIFIER_BYTES];
+	uint8_t descriptor[FSCRYPT_DESCRIPTOR_BYTES];
 	uint32_t handles;
 	uint32_t derivations;
 	uint64_t nonces;
@@ -52,6 +55,10 @@ keyring_init(struct keyring *keyring, uint8_t offset)
 	memset(keyring, 0, sizeof(*keyring));
 	for (index = 0; index < KEYRING_MASTER_BYTES; index++) {
 		keyring->master[index] = (uint8_t)(index * KEYRING_MASTER_MULTIPLIER + offset);
+	}
+	/* Version 1 permits an opaque caller-selected descriptor. */
+	for (index = 0; index < FSCRYPT_DESCRIPTOR_BYTES; index++) {
+		keyring->descriptor[index] = (uint8_t)(offset + index);
 	}
 	memcpy(info, FSCRYPT_HKDF_PREFIX, FSCRYPT_HKDF_PREFIX_SIZE);
 	info[FSCRYPT_HKDF_PREFIX_SIZE] = FSCRYPT_KEY_IDENTIFIER_CONTEXT;
@@ -74,9 +81,12 @@ keyring_find(void *context, uint8_t version, const uint8_t *identifier, size_t s
 {
 	struct keyring *keyring = context;
 	struct key *key;
+	const uint8_t *expected = version == FSCRYPT_V1 ? keyring->descriptor : keyring->identifier;
+	size_t expected_size =
+	    version == FSCRYPT_V1 ? FSCRYPT_DESCRIPTOR_BYTES : FSCRYPT_IDENTIFIER_BYTES;
 
-	if (version != FSCRYPT_V2 || size != sizeof(keyring->identifier) ||
-	    memcmp(identifier, keyring->identifier, size) != 0) {
+	if ((version != FSCRYPT_V1 && version != FSCRYPT_V2) || size != expected_size ||
+	    memcmp(identifier, expected, size) != 0) {
 		return EXT4_NOT_FOUND;
 	}
 	key = keyring_key(keyring);

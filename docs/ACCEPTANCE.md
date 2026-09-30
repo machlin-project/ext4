@@ -16,10 +16,10 @@ safe rejection of a feature is recorded separately from supporting it.
 | Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Accepted for the documented format/geometry matrix, including large logical files and high physical addresses; preserve the explicitly recorded exceptions |
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader, mounted arm64e kext and stock macOS 26.5.2 read-only FSKit profiles pass |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Functional core queue accepted with documented feature/mode limits; see the queue and per-feature evidence below |
-| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir/rename and bounded indexed mutation pass portable, independent and Linux checks; core holds retain open-unlinked or replaced objects; scale and sustained-operation core acceptance pass; native writes and concurrency acceptance pending |
-| Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal and single-user external journals, legacy lists and modern orphan files pass portable faults, independent recovery, Linux reuse and the full regression; fast commit is accepted with the interrupted-Linux-replay limitation below; platform write integration remains pending |
+| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Portable, independent and Linux checks pass with the recorded format limits; stock FSKit 1/4 KiB writes, shared mmap, concurrent writers, namespace mutations and open-unlinked lifetime pass; native full-disk and failure acceptance remain pending |
+| Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Portable journals and orphan recovery pass the recorded matrix; stock FSKit Disk Arbitration recovery passes both block sizes while dirty read-only media remain unchanged; physical device-loss qualification remains pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list, atomic attribute batches and mutation lifetime integration pass portable tests and targeted independent checks; bidirectional Linux attribute/ACL/security checks and direct replay of core attribute transactions pass eight profiles; the linked-truncate e2fsck defect remains explicit below; ACL enforcement and platform policy pending |
-| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Development-signed read-only mounts on stock 26.5.2 pass reads, inode metadata/ownership/timestamps, mmap, concurrent reads, mutation rejection and fscrypt v2 lifecycle; resource failures, cache/reclaim stress and writes remain pending (see [FSKit](FSKIT.md)) |
+| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Signed stock 26.5.2 reads/writes, namespace, mmap, concurrent I/O, user xattrs, recovery and fscrypt v1/v2 key lifecycle pass 1/4 KiB profiles; live set-ID metadata fails and full-disk/failure stress remain unaccepted (see [FSKit](FSKIT.md)) |
 | FSKit control app | Signed app-to-mounted-extension IPC on supported macOS versions, authorization and teardown | Signed same-user App Group IPC, settings, Keychain import/removal, next-mount key snapshots and normal teardown pass on 26.5.2; root-mounted/user-app coordination, crash recovery and GUI workflow acceptance remain pending |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
 | LXNU policy | CAP_FSETID and privilege removal, xattrs, mixed-ABI races, inherited descriptions and attachment restrictions | Not implemented |
@@ -3022,6 +3022,88 @@ approval, mutual XPC authentication and native write acceptance remain separate
 requirements. `scripts/test_fskit_installed_write.py` runs ordinary-user mounted
 mutations, a read-only remount, byte/metadata verification, resource cleanup and
 independent fsck of exported guest images. The runner never mounts on the host.
+
+The normal ServiceManagement approval and actual authenticated service connection
+now pass on stock macOS 26.5.2. An unsigned standalone XPC client is rejected while
+the signed app's health query succeeds before and after it. Ordinary-user writable
+mounts pass on both 1 KiB and 4 KiB images: write/fsync, truncate and sparse growth,
+four concurrent writers, shared writable mmap/msync coherence, modes, user xattrs,
+rename/hardlink/symlink, open-unlinked I/O and directory removal. Read-only remounts
+preserve bytes, inode identity, links, permissions and attributes. Exported guest
+images match their guest hashes and pass independent `e2fsck -fn`; original
+fixtures are unchanged and all mount devices/control endpoints are removed.
+Reports are under the lab's `artifacts/ext4-fskit/installed-clean/build12-write-1/`
+and `build12-auth/`. This establishes the native writable path, not physical
+power-loss survival, ACL authorization or production distribution.
+
+The next component batch cuts a write and all six persistence barriers of a
+transaction starting on clean media. A new owner either reads a clean image or
+requires recovery; discovery and unauthorized recovery leave every byte unchanged.
+Authorized recovery preserves the complete old or new file. A cut immediately
+after the commit record exports a real pending journal with unchanged home blocks;
+replay restores its seven-byte file. Both 1 KiB and 4 KiB runs pass, and independent
+fsck accepts both ordinary-mutation exports and both recovered exports. Reports
+are in `artifacts/checks/fskit-recovery/`.
+
+Installed recovery now passes on both block sizes through Disk Arbitration.
+Read-only attachment of a dirty image refuses mounting and leaves its hash
+unchanged. Writable loading replays the journal before admitting the volume,
+then satisfies Disk Arbitration's automatic check. The recovered file survives
+additional writes and a read-only remount; exported guest images pass independent
+fsck. Full forced check/repair remains unsupported. The repeatable runner is
+`scripts/test_fskit_installed_recovery.py`; evidence is in the lab's
+`artifacts/ext4-fskit/installed-clean/build16-recovery-1/`.
+
+Signed encrypted-write acceptance passes fscrypt v1 and v2 on both block sizes.
+Each run verifies 36 manifest objects, writes and shared mmap beneath an encrypted
+directory, remounts to verify persistence, then removes the saved key and proves
+current-mount retention and next-mount denial. Both policy versions pass independent
+fsck. Evidence is in the lab's `build14-encrypted-write-1/` and
+`build14-encrypted-v1-write-1/` directories under
+`artifacts/ext4-fskit/installed-clean/`. Ownership is explicitly disabled for
+these fixtures; this does not establish authorization policy.
+
+The pinned portable regression for the recovery/inspection changes completed
+718 tests with no failures. It reports 29 explicit scenario skips across 17
+tests; these are not additional passed scenarios. Reports are in
+`artifacts/checks/fskit-recovery/core-tests.summary.json`. Subsequent adapter
+changes and the volume-label operation have their own focused acceptance.
+
+## FSKit lifecycle and capacity checks
+
+The subsequent FSKit batch adds journaled volume rename, available-space reservation
+reporting, maintenance-only MMP heartbeats and release, and a terminal writable
+lifecycle. Component checks pass normal mutation and recovery cuts on both block
+sizes with independent fsck; the MMP fixture passes ownership refresh before
+activation and clean re-acquisition. Directory and symlink size requests are
+ignored without consuming the field, including a request that also changes mode.
+These checks are separate from native volume-rename and full-disk acceptance.
+
+The next focused boundary compiles both runtime-selected I/O classes with SDK 27,
+runs the legacy class and factory selection on 26.x, and fills 16 MiB images with
+both block sizes. A partial allocation failure returns its committed prefix and
+`ENOSPC` together; the prefix reads back exactly and truncation makes space usable
+again. All six normal, recovered and capacity exports pass independent fsck.
+Evidence is in `artifacts/checks/fskit-write18/`. The signed universal application
+build passes nested signature verification; this does not qualify the macOS 27
+handler at runtime.
+
+The extended native permission test on 26.5.2 passes ordinary-user ownership,
+mode denials, sticky-directory denial, privileged chown/flag denial and nodump.
+Its independent set-ID test fails: after a write, both live and reopened `fstat`
+report `6740`, while the independently exported image has mode `0740` and passes
+fsck. The mount reports `nosuid`. This is an outstanding metadata-coherence
+contract, not a passed feature or a suppressed test.
+
+The initial native pressure run times out in `pwrite` and subsequently cannot
+detach. Its last disk state contains about 46.5 MiB of written data with free
+blocks remaining, so it does not establish an ENOSPC failure specifically.
+Samples collected after the detach attempt cannot identify the original stall.
+The disposable VM needed a forced restart; a stopped snapshot and matching raw
+image exports are retained in the lab's
+`artifacts/ext4-fskit/installed-clean/build17-pressure-diagnosis/`.
+The next harness leaves timed-out guest resources intact for diagnosis instead
+of beginning a competing detach, and reports progress while filling the volume.
 
 ## Kernel build evidence
 

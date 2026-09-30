@@ -12,6 +12,7 @@ on:
       - 'scripts/test_fskit.py'
       - 'tests/fskit_*.m'
       - 'tests/generate_fixtures.py'
+      - 'tests/generate_fskit_owned.py'
   pull_request:
     paths:
       - '.github/workflows/fskit.yml'
@@ -22,6 +23,7 @@ on:
       - 'scripts/test_fskit.py'
       - 'tests/fskit_*.m'
       - 'tests/generate_fixtures.py'
+      - 'tests/generate_fskit_owned.py'
   workflow_dispatch:
 
 permissions:
@@ -66,6 +68,10 @@ jobs:
         run: |
           python3 tests/generate_fixtures.py --output artifacts/fskit-ci/fixtures \
             2>&1 | tee artifacts/fskit-ci/reports/fixtures.log
+          python3 tests/generate_fskit_owned.py --empty-mib 16 \
+            --mke2fs "$(command -v mke2fs)" --debugfs "$(command -v debugfs)" \
+            --e2fsck "$(command -v e2fsck)" --output artifacts/fskit-ci/capacity \
+            2>&1 | tee artifacts/fskit-ci/reports/capacity-fixtures.log
       - name: Build unsigned app and extension
         run: |
           python3 scripts/build_fskit.py --derived-data artifacts/fskit-ci/DerivedData \
@@ -82,13 +88,26 @@ jobs:
             2>&1 | tee artifacts/fskit-ci/reports/volume-1k.log
           artifacts/fskit-ci/tests/fskit-volume artifacts/fskit-ci/fixtures/ext4-indexed.img \
             2>&1 | tee artifacts/fskit-ci/reports/volume-indexed.log
+          mkdir -p artifacts/fskit-ci/tests-1k
           artifacts/fskit-ci/tests/fskit-mutation artifacts/fskit-ci/fixtures/ext4-1k.img \
-            artifacts/fskit-ci/tests/fskit-mutated-1k.img \
+            artifacts/fskit-ci/tests-1k/fskit-mutated.img \
             2>&1 | tee artifacts/fskit-ci/reports/mutation-1k.log
           e2fsck -fn artifacts/fskit-ci/tests/fskit-mutated.img \
             2>&1 | tee artifacts/fskit-ci/reports/mutation-fsck-4k.log
-          e2fsck -fn artifacts/fskit-ci/tests/fskit-mutated-1k.img \
+          e2fsck -fn artifacts/fskit-ci/tests-1k/fskit-mutated.img \
             2>&1 | tee artifacts/fskit-ci/reports/mutation-fsck-1k.log
+          e2fsck -fn artifacts/fskit-ci/tests/fskit-recovered.img \
+            2>&1 | tee artifacts/fskit-ci/reports/recovery-fsck-4k.log
+          e2fsck -fn artifacts/fskit-ci/tests-1k/fskit-recovered.img \
+            2>&1 | tee artifacts/fskit-ci/reports/recovery-fsck-1k.log
+          for profile in 4k 1k; do
+            artifacts/fskit-ci/tests/fskit-mutation \
+              "artifacts/fskit-ci/capacity/ext4-owned-$profile.img" --capacity \
+              "artifacts/fskit-ci/capacity/written-$profile.img" \
+              2>&1 | tee "artifacts/fskit-ci/reports/capacity-$profile.log"
+            e2fsck -fn "artifacts/fskit-ci/capacity/written-$profile.img" \
+              2>&1 | tee "artifacts/fskit-ci/reports/capacity-fsck-$profile.log"
+          done
       - name: Preserve build and test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

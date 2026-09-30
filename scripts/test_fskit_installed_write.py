@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Exercise installed FSKit writes, remount and independent fsck in a disposable Tart VM."""
 import argparse
+import errno
 import hashlib
 import json
 import plistlib
 import re
 import subprocess
 from pathlib import Path
+from fskit_test_vm import GuestTimeout, guest_commands, image_devices
 
 
 def main():
@@ -17,6 +19,10 @@ def main():
     parser.add_argument('--fixtures', type=Path, required=True)
     parser.add_argument('--guest-share', required=True)
     parser.add_argument('--checker', required=True, help='Unique staged checker filename')
+    parser.add_argument('--fixture-prefix', default='ext4-metadata')
+    parser.add_argument('--owners', choices=('on', 'off'), default='off')
+    parser.add_argument('--extended', action='store_true',
+                        help='Exercise native permissions, preallocation, ENOSPC and volume rename')
     parser.add_argument('--guest-workdir', required=True, help='New absolute guest directory')
     parser.add_argument('--build-number', type=int, required=True)
     parser.add_argument('--e2fsck', type=Path, required=True)
@@ -26,33 +32,15 @@ def main():
         parser.error('Use a positive build number and a new absolute guest directory')
     if Path(args.checker).name != args.checker:
         parser.error('--checker must be a filename within the fixture directory')
+    if Path(args.fixture_prefix).name != args.fixture_prefix or (args.extended and args.owners != 'on'):
+        parser.error('Use a filename prefix; extended checks require --owners on and owned fixtures')
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
     tart = args.tart.resolve()
     fixtures = args.fixtures.resolve()
     root = args.guest_workdir.rstrip('/')
     app = '/Applications/Machlin ext4.app/Contents/MacOS/Machlin ext4'
-    serial = 0
-
-    def guest(label, *command, required=True, timeout=30, destination=None):
-        nonlocal serial
-        serial += 1
-        prefix = out / f'{serial:03d}-{label}'
-        argv = [str(tart), 'exec', args.vm, *command]
-        with (destination or prefix.with_suffix('.stdout.log')).open('wb') as output:
-            try:
-                result = subprocess.run(argv, stdout=output, stderr=subprocess.PIPE, timeout=timeout)
-            except subprocess.TimeoutExpired as error:
-                prefix.with_suffix('.stderr.log').write_bytes(error.stderr or b'')
-                prefix.with_suffix('.status.json').write_text(json.dumps(
-                    {'argv': argv, 'timed_out': True, 'timeout': timeout}, indent=2) + '\n')
-                raise RuntimeError(f'{label} timed out; inspect the task process before retry') from error
-        prefix.with_suffix('.stderr.log').write_bytes(result.stderr)
-        prefix.with_suffix('.status.json').write_text(json.dumps(
-            {'argv': argv, 'exit_code': result.returncode}, indent=2) + '\n')
-        if required and result.returncode:
-            raise RuntimeError(f'{label}: exit {result.returncode}')
-        return prefix.with_suffix('.stdout.log').read_bytes() if destination is None else b''
+    guest = guest_commands(tart, args.vm, out)
 
     def control(label, *command):
         return json.loads(guest(label, app, '--control', *command))
@@ -74,7 +62,7 @@ def main():
     results = {}
 
     for profile in ('4k', '1k'):
-        filename = f'ext4-metadata-{profile}.img'
+        filename = f'{args.fixture_prefix}-{profile}.img'
         image = root + '/' + filename
         mount = root + '/mount-' + profile
         device = None
@@ -88,18 +76,40 @@ def main():
             for mode in ('write', 'verify'):
                 label = profile + '-' + mode
                 attachment = plistlib.loads(guest(label + '-mount', '/usr/bin/hdiutil', 'attach',
-                    '-readwrite' if mode == 'write' else '-readonly', '-owners', 'off', '-nobrowse',
+                    '-readwrite' if mode == 'write' else '-readonly', '-owners', args.owners, '-nobrowse',
                     '-mountpoint', mount, '-plist', '-imagekey', 'diskimage-class=CRawDiskImage', image))
                 entries = [entry for entry in attachment['system-entities'] if 'dev-entry' in entry]
                 assert len(entries) == 1 and re.fullmatch(r'/dev/disk[0-9]+', entries[0]['dev-entry'])
                 device = entries[0]['dev-entry']
                 assert entries[0].get('mount-point') == mount and entries[0].get('volume-kind') == 'machlinext4'
                 disk = plistlib.loads(guest(label + '-disk', '/usr/sbin/diskutil', 'info', '-plist', device))
-                assert disk['MountPoint'] == mount and disk['GlobalPermissionsEnabled'] is False
+                assert disk['MountPoint'] == mount and disk['GlobalPermissionsEnabled'] == (args.owners == 'on')
                 endpoints = control(label + '-control', 'list')
                 assert len(endpoints) == 1
                 assert endpoints[0]['info']['readOnly'] == (mode == 'verify'), endpoints[0]['info']
                 guest(label + '-check', root + '/checker', mount, mode, timeout=180)
+                if args.extended:
+                    if mode == 'write':
+                        setup = ('/Applications/Machlin ext4.app/Contents/Helpers/'
+                                 'Ext4DeviceSetup.app/Contents/MacOS/Ext4DeviceSetup')
+                        denial = json.loads(guest(label + '-service-removal-denied', '/bin/sh', '-c',
+                            '"$1" --unregister 2>&1; result=$?; test "$result" -ne 0', 'guard', setup))
+                        assert denial['error']['domain'] == 'NSPOSIXErrorDomain'
+                        assert denial['error']['code'] == errno.EBUSY
+                        assert control(label + '-service-retained', 'device-service')['status'] == 'enabled'
+                        result['checks'] = {}
+                        for group, timeout in (('policy', 90), ('setid', 90), ('pressure', 600)):
+                            try:
+                                guest(label + '-' + group, root + '/checker', mount, group, timeout=timeout)
+                                result['checks'][group] = {'passed': True}
+                            except RuntimeError as error:
+                                result['checks'][group] = {'passed': False, 'error': str(error)}
+                                if 'timed out' in str(error):
+                                    raise
+                        guest(label + '-rename', '/usr/sbin/diskutil', 'renameVolume', device, 'Machlin writable')
+                        disk = plistlib.loads(guest(label + '-renamed', '/usr/sbin/diskutil', 'info', '-plist', device))
+                    assert disk['VolumeName'] == 'Machlin writable'
+                    result['extended'] = True
                 guest(label + '-detach', '/usr/bin/hdiutil', 'detach', device)
                 device = None
                 assert control(label + '-cleanup', 'list') == []
@@ -112,21 +122,26 @@ def main():
             with (out / (profile + '-fsck.log')).open('wb') as log:
                 check = subprocess.run([str(args.e2fsck.resolve()), '-fn', str(export)], stdout=log,
                                        stderr=subprocess.STDOUT, timeout=90)
-            result.update(fsck_exit=check.returncode, original_sha256=digest, written_sha256=after)
+            result.update(fsck_exit=check.returncode, original_sha256=digest, written_sha256=after,
+                          ownership=args.owners)
             assert check.returncode == 0, f'{profile}: independent fsck failed'
-            result['passed'] = True
+            result['passed'] = all(check['passed'] for check in result.get('checks', {}).values())
+        except GuestTimeout as error:
+            result.update(error=str(error), recovery_required=True,
+                          cleanup_note='Leave the device intact for stack capture; the guest command may still be running')
         except Exception as error:
             result['error'] = str(error)
         finally:
-            if device is not None:
+            if not result['passed'] and not result.get('recovery_required'):
                 try:
-                    guest(profile + '-failure-detach', '/usr/bin/hdiutil', 'detach', device)
+                    for owned in image_devices(guest, profile + '-failure-devices', image):
+                        guest(profile + '-failure-detach', '/usr/bin/hdiutil', 'detach', owned)
                     assert control(profile + '-failure-endpoints', 'list') == []
                 except Exception as error:
                     result['cleanup_error'] = str(error)
             (out / 'summary.json').write_text(json.dumps(results, indent=2) + '\n')
             print(json.dumps({profile: result}), flush=True)
-        if not result['passed']:
+        if 'error' in result or 'cleanup_error' in result:
             break
     return 0 if len(results) == 2 and all(value['passed'] for value in results.values()) else 1
 

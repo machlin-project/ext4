@@ -303,6 +303,50 @@ ext4_update_admitted(
 }
 
 enum ext4_result
+ext4_set_volume_name(struct ext4_fs *fs, const uint8_t *name, size_t length)
+{
+	struct ext4_transaction *transaction;
+	struct ext4_super_disk *super;
+	uint8_t label[EXT4_VOLUME_NAME_SIZE] = { 0 };
+	size_t index;
+	enum ext4_result error;
+
+	if (fs == NULL || (name == NULL && length != 0)) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if (length > sizeof(label)) {
+		return EXT4_NAME_TOO_LONG;
+	}
+	for (index = 0; index < length; index++) {
+		if (name[index] == 0) {
+			return EXT4_INVALID_ARGUMENT;
+		}
+		label[index] = name[index];
+	}
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
+	if (fs->journal == NULL) {
+		return EXT4_READ_ONLY;
+	}
+	error = ext4_transaction_begin(fs->journal, 1, &transaction);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	error = ext4_transaction_super(transaction, &super);
+	if (error != EXT4_OK) {
+		ext4_transaction_cancel(transaction);
+		return error;
+	}
+	ext4_copy(super->volume_name, label, sizeof(label));
+	error = ext4_edit_commit(fs, transaction);
+	if (error == EXT4_OK) {
+		ext4_copy(fs->info.volume_name, label, sizeof(label));
+	}
+	return error;
+}
+
+enum ext4_result
 ext4_set_attributes(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     const struct ext4_inode_update *update, struct ext4_inode *result)
 {

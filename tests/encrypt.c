@@ -853,26 +853,30 @@ nokey_export(struct ext4_fs *fs, struct model *model, const char *directory, con
 /* Policies: invalid, unsupported, unknown keys and unsuitable directories refuse. */
 static void
 policies(struct ext4_fs *fs, struct model *model, const struct keyring *keyring,
-    const struct keyring *other)
+    const struct keyring *other, uint8_t version)
 {
 	struct ext4_encryption_policy policy;
 	struct ext4_encryption_policy read_back;
 	struct ext4_inode inode = model->directories[MODEL_VAULT];
 	struct ext4_inode result;
+	size_t identifier_size =
+	    version == FSCRYPT_V1 ? FSCRYPT_DESCRIPTOR_BYTES : FSCRYPT_IDENTIFIER_BYTES;
 
 	memset(&policy, 0, sizeof(policy));
-	policy.version = FSCRYPT_V2;
+	policy.version = version;
 	policy.contents_mode = EXT4_FSCRYPT_MODE_AES_256_XTS;
 	policy.filenames_mode = EXT4_FSCRYPT_MODE_AES_256_CTS;
 	policy.flags = FSCRYPT_PAD_32;
-	memcpy(policy.identifier, other->identifier, sizeof(other->identifier));
+	memcpy(policy.identifier, version == FSCRYPT_V1 ? other->descriptor : other->identifier,
+	    identifier_size);
 	EXPECT(ext4_set_encryption_policy(fs, inode.number, inode.generation, &policy, &result),
 	    EXT4_ENCRYPTED);
-	memcpy(policy.identifier, keyring->identifier, sizeof(keyring->identifier));
+	memcpy(policy.identifier, version == FSCRYPT_V1 ? keyring->descriptor : keyring->identifier,
+	    identifier_size);
 	policy.version = FSCRYPT_V2 + 1U;
 	EXPECT(ext4_set_encryption_policy(fs, inode.number, inode.generation, &policy, &result),
 	    EXT4_INVALID_ARGUMENT);
-	policy.version = FSCRYPT_V2;
+	policy.version = version;
 	policy.contents_mode = FSCRYPT_MODE_ADIANTUM;
 	EXPECT(ext4_set_encryption_policy(fs, inode.number, inode.generation, &policy, &result),
 	    EXT4_UNSUPPORTED);
@@ -1221,7 +1225,7 @@ keyed_symlink_cuts(struct device *device)
 
 /* Encrypt a directory through the core and shape objects in it with a model. */
 static void
-keyed_write(struct device *device, const char *exports, const char *source)
+keyed_write(struct device *device, const char *exports, const char *source, uint8_t version)
 {
 	static struct model model;
 	struct keyring keyring;
@@ -1262,7 +1266,7 @@ keyed_write(struct device *device, const char *exports, const char *source)
 	    EXT4_OK);
 	model_create(fs, &model, MODEL_FILE, MODEL_PLAIN, "visible", NULL);
 	model_write(fs, &model, model_find(&model, MODEL_PLAIN, "visible"), 0, 5000, 1);
-	policies(fs, &model, &keyring, &other);
+	policies(fs, &model, &keyring, &other, version);
 	/* Objects of every kind and size under encrypted names. */
 	model_create(fs, &model, MODEL_DIRECTORY, MODEL_VAULT, "sub", NULL);
 	model.count--;
@@ -1557,6 +1561,7 @@ main(int argc, char **argv)
 	bool synthetic = false;
 	bool key = false;
 	bool write = false;
+	uint8_t version = FSCRYPT_V2;
 	int argument;
 
 	for (argument = 1; argument < argc; argument++) {
@@ -1566,6 +1571,9 @@ main(int argc, char **argv)
 			key = true;
 		} else if (strcmp(argv[argument], "--write") == 0) {
 			write = true;
+		} else if (strcmp(argv[argument], "--write-v1") == 0) {
+			write = true;
+			version = FSCRYPT_V1;
 		} else if (image == NULL) {
 			image = argv[argument];
 		} else if (exports == NULL) {
@@ -1577,17 +1585,20 @@ main(int argc, char **argv)
 	}
 	if (image == NULL || (key + synthetic + write) > 1) {
 		fprintf(stderr,
-		    "usage: %s [--synthetic | --key | --write] IMAGE [EXPORT_DIRECTORY]\n",
+		    "usage: %s [--synthetic | --key | --write | --write-v1] IMAGE "
+		    "[EXPORT_DIRECTORY]\n",
 		    argv[0]);
 		return 2;
 	}
 	storage_open(&device, image);
 	if (write) {
-		keyed_write(&device, exports, image);
-		keyed_callback_failures(&device);
-		keyed_power_cuts(&device, CUT_OVERWRITE);
-		keyed_power_cuts(&device, CUT_TRUNCATE);
-		keyed_symlink_cuts(&device);
+		keyed_write(&device, exports, image, version);
+		if (version == FSCRYPT_V2) {
+			keyed_callback_failures(&device);
+			keyed_power_cuts(&device, CUT_OVERWRITE);
+			keyed_power_cuts(&device, CUT_TRUNCATE);
+			keyed_symlink_cuts(&device);
+		}
 		storage_close(&device);
 		return 0;
 	}

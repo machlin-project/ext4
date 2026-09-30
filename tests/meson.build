@@ -96,6 +96,8 @@ foreach name : ['ext4-4k.img', 'ext4-1k.img']
     args: ['--synthetic', paths['fixtures'] / name], timeout: 300, suite: 'format')
   test('encrypt-keyed-write-' + name, programs['encrypt'],
     args: ['--write', paths['fixtures'] / name], timeout: 300, suite: 'format')
+  test('encrypt-v1-keyed-write-' + name, programs['encrypt'],
+    args: ['--write-v1', paths['fixtures'] / name], timeout: 300, suite: 'format')
 endforeach
 if paths['format_fixtures'] != ''
   foreach variant : ['encrypt', 'inline-data']

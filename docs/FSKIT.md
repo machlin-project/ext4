@@ -14,7 +14,11 @@ read-modify-write. Short transfers are errors. The adapter does not mix direct a
 metadata-cache I/O on overlapping ranges.
 
 Resource probing validates the image through the core and returns `usable` for
-an admitted format. Read-only access is a separate mount policy, enforced through
+an admitted format. Pending journals are discovered through superblock-only
+inspection, without reading potentially uncheckpointed root metadata. Recovery
+runs only during a writable load with an authenticated persistence barrier;
+read-only media and explicit `--rdonly` loads never recover. Read-only access is a
+separate mount policy, enforced through
 `requestedMountOptions` and mutation rejection. The earlier unconditional
 `usableButLimited` result prevented Disk Arbitration from recognizing the volume
 on macOS 26.5.2, even though direct FSKit mounts could read it. The guest's Disk
@@ -52,6 +56,11 @@ validated mappings to FSKit's kernel I/O path. Inline, encrypted and verity file
 retain core reads. Partial EOF blocks also retain core reads to avoid exposing
 stale on-disk padding. These mappings require an immutable read-only block
 resource. Writable volumes use normal FSKit cached I/O instead of exporting maps.
+
+The preferred native transfer size is 128 KiB, distinct from ext4's allocation
+block size. The legacy write callback preserves both the committed byte count and
+the terminal error, including a partial `ENOSPC`. The adapter must not conceal that
+error by reporting an incomplete kernel I/O as successful.
 
 ## Writable devices and persistence
 
@@ -91,6 +100,24 @@ map to privileged Darwin system flags; `nodump` maps to the user flag.
 Extent preallocation supports physical-EOF and persistent requests. Contiguous or
 all-or-nothing allocation and combined size/owner changes remain explicitly
 unsupported until the core can carry their full atomic contract.
+The shared mutation helper can create FIFO/socket inodes, and component tests
+exercise that mapping. FSKit's public create callback, however, admits only files
+and directories; native macOS 26.5.2 rejects FIFO/socket creation with `ENOTSUP`.
+Installed conformance records these as unsupported features,
+separately from passed ordinary-file writes. The core's special-file support is
+available to adapters whose native interface can express it.
+
+Volume rename commits the primary superblock label and checksum through the
+journal before publishing the new FSKit name. ext4 labels are at most 16 bytes.
+Attribute updates leave directory/symlink sizes and unavailable creation times
+unconsumed, as FSKit requires, while still applying other supported fields in the
+same request. Available-space reporting excludes reserved ext4 blocks.
+
+Writable ownership starts during resource loading. MMP maintenance therefore runs
+before activation or mounting, and a maintenance-only unload synchronizes and
+releases the claim. Keychain resolution precedes writable ownership so it cannot
+delay a claimed volume's heartbeat. Unmount closes mutation admission; late item
+release and deactivation do not issue further device writes.
 
 Directory enumeration uses the core's streaming visitor, validating and reading
 each directory block once per call. A synchronous packing callback supplies names,
@@ -202,6 +229,22 @@ signed bundles, and register them with LaunchServices and PlugInKit. Check both
 bundle versions and `--control modules` after every update. System enablement
 persisted across these CLI updates; no repeated Settings interaction was needed.
 
+For service updates, use the setup utility's `--unregister` before replacing the
+bundle and `--register` afterwards, with all ext4 volumes unmounted. Registering an
+already enabled service is not an update: in native acceptance its status stayed
+enabled while the authenticated health query failed after replacement. Normal
+unregistration and registration restored health without another approval. The
+setup utility also offers `--refresh` and an update button for this public
+lifecycle after installation, and refuses removal while an ext4 volume is mounted.
+Verify the signed app's `--control device-service` query, not only setup status.
+Immediate re-registration awaits the asynchronous unregister completion. On
+26.5.2, the documented completion boundary still returned transient `EPERM`,
+matching the [ServiceManagement bug acknowledged by Apple DTS](https://developer.apple.com/forums/thread/783539).
+Refresh retries only this error while the service remains unregistered, for a
+maximum 3.75 seconds of backoff. It preserves approval/signature errors and never
+uses private launchd operations. A failed update remains an error; setup status
+alone is not evidence of authenticated service health.
+
 After changing extension metadata, verify discovery again after registration has
 settled. On 26.5.2, PlugInKit registered the new extension identity while the user's
 existing `fskit_agent` stopped exposing the module through the public FSKit API.
@@ -253,8 +296,14 @@ Signed, same-user Keychain sharing remains a separate installation requirement.
 Keep macOS 26.5 as the deployment target. A modern SDK can build one binary with
 27-only calls guarded by runtime availability; compile guards additionally keep
 those calls out when building against an older SDK. Conditional reclaim uses this
-boundary. CI passes the unsigned universal build and focused adapter tests with
-the macOS 26.5 SDK; installed runtime acceptance is separate.
+boundary. Separate sibling volume classes implement the incompatible legacy and
+27 read/write reply signatures. Both call one serialized I/O engine. The 27
+handler supplies fresh inode attributes and sequenced free space in a successful
+write reply; it cannot publish a stale snapshot after a failed device refresh.
+Namespace and other operations retain the compatible older protocols. Native
+acceptance of this combination on macOS 27 remains required: the current host and
+guest run 26.x. Compiling with SDK 27 does not establish its runtime behavior.
+CI also builds against SDK 26.5, excluding the unavailable declarations.
 
 Future 27-only context/cache handlers must delegate to the same volume engine,
 not duplicate the filesystem algorithms. Caller UID/GID in `FSContext` is useful
@@ -263,17 +312,23 @@ set. The old API cannot substitute extension credentials for caller credentials.
 Native mutation policy, ACLs and live cache changes still require explicit designs
 and installed acceptance on each supported OS version.
 
+An installed 26.5.2 conformance test currently fails after writing a set-ID file:
+the core removes the bits on disk, but live and reopened `fstat` still report
+them. The tested mount is `nosuid`; that bounds privilege use but does not satisfy
+the metadata contract. The failed test remains mandatory. The newer reply API is
+a candidate solution on 27, not evidence that either OS's behavior is fixed.
+
 ## Completion requirements
 
 | Area | Implemented boundary | Remaining work |
 | --- | --- | --- |
 | Resource reads | Exact aligned and unaligned reads | Mounted resource failure and removal |
 | File reads | Held state and restricted kernel mapping; mounted read/mmap/EOF checks on 26.5.2 | Native cache/reclaim stress, resource failures and removal |
-| User xattrs | Read/list Linux user namespace; macOS names omit the namespace prefix | Native roundtrip and writable policy; Linux ACL/security/trusted namespaces stay hidden |
+| User xattrs | Native read/list/set/remove roundtrip; macOS names omit the Linux user namespace prefix | Linux ACL/security/trusted namespaces stay hidden |
 | IPC and GUI | Signed same-user App Group RPC, live settings and normal unmount cleanup on 26.5.2 | Root-mounted/user-app coordination, crash recovery and GUI workflow acceptance |
-| Writes | Mutation callbacks, bounded resource writes, authenticated device-barrier service; 1/4 KiB component roundtrips and independent fsck | Signed installed service admission, native mutation/authorization/cache acceptance and device failures |
-| Crypto and ACLs | CommonCrypto fscrypt provider; signed Keychain sharing and mounted v2 encrypted reads on 26.5.2 | Native v1 fixtures, verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
-| Maintenance | Clean read-only quick check | Native recovery flow and full check/repair tooling |
+| Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, remount and independent fsck | Live set-ID attribute coherence, native ENOSPC acceptance, cache stress and device failures |
+| Crypto and ACLs | CommonCrypto fscrypt v1/v2 reads and writes; native key import/removal and remounts on 26.5.2 | Verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
+| Maintenance | Native Disk Arbitration recovery of interrupted transactions; read-only dirty media remain unchanged; component crash cuts | Full check/repair tooling |
 
 The public SDK documents direct writes
 and a metadata buffer-cache flush, but does not establish that a barrier persists
@@ -281,8 +336,9 @@ all preceding writes through device volatile caches. It also does not expose the
 backing descriptor for a device-cache ioctl. The core's flush callback requires
 that guarantee between journal commit phases. Callback completion or a cache flush
 cannot be substituted without confirming the contract. The bundled device-barrier
-service implements a separate public-API path; it requires native acceptance before
-the driver can claim durable block-device writes.
+service implements a separate public-API path. Signed native tests confirm that
+the cache synchronization ioctl succeeds while FSKit owns the writable resource;
+real hardware power-loss qualification remains separate.
 The published Apple HFS extension is only a probe: its load method returns ENOTSUP,
 and its descriptor access imports a private FSKit header. It does not establish a
 public device-barrier path for third-party journaled writers.

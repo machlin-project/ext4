@@ -20,6 +20,7 @@
 	id _resourceOwner;
 	BOOL _active;
 	BOOL _mounted;
+	BOOL _writeClosed;
 	BOOL _retainReadState;
 	Ext4ControlServer *_control;
 	NSError *_controlError;
@@ -60,6 +61,16 @@
 @end
 
 @interface Ext4Volume (OwnerOperations)
+- (void)readFile:(FSItem *)item
+	  offset:(off_t)offset
+	  length:(size_t)length
+      intoBuffer:(FSMutableFileDataBuffer *)buffer
+    replyHandler:(void (^)(size_t, NSError *))reply;
+- (void)writeFile:(FSItem *)item
+	 contents:(NSData *)contents
+	   offset:(off_t)offset
+     replyHandler:(void (^)(size_t, NSError *))reply;
+- (void)startResourceMaintenance;
 - (void)releaseHold:(struct ext4_inode_hold *)hold;
 - (enum ext4_result)validateItem:(Ext4Item *)item;
 - (enum ext4_result)validateMutation:(Ext4Item *)item;

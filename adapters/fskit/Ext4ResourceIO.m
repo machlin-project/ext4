@@ -102,6 +102,13 @@ ext4_resource_release(void *context, void *allocation, size_t size)
 	return ext4_mount(&environment, filesystem);
 }
 
+- (enum ext4_result)inspect:(struct ext4_info *)info
+{
+	struct ext4_environment environment = [self environment];
+
+	return ext4_inspect(&environment, info);
+}
+
 - (struct ext4_environment)environment
 {
 	struct ext4_environment environment = { 0 };

@@ -80,11 +80,11 @@
 	return result;
 }
 
-- (void)readFromFile:(FSItem *)item
-	      offset:(off_t)offset
-	      length:(size_t)length
-	  intoBuffer:(FSMutableFileDataBuffer *)buffer
-	replyHandler:(void (^)(size_t, NSError *))reply
+- (void)readFile:(FSItem *)item
+	  offset:(off_t)offset
+	  length:(size_t)length
+      intoBuffer:(FSMutableFileDataBuffer *)buffer
+    replyHandler:(void (^)(size_t, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *owned = (Ext4Item *)item;
@@ -113,10 +113,10 @@
 	}
 }
 
-- (void)writeContents:(NSData *)contents
-	       toFile:(FSItem *)item
-	     atOffset:(off_t)offset
-	 replyHandler:(void (^)(size_t, NSError *))reply
+- (void)writeFile:(FSItem *)item
+	 contents:(NSData *)contents
+	   offset:(off_t)offset
+     replyHandler:(void (^)(size_t, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *owned = (Ext4Item *)item;
@@ -136,9 +136,10 @@
 			    owned->inode.generation, (uint64_t)offset, contents.bytes,
 			    contents.length, &update, &completed);
 		}
-		/* The core reports only durably committed bytes. Keep a partial prefix
-		 * visible to POSIX; subsequent operations still observe a poisoned owner. */
-		reply(completed, completed != 0 ? nil : ext4_error(error));
+		/* Preserve both the committed prefix and the terminal error. Legacy FSKit
+		 * explicitly accepts this pair; hiding ENOSPC makes an incomplete kernel
+		 * I/O look successful. The modern result adapter has its own reply ABI. */
+		reply(completed, ext4_error(error));
 	}
 }
 

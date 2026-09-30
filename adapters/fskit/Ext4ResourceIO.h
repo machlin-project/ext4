@@ -30,6 +30,7 @@
 - (instancetype)initWithReader:(id<Ext4BlockReader>)reader;
 - (void)enableWritesWithBarrier:(id<Ext4PersistenceBarrier>)barrier deviceName:(NSString *)name;
 - (enum ext4_result)open:(struct ext4_fs **)filesystem;
+- (enum ext4_result)inspect:(struct ext4_info *)info;
 - (enum ext4_result)openWritable:(struct ext4_fs **)filesystem;
 - (enum ext4_result)recover:(struct ext4_recovery_report *)report;
 - (enum ext4_result)readAt:(uint64_t)offset buffer:(void *)buffer length:(size_t)length;

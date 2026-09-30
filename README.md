@@ -35,21 +35,20 @@ separately. AES and key
 management are adapter services, while the core has portable SHA, ARM64 userspace
 SHA-256 acceleration and metadata checksums.
 
-The FSKit write path is implemented and undergoing installed acceptance; the
-kernel adapter remains read-only. The [FSKit adapter](docs/FSKIT.md) requires
-macOS 26.5 or later and
-uses held inode state, restricted kernel read mappings, user xattr reads and an
-App Group Unix socket for the control app. The app and extension build with Apple
-Development signing and profiles authorizing FSKit Module and the shared App Group.
-Installed tests on stock macOS 26.5.2 pass ordinary reads, inode ownership and
-timestamps, signed control IPC and fscrypt v2 key import/read/removal across mounts.
-The arm64e
-kext has read-only acceptance in a dedicated custom-kernel VM; x86_64 has compilation
-evidence. FSKit mutation callbacks pass 1 KiB and 4 KiB component roundtrips and
-independent fsck; its signed device service, native writable cache behavior,
-ACL enforcement and LXNU policy have separate acceptance requirements. FSKit has a CommonCrypto provider
-and Keychain-backed mount keys; native fscrypt v1 acceptance and the kernel
-encryption provider remain pending.
+The [FSKit adapter](docs/FSKIT.md) requires macOS 26.5 or later. Installed tests on
+stock 26.5.2 pass 1 KiB and 4 KiB reads and writes, shared writable mmap, concurrent
+I/O, namespace and user-xattr changes, open-unlinked lifetime and journal recovery.
+An authenticated device-cache service supplies persistence barriers; the app and
+extension retain their sandboxes. App Group control IPC and Keychain-backed
+fscrypt v1/v2 reads, writes and key lifetime pass signed native roundtrips, followed
+by independent fsck. Live set-ID metadata coherence currently fails on 26.5.2;
+native full-disk behavior, ACL authorization, device-loss stress, broader OS/hardware
+acceptance and production distribution remain unaccepted. The macOS 27 I/O reply
+path compiles but still needs native acceptance. This is not a production release.
+
+The kernel adapter remains read-only. The arm64e kext has read-only acceptance in
+a dedicated custom-kernel VM; x86_64 has compilation evidence. Kernel encryption
+and LXNU policy remain pending.
 
 ## Layout
 

@@ -26,10 +26,56 @@ private enum DiskService {
             guard service.status == .requiresApproval else { throw error }
         }
     }
+
+    static func unregister() async throws {
+        var mounts: UnsafeMutablePointer<statfs>?
+        let count = getmntinfo(&mounts, MNT_NOWAIT)
+        guard count > 0, let mounts else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
+        }
+        for index in 0..<Int(count) {
+            let type = withUnsafeBytes(of: mounts[index].f_fstypename) {
+                String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self)
+            }
+            guard type != "machlinext4" else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(EBUSY), userInfo: [
+                    NSLocalizedDescriptionKey: "Unmount all Machlin ext4 volumes before updating or removing the disk service."
+                ])
+            }
+        }
+        // Wait for the documented completion boundary before re-registration.
+        try await service.unregister()
+    }
+
+    static func refresh() async throws {
+        // Registering an already enabled job does not replace its running code.
+        // Use the public lifecycle after a bundle update, with volumes unmounted.
+        if service.status != .notRegistered {
+            try await unregister()
+        }
+        // macOS can still return EPERM immediately after the documented async
+        // completion (Apple DTS thread 783539; reproduced on 26.5.2). Retry only
+        // that transient, still-unregistered state, with a short finite budget.
+        // Approval, signing and all other errors keep their ordinary handling.
+        let delays: [UInt64] = [0, 250_000_000, 500_000_000, 1_000_000_000, 2_000_000_000]
+        for (index, delay) in delays.enumerated() {
+            if delay != 0 { try await Task.sleep(nanoseconds: delay) }
+            do {
+                try register()
+                return
+            } catch {
+                let failure = error as NSError
+                guard failure.domain == SMAppServiceErrorDomain,
+                      failure.code == Int(EPERM), service.status == .notRegistered,
+                      index + 1 < delays.count else { throw error }
+            }
+        }
+    }
 }
 
 private struct SetupView: View {
     @State private var status = DiskService.status
+    @State private var updating = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -51,7 +97,23 @@ private struct SetupView: View {
                 Button("Open System Settings") { SMAppService.openSystemSettingsLoginItems() }
                 Button("Refresh") { status = DiskService.status }
             }
+            Button("Update service after installing a new version") {
+                updating = true
+                Task {
+                    defer { updating = false }
+                    do {
+                        try await DiskService.refresh()
+                        status = DiskService.status
+                        if DiskService.service.status == .requiresApproval {
+                            SMAppService.openSystemSettingsLoginItems()
+                        }
+                    } catch {
+                        status = error.localizedDescription
+                    }
+                }
+            }
         }
+        .disabled(updating)
         .padding(24)
         .frame(width: 500)
     }
@@ -71,13 +133,19 @@ enum DeviceSetup {
             SetupApp.main()
             return
         }
+        Task { await command(arguments) }
+        dispatchMain()
+    }
+
+    private static func command(_ arguments: [String]) async {
         do {
             guard arguments.count == 1 else {
                 throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
             }
             switch arguments[0] {
             case "--register": try DiskService.register()
-            case "--unregister": try DiskService.service.unregister()
+            case "--unregister": try await DiskService.unregister()
+            case "--refresh": try await DiskService.refresh()
             case "--status": break
             default: throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
             }
@@ -91,5 +159,6 @@ enum DeviceSetup {
             if let data { FileHandle.standardError.write(data + Data([10])) }
             exit(EXIT_FAILURE)
         }
+        exit(EXIT_SUCCESS)
     }
 }

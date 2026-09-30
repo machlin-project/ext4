@@ -16,7 +16,7 @@
         <key>FSCheckOptionSyntax</key>
         <dict>
             <key>shortOptions</key>
-            <string>nq</string>
+            <string>npqy</string>
         </dict>
         <key>FSMediaTypes</key>
         <dict>

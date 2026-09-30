@@ -97,9 +97,11 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	fs->info.block_size = EXT4_MIN_BLOCK_SIZE << logarithm;
 	fs->info.blocks = ext4_le32(&super->blocks_count_lo);
 	fs->info.free_blocks = ext4_le32(&super->free_blocks_lo);
+	fs->info.reserved_blocks = ext4_le32(&super->reserved_blocks_lo);
 	if (incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
 		fs->info.blocks |= (uint64_t)ext4_le32(&super->blocks_count_hi) << 32;
 		fs->info.free_blocks |= (uint64_t)ext4_le32(&super->free_blocks_hi) << 32;
+		fs->info.reserved_blocks |= (uint64_t)ext4_le32(&super->reserved_blocks_hi) << 32;
 	}
 	fs->info.inodes = ext4_le32(&super->inodes_count);
 	fs->info.free_inodes = ext4_le32(&super->free_inodes);
@@ -159,7 +161,7 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	if (group_blocks != fs->blocks_per_group) {
 		return EXT4_CORRUPT;
 	}
-	if (fs->info.free_blocks > fs->info.blocks ||
+	if (fs->info.free_blocks > fs->info.blocks || fs->info.reserved_blocks > fs->info.blocks ||
 	    fs->info.free_blocks % fs->cluster_blocks != 0) {
 		return EXT4_CORRUPT;
 	}
@@ -275,6 +277,23 @@ ext4_load(const struct ext4_environment *environment, bool recovery, struct ext4
 	}
 	*result = fs;
 	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_inspect(const struct ext4_environment *environment, struct ext4_info *info)
+{
+	struct ext4_fs *fs = NULL;
+	enum ext4_result error;
+
+	if (info == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	error = ext4_load(environment, true, &fs);
+	if (error == EXT4_OK) {
+		*info = fs->info;
+		ext4_unmount(fs);
+	}
+	return error;
 }
 
 enum ext4_result

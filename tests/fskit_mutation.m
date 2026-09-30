@@ -7,6 +7,16 @@
 #include <string.h>
 #include <sys/stat.h>
 
+/* A transaction starting from a clean volume includes the recovery-marker barrier. */
+enum mutation_barrier {
+	MutationRecoveryMarker = 1,
+	MutationJournalStart,
+	MutationJournalData,
+	MutationJournalCommit,
+	MutationHomeBlocks,
+	MutationJournalReset
+};
+
 /* FSTaskOptions has no public initializer. The adapter only reads taskOptions. */
 @interface MutationOptions : NSObject
 @property NSArray<NSString *> *taskOptions;
@@ -22,6 +32,7 @@
 @property NSUInteger barriers;
 @property BOOL failWrite;
 @property BOOL failBarrier;
+@property NSUInteger failBarrierAt;
 @end
 
 @implementation WritableImage
@@ -74,10 +85,11 @@
 - (BOOL)synchronizeWithError:(NSError **)error
 {
 	self.barriers++;
-	if (self.failBarrier) {
+	if (self.failBarrier || self.barriers == self.failBarrierAt) {
 		*error = [NSError errorWithDomain:NSPOSIXErrorDomain code:EIO userInfo:nil];
+		return NO;
 	}
-	return !self.failBarrier;
+	return YES;
 }
 
 @end
@@ -88,12 +100,12 @@ name(NSString *value)
 	return [FSFileName nameWithString:value];
 }
 
-static Ext4Volume *
+static Ext4LegacyVolume *
 open_volume(WritableImage *image, BOOL writable)
 {
 	Ext4ResourceIO *io = [[Ext4ResourceIO alloc] initWithReader:image];
 	struct ext4_fs *fs = NULL;
-	Ext4Volume *volume;
+	Ext4LegacyVolume *volume;
 
 	assert(io != nil);
 	if (writable) {
@@ -102,14 +114,17 @@ open_volume(WritableImage *image, BOOL writable)
 	} else {
 		assert([io open:&fs] == EXT4_OK);
 	}
-	volume = [[Ext4Volume alloc] initWithResource:nil filesystem:fs resourceOwner:io];
+	volume = [[Ext4LegacyVolume alloc] initWithResource:nil
+						 filesystem:fs
+					      resourceOwner:io
+						     crypto:NULL
+						   writable:writable];
 	assert(volume != nil);
-	volume.writable = writable;
 	return volume;
 }
 
 static FSItem *
-root_item(Ext4Volume *volume)
+root_item(Ext4LegacyVolume *volume)
 {
 	__block FSItem *root = nil;
 	MutationOptions *options = [MutationOptions new];
@@ -125,7 +140,7 @@ root_item(Ext4Volume *volume)
 }
 
 static FSItem *
-create_item(Ext4Volume *volume, FSItem *parent, NSString *filename, FSItemType type)
+create_item(Ext4LegacyVolume *volume, FSItem *parent, NSString *filename, FSItemType type)
 {
 	FSItemSetAttributesRequest *attributes = [FSItemSetAttributesRequest new];
 	__block FSItem *created = nil;
@@ -147,7 +162,7 @@ create_item(Ext4Volume *volume, FSItem *parent, NSString *filename, FSItemType t
 }
 
 static FSItem *
-lookup(Ext4Volume *volume, FSItem *parent, NSString *filename)
+lookup(Ext4LegacyVolume *volume, FSItem *parent, NSString *filename)
 {
 	__block FSItem *found = nil;
 
@@ -162,7 +177,7 @@ lookup(Ext4Volume *volume, FSItem *parent, NSString *filename)
 }
 
 static FSItemAttributes *
-attributes(Ext4Volume *volume, FSItem *item)
+attributes(Ext4LegacyVolume *volume, FSItem *item)
 {
 	__block FSItemAttributes *result = nil;
 	FSItemGetAttributesRequest *request = [FSItemGetAttributesRequest new];
@@ -177,7 +192,7 @@ attributes(Ext4Volume *volume, FSItem *item)
 }
 
 static void
-write_bytes(Ext4Volume *volume, FSItem *file, NSData *data, off_t offset)
+write_bytes(Ext4LegacyVolume *volume, FSItem *file, NSData *data, off_t offset)
 {
 	[volume writeContents:data
 		       toFile:file
@@ -188,7 +203,7 @@ write_bytes(Ext4Volume *volume, FSItem *file, NSData *data, off_t offset)
 }
 
 static void
-check_bytes(Ext4Volume *volume, FSItem *file, NSData *expected)
+check_bytes(Ext4LegacyVolume *volume, FSItem *file, NSData *expected)
 {
 	NSMutableData *actual = [NSMutableData dataWithLength:expected.length];
 	Ext4Item *item = (Ext4Item *)file;
@@ -204,7 +219,7 @@ check_bytes(Ext4Volume *volume, FSItem *file, NSData *expected)
 }
 
 static void
-set_size(Ext4Volume *volume, FSItem *file, uint64_t size)
+set_size(Ext4LegacyVolume *volume, FSItem *file, uint64_t size)
 {
 	FSItemSetAttributesRequest *request = [FSItemSetAttributesRequest new];
 
@@ -218,7 +233,7 @@ set_size(Ext4Volume *volume, FSItem *file, uint64_t size)
 }
 
 static void
-sync_volume(Ext4Volume *volume)
+sync_volume(Ext4LegacyVolume *volume)
 {
 	[volume synchronizeWithFlags:0
 			replyHandler:^(NSError *error) {
@@ -229,17 +244,56 @@ sync_volume(Ext4Volume *volume)
 static void
 check_mutations(WritableImage *image)
 {
-	Ext4Volume *volume = open_volume(image, YES);
+	Ext4LegacyVolume *volume = open_volume(image, YES);
 	FSItem *root = root_item(volume);
 	FSItem *directory = create_item(volume, root, @"fskit-written", FSItemTypeDirectory);
 	FSItem *file = create_item(volume, directory, @"payload", FSItemTypeFile);
 	FSItem *replacement;
+	FSItem *special;
 	FSItemSetAttributesRequest *request;
 	NSMutableData *expected = [NSMutableData dataWithLength:9001];
 	NSData *value = [@"attribute bytes" dataUsingEncoding:NSUTF8StringEncoding];
 	uint8_t *bytes = expected.mutableBytes;
 	NSUInteger index;
 	FSDirectoryVerifier verifier = ((Ext4Item *)directory)->directoryVersion;
+	FSStatFSResult *statistics = volume.volumeStatistics;
+	struct ext4_info info;
+	Ext4ResourceIO *inspector = [[Ext4ResourceIO alloc] initWithReader:image];
+
+	assert([inspector inspect:&info] == EXT4_OK);
+	[volume setVolumeName:name(@"Machlin ext4")
+		 replyHandler:^(FSFileName *actual, NSError *error) {
+		   assert(error == nil && [actual.data isEqualToData:name(@"Machlin ext4").data]);
+		 }];
+	assert([volume.name.data isEqualToData:name(@"Machlin ext4").data]);
+	[volume setVolumeName:name(@"label exceeds sixteen bytes")
+		 replyHandler:^(FSFileName *actual, NSError *error) {
+		   assert(actual == nil && error.code == ENAMETOOLONG);
+		 }];
+	assert(statistics.freeBlocks == info.free_blocks);
+	assert(statistics.availableBlocks == info.free_blocks - info.reserved_blocks);
+	special = create_item(volume, directory, @"fifo", FSItemTypeFIFO);
+	assert(attributes(volume, special).type == FSItemTypeFIFO);
+	special = create_item(volume, directory, @"socket", FSItemTypeSocket);
+	assert(attributes(volume, special).type == FSItemTypeSocket);
+	request = [FSItemSetAttributesRequest new];
+	request.size = 1;
+	[volume setAttributes:request
+		       onItem:directory
+		 replyHandler:^(FSItemAttributes *result, NSError *error) {
+		   assert(error == nil && result.type == FSItemTypeDirectory && result.size != 1);
+		 }];
+	assert(![request wasAttributeConsumed:FSItemAttributeSize]);
+	request = [FSItemSetAttributesRequest new];
+	request.size = 1;
+	request.mode = 0750;
+	[volume setAttributes:request
+		       onItem:directory
+		 replyHandler:^(FSItemAttributes *result, NSError *error) {
+		   assert(error == nil && result.mode == 0750 && result.size != 1);
+		 }];
+	assert(![request wasAttributeConsumed:FSItemAttributeSize]);
+	assert([request wasAttributeConsumed:FSItemAttributeMode]);
 
 	for (index = 0; index < expected.length; index++) {
 		bytes[index] = (uint8_t)(index * 17 + 3);
@@ -272,6 +326,14 @@ check_mutations(WritableImage *image)
 		    replyHandler:^(FSFileName *target, NSError *error) {
 		      assert(error == nil && [target.data isEqualToData:name(@"payload").data]);
 		    }];
+	request = [FSItemSetAttributesRequest new];
+	request.size = 0;
+	[volume setAttributes:request
+		       onItem:lookup(volume, directory, @"symlink")
+		 replyHandler:^(FSItemAttributes *result, NSError *error) {
+		   assert(error == nil && result.type == FSItemTypeSymlink && result.size == 7);
+		 }];
+	assert(![request wasAttributeConsumed:FSItemAttributeSize]);
 	[volume setXattrNamed:name(@"test.attribute")
 		       toData:value
 		       onItem:file
@@ -382,12 +444,19 @@ check_mutations(WritableImage *image)
 	assert(image.writes != 0 && image.barriers != 0);
 	[volume unmountWithReplyHandler:^{
 	}];
+	index = image.writes;
+	assert([volume finishUnloadedResource] == nil && image.writes == index);
+	assert([volume validateItem:(Ext4Item *)file] == EXT4_STALE);
+	/* FSKit may retain items beyond unmount. A late release must not perform I/O. */
+	[volume releaseHold:((Ext4Item *)file)->hold];
+	assert(image.writes == index);
+	[volume invalidate];
 }
 
 static void
 check_remount(WritableImage *image)
 {
-	Ext4Volume *volume = open_volume(image, NO);
+	Ext4LegacyVolume *volume = open_volume(image, NO);
 	FSItem *directory = lookup(volume, root_item(volume), @"fskit-written");
 	FSItem *file = lookup(volume, directory, @"replacement");
 	NSUInteger writes = image.writes;
@@ -395,6 +464,11 @@ check_remount(WritableImage *image)
 	uint8_t *bytes = expected.mutableBytes;
 	NSUInteger index;
 
+	assert([volume.name.data isEqualToData:name(@"Machlin ext4").data]);
+	[volume setVolumeName:name(@"read-only")
+		 replyHandler:^(FSFileName *actual, NSError *error) {
+		   assert(actual == nil && error.code == EROFS);
+		 }];
 	for (index = 0; index < 1025; index++) {
 		bytes[index] = (uint8_t)(index * 17 + 3);
 	}
@@ -413,28 +487,204 @@ check_remount(WritableImage *image)
 }
 
 static void
-check_failed_write(NSData *fixture, BOOL barrier)
+check_failed_mutation(NSData *fixture, NSUInteger barrier, BOOL renameVolume, NSString *exportPath)
 {
 	WritableImage *image = [WritableImage new];
-	Ext4Volume *volume;
+	Ext4LegacyVolume *volume;
 	FSItem *file;
 	NSData *data = [@"failure" dataUsingEncoding:NSUTF8StringEncoding];
+	NSData *interrupted;
+	Ext4ResourceIO *io;
+	struct ext4_fs *fs = NULL;
+	struct ext4_info info;
+	struct ext4_info original;
+	struct ext4_recovery_report report = { 0 };
+	NSUInteger writes;
+	enum ext4_result error;
 
 	image.bytes = [fixture mutableCopy];
 	volume = open_volume(image, YES);
+	io = [[Ext4ResourceIO alloc] initWithReader:image];
+	assert([io inspect:&original] == EXT4_OK);
 	file = create_item(volume, root_item(volume), @"failure", FSItemTypeFile);
-	image.failWrite = !barrier;
-	image.failBarrier = barrier;
-	[volume writeContents:data
-		       toFile:file
-		     atOffset:0
-		 replyHandler:^(size_t size, NSError *error) {
-		   assert(size == 0 && error != nil);
-		 }];
+	sync_volume(volume);
+	image.failWrite = barrier == 0;
+	image.failBarrierAt = barrier != 0 ? image.barriers + barrier : 0;
+	if (renameVolume) {
+		[volume setVolumeName:name(@"recovered-label")
+			 replyHandler:^(FSFileName *actual, NSError *failure) {
+			   assert(actual == nil && failure != nil);
+			 }];
+	} else {
+		[volume writeContents:data
+			       toFile:file
+			     atOffset:0
+			 replyHandler:^(size_t size, NSError *error) {
+			   assert(size == 0 && error != nil);
+			 }];
+	}
 	[volume synchronizeWithFlags:0
 			replyHandler:^(NSError *error) {
 			  assert(error != nil);
 			}];
+	/* Discard the failed owner without flushing, as after an extension crash. */
+	[volume invalidate];
+	image.failWrite = NO;
+	image.failBarrierAt = 0;
+	interrupted = image.bytes.copy;
+	writes = image.writes;
+	io = [[Ext4ResourceIO alloc] initWithReader:image];
+	error = [io open:&fs];
+	assert(error == EXT4_OK || error == EXT4_RECOVERY_REQUIRED);
+	ext4_unmount(fs);
+	assert([io inspect:&info] == EXT4_OK && info.blocks != 0);
+	assert([io recover:&report] == EXT4_READ_ONLY);
+	assert(image.writes == writes && [image.bytes isEqualToData:interrupted]);
+	if (barrier == MutationJournalCommit && !renameVolume) {
+		/* The commit record exists, but no home block has been checkpointed. */
+		assert(error == EXT4_RECOVERY_REQUIRED);
+		if (exportPath != nil) {
+			assert([interrupted writeToFile:[exportPath stringByAppendingPathComponent:
+								@"fskit-recovery-required.img"]
+					     atomically:YES]);
+		}
+	}
+	[io enableWritesWithBarrier:image deviceName:@"memory"];
+	assert([io recover:&report] == EXT4_OK);
+	if (barrier == MutationJournalCommit) {
+		assert(report.transactions == 1 && report.replayed_blocks != 0);
+		if (exportPath != nil) {
+			assert([image.bytes
+			    writeToFile:[exportPath
+					    stringByAppendingPathComponent:@"fskit-recovered.img"]
+			     atomically:YES]);
+		}
+	}
+	volume = open_volume(image, NO);
+	if (renameVolume) {
+		assert([io inspect:&info] == EXT4_OK);
+		assert(memcmp(info.volume_name, original.volume_name, EXT4_VOLUME_NAME_SIZE) == 0 ||
+		    strcmp(info.volume_name, "recovered-label") == 0);
+		if (barrier == MutationJournalCommit) {
+			assert(strcmp(info.volume_name, "recovered-label") == 0);
+		}
+	}
+	file = lookup(volume, root_item(volume), @"failure");
+	assert(attributes(volume, file).size == 0 || attributes(volume, file).size == data.length);
+	check_bytes(volume, file, attributes(volume, file).size != 0 ? data : [NSData data]);
+	if (barrier == MutationJournalCommit && !renameVolume) {
+		assert(attributes(volume, file).size == data.length);
+	}
+	[volume invalidate];
+}
+
+static void
+check_maintenance(WritableImage *image)
+{
+	Ext4ResourceIO *io = [[Ext4ResourceIO alloc] initWithReader:image];
+	struct ext4_info info;
+	Ext4LegacyVolume *volume;
+	NSUInteger writes;
+	NSDate *deadline;
+
+	assert([io inspect:&info] == EXT4_OK && info.mmp_interval > 0 && info.mmp_interval <= 10);
+	volume = open_volume(image, YES);
+	writes = image.writes;
+	deadline = [NSDate dateWithTimeIntervalSinceNow:info.mmp_interval + 2];
+	while (image.writes == writes && deadline.timeIntervalSinceNow > 0) {
+		[NSThread sleepForTimeInterval:0.05];
+	}
+	assert(image.writes > writes); /* Heartbeat without activation or mount. */
+	assert([volume finishUnloadedResource] == nil);
+	[volume invalidate];
+	volume = open_volume(image, YES); /* The preceding maintenance load released MMP. */
+	assert([volume finishUnloadedResource] == nil);
+	[volume invalidate];
+	puts("PASS FSKit maintenance-only MMP heartbeat and ownership release");
+}
+
+static void
+check_api_selection(NSData *fixture)
+{
+	WritableImage *image = [WritableImage new];
+	Ext4ResourceIO *io;
+	struct ext4_fs *fs = NULL;
+	Ext4Volume *volume;
+
+	image.bytes = [fixture mutableCopy];
+	io = [[Ext4ResourceIO alloc] initWithReader:image];
+	assert([io open:&fs] == EXT4_OK);
+	volume = ext4_volume_create(nil, fs, io, NULL, NO);
+	assert(volume != nil);
+#if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
+	if (@available(macOS 27.0, *)) {
+		assert([volume conformsToProtocol:@protocol(FSVolumeReadWriteHandler)]);
+		assert(![volume conformsToProtocol:@protocol(FSVolumeReadWriteOperations)]);
+	} else
+#endif
+	{
+		assert([volume isKindOfClass:Ext4LegacyVolume.class]);
+		assert([volume conformsToProtocol:@protocol(FSVolumeReadWriteOperations)]);
+	}
+	[volume invalidate];
+	[volume unmountWithReplyHandler:^{
+	}];
+	assert(image.writes == 0 && image.barriers == 0);
+}
+
+static void
+check_capacity(WritableImage *image)
+{
+	Ext4LegacyVolume *volume = open_volume(image, YES);
+	FSItem *file = create_item(volume, root_item(volume), @"capacity", FSItemTypeFile);
+	NSMutableData *data = [NSMutableData dataWithLength:256 * 1024 - 1];
+	NSMutableData *readback = [NSMutableData dataWithLength:data.length];
+	Ext4Item *item = (Ext4Item *)file;
+	__block size_t completed;
+	__block NSError *failure;
+	uint64_t total = 0;
+	uint64_t offset;
+	size_t count;
+	BOOL partialError = NO;
+
+	memset(data.mutableBytes, 0x6d, data.length);
+	do {
+		completed = 0;
+		failure = nil;
+		[volume writeContents:data
+			       toFile:file
+			     atOffset:(off_t)total
+			 replyHandler:^(size_t written, NSError *error) {
+			   completed = written;
+			   failure = error;
+			 }];
+		assert(completed <= data.length);
+		total += completed;
+		assert(total <= image.bytes.length);
+		if (failure != nil) {
+			assert(failure.code == ENOSPC);
+			partialError = completed != 0;
+		} else {
+			assert(completed == data.length);
+		}
+	} while (failure == nil);
+	assert(partialError && attributes(volume, file).size == total);
+	assert([volume validateItem:item] == EXT4_OK);
+	for (offset = 0; offset < total; offset += completed) {
+		count = (size_t)MIN(total - offset, data.length);
+		assert([volume readItem:item
+				 offset:offset
+				 buffer:readback.mutableBytes
+				 length:count
+			      completed:&completed] == EXT4_OK);
+		assert(completed == count && memcmp(readback.bytes, data.bytes, count) == 0);
+	}
+	set_size(volume, file, 0);
+	write_bytes(volume, file, data, 0);
+	sync_volume(volume);
+	[volume invalidate];
+	puts("PASS FSKit partial ENOSPC reports its durable prefix and error, readback and space "
+	     "reuse");
 }
 
 int
@@ -443,11 +693,24 @@ main(int argc, const char *argv[])
 	@autoreleasepool {
 		NSData *fixture;
 		WritableImage *image = [WritableImage new];
+		NSUInteger barrier;
 
-		assert(argc == 2 || argc == 3);
+		assert(argc == 2 || argc == 3 || (argc == 4 && strcmp(argv[2], "--capacity") == 0));
 		fixture = [NSData dataWithContentsOfFile:@(argv[1])];
 		assert(fixture != nil);
 		image.bytes = [fixture mutableCopy];
+		if (argc >= 3 && strcmp(argv[2], "--capacity") == 0) {
+			check_capacity(image);
+			if (argc == 4) {
+				assert([image.bytes writeToFile:@(argv[3]) atomically:YES]);
+			}
+			return 0;
+		}
+		if (argc == 3 && strcmp(argv[2], "--maintenance") == 0) {
+			check_maintenance(image);
+			return 0;
+		}
+		check_api_selection(fixture);
 		@autoreleasepool {
 			check_mutations(image);
 		}
@@ -457,16 +720,21 @@ main(int argc, const char *argv[])
 		if (argc == 3) {
 			assert([image.bytes writeToFile:@(argv[2]) atomically:YES]);
 		}
-		@autoreleasepool {
-			check_failed_write(fixture, NO);
-		}
-		@autoreleasepool {
-			check_failed_write(fixture, YES);
+		/* One failed write, then every barrier from recovery marker to empty log. */
+		for (barrier = 0; barrier <= MutationJournalReset; barrier++) {
+			@autoreleasepool {
+				check_failed_mutation(fixture, barrier, NO,
+				    argc == 3 ? [@(argv[2]) stringByDeletingLastPathComponent]
+					      : nil);
+			}
+			@autoreleasepool {
+				check_failed_mutation(fixture, barrier, YES, nil);
+			}
 		}
 		puts("PASS FSKit mutation: namespace, metadata, xattrs, resize, preallocation, "
 		     "flags, "
 		     "open-unlinked lifetime, concurrent writes, remount and I/O failure "
-		     "propagation");
+		     "propagation, recovery at every barrier and immutable read-only inspection");
 	}
 	return 0;
 }

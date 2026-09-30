@@ -75,6 +75,33 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 
 @implementation Ext4Volume (Mutation)
 
+- (BOOL)isVolumeRenameInhibited
+{
+	return !self.writable;
+}
+
+- (void)setVolumeName:(FSFileName *)name replyHandler:(void (^)(FSFileName *, NSError *))reply
+{
+	@synchronized(self) {
+		NSData *bytes = name.data;
+		enum ext4_result error = !self.writable ? EXT4_READ_ONLY
+		    : !_active || _writeClosed		? EXT4_STALE
+							: _lifetimeError;
+
+		if (error == EXT4_OK && (bytes == nil || bytes.length == 0)) {
+			error = EXT4_INVALID_ARGUMENT;
+		}
+		if (error == EXT4_OK) {
+			error = ext4_set_volume_name(_fs, bytes.bytes, bytes.length);
+		}
+		if (error == EXT4_OK) {
+			ext4_get_info(_fs, &_info);
+			self.name = name;
+		}
+		reply(error == EXT4_OK ? name : nil, ext4_error(error));
+	}
+}
+
 - (enum ext4_result)validateMutation:(Ext4Item *)item
 {
 	enum ext4_result error;
@@ -82,6 +109,9 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 	/* Preserve EROFS even for an operation whose unused arguments are absent. */
 	if (!self.writable) {
 		return EXT4_READ_ONLY;
+	}
+	if (_writeClosed) {
+		return EXT4_STALE;
 	}
 	error = [self validateItem:item];
 	return error == EXT4_OK ? _lifetimeError : error;
@@ -147,6 +177,7 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 		Ext4Item *parent = (Ext4Item *)directory;
 		Ext4Item *created = nil;
 		struct ext4_inode inode = { 0 };
+		struct ext4_special_file special = { 0 };
 		struct ext4_timestamp now = ext4_current_time();
 		struct ext4_inode_update update = { .fields = EXT4_ATTR_PERMISSIONS |
 			    EXT4_ATTR_UID | EXT4_ATTR_GID | EXT4_ATTR_ACCESS_TIME |
@@ -193,6 +224,14 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 				error = ext4_symlink(_fs, parent->inode.number,
 				    parent->inode.generation, bytes.bytes, bytes.length,
 				    target.bytes, target.length, &update, &now, &inode);
+				break;
+			case FSItemTypeFIFO:
+			case FSItemTypeSocket:
+				special.type =
+				    type == FSItemTypeFIFO ? EXT4_FT_FIFO : EXT4_FT_SOCKET;
+				error =
+				    ext4_mknod(_fs, parent->inode.number, parent->inode.generation,
+					bytes.bytes, bytes.length, &special, &update, &now, &inode);
 				break;
 			default:
 				error = EXT4_UNSUPPORTED;
@@ -352,8 +391,19 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 			    FSItemAttributeFileID | FSItemAttributeParentID)) != 0) {
 			error = EXT4_INVALID_ARGUMENT;
 		}
+		if (error == EXT4_OK && (item->inode.mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR) {
+			/* FSKit requires non-file sizes to be ignored, even in a request
+			 * that also changes supported metadata. Do not consume this field. */
+			supported &= ~FSItemAttributeSize;
+		}
 		if (error == EXT4_OK) {
 			error = ext4_copy_attribute_request(request, &update);
+			if (!item->inode.birth_time_valid) {
+				/* Old inode formats cannot represent creation time. Leave it
+				 * unconsumed so FSKit can handle the unsupported attribute. */
+				supported &= ~FSItemAttributeBirthTime;
+				update.fields &= ~EXT4_ATTR_BIRTH_TIME;
+			}
 		}
 		if (error != EXT4_OK) {
 			reply(nil, ext4_error(error));
@@ -389,8 +439,7 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 			reply([self attributesForInode:&item->inode], nil);
 			return;
 		}
-		truncate = (supplied & FSItemAttributeSize) != 0 &&
-		    (item->inode.mode & EXT4_MODE_TYPE) == EXT4_MODE_REGULAR;
+		truncate = (supplied & supported & FSItemAttributeSize) != 0;
 		if (truncate || (supplied & (FSItemAttributeUID | FSItemAttributeGID)) != 0) {
 			error = [self removeCapabilityFromItem:item update:&update change:&change];
 			if ((supplied & FSItemAttributeMode) == 0) {
