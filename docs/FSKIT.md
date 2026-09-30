@@ -186,6 +186,12 @@ python3 ../ext4/scripts/build_fskit.py --team YOUR_TEAM_ID --provision --clean \
 
 Both profile arguments are required together. They bind only their respective
 targets; the portable core remains independent of signing profiles.
+The build defaults to Debug. Use `--configuration Release` for optimized native
+acceptance and performance measurements. `--build-number N` assigns the same
+positive bundle build number to the app and its extension; increase it when
+installing a replacement build so the system can distinguish the versions.
+Configuration does not change the signing identity or profile type: a Release
+build with development profiles is still a development artifact.
 Signed builds finish by verifying the complete bundle, including nested code,
 strictly for all architectures. When switching profiles, use `--clean`: Xcode's
 incremental build has replaced an extension's embedded profile without rerunning

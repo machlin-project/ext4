@@ -18,8 +18,12 @@ def main() -> None:
     parser.add_argument("--app-profile", help="App development profile name or UUID (requires --extension-profile)")
     parser.add_argument("--extension-profile", help="Extension development profile name or UUID (requires --app-profile)")
     parser.add_argument("--clean", action="store_true", help="Clean products before building, for example after changing profiles")
+    parser.add_argument("--configuration", choices=("Debug", "Release"), default="Debug")
+    parser.add_argument("--build-number", type=int, help="Positive bundle build number for both app and extension")
     parser.add_argument("--derived-data", type=Path, default=ROOT / "artifacts/fskit/DerivedData")
     args = parser.parse_args()
+    if args.build_number is not None and args.build_number <= 0:
+        parser.error("--build-number must be positive")
     if args.provision and not args.team:
         parser.error("--provision requires --team")
     manual = bool(args.app_profile or args.extension_profile)
@@ -40,10 +44,12 @@ def main() -> None:
     )
     command = [
         "xcodebuild", "-project", str(project / "Ext4FSKit.xcodeproj"),
-        "-scheme", "Ext4FSKitApp", "-configuration", "Debug", "-sdk", "macosx",
+        "-scheme", "Ext4FSKitApp", "-configuration", args.configuration, "-sdk", "macosx",
         "-destination", "generic/platform=macOS", "-derivedDataPath", str(derived_data),
         "-jobs", "4", "CLANG_ENABLE_EXPLICIT_MODULES=NO", f"CC={clang}",
     ]
+    if args.build_number is not None:
+        command.append(f"CURRENT_PROJECT_VERSION={args.build_number}")
     if args.team:
         command.extend([
             f"CODE_SIGN_STYLE={'Manual' if manual else 'Automatic'}",
@@ -64,7 +70,7 @@ def main() -> None:
     command.append("build")
     subprocess.run(command, check=True, cwd=ROOT, env=environment)
     if args.team:
-        app = derived_data / "Build/Products/Debug/Machlin ext4.app"
+        app = derived_data / "Build/Products" / args.configuration / "Machlin ext4.app"
         subprocess.run(
             ["codesign", "--verify", "--deep", "--strict", "--all-architectures", str(app)],
             check=True, cwd=ROOT, env=environment,
