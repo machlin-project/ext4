@@ -480,6 +480,13 @@ ext4_extent_cache_capacity(const struct ext4_fs *fs)
 	return capacity < EXT4_READ_CACHE_LEAVES ? capacity : EXT4_READ_CACHE_LEAVES;
 }
 
+static void
+ext4_read_run_store(
+    struct ext4_map_reader *reader, uint32_t logical, uint64_t physical, uint64_t blocks)
+{
+	reader->run = (struct ext4_read_run){ logical, (uint64_t)logical + blocks, physical };
+}
+
 bool
 ext4_map_reader_cached(
     struct ext4_map_reader *reader, uint32_t logical, uint64_t *physical, uint64_t *blocks)
@@ -487,14 +494,23 @@ ext4_map_reader_cached(
 	struct ext4_extent_cache *cache = reader->cache;
 	uint32_t index;
 
+	if (logical >= reader->run.first && logical < reader->run.limit) {
+		*physical = reader->run.physical == 0
+		    ? 0
+		    : reader->run.physical + (logical - reader->run.first);
+		*blocks = reader->run.limit - logical;
+		return true;
+	}
 	if (ext4_extent_cursor_contains(&reader->cursor, logical)) {
 		ext4_extent_cursor_map(&reader->cursor, logical, physical, blocks);
+		ext4_read_run_store(reader, logical, *physical, *blocks);
 		return true;
 	}
 	for (index = 0; cache != NULL && index < EXT4_READ_CACHE_LEAVES; index++) {
 		if (ext4_extent_cursor_contains(&cache->leaves[index].cursor, logical)) {
 			reader->cursor = cache->leaves[index].cursor;
 			ext4_extent_cursor_map(&reader->cursor, logical, physical, blocks);
+			ext4_read_run_store(reader, logical, *physical, *blocks);
 			return true;
 		}
 	}
@@ -514,18 +530,26 @@ ext4_map_reader_next(struct ext4_fs *fs, const struct ext4_inode *inode,
 	if (fs->aborted) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
-	if ((inode->flags & (EXT4_INODE_EXTENTS | EXT4_INODE_INLINE_DATA)) != EXT4_INODE_EXTENTS) {
-		return ext4_map_blocks(
-		    fs, inode, logical, &reader->scratch, physical, blocks, NULL);
-	}
 	if (ext4_map_reader_cached(reader, logical, physical, blocks)) {
 		return EXT4_OK;
+	}
+	if ((inode->flags & (EXT4_INODE_EXTENTS | EXT4_INODE_INLINE_DATA)) != EXT4_INODE_EXTENTS) {
+		error =
+		    ext4_map_blocks(fs, inode, logical, &reader->scratch, physical, blocks, NULL);
+		if (error == EXT4_OK) {
+			ext4_read_run_store(reader, logical, *physical, *blocks);
+		}
+		return error;
 	}
 	capacity = ext4_extent_cache_capacity(fs);
 	error = ext4_extent_map(
 	    fs, inode, logical, &reader->scratch, physical, blocks, NULL, NULL, &reader->cursor);
-	if (error != EXT4_OK || cache == NULL || capacity == 0 ||
-	    reader->cursor.leaf != reader->scratch || reader->scratch == NULL) {
+	if (error != EXT4_OK) {
+		return error;
+	}
+	ext4_read_run_store(reader, logical, *physical, *blocks);
+	if (cache == NULL || capacity == 0 || reader->cursor.leaf != reader->scratch ||
+	    reader->scratch == NULL) {
 		return error;
 	}
 	/* Transfer the verified leaf without copying it. The evicted buffer becomes
@@ -559,4 +583,5 @@ ext4_map_reader_close(struct ext4_fs *fs, struct ext4_map_reader *reader)
 	}
 	reader->scratch = NULL;
 	reader->cursor.leaf = NULL;
+	reader->run.limit = 0;
 }

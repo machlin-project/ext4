@@ -1251,7 +1251,12 @@ rest of the call. Once an extent leaf's checksum and every record have passed
 validation, the read retains that private leaf and locates subsequent data/hole
 ranges with a cursor at sequential boundaries and binary search for other seeks.
 The hint advances at most one record because validation excludes overlaps and
-empty extents. An ancestor's next-index boundary limits reuse; crossing
+empty extents. The reader also retains the last decoded run, shared by both map
+formats. Requests inside it use its bounded logical interval and physical base
+without another search, disk-field decode or indirect-tree traversal. It holds no
+pointer into traversal scratch, so a failed miss cannot damage the prior run.
+Closing the reader or invalidating a held snapshot discards it. An ancestor's
+next-index boundary limits reuse; crossing
 it restarts the checked descent before overwriting scratch. Inline extent maps and
 direct pointers need no scratch buffer. No leaf or validation state survives an
 ordinary read, so later calls observe changed mapping nodes and validate them again. Native
@@ -1288,8 +1293,8 @@ reads and transfer its buffer into the cache without copying. Round-robin evicti
 reuses the displaced buffer as scratch. At most eight leaf blocks, capped at
 64 KiB, plus one scratch block and fixed bookkeeping belong to a hold. File data
 always comes from the current journal snapshots or the environment; the held-read
-cache itself stores no file data or pages. Legacy indirect maps reuse scratch but
-not cached leaves.
+cache itself stores no file data or pages. Legacy indirect maps reuse scratch and
+the last decoded run but do not cache leaves.
 
 A mount revision advances before every nonempty transaction commit attempt,
 covering direct writes, ordered data, deferred publication and failed commits.

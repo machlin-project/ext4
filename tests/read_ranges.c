@@ -255,6 +255,50 @@ check_window(struct model *model, const struct ext4_inode *inode, uint64_t first
 }
 
 static void
+check_cached_run(struct model *model, const struct ext4_inode *inode, uint32_t first,
+    uint64_t physical, uint64_t length)
+{
+	struct ext4_map_reader reader = { 0 };
+	uint64_t mapped;
+	uint64_t blocks;
+	uint64_t offset;
+	size_t reads;
+	size_t allocations;
+	unsigned int pass;
+
+	model_reset(model);
+	CHECK(ext4_map_reader_next(&model->fs, inode, &reader, first, &mapped, &blocks) == EXT4_OK);
+	CHECK(mapped == physical && blocks == length);
+	reads = model->reads;
+	allocations = model->allocations;
+	model->fail_read = reads + 1U;
+	/* Reverse and repeated seeks inside one checked run must neither traverse
+	 * indirect ancestors again nor depend on a sequential extent cursor. */
+	for (pass = 0; pass < 3U; pass++) {
+		for (offset = length; offset != 0; offset--) {
+			CHECK(ext4_map_reader_next(&model->fs, inode, &reader,
+				  first + (uint32_t)(offset - 1U), &mapped, &blocks) == EXT4_OK);
+			CHECK(mapped == (physical == 0 ? 0 : physical + offset - 1U));
+			CHECK(blocks == length - offset + 1U);
+		}
+	}
+	CHECK(model->reads == reads && model->allocations == allocations);
+	model->fs.aborted = true;
+	CHECK(ext4_map_reader_next(&model->fs, inode, &reader, first, &mapped, &blocks) ==
+	    EXT4_RECOVERY_REQUIRED);
+	model->fs.aborted = false;
+	ext4_map_reader_close(&model->fs, &reader);
+	CHECK(!ext4_map_reader_cached(&reader, first, &mapped, &blocks));
+	/* Closing discards both the decoded run and its metadata view. */
+	if (reads != 0) {
+		CHECK(ext4_map_reader_next(&model->fs, inode, &reader, first, &mapped, &blocks) ==
+		    EXT4_IO);
+	}
+	ext4_map_reader_close(&model->fs, &reader);
+	model_reset(model);
+}
+
+static void
 extent_cases(struct model *model, struct ext4_inode *inode)
 {
 	const uint32_t inline_map[] = { MODEL_DATA_FIRST, MODEL_DATA_FIRST + 1U,
@@ -285,6 +329,10 @@ extent_cases(struct model *model, struct ext4_inode *inode)
 	    3U * bs - 37U, false);
 	check_range(model, inode, 4U * bs + 5U, SIZE_MAX, 0, 3U * bs - 5U, true);
 	check_range(model, inode, 8U * bs + 7U, SIZE_MAX, 0, 2U * bs - 7U, true);
+	check_cached_run(model, inode, 0, MODEL_DATA_FIRST, 4);
+	check_cached_run(model, inode, 4, 0, 3);
+	check_cached_run(model, inode, 7, 0, 3);
+	check_cached_run(model, inode, 10, MODEL_DATA_OTHER, 4);
 	saved_size = inode->size;
 	inode->size = bs - 19U;
 	check_range(
@@ -310,6 +358,8 @@ extent_cases(struct model *model, struct ext4_inode *inode)
 	check_window(model, inode, 0, tree_map, sizeof(tree_map) / sizeof(*tree_map));
 	check_range(model, inode, 2U * bs + 3U, SIZE_MAX, 0, 6U * bs - 3U, true);
 	check_range(model, inode, 8U * bs, SIZE_MAX, 0, 2U * bs, true);
+	check_cached_run(model, inode, 2, 0, 6);
+	check_cached_run(model, inode, 8, 0, 2);
 	header = (struct ext4_extent_header_disk *)leaf_right;
 	for (damage = 0; damage < 2; damage++) {
 		if (damage == 0) {
@@ -531,10 +581,14 @@ indirect_cases(struct model *model, struct ext4_inode *inode)
 	const uint32_t ending[] = { MODEL_DATA_OTHER + 2U, MODEL_DATA_OTHER + 3U, 0, 0 };
 	struct ext4_le32 *root = (struct ext4_le32 *)inode->block_data;
 	struct ext4_le32 *pointers;
+	struct ext4_map_reader reader = { 0 };
 	uint32_t bs = model->fs.info.block_size;
 	uint32_t per_block = bs / sizeof(*pointers);
 	uint64_t first = EXT4_DIRECT_BLOCKS;
 	uint64_t span = per_block;
+	uint64_t mapped;
+	uint64_t run;
+	size_t reads;
 	unsigned int depth;
 	unsigned int level;
 
@@ -558,7 +612,27 @@ indirect_cases(struct model *model, struct ext4_inode *inode)
 		ext4_encode32(&pointers[3], MODEL_DATA_OTHER);
 		inode->size = ((depth == 0 ? 0 : first) + 6U) * bs - 19U;
 		check_window(model, inode, depth == 0 ? 0 : first, beginning, 6);
+		check_cached_run(
+		    model, inode, depth == 0 ? 0 : (uint32_t)first, MODEL_DATA_FIRST, 2);
 		if (depth != 0) {
+			/* A failed miss may overwrite traversal scratch. The last decoded
+			 * run remains valid, but must never satisfy the failed address. */
+			CHECK(ext4_map_reader_next(&model->fs, inode, &reader, (uint32_t)first,
+				  &mapped, &run) == EXT4_OK);
+			model->fail_read = model->reads + depth;
+			model->poison_failed_read = true;
+			CHECK(ext4_map_reader_next(&model->fs, inode, &reader, (uint32_t)first + 3U,
+				  &mapped, &run) == EXT4_IO);
+			reads = model->reads;
+			CHECK(ext4_map_reader_next(&model->fs, inode, &reader, (uint32_t)first + 1U,
+				  &mapped, &run) == EXT4_OK);
+			CHECK(mapped == MODEL_DATA_FIRST + 1U && run == 1 && model->reads == reads);
+			model->fail_read = 0;
+			CHECK(ext4_map_reader_next(&model->fs, inode, &reader, (uint32_t)first + 3U,
+				  &mapped, &run) == EXT4_OK);
+			CHECK(mapped == MODEL_DATA_OTHER && run == 1);
+			ext4_map_reader_close(&model->fs, &reader);
+			model_reset(model);
 			ext4_encode32(&pointers[per_block - 2U], MODEL_DATA_OTHER + 2U);
 			ext4_encode32(&pointers[per_block - 1U], MODEL_DATA_OTHER + 3U);
 			inode->size = (first + per_block + 2U) * bs - 19U;
@@ -708,6 +782,11 @@ logical_limit(struct model *model, struct ext4_inode *inode)
 	inode->flags = EXT4_INODE_EXTENTS;
 	node_header(inode->block_data, sizeof(inode->block_data), 0, 0);
 	inode->size = limit + bs;
+	check_cached_run(model, inode, UINT32_MAX - 7U, 0, 8);
+	node_header(inode->block_data, sizeof(inode->block_data), 0, 1);
+	node_extent(inode->block_data, 0, UINT32_MAX - 7U, 8, MODEL_DATA_FIRST);
+	check_cached_run(model, inode, UINT32_MAX - 7U, MODEL_DATA_FIRST, 8);
+	node_header(inode->block_data, sizeof(inode->block_data), 0, 0);
 	check_range(model, inode, limit - bs + 17U, SIZE_MAX, 0, bs - 17U, true);
 	CHECK(ext4_map_read(&model->fs, inode, limit, bs, &mapping) == EXT4_RANGE);
 	memset(output, 0xa5, bs + 1U);

@@ -29,7 +29,7 @@ See [the review and performance criteria](docs/CORE-REVIEW.md). The target is 15
 higher throughput than Linux on matched filesystem workloads; SHA/AES measurements
 are separate. Reads require a geometric mean of at least 1.15 across eight fixed
 profiles, with every profile at least as fast as Linux. The latest read mean is
-1.186, but four contiguous-file profiles remain below Linux. Writes are evaluated
+1.162, but four contiguous-file profiles remain below Linux. Writes are evaluated
 separately. AES and key
 management are adapter services, while the core has portable SHA, ARM64 userspace
 SHA-256 acceleration and metadata checksums.

@@ -31,10 +31,10 @@ fixed profiles**, and **every profile at least as fast as Linux**. These are den
 and sparse files, warm and guest-cold cache, sequential and random access. Writes
 are evaluated separately with equivalent durability. SHA/AES are separate again.
 
-The latest read mean is **1.186**, but all four dense-file profiles are below Linux:
-0.961 warm sequential, 0.966 warm random, 0.925 cold sequential and 0.989 cold random.
+The latest read mean is **1.162**, but all four dense-file profiles are below Linux:
+0.977 warm sequential, 0.963 warm random, 0.909 cold sequential and 0.997 cold random.
 The agreed read target is **not met**. Evidence and the failing acceptance gate are
-in lab `artifacts/ext4-journal/read-memory-candidate/`. The gate is
+in lab `artifacts/ext4-journal/read-run-cache/`. The gate is
 `tests/check_read_benchmark.py --require-target`; a valid measurement can still
 fail its performance target. Do not remove difficult profiles or count raw-backend
 controls as core results. Guest-cold is not host/storage-cold.
@@ -58,6 +58,10 @@ every 1 MiB. Neither write profile beats Linux.
 
 - `read_state.c` owns held inode snapshots, mapping caches and invalidation shared
   by `ext4_read_held` and `ext4_map_read_held`. Stateless APIs retain their contracts.
+- Readers reuse the last checked run without another extent search or indirect
+  traversal. Four focused read tests and all three native builds pass in
+  `artifacts/checks/read-run-cache/`; the 140-sample Linux run passes functionally
+  but fails the strict performance gate. No general speedup is claimed from it.
 - `memory.c` owns copy, equality and zeroing. Guarded ARM64 DC ZVA uses only general
   registers and whole aligned normal-memory blocks within the caller range. The
   portable fallback is independently tested. Kernel SIMD remains excluded.

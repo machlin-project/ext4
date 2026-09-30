@@ -823,25 +823,39 @@ exclusion and encryption/verity restrictions. ARM64 large-range zeroing uses
 permitted, bounded `DC ZVA` blocks and ordinary-store edges; it uses general
 registers only. Both optimized and portable paths have canary/guard-page coverage.
 
-The unchanged buffered-pread stand produced these seven-pair read measurements:
+The latest reader also retains its last decoded physical/hole run. Extent and
+indirect reads share this bounded state; interior requests avoid another search,
+decode or indirect-tree traversal. Its value does not refer to mutable scratch.
+Tests cover backward/repeated seeks, holes, unwritten runs, ancestor bounds,
+failed misses that poison scratch, aborts, close/reopen and the 32-bit logical
+ceiling. The four focused read tests, formatting, freestanding frame checks and
+unsigned FSKit/arm64e/x86_64 builds pass in `artifacts/checks/read-run-cache/`.
+
+The unchanged buffered-pread stand produced these latest seven-pair measurements:
 
 | File | Cache | Access | Linux MiB/s | Core MiB/s | Core/Linux |
 | --- | --- | --- | ---: | ---: | ---: |
-| Contiguous | Warm | Sequential | 32,612.6 | 31,341.5 | 0.961 |
-| Contiguous | Warm | Random | 4,244.2 | 4,101.1 | 0.966 |
-| Contiguous | Guest-cold | Sequential | 8,919.3 | 8,252.4 | 0.925 |
-| Contiguous | Guest-cold | Random | 169.8 | 167.9 | 0.988 |
-| Sparse | Warm | Sequential | 22,638.3 | 33,515.2 | 1.480 |
-| Sparse | Warm | Random | 9,696.0 | 16,457.6 | 1.697 |
-| Sparse | Guest-cold | Sequential | 6,155.3 | 10,590.6 | 1.721 |
-| Sparse | Guest-cold | Random | 305.4 | 325.3 | 1.065 |
+| Contiguous | Warm | Sequential | 31,818.9 | 31,073.2 | 0.977 |
+| Contiguous | Warm | Random | 4,276.9 | 4,120.4 | 0.963 |
+| Contiguous | Guest-cold | Sequential | 8,998.9 | 8,177.4 | 0.909 |
+| Contiguous | Guest-cold | Random | 170.8 | 170.3 | 0.997 |
+| Sparse | Warm | Sequential | 24,324.8 | 33,008.1 | 1.357 |
+| Sparse | Warm | Random | 10,482.4 | 16,374.5 | 1.562 |
+| Sparse | Guest-cold | Sequential | 6,347.9 | 10,906.8 | 1.718 |
+| Sparse | Guest-cold | Random | 313.5 | 336.1 | 1.072 |
 
-The geometric mean is **1.186**, exceeding 1.15. **Acceptance remains open**:
-all four contiguous profiles remain below Linux. Separate-boot comparison with
-the preceding 1.143 baseline is not an isolated old/new-core measurement.
+The geometric mean is **1.162**, exceeding 1.15. **Acceptance remains open**:
+all four contiguous profiles remain below Linux. The preceding run's mean was
+1.186; the latest warm sparse Linux rates rose 7.4–8.1% while core rates fell
+0.5–1.5%. Separate boots do not isolate the implementation's timing effect, and
+this run does not establish a general read speedup. The raw-backend controls also
+remain below Linux: 0.981 warm sequential, 0.989 warm random, 0.946 cold sequential,
+and 0.997 cold random. Removing core mapping work alone does not demonstrate that
+this buffered backend can meet the remaining per-profile threshold.
 The actual Linux guest identified itself, all 140 samples and independent byte
 checks passed, shutdown was clean and the read image stayed unchanged. Evidence:
-lab `artifacts/ext4-journal/read-memory-candidate/`.
+lab `artifacts/ext4-journal/read-run-cache/`; the earlier run remains preserved in
+`read-memory-candidate/`.
 
 A preceding backend diagnostic retained the original pread comparison and added
 both Linux/core mmap controls plus demand-pread. Mappings were removed before cold

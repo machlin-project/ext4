@@ -30,7 +30,16 @@ struct ext4_extent_cache {
 	uint32_t next;
 };
 
+/* A decoded run has no pointer into replaceable traversal storage. Both extent
+ * and indirect readers can reuse it within their immutable inode/device view. */
+struct ext4_read_run {
+	uint64_t first;
+	uint64_t limit;
+	uint64_t physical;
+};
+
 struct ext4_map_reader {
+	struct ext4_read_run run;
 	struct ext4_extent_cursor cursor;
 	uint8_t *scratch;
 	struct ext4_extent_cache *cache;
@@ -52,8 +61,8 @@ enum ext4_result ext4_read_state_get(struct ext4_inode_hold *hold, struct ext4_r
  * The owner must close the reader before changing either. */
 enum ext4_result ext4_map_reader_next(struct ext4_fs *fs, const struct ext4_inode *inode,
     struct ext4_map_reader *reader, uint32_t logical, uint64_t *physical, uint64_t *blocks);
-/* Look ahead only through already validated leaves. Never allocate or read the
- * device: planning a later run must not move a metadata failure ahead of data. */
+/* Look ahead only through a checked run or validated leaves. Never allocate or
+ * read the device: planning cannot move a metadata failure ahead of data. */
 bool ext4_map_reader_cached(
     struct ext4_map_reader *reader, uint32_t logical, uint64_t *physical, uint64_t *blocks);
 /* Deliver a byte range, batching adjacent physical data across logical holes.

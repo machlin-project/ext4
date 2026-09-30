@@ -316,6 +316,21 @@ requires complete paired profiles, verifies equal work and reports all eight
 core/Linux comparisons, medians/p95 and every paired throughput ratio. All seven
 ratios must reach 1.15 for the reported per-profile target flag; the flag is not
 a statistical confidence interval or a claim about mounted FSKit/LXNU performance.
+The agreed overall acceptance is separate: `--require-target` requires a geometric
+mean of at least 1.15 across the eight profile median ratios, with every profile
+at least 1.0. It saves the complete report and exits unsuccessfully when the target
+is missed; diagnostic readers never contribute to the score.
+
+`tests/prepare_write_benchmark.py` takes the same preparation options and creates
+two identical disposable volumes. The guest writes one through Linux VFS and one
+through the core, with ordered data and a timed durability barrier every 1 MiB.
+Seven interleaved pairs each overwrite 256 MiB, using 64 KiB sequential requests
+or permuted 4 KiB requests on a preallocated 16 MiB file. All samples verify the
+expected payload; after core teardown Linux independently reads its final volume.
+Use `tests/check_write_benchmark.py CONSOLE --output REPORT` and run nonrepairing
+`e2fsck -fn` on both resulting images. Report callbacks, allocations, device writes
+and barrier counts alongside the broad paired timing ranges. Write results are
+evaluated separately and do not change the fixed read target.
 
 ## Multi-mount protection tests
 
