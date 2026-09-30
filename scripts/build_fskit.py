@@ -4,6 +4,7 @@
 import argparse
 import os
 from pathlib import Path
+import pwd
 import subprocess
 
 
@@ -20,6 +21,9 @@ def main() -> None:
         parser.error("--provision requires --team")
     project = ROOT / "adapters/fskit"
     environment = os.environ.copy()
+    username = pwd.getpwuid(os.getuid()).pw_name
+    environment.setdefault("USER", username)
+    environment.setdefault("LOGNAME", username)
     for name in ("CFLAGS", "CPPFLAGS", "CXXFLAGS", "LDFLAGS", "CC", "CXX", "SDKROOT"):
         environment.pop(name, None)
     clang = subprocess.check_output(["xcrun", "--find", "clang"], text=True).strip()

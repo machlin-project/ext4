@@ -773,6 +773,11 @@ enum ext4_result ext4_read(struct ext4_fs *fs, const struct ext4_inode *inode, u
 enum ext4_result ext4_read_held(
     struct ext4_inode_hold *hold, uint64_t offset, void *buffer, size_t length, size_t *completed);
 void ext4_drop_read_cache(struct ext4_inode_hold *hold);
+/* Whether this inode's representation permits unverified native block reads.
+ * Actual ranges still need ext4_map_read[_held] validation. Native owners also
+ * enforce mapping lifetime, read-only policy and EOF zeroing. */
+bool ext4_inode_can_map_read(const struct ext4_inode *inode);
+
 /* Return a contiguous physical or zero-filled range from a fresh regular-file
  * snapshot. The range can include padding in the block containing EOF, but no
  * later blocks. The owner zeroes EOF padding before exposing it through a native

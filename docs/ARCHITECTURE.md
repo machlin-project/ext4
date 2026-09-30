@@ -1447,9 +1447,13 @@ and closes the backing block device at its existing mount boundary.
 The kernel inode index serializes vnode creation independently of its lookup
 lock, so vnode creation can reclaim another inode without recursively taking
 the index lock. Cached vnode references are checked with XNU's vnode identity
-before use. FSKit uses a weak item identity table, retaining one item while any
-concurrent framework operation owns it. Neither identity table is a file-data
-cache.
+before use. FSKit uses a weak item identity table. Each item retains a core inode hold and
+the volume/resource owner. A volume monitor serializes core operations, item
+publication and private control commands. Conditional reclaim on macOS 27 uses
+that same monitor; older systems retain the hold through the last strong item
+reference. Native lifetime acceptance remains separate from unsigned tests.
+Neither identity table is a file-data cache. The [FSKit contract](FSKIT.md)
+describes resource I/O, read mappings and the App Group control endpoint.
 
 ## Linux operation policy
 

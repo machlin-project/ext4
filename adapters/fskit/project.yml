@@ -33,6 +33,17 @@ targets:
       - Ext4Extension.swift
       - Ext4FileSystem.m
       - Ext4FileSystem.h
+      - Ext4Volume.m
+      - Ext4Volume.h
+      - Ext4VolumeInternal.h
+      - Ext4VolumeIO.m
+      - Ext4VolumeControl.m
+      - Ext4ResourceIO.m
+      - Ext4ResourceIO.h
+      - Ext4Support.m
+      - Ext4Support.h
+      - Ext4Control.m
+      - Ext4Control.h
       - BridgingHeader.h
     dependencies:
       - target: Ext4Core
@@ -54,6 +65,9 @@ targets:
     platform: macOS
     sources:
       - App.swift
+      - Ext4Control.m
+      - Ext4Control.h
+      - AppBridge.h
     dependencies:
       - target: Ext4FSKitExtension
         embed: true
@@ -62,6 +76,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: org.machlin.ext4
         PRODUCT_NAME: Machlin ext4
         GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_ENTITLEMENTS: App.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: AppBridge.h
         INFOPLIST_KEY_CFBundleDisplayName: Machlin ext4
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         ENABLE_APP_SANDBOX: YES

@@ -24,7 +24,8 @@ ASan/UBSan builds and freestanding compilation with a 2 KiB stack-frame budget
 check the shared implementation. Historical test counts and their exact limitations
 belong in the acceptance matrix; they do not establish native adapter readiness.
 
-The current phase is final review, code organization and measured performance work.
+The current phase is FSKit integration with a separate app control channel,
+while retaining the final review and performance criteria.
 See [the review and performance criteria](docs/CORE-REVIEW.md). The target is 15%
 higher throughput than Linux on matched filesystem workloads; SHA/AES measurements
 are separate. Reads require a geometric mean of at least 1.15 across eight fixed
@@ -34,7 +35,9 @@ separately. AES and key
 management are adapter services, while the core has portable SHA, ARM64 userspace
 SHA-256 acceleration and metadata checksums.
 
-Both native adapters remain read-only. FSKit builds unsigned, but installation and
+Both native adapters remain read-only. The [FSKit adapter](docs/FSKIT.md) now
+uses held inode state, restricted kernel read mappings, user xattr reads and an
+App Group Unix socket for the control app. FSKit builds unsigned, but installation and
 mount acceptance await a signing profile with FSKit Module capability. The arm64e
 kext has read-only acceptance in a dedicated custom-kernel VM; x86_64 has compilation
 evidence. Native writes, page-cache integration for mutation, ACL enforcement and

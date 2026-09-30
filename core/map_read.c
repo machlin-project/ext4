@@ -6,6 +6,13 @@ static enum ext4_result ext4_map_blocks(struct ext4_fs *fs, const struct ext4_in
     uint32_t logical, uint8_t **scratch, uint64_t *physical, uint64_t *blocks,
     struct ext4_block_path *path);
 
+bool
+ext4_inode_can_map_read(const struct ext4_inode *inode)
+{
+	return inode != NULL && (inode->mode & EXT4_MODE_TYPE) == EXT4_MODE_REGULAR &&
+	    (inode->flags & (EXT4_INODE_ENCRYPT | EXT4_INODE_VERITY | EXT4_INODE_INLINE_DATA)) == 0;
+}
+
 static enum ext4_result
 ext4_mapping_node(struct ext4_fs *fs, uint64_t block, uint8_t **scratch)
 {

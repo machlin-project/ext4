@@ -132,13 +132,15 @@ inspect the remaining matrix asynchronously.
 Implementation and benchmark batches are committed. Inspect CI asynchronously.
 Continue closing the per-profile read deficits without
 weakening the comparator; writes remain a separate performance direction.
-The user was asked whether the next I/O pass should target native integration
-(FSKit first) or the laboratory Linux backend. No answer is recorded yet. Do not
-silently replace the fixed pread comparator, exclude a profile, or call a diagnostic
-backend a production FSKit/LXNU result.
+The user selected native I/O integration: FSKit first, then LXNU, and expanded
+the immediate task to a complete FSKit adapter with an app control channel.
+Do not replace the fixed pread comparator, exclude a profile, or call unsigned
+adapter tests production FSKit/LXNU performance evidence. See [FSKit](FSKIT.md)
+for the integration contracts and outstanding native acceptance.
 
 Both adapters remain read-only. FSKit integration precedes LXNU policy; signing
-is deferred. The held-read APIs are not yet adopted by the native adapters.
+is deferred. FSKit now adopts held reads; installed mapping and lifetime acceptance remains
+pending. The kernel adapter has not yet adopted these APIs.
 XNU/LXNU retains UBC/cluster I/O; do not build a replacement file page cache in core.
 Native cryptography, writes, concurrency and page-cache integration require their
 own acceptance. No host kernel, boot policy, NVRAM or system-file changes.
