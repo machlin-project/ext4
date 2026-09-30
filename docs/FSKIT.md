@@ -167,6 +167,25 @@ does not install or launch the app. Verify the app and embedded extension signat
 and their profile entitlements before transferring them to the dedicated test VM.
 Development profiles must also include the test Mac's provisioning identifier;
 host build success does not establish permission to run in a different VM.
+For an Apple silicon Mac, use its Provisioning UDID, not its Hardware UUID.
+If automatic profiles omit the registered VM, create a Mac App Development
+profile for each bundle ID including the intended test devices, then let Xcode
+download and select the two profiles explicitly:
+
+```sh
+python3 ../ext4/scripts/build_fskit.py --team YOUR_TEAM_ID --provision --clean \
+  --app-profile 'Machlin ext4 development devices' \
+  --extension-profile 'Machlin ext4 filesystem development devices' \
+  --derived-data ../ext4/artifacts/checks/fskit-signed/DerivedData
+```
+
+Both profile arguments are required together. They bind only their respective
+targets; the portable core remains independent of signing profiles.
+Signed builds finish by verifying the complete bundle, including nested code,
+strictly for all architectures. When switching profiles, use `--clean`: Xcode's
+incremental build has replaced an extension's embedded profile without rerunning
+its signing step, reporting build success with an invalid resource seal. Ordinary
+unchanged-profile builds remain incremental.
 
 From the absolute Machlin lab directory:
 
@@ -210,6 +229,7 @@ part of the unsigned checks.
 
 - [App Groups entitlement](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.security.application-groups): IPC and container requirements.
 - [Provisioned macOS App Groups](https://developer.apple.com/documentation/xcode/accessing-app-group-containers): profile authorization and automatic group registration.
+- [Registering test devices](https://developer.apple.com/help/account/devices/register-a-single-device/): the Provisioning UDID requirement for Apple silicon Macs.
 - [Block device resources](https://developer.apple.com/documentation/fskit/fsblockdeviceresource): direct versus cached I/O.
 - [Apple HFS extension source](https://github.com/apple-oss-distributions/hfs/blob/main/hfs_appex/HFSFileSystem.m): private descriptor access and unsupported volume loading.
 - [Metadata flush](https://developer.apple.com/documentation/fskit/fsblockdeviceresource/metadataflush()): buffer-cache contract.
