@@ -14,7 +14,7 @@ def main() -> None:
     parser.add_argument("--image", type=Path, required=True,
                         help="Clean fixture authored by tests/generate_fixtures.py")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--suite", choices=("all", "resource", "control", "volume", "crypto", "keystore"), default="all")
+    parser.add_argument("--suite", choices=("all", "resource", "control", "volume", "mutation", "crypto", "keystore"), default="all")
     parser.add_argument("--encrypted-image", type=Path)
     parser.add_argument("--encrypted-manifest", type=Path)
     args = parser.parse_args()
@@ -31,10 +31,11 @@ def main() -> None:
         "resource": ["Ext4ResourceIO.m"],
         "control": ["Ext4Control.m"],
         "volume": ["Ext4ResourceIO.m", "Ext4Support.m", "Ext4Control.m", "Ext4Volume.m",
-                   "Ext4VolumeIO.m", "Ext4VolumeControl.m", "Ext4Crypto.m"],
+                   "Ext4VolumeIO.m", "Ext4VolumeMutation.m", "Ext4VolumeControl.m", "Ext4Crypto.m"],
         "crypto": ["Ext4Crypto.m"],
         "keystore": ["Ext4Crypto.m", "Ext4KeyStore.m", "Ext4Control.m"],
     }
+    suites["mutation"] = suites["volume"]
     for name, sources in suites.items():
         if args.suite != "all" and name != args.suite:
             continue
@@ -56,6 +57,8 @@ def main() -> None:
         ]
         subprocess.run(command, check=True)
         arguments = [str(args.image.resolve())] if name == "volume" else []
+        if name == "mutation":
+            arguments = [str(args.image.resolve()), str((args.output / "fskit-mutated.img").resolve())]
         if name == "volume" and args.encrypted_image is not None:
             arguments.extend([str(args.encrypted_image.resolve()), str(args.encrypted_manifest.resolve())])
         subprocess.run([str(binary.resolve()), *arguments], check=True, timeout=60)

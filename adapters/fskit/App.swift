@@ -33,11 +33,22 @@ private final class ControlModel: ObservableObject {
     @Published var volumes: [MountedVolume] = []
     @Published var status = "No mounted volumes discovered."
     @Published var busy = false
+    @Published var deviceServiceStatus = "Checking…"
+
+    func enableWriting() {
+        do {
+            try DeviceService.register()
+            status = "Complete disk service setup, then remount the volume to enable writing."
+        } catch {
+            status = error.localizedDescription
+        }
+    }
 
     func refresh() {
         guard !busy else { return }
         busy = true
         DispatchQueue.global(qos: .userInitiated).async {
+            let serviceStatus = DeviceService.status()
             var found: [MountedVolume] = []
             var failures: [String] = []
             let directory = FileManager.default.containerURL(
@@ -66,7 +77,7 @@ private final class ControlModel: ObservableObject {
                             volumeID: volumeID,
                             keys: keys,
                             loadedKeys: (info["loadedKeys"] as? NSNumber)?.intValue ?? 0,
-                            details: "Volume: \(identifier)\nBlock size: \(blockSize) bytes\nBlocks: \(blocks), free: \(freeBlocks)",
+                            details: "Mode: \(info["readOnly"] as? Bool == false ? "Read-write" : "Read-only")\nVolume: \(identifier)\nBlock size: \(blockSize) bytes\nBlocks: \(blocks), free: \(freeBlocks)",
                             retainReadState: settings["retainReadState"] as? Bool ?? true
                         ))
                     } catch {
@@ -81,6 +92,7 @@ private final class ControlModel: ObservableObject {
                 ? "Mount an ext4 volume, then refresh. Only active extension instances appear here."
                 : "\(found.count) active volume(s).")
             DispatchQueue.main.async {
+                self.deviceServiceStatus = serviceStatus
                 self.volumes = completed
                 self.status = message
                 self.busy = false
@@ -176,6 +188,10 @@ struct MachlinExt4App: App {
                     Button("Refresh") { model.refresh() }.disabled(model.busy)
                 }
                 Text("Enable the extension in System Settings → General → Login Items & Extensions → File System Extensions.")
+                HStack {
+                    Button("Enable disk writing…") { model.enableWriting() }.disabled(model.busy)
+                    Text("Disk service: \(model.deviceServiceStatus)").foregroundStyle(.secondary)
+                }
                 Text(model.status).foregroundStyle(.secondary)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
@@ -208,7 +224,7 @@ struct MachlinExt4App: App {
                         }
                     }
                 }
-                Text("Block-device mounts currently use read-only mode. Settings affect this mounted instance only.")
+                Text("Writing requires the approved disk service and writable media. Settings affect this mounted instance only.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .padding(24)

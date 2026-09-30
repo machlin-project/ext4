@@ -35,7 +35,8 @@ separately. AES and key
 management are adapter services, while the core has portable SHA, ARM64 userspace
 SHA-256 acceleration and metadata checksums.
 
-Both native adapters remain read-only. The [FSKit adapter](docs/FSKIT.md) requires
+The FSKit write path is implemented and undergoing installed acceptance; the
+kernel adapter remains read-only. The [FSKit adapter](docs/FSKIT.md) requires
 macOS 26.5 or later and
 uses held inode state, restricted kernel read mappings, user xattr reads and an
 App Group Unix socket for the control app. The app and extension build with Apple
@@ -44,8 +45,9 @@ Installed tests on stock macOS 26.5.2 pass ordinary reads, inode ownership and
 timestamps, signed control IPC and fscrypt v2 key import/read/removal across mounts.
 The arm64e
 kext has read-only acceptance in a dedicated custom-kernel VM; x86_64 has compilation
-evidence. Native writes, page-cache integration for mutation, ACL enforcement and
-LXNU policy follow core review, with FSKit first. FSKit has a CommonCrypto provider
+evidence. FSKit mutation callbacks pass 1 KiB and 4 KiB component roundtrips and
+independent fsck; its signed device service, native writable cache behavior,
+ACL enforcement and LXNU policy have separate acceptance requirements. FSKit has a CommonCrypto provider
 and Keychain-backed mount keys; native fscrypt v1 acceptance and the kernel
 encryption provider remain pending.
 

@@ -16,15 +16,21 @@ struct ext4_native_crypto;
 		   resourceOwner:(id)resourceOwner
 			  crypto:(struct ext4_native_crypto *)crypto;
 @property(nonatomic, strong) NSError *keyStoreError;
+@property(nonatomic, strong) NSError *writeAvailabilityError;
+/* Set only before activation, after a successful writable core mount. */
+@property(nonatomic) BOOL writable;
 - (NSError *)checkMountEligibility;
 - (void)invalidate;
 
 @end
 
 @interface Ext4Volume (FileIO) <FSVolumeReadWriteOperations, FSVolumeOpenCloseOperations,
-    FSVolumeXattrOperations, FSVolumeKernelOffloadedIOOperations>
+    FSVolumeXattrOperations, FSVolumeKernelOffloadedIOOperations, FSVolumeItemDeactivation>
 @end
 
 @interface Ext4Volume (Control)
 - (NSDictionary *)controlRequest:(NSDictionary *)request;
+@end
+
+@interface Ext4Volume (Mutation) <FSVolumePreallocateOperations>
 @end

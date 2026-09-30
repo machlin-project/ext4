@@ -8,8 +8,9 @@ establish installed FSKit behavior.
 
 The filesystem object owns resource loading and maintenance requests.
 `Ext4ResourceIO` retains the block resource and supplies exact, bounded direct
-reads. Aligned requests use the caller's buffer; unaligned requests use a checked
-bounce buffer. Short transfers are errors. The adapter does not mix direct and
+reads and writes. Aligned requests use the caller's buffer; unaligned reads use a
+checked bounce buffer and unaligned writes preserve both surrounding edges with
+read-modify-write. Short transfers are errors. The adapter does not mix direct and
 metadata-cache I/O on overlapping ranges.
 
 Resource probing validates the image through the core and returns `usable` for
@@ -38,16 +39,58 @@ through release and unmount. On macOS 27, conditional reclaim uses the same moni
 as lookup publication. On older systems, a hold survives until FSKit releases its
 last strong item reference. Both paths need installed concurrency acceptance.
 
-The open/close protocol rejects write and read/write opens with `EROFS` before
-the kernel can admit cached writes or shared writable mappings. Item lifetime
-continues to own inode holds independently of the open count. This complements
-the requested read-only mount flag; acceptance checks both contracts separately.
+The open/close protocol rejects write access on read-only mounts before the
+kernel admits cached writes or shared writable mappings. Writable mounts use the
+FSKit data cache and core I/O callbacks, with kernel block mappings inhibited.
+The last-use notification for an open-unlinked item releases its core hold and
+reclaims storage. A descriptor close alone does not release it while mappings or
+other users remain. Deactivation clears remaining holds without I/O and releases
+the block resource, even if the framework retains stale item objects.
 
 Regular, block-aligned files with ordinary extent or indirect data can supply
 validated mappings to FSKit's kernel I/O path. Inline, encrypted and verity files
 retain core reads. Partial EOF blocks also retain core reads to avoid exposing
 stale on-disk padding. These mappings require an immutable read-only block
-resource. Writable mapping lifetime and cache invalidation are separate work.
+resource. Writable volumes use normal FSKit cached I/O instead of exporting maps.
+
+## Writable devices and persistence
+
+The app bundles a ServiceManagement launch daemon whose operations are a health
+query, binding a validated block-device name and synchronizing that device's cache.
+A separate small setup application registers it through `SMAppService`; macOS
+requires approval in Login Items & Extensions. The control app's **Enable disk
+writing** button opens this utility. macOS 14.2 and later prohibit a sandboxed app
+from registering an unsandboxed daemon, as documented by
+[Apple DTS](https://developer.apple.com/forums/thread/802443). The utility handles
+installation only and does not participate in mounted filesystem I/O. Remount
+after enabling the service; a mounted instance never changes its storage contract
+in place. This installer arrangement targets direct macOS distribution.
+
+The extension/control app and daemon authenticate each other with code-signing
+requirements for exact peer identifiers and their own signing Team ID. The App Group-prefixed
+Mach service is `group.org.machlin.ext4.device-barrier`. Each connection pins one
+device descriptor after checking its type and geometry. The daemon uses the public
+`DKIOCSYNCHRONIZECACHE` ioctl, with no general ioctl, file-data or descriptor transfer
+interface. All filesystem operations and journal ownership remain in the extension.
+The control app and extension retain their sandboxes. The setup utility runs as
+the ordinary user without a sandbox; only the narrow daemon runs as root.
+
+Writable admission requires writable media, a usable service connection and a
+successful device barrier. An unavailable service leaves the volume read-only;
+`getInfo.writeUnavailableReason` reports the cause. Once admitted, a failed or
+timed-out barrier fails the core transaction; it never acknowledges persistence.
+Public FSKit metadata-buffer flushing alone is not used as a device barrier.
+Signed installed acceptance of this path is separate from component tests.
+
+The mutation engine handles file/directory/symlink creation, links, unlink/rmdir,
+rename and replacement, partial writes, sparse growth, truncate, owner/mode/time
+changes and user xattrs. Namespace changes advance directory verifiers. Data
+changes conservatively remove set-ID bits and Linux file capabilities in the same
+transaction because 26.x callbacks lack caller credentials. Immutable/append flags
+map to privileged Darwin system flags; `nodump` maps to the user flag.
+Extent preallocation supports physical-EOF and persistent requests. Contiguous or
+all-or-nothing allocation and combined size/owner changes remain explicitly
+unsupported until the core can carry their full atomic contract.
 
 Directory enumeration uses the core's streaming visitor, validating and reading
 each directory block once per call. A synchronous packing callback supplies names,
@@ -61,7 +104,8 @@ checks and inode-read errors keep their existing contracts.
 Both the app and extension declare `group.org.machlin.ext4`. The App Group must
 be registered and included in both provisioning profiles. The transport resolves
 the container through FileManager; there is no guessed container path, additional
-extension point, privileged broker or filesystem data transport.
+extension point or filesystem data transport. This application control endpoint
+is separate from the restricted device-barrier service.
 
 Each mounted instance publishes a randomly named Unix stream socket and discovery
 manifest at the App Group root. Short names accommodate the Unix socket path limit;
@@ -119,6 +163,8 @@ actual enabled state, independently of PlugInKit's election marker.
 ```sh
 app='/Applications/Machlin ext4.app/Contents/MacOS/Machlin ext4'
 "$app" --control modules
+"$app" --control device-service
+"$app" --control device-service setup
 "$app" --control list
 "$app" --control request ENDPOINT ping
 "$app" --control request ENDPOINT getCapabilities
@@ -225,17 +271,18 @@ and installed acceptance on each supported OS version.
 | File reads | Held state and restricted kernel mapping; mounted read/mmap/EOF checks on 26.5.2 | Native cache/reclaim stress, resource failures and removal |
 | User xattrs | Read/list Linux user namespace; macOS names omit the namespace prefix | Native roundtrip and writable policy; Linux ACL/security/trusted namespaces stay hidden |
 | IPC and GUI | Signed same-user App Group RPC, live settings and normal unmount cleanup on 26.5.2 | Root-mounted/user-app coordination, crash recovery and GUI workflow acceptance |
-| Writes | Portable core has mutations and durability | Device persistence contract, native mutation/authorization/cache integration |
+| Writes | Mutation callbacks, bounded resource writes, authenticated device-barrier service; 1/4 KiB component roundtrips and independent fsck | Signed installed service admission, native mutation/authorization/cache acceptance and device failures |
 | Crypto and ACLs | CommonCrypto fscrypt provider; signed Keychain sharing and mounted v2 encrypted reads on 26.5.2 | Native v1 fixtures, verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
 | Maintenance | Clean read-only quick check | Native recovery flow and full check/repair tooling |
 
-**Block-device mounts remain read-only.** The public SDK documents direct writes
+The public SDK documents direct writes
 and a metadata buffer-cache flush, but does not establish that a barrier persists
 all preceding writes through device volatile caches. It also does not expose the
 backing descriptor for a device-cache ioctl. The core's flush callback requires
 that guarantee between journal commit phases. Callback completion or a cache flush
-cannot be substituted without confirming the contract. This is an unresolved
-integration contract, not proof that durable FSKit writes are impossible.
+cannot be substituted without confirming the contract. The bundled device-barrier
+service implements a separate public-API path; it requires native acceptance before
+the driver can claim durable block-device writes.
 The published Apple HFS extension is only a probe: its load method returns ENOTSUP,
 and its descriptor access imports a private FSKit header. It does not establish a
 public device-barrier path for third-party journaled writers.

@@ -2914,8 +2914,9 @@ these builds add no installed or mounted native acceptance.
 
 The app and embedded extension compile using the macOS 27 SDK with deployment
 target macOS 26.5. The adapter maps resource I/O, inode identity, attributes,
-lookup, directory cookies, links and reads to the same C library. Mutations return
-`EROFS`; its requested mount options include read-only. Only a quick clean-volume
+lookup, directory cookies, links, reads and mutations to the same C library.
+Read-only resources and explicit read-only loads reject mutation with `EROFS`.
+Only a quick clean-volume
 check is implemented; it is not a full consistency checker or repair utility.
 
 The app and embedded extension build both unsigned and with personal Apple
@@ -3001,6 +3002,26 @@ and attached devices are cleaned up, and image hashes remain unchanged. Native r
 reports are in `artifacts/ext4-encrypt/fskit-searchable-{1k,4k}/`, both under the lab.
 This establishes installed fscrypt v2 and signed Keychain sharing for the same user
 on 26.5.2, separately from ownership preservation and unaccepted writes.
+
+The writable adapter now passes standalone component scenarios for both 1 KiB
+and 4 KiB images: creation, links, symlinks, replacement rename, user xattrs,
+set-ID stripping, shrink/sparse growth, physical-EOF preallocation, immutable
+flags, concurrent writes, held open-unlinked files, remount and injected write or
+barrier failure. Independent nonrepairing `e2fsck -fn` accepts both changed images.
+Resource tests additionally cover aligned and unaligned writes, preserved edge
+bytes, bounds, short transfers, failed read-modify-write and failed barriers.
+These checks are in `artifacts/checks/fskit-write/`. They do not establish native
+page-cache coherence, device persistence or installed write behavior.
+
+The app now packages a signed device-cache service and a separate installation
+utility. GUI and extension remain sandboxed. The initial attempt to register an
+unsandboxed daemon directly from the sandboxed GUI was rejected; modern macOS
+explicitly prohibits that arrangement. The corrected package passes strict nested
+signature checks, including the setup utility and helper. Installed service
+approval, mutual XPC authentication and native write acceptance remain separate
+requirements. `scripts/test_fskit_installed_write.py` runs ordinary-user mounted
+mutations, a read-only remount, byte/metadata verification, resource cleanup and
+independent fsck of exported guest images. The runner never mounts on the host.
 
 ## Kernel build evidence
 

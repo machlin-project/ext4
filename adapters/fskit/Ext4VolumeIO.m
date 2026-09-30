@@ -5,8 +5,32 @@
 #include <sys/xattr.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 @implementation Ext4Volume (FileIO)
+
+- (FSItemDeactivationOptions)itemDeactivationPolicy
+{
+	return self.writable ? FSItemDeactivationForRemovedItems : FSItemDeactivationNever;
+}
+
+- (void)deactivateItem:(FSItem *)file replyHandler:(void (^)(NSError *))reply
+{
+	@synchronized(self) {
+		Ext4Item *item = (Ext4Item *)file;
+		enum ext4_result error = [self validateItem:item];
+
+		/* VNOP_INACTIVE is the last-use boundary, including mappings. Closing a
+		 * descriptor alone must never discard an open-unlinked file's storage. */
+		if (error == EXT4_OK && self.writable && item->inode.links == 0) {
+			[self releaseHold:item->hold];
+			item->hold = NULL;
+			[_items removeObjectForKey:@(item->inode.number)];
+			error = _lifetimeError;
+		}
+		reply(ext4_error(error));
+	}
+}
 
 - (BOOL)isOpenCloseInhibited
 {
@@ -22,7 +46,7 @@
 
 		/* Refuse write access before the kernel admits cached writes or shared
 		 * writable mappings, independently of the exported mount flags. */
-		if (result == EXT4_OK && (modes & FSVolumeOpenModesWrite) != 0) {
+		if (result == EXT4_OK && !self.writable && (modes & FSVolumeOpenModesWrite) != 0) {
 			result = EXT4_READ_ONLY;
 		}
 		reply(ext4_error(result));
@@ -94,10 +118,28 @@
 	     atOffset:(off_t)offset
 	 replyHandler:(void (^)(size_t, NSError *))reply
 {
-	(void)contents;
-	(void)item;
-	(void)offset;
-	reply(0, ext4_error(EXT4_READ_ONLY));
+	@synchronized(self) {
+		Ext4Item *owned = (Ext4Item *)item;
+		struct ext4_inode_update update;
+		struct ext4_xattr_change change;
+		size_t completed = 0;
+		enum ext4_result error = [self validateMutation:owned];
+
+		if (error == EXT4_OK && (offset < 0 || contents == nil)) {
+			error = EXT4_INVALID_ARGUMENT;
+		}
+		if (error == EXT4_OK) {
+			error = [self writeUpdateForItem:owned update:&update change:&change];
+		}
+		if (error == EXT4_OK) {
+			error = ext4_write_partial(_fs, owned->inode.number,
+			    owned->inode.generation, (uint64_t)offset, contents.bytes,
+			    contents.length, &update, &completed);
+		}
+		/* The core reports only durably committed bytes. Keep a partial prefix
+		 * visible to POSIX; subsequent operations still observe a poisoned owner. */
+		reply(completed, completed != 0 ? nil : ext4_error(error));
+	}
 }
 
 - (void)createFileNamed:(FSFileName *)name
@@ -282,11 +324,63 @@
 	       policy:(FSSetXattrPolicy)policy
 	 replyHandler:(void (^)(NSError *))reply
 {
-	(void)name;
-	(void)value;
-	(void)item;
-	(void)policy;
-	reply(ext4_error(EXT4_READ_ONLY));
+	@synchronized(self) {
+		Ext4Item *owned = (Ext4Item *)item;
+		NSData *key = name.data;
+		struct timespec now;
+		struct ext4_inode inode = { 0 };
+		struct ext4_xattr_change change = { .name_index = EXT4_XATTR_USER,
+			.name = key.bytes,
+			.name_length = key.length,
+			.value = value.bytes,
+			.value_size = value.length };
+		struct ext4_inode_update update = { .fields =
+							EXT4_ATTR_XATTRS | EXT4_ATTR_CHANGE_TIME,
+			.xattrs = &change,
+			.xattr_count = 1 };
+		enum ext4_result error = [self validateMutation:owned];
+
+		if (error == EXT4_OK &&
+		    (key.length == 0 || key.length > XATTR_MAXNAMELEN ||
+			memchr(key.bytes, 0, key.length) != NULL ||
+			value.length > (NSUInteger)self.maximumXattrSize)) {
+			error = EXT4_INVALID_ARGUMENT;
+		}
+		if (error == EXT4_OK) {
+			switch (policy) {
+			case FSSetXattrPolicyAlwaysSet:
+				change.policy = EXT4_XATTR_SET;
+				break;
+			case FSSetXattrPolicyMustCreate:
+				change.policy = EXT4_XATTR_CREATE;
+				break;
+			case FSSetXattrPolicyMustReplace:
+				change.policy = EXT4_XATTR_REPLACE;
+				break;
+			case FSSetXattrPolicyDelete:
+				change.policy = EXT4_XATTR_REMOVE;
+				change.value = NULL;
+				change.value_size = 0;
+				break;
+			default:
+				error = EXT4_INVALID_ARGUMENT;
+				break;
+			}
+		}
+		clock_gettime(CLOCK_REALTIME, &now);
+		update.change_time = (struct ext4_timestamp){ now.tv_sec, (uint32_t)now.tv_nsec };
+		if (error == EXT4_OK) {
+			error = ext4_set_attributes(
+			    _fs, owned->inode.number, owned->inode.generation, &update, &inode);
+		}
+		if (error == EXT4_OK) {
+			owned->inode = inode;
+		}
+		reply(error == EXT4_NOT_FOUND ? [NSError errorWithDomain:NSPOSIXErrorDomain
+								    code:ENOATTR
+								userInfo:nil]
+					      : ext4_error(error));
+	}
 }
 
 @end

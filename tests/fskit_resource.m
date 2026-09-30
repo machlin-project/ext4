@@ -4,7 +4,7 @@
 #include <errno.h>
 #include <string.h>
 
-@interface MemoryBlocks : NSObject <Ext4BlockReader>
+@interface MemoryBlocks : NSObject <Ext4BlockWriter, Ext4PersistenceBarrier>
 @property uint64_t blockSize;
 @property uint64_t blockCount;
 @property uint64_t physicalBlockSize;
@@ -12,10 +12,41 @@
 @property void *lastBuffer;
 @property BOOL shortRead;
 @property BOOL fail;
+@property BOOL shortWrite;
+@property BOOL failWrite;
+@property BOOL failBarrier;
+@property size_t writes;
+@property size_t barriers;
 @property NSMutableData *bytes;
 @end
 
 @implementation MemoryBlocks
+
+- (BOOL)synchronizeWithError:(NSError **)error
+{
+	self.barriers++;
+	if (self.failBarrier) {
+		*error = [NSError errorWithDomain:NSPOSIXErrorDomain code:EIO userInfo:nil];
+	}
+	return !self.failBarrier;
+}
+
+- (size_t)writeFrom:(void *)buffer
+	 startingAt:(off_t)offset
+	     length:(size_t)length
+	      error:(NSError **)error
+{
+	self.writes++;
+	assert(offset >= 0 && (uint64_t)offset % self.physicalBlockSize == 0);
+	assert(length % self.physicalBlockSize == 0);
+	assert((uint64_t)offset + length <= self.bytes.length);
+	if (self.failWrite) {
+		*error = [NSError errorWithDomain:NSPOSIXErrorDomain code:EIO userInfo:nil];
+		return 0;
+	}
+	memcpy((uint8_t *)self.bytes.mutableBytes + offset, buffer, length);
+	return self.shortWrite ? length - 1 : length;
+}
 
 - (size_t)readInto:(void *)buffer
 	startingAt:(off_t)offset
@@ -83,6 +114,40 @@ main(void)
 		assert([io readAt:0 buffer:output length:512] == EXT4_IO);
 		memset(output, 0xa5, sizeof(output));
 		assert([io readAt:1 buffer:output length:1] == EXT4_IO && output[0] == 0xa5);
+		blocks.fail = NO;
+		assert([io writeAt:0 buffer:output length:512] == EXT4_READ_ONLY);
+		assert([io synchronize] == EXT4_READ_ONLY && blocks.writes == 0);
+		[io enableWritesWithBarrier:blocks deviceName:@"memory"];
+		memset(output, 0x5a, sizeof(output));
+		assert([io writeAt:1024 buffer:output length:512] == EXT4_OK);
+		assert(memcmp(source + 1024, output, 512) == 0);
+		assert(
+		    source[1023] == (uint8_t)(1023 * 17) && source[1536] == (uint8_t)(1536 * 17));
+		assert([io writeAt:511 buffer:output length:514] == EXT4_OK);
+		assert(
+		    memcmp(source + 511, output, 514) == 0 && source[510] == (uint8_t)(510 * 17));
+		assert([io writeAt:4095 buffer:output length:1] == EXT4_OK && source[4095] == 0x5a);
+		calls = blocks.writes;
+		assert([io writeAt:4096 buffer:NULL length:0] == EXT4_OK);
+		assert([io writeAt:4096 buffer:output length:1] == EXT4_IO);
+		assert([io writeAt:UINT64_MAX buffer:output length:1] == EXT4_IO);
+		assert([io writeAt:1 buffer:output length:SIZE_MAX] == EXT4_IO);
+		assert([io writeAt:0 buffer:NULL length:1] == EXT4_IO && blocks.writes == calls);
+		blocks.fail = YES;
+		assert([io writeAt:1 buffer:output length:1] == EXT4_IO && blocks.writes == calls);
+		blocks.fail = NO;
+		blocks.shortRead = YES;
+		assert([io writeAt:1 buffer:output length:1] == EXT4_IO && blocks.writes == calls);
+		blocks.shortRead = NO;
+		blocks.shortWrite = YES;
+		assert([io writeAt:0 buffer:output length:512] == EXT4_IO);
+		blocks.shortWrite = NO;
+		blocks.failWrite = YES;
+		assert([io writeAt:1 buffer:output length:1] == EXT4_IO);
+		blocks.failWrite = NO;
+		assert([io synchronize] == EXT4_OK && blocks.barriers == 1);
+		blocks.failBarrier = YES;
+		assert([io synchronize] == EXT4_IO && blocks.barriers == 2);
 		blocks.physicalBlockSize = 0;
 		assert([[Ext4ResourceIO alloc] initWithReader:blocks] == nil);
 		blocks.physicalBlockSize = 511;
@@ -94,7 +159,7 @@ main(void)
 		blocks.blockSize = 0;
 		assert([[Ext4ResourceIO alloc] initWithReader:blocks] == nil);
 		puts("PASS FSKit resource: aligned direct I/O, unaligned bounds, short reads and "
-		     "failures");
+		     "failures; write guards, read-only admission and persistence failures");
 	}
 	return 0;
 }

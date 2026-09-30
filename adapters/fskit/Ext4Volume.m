@@ -131,6 +131,9 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 
 - (void)dealloc
 {
+	if (_mmpTimer != nil) {
+		dispatch_source_cancel(_mmpTimer);
+	}
 	[_control stop];
 	ext4_unmount(_fs);
 	ext4_native_crypto_destroy(_crypto);
@@ -140,7 +143,11 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 {
 	@synchronized(self) {
 		if (hold != NULL) {
-			(void)ext4_release_inode(hold);
+			enum ext4_result error = ext4_release_inode(hold);
+
+			if (error != EXT4_OK && _lifetimeError == EXT4_OK) {
+				_lifetimeError = error;
+			}
 		}
 	}
 }
@@ -157,6 +164,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 			*error = EXT4_STALE;
 			return nil;
 		}
+		item->inode = *inode;
 		return item;
 	}
 	*error = ext4_get_xattr(_fs, inode->number, inode->generation, EXT4_XATTR_POSIX_ACL_ACCESS,
@@ -175,6 +183,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	item->inode = *inode;
 	item->hold = hold;
 	item->owner = self;
+	[self changedDirectory:item];
 	[_items setObject:item forKey:@(inode->number)];
 	return item;
 }
@@ -185,7 +194,10 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	    item->hold == NULL) {
 		return EXT4_STALE;
 	}
-	return EXT4_OK;
+	if (_lifetimeError != EXT4_OK) {
+		return _lifetimeError;
+	}
+	return self.writable ? ext4_refresh_inode(item->hold, &item->inode) : EXT4_OK;
 }
 
 - (BOOL)canOffload:(const struct ext4_inode *)inode
@@ -193,7 +205,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	/* FSKit retains mappings after blockmap returns. Until writable cache
 	 * invalidation is accepted, only immutable read-only mappings are supplied.
 	 * Partial EOF blocks stay on the core path, which always clips to size. */
-	return _resource != nil && ext4_inode_can_map_read(inode) &&
+	return !self.writable && _resource != nil && ext4_inode_can_map_read(inode) &&
 	    inode->size % _info.block_size == 0;
 }
 
@@ -211,6 +223,9 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 		attributes.size = inode->size;
 		attributes.allocSize = inode->blocks_512 * 512U;
 		attributes.fileID = inode->number;
+		attributes.flags = ((inode->flags & EXT4_INODE_IMMUTABLE) ? SF_IMMUTABLE : 0) |
+		    ((inode->flags & EXT4_INODE_APPEND) ? SF_APPEND : 0) |
+		    ((inode->flags & EXT4_INODE_NODUMP) ? UF_NODUMP : 0);
 		attributes.inhibitKernelOffloadedIO = ![self canOffload:inode];
 		time.tv_nsec = inode->modify_time.nanoseconds;
 		time.tv_sec = inode->modify_time.seconds;
@@ -228,6 +243,74 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 		}
 		return attributes;
 	}
+}
+
+- (void)createItemNamed:(FSFileName *)name
+		   type:(FSItemType)type
+	    inDirectory:(FSItem *)directory
+	     attributes:(FSItemSetAttributesRequest *)attributes
+	   replyHandler:(void (^)(FSItem *, FSFileName *, NSError *))reply
+{
+	[self createNamed:name
+		     type:type
+		   parent:directory
+	       attributes:attributes
+		     link:nil
+		    reply:reply];
+}
+
+- (void)createSymbolicLinkNamed:(FSFileName *)name
+		    inDirectory:(FSItem *)directory
+		     attributes:(FSItemSetAttributesRequest *)attributes
+		   linkContents:(FSFileName *)contents
+		   replyHandler:(void (^)(FSItem *, FSFileName *, NSError *))reply
+{
+	[self createNamed:name
+		     type:FSItemTypeSymlink
+		   parent:directory
+	       attributes:attributes
+		     link:contents
+		    reply:reply];
+}
+
+- (void)createLinkToItem:(FSItem *)item
+		   named:(FSFileName *)name
+	     inDirectory:(FSItem *)directory
+	    replyHandler:(void (^)(FSFileName *, NSError *))reply
+{
+	[self linkItem:item named:name inDirectory:directory replyHandler:reply];
+}
+
+- (void)removeItem:(FSItem *)item
+	     named:(FSFileName *)name
+     fromDirectory:(FSItem *)directory
+      replyHandler:(void (^)(NSError *))reply
+{
+	[self deleteItem:item named:name fromDirectory:directory replyHandler:reply];
+}
+
+- (void)renameItem:(FSItem *)item
+       inDirectory:(FSItem *)sourceDirectory
+	     named:(FSFileName *)sourceName
+	 toNewName:(FSFileName *)destinationName
+       inDirectory:(FSItem *)destinationDirectory
+	  overItem:(FSItem *)overItem
+      replyHandler:(void (^)(FSFileName *, NSError *))reply
+{
+	[self moveItem:item
+	     inDirectory:sourceDirectory
+		   named:sourceName
+	       toNewName:destinationName
+	     inDirectory:destinationDirectory
+		overItem:overItem
+	    replyHandler:reply];
+}
+
+- (void)setAttributes:(FSItemSetAttributesRequest *)request
+	       onItem:(FSItem *)item
+	 replyHandler:(void (^)(FSItemAttributes *, NSError *))reply
+{
+	[self changeAttributes:request onItem:item replyHandler:reply];
 }
 
 - (NSInteger)maximumLinkCount
@@ -263,9 +346,10 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 - (FSMountOptions)requestedMountOptions
 {
 #if DEBUG
-	NSLog(@"Machlin ext4 requested read-only mount flags");
+	NSLog(
+	    @"Machlin ext4 requested %@ mount flags", self.writable ? @"read-write" : @"read-only");
 #endif
-	return FSMountOptionsReadOnly;
+	return self.writable ? 0 : FSMountOptionsReadOnly;
 }
 
 - (FSVolumeSupportedCapabilities *)supportedVolumeCapabilities
@@ -279,7 +363,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	capabilities.supportsFastStatFS = YES;
 	/* Read-only is a mount policy; ext4 retains POSIX permissions and owners. */
 	capabilities.doesNotSupportSettingFilePermissions = NO;
-	capabilities.doesNotSupportImmutableFiles = YES;
+	capabilities.doesNotSupportImmutableFiles = NO;
 	capabilities.caseFormat = FSVolumeCaseFormatSensitive;
 	return capabilities;
 }
@@ -290,11 +374,14 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 		FSStatFSResult *statistics =
 		    [[FSStatFSResult alloc] initWithFileSystemTypeName:@"machlinext4"];
 
+		if (_fs != NULL) {
+			ext4_get_info(_fs, &_info);
+		}
 		statistics.blockSize = _info.block_size;
 		statistics.ioSize = _info.block_size;
 		statistics.totalBlocks = _info.blocks;
 		statistics.freeBlocks = _info.free_blocks;
-		statistics.availableBlocks = 0;
+		statistics.availableBlocks = self.writable ? _info.free_blocks : 0;
 		statistics.usedBlocks = _info.blocks - _info.free_blocks;
 		statistics.totalFiles = _info.inodes;
 		statistics.freeFiles = _info.free_inodes;
@@ -314,6 +401,29 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 			return;
 		}
 		_mounted = YES;
+		if (self.writable && _info.mmp_interval != 0 && _mmpTimer == nil) {
+			__weak Ext4Volume *weakSelf = self;
+			uint64_t interval = (uint64_t)_info.mmp_interval * NSEC_PER_SEC;
+
+			_mmpTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+			    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+			dispatch_source_set_timer(_mmpTimer,
+			    dispatch_time(DISPATCH_TIME_NOW, (int64_t)interval), interval, 0);
+			dispatch_source_set_event_handler(_mmpTimer, ^{
+			  Ext4Volume *volume = weakSelf;
+
+			  if (volume == nil) {
+				  return;
+			  }
+			  @synchronized(volume) {
+				  if (volume->_active && volume->_mounted &&
+				      volume->_lifetimeError == EXT4_OK) {
+					  volume->_lifetimeError = ext4_mmp_update(volume->_fs);
+				  }
+			  }
+			});
+			dispatch_resume(_mmpTimer);
+		}
 		[self startControl];
 		reply(nil);
 	}
@@ -325,6 +435,16 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	NSLog(@"Machlin ext4 unmount callback");
 #endif
 	@synchronized(self) {
+		if (self.writable && _lifetimeError == EXT4_OK) {
+			_lifetimeError = ext4_sync(_fs);
+			if (_lifetimeError == EXT4_OK) {
+				_lifetimeError = ext4_mmp_release(_fs);
+			}
+		}
+		if (_mmpTimer != nil) {
+			dispatch_source_cancel(_mmpTimer);
+			_mmpTimer = nil;
+		}
 		_mounted = NO;
 		[_control stop];
 		_control = nil;
@@ -335,9 +455,13 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 - (void)synchronizeWithFlags:(FSSyncFlags)flags replyHandler:(void (^)(NSError *))reply
 {
 	@synchronized(self) {
+		enum ext4_result error = !_active ? EXT4_STALE : _lifetimeError;
+
 		(void)flags;
-		/* The read-only implementation has no pending writes or dirty metadata. */
-		reply(nil);
+		if (error == EXT4_OK && self.writable) {
+			error = ext4_sync(_fs);
+		}
+		reply(ext4_error(error));
 	}
 }
 
@@ -463,7 +587,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 			reply(current, ext4_error(error));
 			return;
 		}
-		current = (uint64_t)parent->inode.generation + 1;
+		current = parent->directoryVersion;
 		if (verifier != FSDirectoryVerifierInitial && verifier != current) {
 			reply(current,
 			    [NSError errorWithDomain:NSPOSIXErrorDomain code:ESTALE userInfo:nil]);
@@ -518,87 +642,29 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	}
 }
 
-- (void)createItemNamed:(FSFileName *)name
-		   type:(FSItemType)type
-	    inDirectory:(FSItem *)directory
-	     attributes:(FSItemSetAttributesRequest *)newAttributes
-	   replyHandler:(void (^)(FSItem *, FSFileName *, NSError *))reply
-{
-	(void)name;
-	(void)type;
-	(void)directory;
-	(void)newAttributes;
-	reply(nil, nil, ext4_error(EXT4_READ_ONLY));
-}
-
-- (void)createSymbolicLinkNamed:(FSFileName *)name
-		    inDirectory:(FSItem *)directory
-		     attributes:(FSItemSetAttributesRequest *)newAttributes
-		   linkContents:(FSFileName *)contents
-		   replyHandler:(void (^)(FSItem *, FSFileName *, NSError *))reply
-{
-	(void)name;
-	(void)directory;
-	(void)newAttributes;
-	(void)contents;
-	reply(nil, nil, ext4_error(EXT4_READ_ONLY));
-}
-
-- (void)createLinkToItem:(FSItem *)item
-		   named:(FSFileName *)name
-	     inDirectory:(FSItem *)directory
-	    replyHandler:(void (^)(FSFileName *, NSError *))reply
-{
-	(void)item;
-	(void)name;
-	(void)directory;
-	reply(nil, ext4_error(EXT4_READ_ONLY));
-}
-
-- (void)renameItem:(FSItem *)item
-       inDirectory:(FSItem *)sourceDirectory
-	     named:(FSFileName *)sourceName
-	 toNewName:(FSFileName *)destinationName
-       inDirectory:(FSItem *)destinationDirectory
-	  overItem:(FSItem *)overItem
-      replyHandler:(void (^)(FSFileName *, NSError *))reply
-{
-	(void)item;
-	(void)sourceDirectory;
-	(void)sourceName;
-	(void)destinationName;
-	(void)destinationDirectory;
-	(void)overItem;
-	reply(nil, ext4_error(EXT4_READ_ONLY));
-}
-
-- (void)removeItem:(FSItem *)item
-	     named:(FSFileName *)name
-     fromDirectory:(FSItem *)directory
-      replyHandler:(void (^)(NSError *))reply
-{
-	(void)item;
-	(void)name;
-	(void)directory;
-	reply(ext4_error(EXT4_READ_ONLY));
-}
-
-- (void)setAttributes:(FSItemSetAttributesRequest *)newAttributes
-	       onItem:(FSItem *)item
-	 replyHandler:(void (^)(FSItemAttributes *, NSError *))reply
-{
-	(void)newAttributes;
-	(void)item;
-	reply(nil, ext4_error(EXT4_READ_ONLY));
-}
-
 - (void)invalidate
 {
 	@synchronized(self) {
+		if (_mmpTimer != nil) {
+			dispatch_source_cancel(_mmpTimer);
+			_mmpTimer = nil;
+		}
 		_active = NO;
 		_mounted = NO;
 		[_control stop];
 		_control = nil;
+		/* Deactivation follows FSKit's final sync and reclaim. Abandon any
+		 * remaining holds without I/O, including forced-removal orphans. Late
+		 * framework references must not retain an open device or release freed
+		 * core state from their eventual Objective-C dealloc. */
+		for (Ext4Item *item in _items.objectEnumerator) {
+			item->hold = NULL;
+		}
+		[_items removeAllObjects];
+		ext4_unmount(_fs);
+		_fs = NULL;
+		_resource = nil;
+		_resourceOwner = nil;
 	}
 }
 

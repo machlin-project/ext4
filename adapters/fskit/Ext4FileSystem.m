@@ -4,6 +4,7 @@
 #import "Ext4ResourceIO.h"
 #import "Ext4Support.h"
 #import "Ext4KeyStore.h"
+#import "Ext4DeviceBarrier.h"
 #include "Ext4Crypto.h"
 #include <errno.h>
 
@@ -123,9 +124,10 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 	struct ext4_info info;
 	NSError *keyError = nil;
 	NSError *loadError = nil;
+	NSError *writeError = nil;
+	BOOL writable = NO;
 	enum ext4_result error;
 
-	(void)options;
 	@synchronized(self) {
 		if (_volume != nil) {
 			loadError = [NSError errorWithDomain:NSPOSIXErrorDomain
@@ -133,6 +135,25 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 						    userInfo:nil];
 		} else {
 			error = ext4_open_resource(resource, &owner, &fs);
+			if (error == EXT4_OK && ![options.taskOptions containsObject:@"--rdonly"] &&
+			    [(FSBlockDeviceResource *)resource isWritable]) {
+				FSBlockDeviceResource *device = (FSBlockDeviceResource *)resource;
+				Ext4DeviceBarrier *barrier =
+				    [[Ext4DeviceBarrier alloc] initWithDevice:device.BSDName
+								    blockSize:device.blockSize
+								   blockCount:device.blockCount
+									error:&writeError];
+
+				if (barrier != nil) {
+					ext4_unmount(fs);
+					fs = NULL;
+					[owner enableWritesWithBarrier:(id<Ext4PersistenceBarrier>)
+									   barrier
+							    deviceName:device.BSDName];
+					error = [owner openWritable:&fs];
+					writable = error == EXT4_OK;
+				}
+			}
 			if (error == EXT4_OK) {
 				ext4_get_info(fs, &info);
 				crypto = [Ext4KeyStore
@@ -150,6 +171,8 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 				}
 			}
 			volume.keyStoreError = keyError;
+			volume.writeAvailabilityError = writeError;
+			volume.writable = writable;
 			loadError = ext4_error(error);
 			_volume = volume;
 			self.containerStatus = loadError == nil

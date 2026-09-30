@@ -508,6 +508,13 @@ enum ext4_result ext4_truncate(struct ext4_fs *fs, uint32_t number, uint32_t gen
 
 enum ext4_fallocate_flags { EXT4_FALLOC_KEEP_SIZE = 1U << 0, EXT4_FALLOC_PUNCH_HOLE = 1U << 1 };
 
+/* Byte offset just past the final allocated extent, including unwritten space
+ * beyond logical EOF. The owner supplies a current inode snapshot and serializes
+ * the query with mutations. Only extent-mapped regular files are supported;
+ * output is unchanged on error. This is not the inode's allocated byte count. */
+enum ext4_result ext4_allocation_end(
+    struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t *offset);
+
 /* Reserve a nonempty byte range, preserving existing data and allocating holes.
  * Reservation requires extent mapping and leaves new extents unwritten. It also
  * retains leaf capacity for later partial EOF growth through write_partial;

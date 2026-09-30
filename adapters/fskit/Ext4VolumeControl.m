@@ -43,6 +43,7 @@
 			return @{ @"result" : @{ @"reply" : @"pong" } };
 		}
 		if ([command isEqual:@"getInfo"]) {
+			ext4_get_info(_fs, &_info);
 			return @{
 				@"result" : @{
 					@"volume" : [[NSUUID alloc] initWithUUIDBytes:_info.uuid]
@@ -55,7 +56,10 @@
 					@"mounted" : @(_mounted),
 					@"loadedKeys" : @(ext4_native_crypto_count(_crypto)),
 					@"keyStoreAvailable" : @(self.keyStoreError == nil),
-					@"readOnly" : @YES,
+					@"readOnly" : @(!self.writable),
+					@"writeUnavailableReason" :
+						self.writeAvailabilityError.localizedDescription
+					    ?: NSNull.null,
 					@"featuresCompat" : @(_info.feature_compat),
 					@"featuresIncompat" : @(_info.feature_incompat),
 					@"featuresReadOnlyCompat" : @(_info.feature_ro_compat)
@@ -69,8 +73,8 @@
 						@"ping", @"getInfo", @"getCapabilities",
 						@"getSettings", @"setSettings", @"dropReadState"
 					],
-					@"durableWrites" : @NO,
-					@"kernelReadMapping" : @YES,
+					@"durableWrites" : @(self.writable),
+					@"kernelReadMapping" : @(!self.writable),
 					@"aclAuthorization" : @NO,
 					@"keyManagement" : @YES,
 					@"keyStorage" : @"keychain",

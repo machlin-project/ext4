@@ -82,6 +82,13 @@ jobs:
             2>&1 | tee artifacts/fskit-ci/reports/volume-1k.log
           artifacts/fskit-ci/tests/fskit-volume artifacts/fskit-ci/fixtures/ext4-indexed.img \
             2>&1 | tee artifacts/fskit-ci/reports/volume-indexed.log
+          artifacts/fskit-ci/tests/fskit-mutation artifacts/fskit-ci/fixtures/ext4-1k.img \
+            artifacts/fskit-ci/tests/fskit-mutated-1k.img \
+            2>&1 | tee artifacts/fskit-ci/reports/mutation-1k.log
+          e2fsck -fn artifacts/fskit-ci/tests/fskit-mutated.img \
+            2>&1 | tee artifacts/fskit-ci/reports/mutation-fsck-4k.log
+          e2fsck -fn artifacts/fskit-ci/tests/fskit-mutated-1k.img \
+            2>&1 | tee artifacts/fskit-ci/reports/mutation-fsck-1k.log
       - name: Preserve build and test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

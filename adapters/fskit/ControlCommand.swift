@@ -8,6 +8,7 @@ import Darwin
 enum ControlCommand {
     private static let usage = """
     Usage: Machlin ext4 --control modules
+           Machlin ext4 --control device-service [setup]
            Machlin ext4 --control list
            Machlin ext4 --control request ENDPOINT COMMAND [ARGUMENTS_JSON]
            Machlin ext4 --control keys VOLUME_UUID
@@ -61,6 +62,14 @@ enum ControlCommand {
         do {
             let result: Any
             switch (command, arguments.count) {
+            case ("device-service", 1):
+                result = ["status": DeviceService.status()]
+            case ("device-service", 2):
+                switch arguments[1] {
+                case "setup": try DeviceService.register()
+                default: throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
+                }
+                result = ["setupOpened": true]
             case ("modules", 1):
                 // Keep the main run loop free for FSKit's asynchronous completion.
                 DispatchQueue.global().asyncAfter(deadline: .now() + 10) {

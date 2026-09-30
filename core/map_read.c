@@ -446,6 +446,23 @@ ext4_extent_last_end(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_
 }
 
 enum ext4_result
+ext4_allocation_end(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t *offset)
+{
+	uint64_t blocks;
+	enum ext4_result error;
+
+	if (fs == NULL || inode == NULL || offset == NULL ||
+	    (inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	error = ext4_extent_last_end(fs, inode, &blocks);
+	if (error == EXT4_OK) {
+		*offset = blocks * fs->info.block_size;
+	}
+	return error;
+}
+
+enum ext4_result
 ext4_map_block(
     struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical, uint64_t *physical)
 {

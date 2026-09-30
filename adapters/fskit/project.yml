@@ -15,6 +15,50 @@ settings:
     MARKETING_VERSION: '0.1.0'
     CURRENT_PROJECT_VERSION: '1'
 targets:
+  Ext4DeviceBarrier:
+    type: tool
+    platform: macOS
+    sources:
+      - DeviceBarrierService.m
+      - Ext4PeerIdentity.m
+      - Ext4DeviceBarrier.h
+    dependencies:
+      - sdk: Foundation.framework
+      - sdk: Security.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.machlin.ext4.device-barrier
+        OTHER_CODE_SIGN_FLAGS: --identifier org.machlin.ext4.device-barrier
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        OTHER_CFLAGS: -Wdeclaration-after-statement
+        SKIP_INSTALL: YES
+  Ext4DeviceSetup:
+    type: application
+    platform: macOS
+    sources:
+      - DeviceSetup.swift
+      - path: group.org.machlin.ext4.device-barrier.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchDaemons
+    dependencies:
+      - target: Ext4DeviceBarrier
+        embed: true
+        link: false
+        copy:
+          destination: wrapper
+          subpath: Contents/Library/LaunchServices
+      - sdk: ServiceManagement.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.machlin.ext4.device-setup
+        GENERATE_INFOPLIST_FILE: YES
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Machlin ext4 Disk Service
+        SKIP_INSTALL: YES
   Ext4Core:
     type: library.static
     platform: macOS
@@ -37,9 +81,13 @@ targets:
       - Ext4Volume.h
       - Ext4VolumeInternal.h
       - Ext4VolumeIO.m
+      - Ext4VolumeMutation.m
       - Ext4VolumeControl.m
       - Ext4ResourceIO.m
       - Ext4ResourceIO.h
+      - Ext4DeviceBarrier.h
+      - Ext4DeviceBarrier.m
+      - Ext4PeerIdentity.m
       - Ext4Support.m
       - Ext4Support.h
       - Ext4Control.m
@@ -74,6 +122,10 @@ targets:
     sources:
       - App.swift
       - ControlCommand.swift
+      - DeviceService.swift
+      - Ext4DeviceBarrier.h
+      - Ext4DeviceBarrier.m
+      - Ext4PeerIdentity.m
       - Ext4Control.m
       - Ext4Control.h
       - Ext4Crypto.m
@@ -84,9 +136,16 @@ targets:
     dependencies:
       - target: Ext4FSKitExtension
         embed: true
+      - target: Ext4DeviceSetup
+        embed: true
+        link: false
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
       - sdk: Security.framework
       - sdk: LocalAuthentication.framework
       - sdk: FSKit.framework
+      - sdk: ServiceManagement.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.machlin.ext4
