@@ -201,6 +201,12 @@ enum ext4_result ext4_transaction_data(
  * or cancel the transaction on failure. No old-data read or clearing is needed. */
 enum ext4_result ext4_transaction_data_replace(
     struct ext4_transaction *transaction, uint64_t block, void **result);
+/* Stage one full data block from an immutable caller range. available bounds
+ * that range from source, permitting contiguous ordered writes. Keep it valid
+ * until commit/cancel returns. Commit owns a copy before retaining a journaled
+ * block; requesting a mutable snapshot detaches it before returning storage. */
+enum ext4_result ext4_transaction_data_source(
+    struct ext4_transaction *transaction, uint64_t block, const void *source, size_t available);
 /* Record blocks this transaction frees for ordered data's reuse rule. */
 void ext4_transaction_freed(struct ext4_transaction *transaction, uint64_t block, uint64_t length);
 /* Enroll a block whose previous contents the caller replaces completely: a new
@@ -225,15 +231,15 @@ uint32_t ext4_transaction_count(const struct ext4_transaction *transaction);
 void ext4_transaction_entry(const struct ext4_transaction *transaction, uint32_t index,
     uint64_t *block, const void **buffer);
 /* The transaction's snapshot of block, or NULL without enrolling it. */
-void *ext4_transaction_peek(const struct ext4_transaction *transaction, uint64_t block);
+const void *ext4_transaction_peek(const struct ext4_transaction *transaction, uint64_t block);
 uint32_t ext4_journal_credits(const struct ext4_journal *journal);
 /* Credit bound for begin_recovery conversions; never below the ordinary bound. */
 uint32_t ext4_journal_recovery_credits(const struct ext4_journal *journal);
 /* Both commit and cancel consume the transaction and release all snapshots. */
 enum ext4_result ext4_transaction_commit(struct ext4_transaction *transaction);
-/* A commit refused before any write, such as by quota enforcement, cancelled the
- * transaction and leaves the journal and its owner usable. */
-bool ext4_commit_rejected(enum ext4_result error);
+/* Quota or memory refusal before this operation's writes leaves its owner usable.
+ * The same status from a write/flush callback aborts the journal and is fatal. */
+bool ext4_commit_rejected(const struct ext4_journal *journal, enum ext4_result error);
 /* With deferred commit, make every merged operation durable as one transaction and
  * checkpoint it. Without pending operations it writes nothing. */
 enum ext4_result ext4_journal_commit(struct ext4_journal *journal);

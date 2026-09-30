@@ -143,18 +143,22 @@ write_device(void *context, uint64_t offset, const void *buffer, size_t length)
 	struct device *device = context;
 	struct pair *pair = device->pair;
 	const struct ext4_jbd_header *header = buffer;
+	size_t copied;
 	bool cut;
 
 	CHECK(offset <= device->size && length <= device->size - offset);
-	CHECK(length == pair->block_size && offset % pair->block_size == 0);
+	CHECK(length != 0 && length % pair->block_size == 0 && offset % pair->block_size == 0);
 	if (pair->off) {
 		return EXT4_IO;
 	}
 	pair->writes++;
 	cut = ++pair->events == pair->stop_at;
 	if (!cut || pair->partial) {
-		memcpy(device->cache + offset, buffer, cut ? length / 2U : length);
-		device->dirty[offset / pair->block_size] = 1;
+		copied = cut ? length / 2U + (length > pair->block_size ? EXT4_SECTOR_SIZE : 0U)
+			     : length;
+		memcpy(device->cache + offset, buffer, copied);
+		memset(device->dirty + offset / pair->block_size, 1,
+		    (copied + pair->block_size - 1U) / pair->block_size);
 	}
 	if (cut) {
 		power_cut(pair);

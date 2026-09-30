@@ -453,6 +453,7 @@ void ext4_quota_exempt(struct ext4_fs *fs, bool exempt);
  * metadata, size, permission bits, mtime and ctime share the transaction.
  * Those three attribute fields are required; XATTRS may also select an admitted
  * batch in the same transaction and is required when the inode has attributes.
+ * The buffer and admitted update stay immutable until the call returns.
  * completed is length only on success, otherwise zero; an I/O error can have a
  * committed outcome that must be resolved by recovery. Zero length is a no-op. */
 enum ext4_result ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation,
@@ -781,6 +782,13 @@ void ext4_drop_read_cache(struct ext4_inode_hold *hold);
  * ext4_read, or map it after ext4_sync. Failure leaves mapping unchanged. */
 enum ext4_result ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset,
     size_t length, struct ext4_mapping *mapping);
+/* The same native range contract, using the held inode's current snapshot and
+ * bounded mapping cache shared with ext4_read_held. Transaction invalidation,
+ * explicit refresh, memory-pressure eviction and lifetime are shared as well.
+ * Encryption/verity cannot bypass their checks through this API. A returned
+ * range is valid only while the owner's serialization prevents mutation. */
+enum ext4_result ext4_map_read_held(
+    struct ext4_inode_hold *hold, uint64_t offset, size_t length, struct ext4_mapping *mapping);
 
 enum ext4_dir_action { EXT4_DIR_ACCEPT, EXT4_DIR_ACCEPT_STOP, EXT4_DIR_STOP };
 

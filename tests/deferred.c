@@ -247,6 +247,8 @@ static uint32_t
 native_reads(struct ext4_fs *fs, const struct device *device)
 {
 	struct ext4_mapping mapping;
+	struct ext4_mapping held_mapping;
+	struct ext4_inode_hold *hold;
 	struct ext4_inode root;
 	struct ext4_inode directory;
 	struct ext4_inode inode;
@@ -272,14 +274,22 @@ native_reads(struct ext4_fs *fs, const struct device *device)
 		expected = malloc(length);
 		CHECK(expected != NULL);
 		pattern(expected, length, index == FILES ? 0 : index);
+		EXPECT(ext4_hold_inode(fs, inode.number, inode.generation, &hold), EXT4_OK);
 		for (offset = 0; offset < length; offset += span) {
 			error = ext4_map_read(fs, &inode, offset, length - offset, &mapping);
+			memset(&held_mapping, 0xa5, sizeof(held_mapping));
+			EXPECT(ext4_map_read_held(hold, offset, length - offset, &held_mapping),
+			    error);
 			if (error == EXT4_BUSY) {
+				CHECK(held_mapping.device_offset == UINT64_C(0xa5a5a5a5a5a5a5a5));
 				busy++;
 				span = device->block_size - (size_t)(offset % device->block_size);
 				continue;
 			}
 			EXPECT(error, EXT4_OK);
+			CHECK(held_mapping.device_offset == mapping.device_offset &&
+			    held_mapping.length == mapping.length &&
+			    held_mapping.hole == mapping.hole);
 			CHECK(!mapping.hole && mapping.length != 0);
 			span = mapping.length < length - offset ? mapping.length
 								: length - (size_t)offset;
@@ -287,6 +297,7 @@ native_reads(struct ext4_fs *fs, const struct device *device)
 			    memcmp(device->cache + mapping.device_offset, expected + offset,
 				span) == 0);
 		}
+		EXPECT(ext4_release_inode(hold), EXT4_OK);
 		free(expected);
 	}
 	return busy;

@@ -212,6 +212,13 @@ ext4_group_get(struct ext4_fs *fs, uint32_t group, struct ext4_group *result)
 	return error;
 }
 
+static uint64_t
+ext4_inode_group_offset(const struct ext4_fs *fs, const struct ext4_group *group, uint32_t number)
+{
+	return group->inode_table * fs->info.block_size +
+	    (uint64_t)((number - 1) % fs->inodes_per_group) * fs->inode_size;
+}
+
 enum ext4_result
 ext4_inode_location(struct ext4_fs *fs, uint32_t number, uint64_t *offset)
 {
@@ -223,8 +230,7 @@ ext4_inode_location(struct ext4_fs *fs, uint32_t number, uint64_t *offset)
 	}
 	error = ext4_group_get(fs, (number - 1) / fs->inodes_per_group, &group);
 	if (error == EXT4_OK) {
-		*offset = group.inode_table * fs->info.block_size +
-		    (uint64_t)((number - 1) % fs->inodes_per_group) * fs->inode_size;
+		*offset = ext4_inode_group_offset(fs, &group, number);
 	}
 	return error;
 }
@@ -266,21 +272,46 @@ out:
 	return error;
 }
 
+static enum ext4_result
+ext4_inode_group_allocated(struct ext4_fs *fs, uint32_t number, struct ext4_group *group)
+{
+	enum ext4_result error;
+
+	error = ext4_group_get(fs, (number - 1) / fs->inodes_per_group, group);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (group->flags & EXT4_GROUP_INODE_UNINIT) {
+		return EXT4_CORRUPT;
+	}
+	return ext4_bitmap_allocated(fs, group->inode_bitmap, fs->inodes_per_group,
+	    group->inode_bitmap_checksum, (number - 1) % fs->inodes_per_group);
+}
+
 enum ext4_result
 ext4_inode_allocated(struct ext4_fs *fs, uint32_t number)
 {
 	struct ext4_group group;
+
+	return ext4_inode_group_allocated(fs, number, &group);
+}
+
+enum ext4_result
+ext4_inode_resolve(struct ext4_fs *fs, uint32_t number, uint64_t *offset)
+{
+	struct ext4_group group;
 	enum ext4_result error;
 
-	error = ext4_group_get(fs, (number - 1) / fs->inodes_per_group, &group);
-	if (error != EXT4_OK) {
-		return error;
+	if (number == 0 || number > fs->info.inodes) {
+		return EXT4_INVALID_ARGUMENT;
 	}
-	if (group.flags & EXT4_GROUP_INODE_UNINIT) {
-		return EXT4_CORRUPT;
+	/* The serialized owner validates allocation and locates the record using
+	 * one checked descriptor. Publish no address if bitmap validation fails. */
+	error = ext4_inode_group_allocated(fs, number, &group);
+	if (error == EXT4_OK) {
+		*offset = ext4_inode_group_offset(fs, &group, number);
 	}
-	return ext4_bitmap_allocated(fs, group.inode_bitmap, fs->inodes_per_group,
-	    group.inode_bitmap_checksum, (number - 1) % fs->inodes_per_group);
+	return error;
 }
 
 enum ext4_result

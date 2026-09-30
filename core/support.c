@@ -1,44 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "journal.h"
 
-void
-ext4_copy(void *destination, const void *source, size_t length)
-{
-	uint8_t *output = destination;
-	const uint8_t *input = source;
-	size_t index;
-
-	for (index = 0; index < length; index++) {
-		output[index] = input[index];
-	}
-}
-
-void
-ext4_zero(void *destination, size_t length)
-{
-	uint8_t *output = destination;
-	size_t index;
-
-	for (index = 0; index < length; index++) {
-		output[index] = 0;
-	}
-}
-
-bool
-ext4_equal(const void *left, const void *right, size_t length)
-{
-	const uint8_t *a = left;
-	const uint8_t *b = right;
-	size_t index;
-
-	for (index = 0; index < length; index++) {
-		if (a[index] != b[index]) {
-			return false;
-		}
-	}
-	return true;
-}
-
 /* Nibble remainders for the non-reflected IEEE polynomial used by JBD2 v1.
  * Seed and final-complement conventions remain with the caller. */
 _Static_assert(EXT4_CRC32_POLYNOMIAL == 0x04c11db7U, "CRC32 table polynomial");

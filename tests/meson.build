@@ -3,6 +3,8 @@
 # required cases; missing images fail tests instead of silently removing them.
 paths = {}
 test('range-index', programs['ranges'], suite: 'core')
+test('memory-bounds', programs['memory'], suite: 'core')
+test('memory-portable-bounds', programs['memory-portable'], suite: 'core')
 test('hash-streams-and-nokey-names', programs['hash'], suite: 'core')
 test('journal-live-read-ranges', programs['journal-read'], suite: 'core')
 test('journal-snapshot-ownership', programs['journal-transfer'], suite: 'core')

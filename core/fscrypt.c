@@ -668,7 +668,7 @@ ext4_set_encryption_policy(struct ext4_fs *fs, uint32_t number, uint32_t generat
 	}
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
-		if (!ext4_commit_rejected(error)) {
+		if (!ext4_commit_rejected(fs->journal, error)) {
 			fs->aborted = true;
 		}
 		return error;

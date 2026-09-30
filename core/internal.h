@@ -227,6 +227,9 @@ enum ext4_result ext4_mmp_guard(struct ext4_fs *fs);
 bool ext4_system_block(const struct ext4_fs *fs, uint64_t block);
 bool ext4_system_overlaps(const struct ext4_fs *fs, uint64_t block, uint64_t length);
 enum ext4_result ext4_inode_location(struct ext4_fs *fs, uint32_t number, uint64_t *offset);
+/* Locate an allocated inode with one descriptor read and a checked bitmap.
+ * The exclusive owner keeps both observations stable; errors preserve offset. */
+enum ext4_result ext4_inode_resolve(struct ext4_fs *fs, uint32_t number, uint64_t *offset);
 enum ext4_result ext4_inode_decode(
     struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4_inode *inode);
 /* Offline orphan ownership may inspect allocated inodes with no links. */

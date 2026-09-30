@@ -121,25 +121,31 @@ device_write(void *context, uint64_t offset, const void *buffer, size_t length)
 	struct device *device = context;
 	size_t partial;
 
-	CHECK(!device->off && offset % device->block_size == 0 && length == device->block_size);
+	CHECK(!device->off && offset % device->block_size == 0 && length != 0 &&
+	    length % device->block_size == 0);
 	CHECK(offset <= device->size && length <= device->size - offset);
 	device->writes++;
 	if (++device->events == device->stop_at) {
 		if (device->partial) {
 			partial = length / 2;
+			if (length > device->block_size) {
+				/* Tear inside a block after the batch's complete prefix. */
+				partial += EXT4_SECTOR_SIZE;
+			}
 			if (offset ==
 			    (EXT4_SUPER_OFFSET / device->block_size) * device->block_size) {
 				partial = EXT4_SUPER_OFFSET % device->block_size + EXT4_SECTOR_SIZE;
 			}
 			memcpy(device->cache + offset, buffer, partial);
-			device->dirty[offset / device->block_size] = 1;
+			memset(device->dirty + offset / device->block_size, 1,
+			    (partial + device->block_size - 1U) / device->block_size);
 		}
 		device_persist(device, device->survival);
 		device->off = true;
 		return EXT4_IO;
 	}
 	memcpy(device->cache + offset, buffer, length);
-	device->dirty[offset / device->block_size] = 1;
+	memset(device->dirty + offset / device->block_size, 1, length / device->block_size);
 	if (device->journal_blocks[offset / device->block_size] &&
 	    ext4_be32(&((const struct ext4_jbd_header *)buffer)->magic) == EXT4_JBD_MAGIC &&
 	    ext4_be32(&((const struct ext4_jbd_header *)buffer)->type) == EXT4_JBD_COMMIT) {

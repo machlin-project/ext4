@@ -666,6 +666,35 @@ cached_leaves(struct model *model, struct ext4_inode *inode)
 }
 
 static void
+native_mapping_guards(struct model *model, const struct ext4_inode *inode)
+{
+	struct ext4_read_state state = { 0 };
+	struct ext4_inode_hold hold = { 0 };
+	struct ext4_mapping mapping;
+	struct ext4_mapping before;
+
+	model_reset(model);
+	state.inode = *inode;
+	state.revision = model->fs.read_revision;
+	hold.fs = &model->fs;
+	hold.references = 1;
+	hold.reader = &state;
+	memset(&mapping, 0xa5, sizeof(mapping));
+	memcpy(&before, &mapping, sizeof(before));
+	state.inode.flags = EXT4_INODE_EXTENTS | EXT4_INODE_ENCRYPT;
+	CHECK(ext4_map_read_held(&hold, 0, 1, &mapping) == EXT4_ENCRYPTED);
+	state.inode.flags = EXT4_INODE_EXTENTS | EXT4_INODE_VERITY;
+	CHECK(ext4_map_read_held(&hold, 0, 1, &mapping) == EXT4_UNSUPPORTED);
+	state.inode.flags = EXT4_INODE_INLINE_DATA;
+	CHECK(ext4_map_read_held(&hold, 0, 1, &mapping) == EXT4_UNSUPPORTED);
+	state.inode.mode = EXT4_MODE_DIRECTORY | 0755;
+	CHECK(ext4_map_read_held(&hold, 0, 1, &mapping) == EXT4_INVALID_ARGUMENT);
+	CHECK(memcmp(&before, &mapping, sizeof(before)) == 0);
+	CHECK(model->reads == 0 && model->allocations == 0);
+	puts("PASS held mappings preserve encryption, verity, inline and file-type guards");
+}
+
+static void
 logical_limit(struct model *model, struct ext4_inode *inode)
 {
 	struct ext4_mapping mapping;
@@ -725,6 +754,7 @@ main(void)
 			batched_reads(&model, &inode);
 			cached_leaves(&model, &inode);
 			indirect_cases(&model, &inode);
+			native_mapping_guards(&model, &inode);
 			logical_limit(&model, &inode);
 			CHECK(model.live == 0);
 			free(model.data);

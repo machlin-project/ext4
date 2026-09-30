@@ -60,10 +60,7 @@ ext4_refresh_inode(struct ext4_inode_hold *hold, struct ext4_inode *result)
 	if (fs->aborted) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
-	error = ext4_inode_allocated(fs, hold->number);
-	if (error == EXT4_OK) {
-		error = ext4_inode_location(fs, hold->number, &offset);
-	}
+	error = ext4_inode_resolve(fs, hold->number, &offset);
 	if (error != EXT4_OK) {
 		return error;
 	}

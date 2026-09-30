@@ -117,10 +117,7 @@ ext4_xattr_inode_read(struct ext4_fs *fs, uint32_t parent, uint32_t generation,
 	    ext4_le16(&entry->value_offset) != 0 || size == 0 || size > EXT4_XATTR_VALUE_MAX) {
 		return EXT4_CORRUPT;
 	}
-	error = ext4_inode_allocated(fs, number);
-	if (error == EXT4_OK) {
-		error = ext4_inode_location(fs, number, &location);
-	}
+	error = ext4_inode_resolve(fs, number, &location);
 	if (error != EXT4_OK) {
 		return error;
 	}

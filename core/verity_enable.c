@@ -128,7 +128,7 @@ ext4_verity_step_commit(struct ext4_verity_builder *builder, struct ext4_transac
 		return error;
 	}
 	error = ext4_transaction_commit(transaction);
-	if (error != EXT4_OK && !ext4_commit_rejected(error)) {
+	if (error != EXT4_OK && !ext4_commit_rejected(fs->journal, error)) {
 		fs->aborted = true;
 	}
 	return error;
@@ -540,7 +540,7 @@ ext4_verity_finish(struct ext4_verity_builder *builder, struct ext4_inode *resul
 	}
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
-		if (!ext4_commit_rejected(error)) {
+		if (!ext4_commit_rejected(fs->journal, error)) {
 			fs->aborted = true;
 		}
 		return error;

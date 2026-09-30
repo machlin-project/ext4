@@ -10,10 +10,12 @@ if cc.get_id() in ['clang', 'apple-clang']
 endif
 
 core_sources = files(
-  'core/support.c', 'core/mount.c', 'core/inode.c', 'core/read.c', 'core/read_io.c',
+  'core/support.c', 'core/memory.c', 'core/mount.c', 'core/inode.c',
+  'core/read.c', 'core/read_io.c', 'core/read_state.c',
   'core/map_read.c', 'core/directory.c',
   'core/directory_lookup.c', 'core/inline.c', 'core/inline_create.c',
-  'core/journal.c', 'core/journal_read.c', 'core/recovery.c', 'core/group.c', 'core/system.c',
+  'core/journal.c', 'core/transaction.c', 'core/journal_read.c',
+  'core/recovery.c', 'core/group.c', 'core/system.c',
   'core/fast_commit.c', 'core/fast_commit_replay.c',
   'core/allocate.c', 'core/cluster.c', 'core/map_write.c', 'core/write.c', 'core/orphan.c',
   'core/inode_allocate.c', 'core/inode_flags.c', 'core/namespace.c', 'core/lifetime.c',
@@ -51,7 +53,7 @@ posix_dependency = declare_dependency(link_with: ext4_posix,
 # Keep executable paths stable for the independent image and VM harnesses.
 programs = {}
 foreach name, source : {
-  'checksum': 'checksum', 'geometry': 'geometry', 'ranges': 'ranges', 'hash': 'hash',
+  'checksum': 'checksum', 'geometry': 'geometry', 'ranges': 'ranges', 'hash': 'hash', 'memory': 'memory',
   'xattr': 'xattr', 'xattr-write': 'xattr_write', 'xattr-lifetime': 'xattr_lifetime', 'space': 'space',
   'ea-inode': 'ea_inode', 'inline': 'inline', 'cluster': 'cluster',
   'directory-index': 'directory_index', 'directory-lookup': 'directory_lookup', 'index-write': 'index_write',
@@ -74,6 +76,9 @@ endforeach
 programs += {'hash-portable': executable('ext4-hash-portable-test',
   ['tests/hash.c', 'core/sha.c'], include_directories: internal_headers,
   dependencies: ext4_dependency, c_args: core_arguments + ['-DEXT4_SHA_PORTABLE'])}
+programs += {'memory-portable': executable('ext4-memory-portable-test',
+  ['tests/memory.c', 'core/memory.c'], include_directories: internal_headers,
+  dependencies: ext4_dependency, c_args: core_arguments + ['-DEXT4_MEMORY_PORTABLE'])}
 programs += {'directory-hash': executable('ext4-directory-hash-test', 'tests/directory_hash.c',
   include_directories: internal_headers, dependencies: ext4_dependency)}
 programs += {'crypto-vectors': executable('ext4-crypto-vectors-test', 'tests/crypto_vectors.c',

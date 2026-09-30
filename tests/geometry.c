@@ -106,6 +106,50 @@ layout_check(struct device *device, struct ext4_fs *fs, const char *expected, bo
 }
 
 static void
+resolve_inode(struct device *device, struct ext4_fs *fs, uint32_t number)
+{
+	uint64_t expected;
+	uint64_t offset;
+	uint32_t reads;
+	uint32_t allocations;
+	uint32_t live = device->live;
+	uint32_t fault;
+	unsigned int kind;
+
+	device->reads = device->allocations = 0;
+	EXPECT(ext4_inode_allocated(fs, number), EXT4_OK);
+	EXPECT(ext4_inode_location(fs, number, &expected), EXT4_OK);
+	reads = device->reads;
+	allocations = device->allocations;
+	device->reads = device->allocations = 0;
+	EXPECT(ext4_inode_resolve(fs, number, &offset), EXT4_OK);
+	CHECK(offset == expected && device->reads + 1U == reads &&
+	    device->allocations + 1U == allocations && device->live == live);
+	reads = device->reads;
+	allocations = device->allocations;
+	for (kind = 0; kind < 2U; kind++) {
+		for (fault = 1; fault <= (kind == 0 ? allocations : reads); fault++) {
+			offset = UINT64_MAX;
+			device->reads = device->allocations = 0;
+			device->fail_allocation = kind == 0 ? fault : 0;
+			device->fail_read = kind == 1 ? fault : 0;
+			EXPECT(ext4_inode_resolve(fs, number, &offset),
+			    kind == 0 ? EXT4_NO_MEMORY : EXT4_IO);
+			CHECK(offset == UINT64_MAX && device->live == live);
+			device->fail_allocation = device->fail_read = 0;
+		}
+	}
+	device->reads = device->allocations = 0;
+	offset = UINT64_MAX;
+	EXPECT(ext4_inode_resolve(fs, 0, &offset), EXT4_INVALID_ARGUMENT);
+	if (fs->info.inodes < UINT32_MAX) {
+		EXPECT(
+		    ext4_inode_resolve(fs, fs->info.inodes + 1U, &offset), EXT4_INVALID_ARGUMENT);
+	}
+	CHECK(offset == UINT64_MAX && device->reads == 0 && device->allocations == 0);
+}
+
+static void
 prepare(struct device *device, const char *expected)
 {
 	struct ext4_fs *fs = mount_writer(device);
@@ -135,6 +179,7 @@ prepare(struct device *device, const char *expected)
 		    EXT4_OK);
 		group = (inode.number - 1U) / fs->inodes_per_group;
 		if (group != previous) {
+			resolve_inode(device, fs, inode.number);
 			memset(bytes, (int)(group + 1U), device->block_size + 3U);
 			EXPECT(ext4_write(fs, inode.number, inode.generation, 0, bytes,
 				   device->block_size + 3U, &write_update, &completed),

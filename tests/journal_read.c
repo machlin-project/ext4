@@ -87,6 +87,48 @@ snapshots(struct ext4_journal *owner, const uint64_t *blocks, uint8_t pattern, u
 }
 
 static void
+check_fragmented_map(uint32_t block_size)
+{
+	struct ext4_journal_run runs[] = { { 12, 0, 2 }, { 2, 2, 3 }, { 8, 5, 1 }, { 6, 6, 2 } };
+	static const uint32_t physical[] = { 12, 13, 2, 3, 4, 8, 6, 7 };
+	struct device device = { .size = (size_t)DEVICE_BLOCKS * block_size };
+	struct ext4_fs fs = { 0 };
+	struct ext4_journal journal = { .fs = &fs,
+		.runs = runs,
+		.run_count = sizeof(runs) / sizeof(runs[0]),
+		.blocks = sizeof(physical) / sizeof(physical[0]) + 1U };
+	uint8_t *output = malloc(block_size);
+	uint32_t logical;
+	size_t offset;
+
+	device.home = malloc(device.size);
+	CHECK(device.home != NULL && output != NULL);
+	for (offset = 0; offset < device.size; offset++) {
+		device.home[offset] = (uint8_t)(offset / block_size * 19U + offset % block_size);
+	}
+	fs.info.block_size = block_size;
+	fs.info.blocks = DEVICE_BLOCKS;
+	fs.environment = (struct ext4_environment){ &device, device.size, device_read,
+		device_allocate, device_release };
+	for (logical = 0; logical < sizeof(physical) / sizeof(physical[0]); logical++) {
+		CHECK(ext4_journal_read(&journal, logical, output) == EXT4_OK);
+		CHECK(memcmp(output, device.home + (size_t)physical[logical] * block_size,
+			  block_size) == 0);
+	}
+	CHECK(ext4_journal_read(&journal, logical, output) == EXT4_CORRUPT);
+	CHECK(ext4_journal_read(&journal, journal.blocks, output) == EXT4_CORRUPT);
+	CHECK(device.reads == logical && device.allocations == 0);
+	device.fail_read = device.reads + 1U;
+	CHECK(ext4_journal_read(&journal, 0, output) == EXT4_IO);
+	journal.run_count = 0;
+	CHECK(ext4_journal_read(&journal, 0, output) == EXT4_CORRUPT);
+	free(output);
+	free(device.home);
+	printf("PASS fragmented journal mapping: %u-byte blocks, run edges, gaps and I/O faults\n",
+	    block_size);
+}
+
+static void
 check_view(uint32_t block_size)
 {
 	static const uint64_t committed[] = { 8, 2, 4 };
@@ -190,6 +232,9 @@ check_view(uint32_t block_size)
 int
 main(void)
 {
+	check_fragmented_map(1024);
+	check_fragmented_map(4096);
+	check_fragmented_map(65536);
 	check_view(1024);
 	check_view(4096);
 	check_view(65536);

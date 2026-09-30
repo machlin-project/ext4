@@ -36,6 +36,17 @@ struct ext4_map_reader {
 	struct ext4_extent_cache *cache;
 };
 
+/* One held inode owns the checked snapshot and mapping cache for both copied
+ * reads and native block mappings. Neither consumer retains file data. */
+struct ext4_read_state {
+	struct ext4_inode inode;
+	struct ext4_map_reader mapping;
+	struct ext4_extent_cache cache;
+	uint64_t revision;
+};
+
+enum ext4_result ext4_read_state_get(struct ext4_inode_hold *hold, struct ext4_read_state **result);
+
 /* A zero-initialized reader uses one temporary block. An optional cache retains
  * leaves across calls for the same immutable inode snapshot and device view.
  * The owner must close the reader before changing either. */

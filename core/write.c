@@ -242,11 +242,7 @@ ext4_edit_inode_record(struct ext4_fs *fs, struct ext4_transaction *transaction,
 	    ext4_quota_system_inode(fs, number)) {
 		return EXT4_UNSUPPORTED;
 	}
-	error = ext4_inode_allocated(fs, number);
-	if (error != EXT4_OK) {
-		return error;
-	}
-	error = ext4_inode_location(fs, number, &offset);
+	error = ext4_inode_resolve(fs, number, &offset);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -286,7 +282,7 @@ ext4_edit_commit(struct ext4_fs *fs, struct ext4_transaction *transaction)
 
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
-		if (!ext4_commit_rejected(error)) {
+		if (!ext4_commit_rejected(fs->journal, error)) {
 			fs->aborted = true;
 		}
 	}
@@ -561,7 +557,7 @@ ext4_write_targets_add(struct ext4_write_targets *targets, uint32_t logical, uin
 static enum ext4_result
 ext4_write_data(struct ext4_allocation *allocation, struct ext4_write_targets *targets,
     const struct ext4_inode *inode, uint32_t logical, uint64_t physical, bool fresh, size_t within,
-    const void *source, size_t length)
+    const void *source, size_t length, size_t available)
 {
 	struct ext4_fs *fs = allocation->fs;
 	void *snapshot;
@@ -571,6 +567,11 @@ ext4_write_data(struct ext4_allocation *allocation, struct ext4_write_targets *t
 	error = ext4_write_targets_add(targets, logical, physical);
 	if (error != EXT4_OK) {
 		return error;
+	}
+	if (source != NULL && within == 0 && length == fs->info.block_size &&
+	    !(inode->flags & EXT4_INODE_ENCRYPT)) {
+		return ext4_transaction_data_source(
+		    allocation->transaction, physical, source, available);
 	}
 	error = replace
 	    ? ext4_transaction_data_replace(allocation->transaction, physical, &snapshot)
@@ -622,7 +623,7 @@ ext4_write_gap(struct ext4_allocation *allocation, const struct ext4_inode *inod
 			error = ext4_allocation_valid(allocation, run.physical);
 			if (error == EXT4_OK) {
 				error = ext4_write_data(allocation, targets, inode, logical,
-				    run.physical, false, within, NULL, (size_t)chunk);
+				    run.physical, false, within, NULL, (size_t)chunk, 0);
 			}
 			if (error != EXT4_OK) {
 				return error;
@@ -1119,9 +1120,9 @@ ext4_write_stage(struct ext4_write_edit *edit, struct ext4_inode *inode,
 		}
 		/* map_allocate already validated existing backing or allocated it from
 		 * a checked bitmap. The data edit still guards aliases between targets. */
-		error =
-		    ext4_write_data(allocation, &edit->targets, inode, (uint32_t)(logical + index),
-			physical, zero, within, range->data + consumed, chunk);
+		error = ext4_write_data(allocation, &edit->targets, inode,
+		    (uint32_t)(logical + index), physical, zero, within, range->data + consumed,
+		    chunk, range->length - consumed);
 		if (error != EXT4_OK) {
 			return error;
 		}

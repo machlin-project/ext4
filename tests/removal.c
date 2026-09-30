@@ -262,6 +262,7 @@ held_files(struct device *device)
 	struct ext4_inode_hold *duplicate;
 	struct ext4_inode_hold *other_hold;
 	struct ext4_inode_update update = write_attributes();
+	struct ext4_mapping mapping;
 	uint8_t *bytes = malloc(device->block_size);
 	uint8_t *observed = malloc(device->block_size);
 	uint64_t free_blocks;
@@ -280,6 +281,7 @@ held_files(struct device *device)
 	EXPECT(ext4_hold_inode(fs, file.number, file.generation, &hold), EXT4_OK);
 	EXPECT(ext4_hold_inode(fs, file.number, file.generation, &duplicate), EXT4_OK);
 	CHECK(hold == duplicate && fs->hold_count == 1 && hold->references == 2);
+	EXPECT(ext4_map_read_held(hold, 0, device->block_size, &mapping), EXT4_NOT_FOUND);
 	EXPECT(ext4_hold_inode(fs, other.number, other.generation, &other_hold), EXT4_OK);
 	for (block = 0; block < TEST_REMOVAL_DATA_BLOCKS; block++) {
 		EXPECT(ext4_write(fs, file.number, file.generation,
@@ -291,6 +293,12 @@ held_files(struct device *device)
 			   device->block_size, &completed),
 		    EXT4_OK);
 		CHECK(completed == device->block_size && memcmp(bytes, observed, completed) == 0);
+		EXPECT(ext4_map_read_held(hold, (uint64_t)block * device->block_size,
+			   device->block_size, &mapping),
+		    EXT4_OK);
+		CHECK(!mapping.hole && mapping.length == device->block_size &&
+		    mapping.device_offset <= device->size - device->block_size &&
+		    memcmp(device->cache + mapping.device_offset, bytes, device->block_size) == 0);
 	}
 	EXPECT(remove_inode(fs, &root, "held-file", &file, false, &result), EXT4_OK);
 	CHECK(result.links == 0 && hold->unlinked && fs->last_orphan == file.number);
@@ -334,6 +342,10 @@ held_files(struct device *device)
 	CHECK(result.links == 0 && result.size == 1 && fs->last_orphan == other.number);
 	EXPECT(ext4_read_held(hold, 0, observed, device->block_size, &completed), EXT4_OK);
 	CHECK(completed == 1 && observed[0] == bytes[0]);
+	EXPECT(ext4_map_read_held(hold, device->block_size, device->block_size, &mapping),
+	    EXT4_NOT_FOUND);
+	EXPECT(ext4_map_read_held(hold, 0, 2U * device->block_size, &mapping), EXT4_OK);
+	CHECK(mapping.length == device->block_size && !mapping.hole);
 	memset(bytes, 0x36, device->block_size);
 	EXPECT(ext4_write(fs, file.number, file.generation, device->block_size + 7, bytes, 13,
 		   &update, &completed),

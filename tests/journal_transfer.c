@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #define CHECK(expression)                                                                          \
 	do {                                                                                       \
@@ -24,6 +25,17 @@
 #define HOME_BYTE 0x11U
 #define ALLOCATION_BYTE 0xa5U
 
+enum source_case {
+	SOURCE_CONTIGUOUS,
+	SOURCE_BOUNDED,
+	SOURCE_FRAGMENTED,
+	SOURCE_LOGGED,
+	SOURCE_COMPOUND,
+	SOURCE_CHECKPOINT,
+	SOURCE_REUSED,
+	SOURCE_CASES
+};
+
 struct device {
 	uint8_t *home;
 	size_t size;
@@ -31,7 +43,9 @@ struct device {
 	size_t fail_allocation;
 	size_t live;
 	size_t writes;
+	size_t largest_write;
 	size_t fail_write;
+	enum ext4_result write_error;
 };
 
 static void *
@@ -78,8 +92,11 @@ device_write(void *context, uint64_t offset, const void *buffer, size_t length)
 	struct device *device = context;
 
 	CHECK(offset <= device->size && length <= device->size - offset);
+	if (length > device->largest_write) {
+		device->largest_write = length;
+	}
 	if (++device->writes == device->fail_write) {
-		return EXT4_IO;
+		return device->write_error == EXT4_OK ? EXT4_IO : device->write_error;
 	}
 	memcpy(device->home + offset, buffer, length);
 	return EXT4_OK;
@@ -159,6 +176,7 @@ check_transfer(uint32_t block_size, bool ordered, size_t fail_write)
 		device.fail_allocation = allocations + (attempt == 0 ? 1U : 2U);
 		error = ext4_transaction_commit(transaction);
 		CHECK(error == (attempt == 0 ? EXT4_NO_MEMORY : EXT4_OK));
+		CHECK(ext4_commit_rejected(&journal, error) == (attempt == 0));
 		CHECK(device.allocations == allocations + 1U);
 		CHECK(!journal.aborted && !journal.transaction_active && device.writes == 0);
 		if (attempt == 0) {
@@ -183,6 +201,7 @@ check_transfer(uint32_t block_size, bool ordered, size_t fail_write)
 	CHECK(error == (fail_write == 0 ? EXT4_OK : EXT4_IO));
 	CHECK(device.allocations == allocations && !journal.transaction_active);
 	CHECK(journal.aborted == (fail_write != 0));
+	CHECK(!ext4_commit_rejected(&journal, error));
 	CHECK(device.writes == (ordered ? (fail_write == 0 ? 2U : fail_write) : 0U));
 	CHECK(ext4_transaction_peek(journal.compound, METADATA_SECOND) == second);
 	check_bytes(second, 0x81U, block_size);
@@ -228,17 +247,167 @@ check_transfer(uint32_t block_size, bool ordered, size_t fail_write)
 	free(device.home);
 }
 
+/* Read-only source pages expose accidental writes or releases of caller memory.
+ * Ordered data can borrow them through the callback; retained data must detach
+ * before returning, including when an older compound/checkpoint owns the block. */
+static void
+check_source(uint32_t block_size, enum source_case kind, size_t fail_allocation, size_t fail_write,
+    enum ext4_result write_error)
+{
+	struct device device = { .size = (size_t)DEVICE_BLOCKS * block_size };
+	struct ext4_fs fs = { 0 };
+	struct ext4_block_range reused = { DATA_FIRST, 2 };
+	struct ext4_journal journal = { .fs = &fs,
+		.first = 1,
+		.last = DEVICE_BLOCKS,
+		.compound_blocks = COMPOUND_BLOCKS,
+		.ordered_data = kind != SOURCE_LOGGED };
+	struct ext4_transaction *transaction;
+	uint8_t *source;
+	void *buffer;
+	const void *retained;
+	uint32_t second = DATA_SECOND + (kind == SOURCE_FRAGMENTED ? 1U : 0U);
+	size_t allocations;
+	size_t live;
+	bool retain_first = kind >= SOURCE_LOGGED;
+	bool retain_second = kind == SOURCE_LOGGED || kind == SOURCE_REUSED;
+	enum ext4_result error;
+
+	device.home = malloc(device.size);
+	source =
+	    mmap(NULL, 2U * block_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	CHECK(device.home != NULL && source != MAP_FAILED);
+	memset(device.home, HOME_BYTE, device.size);
+	memset(source, 0xc1U, block_size);
+	memset(source + block_size, 0xd1U, block_size);
+	CHECK(mprotect(source, 2U * block_size, PROT_READ) == 0);
+	fs.info.block_size = block_size;
+	fs.info.blocks = DEVICE_BLOCKS;
+	fs.environment = (struct ext4_environment){ &device, device.size, device_read,
+		device_allocate, device_release };
+	fs.journal = &journal;
+	journal.writer.context = &device;
+	journal.writer.write = device_write;
+
+	/* Mutable access detaches an immutable view, including replacement requests.
+	 * An allocation refusal must not expose the source as writable storage. */
+	CHECK(ext4_transaction_begin(&journal, TRANSACTION_CREDITS, &transaction) == EXT4_OK);
+	allocations = device.allocations;
+	CHECK(ext4_transaction_data_source(transaction, DATA_FIRST, source, block_size - 1U) ==
+	    EXT4_INVALID_ARGUMENT);
+	CHECK(ext4_transaction_count(transaction) == 0);
+	CHECK(ext4_transaction_data_source(transaction, DATA_FIRST, source, 2U * block_size) ==
+	    EXT4_OK);
+	CHECK(device.allocations == allocations);
+	CHECK(ext4_transaction_peek(transaction, DATA_FIRST) == source);
+	device.fail_allocation = allocations + 1U;
+	buffer = (void *)source;
+	CHECK(ext4_transaction_data_replace(transaction, DATA_FIRST, &buffer) == EXT4_NO_MEMORY);
+	CHECK(buffer == NULL && ext4_transaction_peek(transaction, DATA_FIRST) == source);
+	device.fail_allocation = 0;
+	CHECK(ext4_transaction_buffer(transaction, DATA_FIRST, &buffer) == EXT4_OK);
+	CHECK(buffer != source);
+	check_bytes(buffer, 0xc1U, block_size);
+	memset(buffer, 0x71U, block_size);
+	check_bytes(source, 0xc1U, block_size);
+	CHECK(ext4_transaction_data_source(
+		  transaction, DATA_FIRST, source + block_size, block_size) == EXT4_OK);
+	CHECK(ext4_transaction_peek(transaction, DATA_FIRST) == buffer);
+	check_bytes(buffer, 0xd1U, block_size);
+	ext4_transaction_cancel(transaction);
+	CHECK(device.live == 0 && device.writes == 0);
+
+	if (kind == SOURCE_COMPOUND || kind == SOURCE_CHECKPOINT) {
+		CHECK(
+		    ext4_transaction_begin(&journal, TRANSACTION_CREDITS, &transaction) == EXT4_OK);
+		stage(transaction, DATA_FIRST, false, 0x51U);
+		CHECK(ext4_transaction_commit(transaction) == EXT4_OK);
+		if (kind == SOURCE_CHECKPOINT) {
+			journal.checkpoint = journal.compound;
+			journal.compound = NULL;
+		}
+	}
+	if (kind == SOURCE_REUSED) {
+		journal.freed = &reused;
+		journal.freed_count = 1;
+	}
+	live = device.live;
+	CHECK(ext4_transaction_begin(&journal, TRANSACTION_CREDITS, &transaction) == EXT4_OK);
+	stage(transaction, METADATA_FIRST, false, 0x41U);
+	allocations = device.allocations;
+	CHECK(ext4_transaction_data_source(transaction, DATA_FIRST, source,
+		  kind == SOURCE_BOUNDED ? block_size : 2U * block_size) == EXT4_OK);
+	CHECK(ext4_transaction_data_source(transaction, second, source + block_size, block_size) ==
+	    EXT4_OK);
+	CHECK(device.allocations == allocations);
+	device.fail_allocation = fail_allocation == 0 ? 0 : allocations + fail_allocation;
+	device.fail_write = fail_write;
+	device.write_error = write_error;
+	error = ext4_transaction_commit(transaction);
+	CHECK(error ==
+	    (fail_allocation != 0 ? EXT4_NO_MEMORY : (fail_write != 0 ? write_error : EXT4_OK)));
+	CHECK(!journal.transaction_active && journal.aborted == (fail_write != 0));
+	CHECK(ext4_commit_rejected(&journal, error) == (fail_allocation != 0));
+	check_bytes(source, 0xc1U, block_size);
+	check_bytes(source + block_size, 0xd1U, block_size);
+	CHECK(mprotect(source, 2U * block_size, PROT_READ | PROT_WRITE) == 0);
+	memset(source, 0xffU, 2U * block_size);
+	if (error == EXT4_OK) {
+		retained = ext4_transaction_peek(journal.compound, DATA_FIRST);
+		CHECK((retained != NULL) == retain_first && retained != source);
+		check_bytes(retain_first ? retained : device.home + DATA_FIRST * block_size, 0xc1U,
+		    block_size);
+		retained = ext4_transaction_peek(journal.compound, second);
+		CHECK((retained != NULL) == retain_second && retained != source + block_size);
+		check_bytes(retain_second ? retained : device.home + second * block_size, 0xd1U,
+		    block_size);
+		CHECK(device.writes ==
+		    (retain_second ? 0U : (retain_first || kind == SOURCE_CONTIGUOUS ? 1U : 2U)));
+		CHECK(device.largest_write ==
+		    (kind == SOURCE_CONTIGUOUS ? 2U * block_size
+					       : (retain_second ? 0U : block_size)));
+	} else if (fail_allocation != 0) {
+		CHECK(device.writes == 0 && device.live == live);
+		check_bytes(device.home, HOME_BYTE, device.size);
+	}
+	check_bytes(device.home + METADATA_FIRST * block_size, HOME_BYTE, block_size);
+	if (journal.checkpoint != NULL) {
+		check_bytes(
+		    ext4_transaction_peek(journal.checkpoint, DATA_FIRST), 0x51U, block_size);
+	}
+	ext4_transaction_cancel(journal.compound);
+	ext4_transaction_cancel(journal.checkpoint);
+	CHECK(device.live == 0);
+	CHECK(munmap(source, 2U * block_size) == 0);
+	free(device.home);
+}
+
 int
 main(void)
 {
 	static const uint32_t block_sizes[] = { EXT4_MIN_BLOCK_SIZE, 4096U, EXT4_MAX_BLOCK_SIZE };
 	size_t index;
 	size_t fail_write;
+	enum source_case kind;
+	size_t fail_allocation;
 
 	for (index = 0; index < sizeof(block_sizes) / sizeof(block_sizes[0]); index++) {
 		check_transfer(block_sizes[index], false, 0);
 		for (fail_write = 0; fail_write <= 2; fail_write++) {
 			check_transfer(block_sizes[index], true, fail_write);
+		}
+		for (kind = SOURCE_CONTIGUOUS; kind < SOURCE_CASES; kind++) {
+			check_source(block_sizes[index], kind, 0, 0, EXT4_OK);
+		}
+		check_source(block_sizes[index], SOURCE_CONTIGUOUS, 1, 0, EXT4_OK);
+		check_source(block_sizes[index], SOURCE_CONTIGUOUS, 0, 1, EXT4_IO);
+		check_source(block_sizes[index], SOURCE_FRAGMENTED, 0, 2, EXT4_IO);
+		/* Callback statuses cannot masquerade as pre-I/O admission refusals. */
+		check_source(block_sizes[index], SOURCE_FRAGMENTED, 0, 2, EXT4_NO_MEMORY);
+		check_source(block_sizes[index], SOURCE_CONTIGUOUS, 0, 1, EXT4_QUOTA_EXCEEDED);
+		for (fail_allocation = 1; fail_allocation <= 3; fail_allocation++) {
+			check_source(
+			    block_sizes[index], SOURCE_LOGGED, fail_allocation, 0, EXT4_OK);
 		}
 	}
 	puts("PASS journal snapshot ownership, allocation refusal and ordered write failures");

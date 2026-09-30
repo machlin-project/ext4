@@ -409,10 +409,7 @@ ext4_xattr_open(
 	if (fs->aborted) {
 		return EXT4_RECOVERY_REQUIRED;
 	}
-	error = ext4_inode_allocated(fs, number);
-	if (error == EXT4_OK) {
-		error = ext4_inode_location(fs, number, &offset);
-	}
+	error = ext4_inode_resolve(fs, number, &offset);
 	if (error != EXT4_OK) {
 		return error;
 	}

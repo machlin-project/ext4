@@ -18,11 +18,10 @@ ext4_mapping_node(struct ext4_fs *fs, uint64_t block, uint8_t **scratch)
 	return ext4_block_read(fs, block, *scratch);
 }
 
-enum ext4_result
-ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, size_t length,
-    struct ext4_mapping *mapping)
+static enum ext4_result
+ext4_map_reader_range(struct ext4_fs *fs, const struct ext4_inode *inode,
+    struct ext4_map_reader *reader, uint64_t offset, size_t length, struct ext4_mapping *mapping)
 {
-	uint8_t *scratch = NULL;
 	uint64_t block;
 	uint64_t logical;
 	uint64_t blocks;
@@ -52,10 +51,7 @@ ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offse
 	if (logical > UINT32_MAX) {
 		return EXT4_RANGE;
 	}
-	error = ext4_map_blocks(fs, inode, (uint32_t)logical, &scratch, &block, &blocks, NULL);
-	if (scratch != NULL) {
-		fs->environment.release(fs->environment.context, scratch, fs->info.block_size);
-	}
+	error = ext4_map_reader_next(fs, inode, reader, (uint32_t)logical, &block, &blocks);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -80,6 +76,38 @@ ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offse
 	mapping->length = bytes < length ? (size_t)bytes : length;
 	/* Native I/O may include padding in the final filesystem block only. */
 	return EXT4_OK;
+}
+
+enum ext4_result
+ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset, size_t length,
+    struct ext4_mapping *mapping)
+{
+	struct ext4_map_reader reader = { 0 };
+	enum ext4_result error;
+
+	error = ext4_map_reader_range(fs, inode, &reader, offset, length, mapping);
+	if (fs != NULL) {
+		ext4_map_reader_close(fs, &reader);
+	}
+	return error;
+}
+
+enum ext4_result
+ext4_map_read_held(
+    struct ext4_inode_hold *hold, uint64_t offset, size_t length, struct ext4_mapping *mapping)
+{
+	struct ext4_read_state *reader;
+	enum ext4_result error;
+
+	if (mapping == NULL || length == 0) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	error = ext4_read_state_get(hold, &reader);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	return ext4_map_reader_range(
+	    hold->fs, &reader->inode, &reader->mapping, offset, length, mapping);
 }
 
 /* leaf_end, when requested, receives the end of the selected leaf's last extent. */

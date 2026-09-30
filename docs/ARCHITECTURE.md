@@ -68,6 +68,13 @@ Mount validates geometry bounds and rejects the incompatible META_BG/RESIZE_INOD
 combination. Journal replay cannot change these captured geometry fields. Online
 filesystem resizing is not implemented. See the [ext4 block-group layouts](https://docs.kernel.org/filesystems/ext4/blockgroup.html).
 
+Checked inode resolution uses one descriptor for both allocation-bitmap validation
+and the record address. Writable inode edits, held-inode refresh and xattr reads
+share it under the serialized owner, avoiding a duplicate descriptor read and
+allocation. An error publishes no address; descriptor and bitmap checksums and
+the inode allocation bit retain their checks. Unchecked location remains separate
+for callers that must locate an inode before allocating it.
+
 BIGALLOC keeps extent offsets and public accounting in filesystem blocks, while
 group bitmaps and their on-disk free counts use clusters. The allocator rounds
 metadata allocations to whole clusters. A data hole first searches its logical
@@ -138,8 +145,12 @@ data uses the native UBC owner; the core must not introduce another file-page
 cache. Journal buffers and metadata transaction snapshots have explicit ownership.
 
 The journal owner admits one transaction at a time under the filesystem
-owner's serialization. Each transaction has bounded credits and private block
+owner's serialization. Each transaction has bounded credits and private metadata
 snapshots; affected metadata locks remain held through checkpoint completion.
+`core/transaction.c` owns enrollment, indexing, buffer lifetime and transfer into
+retained sets. `core/journal.c` owns admission to those sets, data/log ordering,
+barriers and checkpointing. Their private storage layout is in `transaction.h`;
+filesystem operations use the opaque transaction API in `journal.h`.
 The ordered sequence is: persist the recovery marker, publish the log start,
 persist log records and ordered data, persist the commit, persist home blocks,
 then clear the log start. Only a successful clean finish clears the filesystem's
@@ -194,6 +205,19 @@ because the old owner still references it until then, or when the compound alrea
 holds the block; each transaction records the ranges it frees, the compound keeps a
 sorted set of up to 4,096, and an overflow journals all data until the next durable
 commit.
+
+A complete unencrypted data block may initially borrow the caller's immutable
+input instead of allocating and copying another buffer. The view lasts only until
+the operation's commit or cancellation returns. A mutable snapshot request first
+detaches it into owned storage. After quota changes and before any device I/O,
+commit fixes the data/home decision once and makes an owned copy of every view
+that needs journal retention, including blocks protected by earlier frees or a
+compound/checkpoint version. A failed allocation cancels without publishing views.
+Retained sets therefore never reference caller memory. Selected ordered blocks
+are coalesced only when device addresses are consecutive and their sources lie
+within one explicitly bounded caller range; adjacent allocation addresses alone
+do not authorize coalescing. Partial blocks, encryption and zeroing retain owned
+snapshots. Ordering, error aborts and durability barriers are unchanged.
 
 `ext4_write_options.checkpoint_blocks` checkpoints lazily, as jbd2's checkpoint list
 does, in either commit mode. A committed transaction stays in the log, and its
@@ -1219,7 +1243,8 @@ ranges. Extent runs stop at extent and ancestor-index boundaries; legacy runs
 stop at their pointer-table boundary, while an absent ancestor represents its
 remaining sparse subtree. `core/map_read.c` owns traversal, validation and mapping
 state; `core/read_io.c` plans and delivers mapped byte ranges, while `core/read.c`
-owns inode snapshots, EOF, decryption and verity routing.
+owns EOF, decryption and verity routing. `core/read_state.c` owns held snapshots,
+cache invalidation and disposal, shared by copied reads and native mappings.
 Unwritten extents return zeros. An ordinary `ext4_read` allocates mapping
 scratch only when it reaches an external node and reuses that one block for the
 rest of the call. Once an extent leaf's checksum and every record have passed
@@ -1252,8 +1277,11 @@ earlier completed bytes remain valid. Callers requiring allocated data still sto
 at the first hole or unwritten extent. Encrypted-block decryption and verity
 verification retain their existing boundaries.
 
-`ext4_read_held` uses the existing inode hold as the owner of an optional read
-snapshot and bounded extent-leaf cache. Repeated holds share it. Fully checked
+`ext4_read_held` and `ext4_map_read_held` use the existing inode hold as the owner of
+an optional read snapshot and bounded extent-leaf cache. Repeated holds and both
+consumers share it. Native ranges retain the EOF-padding, journal-home, encryption
+and verity restrictions of `ext4_map_read`; they remain valid only under the same
+serialization that excludes mutation. Fully checked
 external leaves retain their ancestor interval; hits use binary search without
 metadata reads or allocations. Misses use the same checked descent as ordinary
 reads and transfer its buffer into the cache without copying. Round-robin eviction
@@ -1276,6 +1304,23 @@ same owner serialization as mutations. The backing view must otherwise remain
 stable; the ordinary snapshot API is still available for stateless reads.
 Encryption resolves keys and decrypts on each request, and verity still verifies
 data through its existing path; mapping reuse does not replace those checks.
+
+`core/memory.c` isolates the core's byte primitives. ARM64 zeroing of large normal
+memory ranges queries `DCZID_EL0`, uses `DC ZVA` only for permitted, fully contained,
+naturally aligned blocks, and handles both edges with ordinary stores. It requires
+no SIMD register ownership, mutable CPU-feature cache, heap buffer or OS service,
+and is available to both userspace and kernel builds. Other architectures,
+prohibited instructions, small ranges and `EXT4_MEMORY_PORTABLE` use ordinary
+stores. Core buffers are normal memory; platform callbacks own device-register
+access. Canary and guard-page tests cover the optimized and portable paths.
+
+Journal emission borrows each immutable snapshot directly for tag checksums and
+log submission. Only a payload starting with JBD2 magic uses an escaped scratch
+copy. V1 transaction checksums use that same encoded view in descriptor/data order,
+without changing the snapshot retained for live reads or checkpointing. Logical
+journal runs are admitted in order and resolved by binary search, without a new
+index or persistent cursor. Write ordering, barriers and recovery authority are
+unchanged.
 
 An indexed insertion reuses record slack, compacts a fragmented leaf, or splits
 the leaf at a balanced record boundary. Equal hashes retain the collision
