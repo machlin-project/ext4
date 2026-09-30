@@ -83,6 +83,60 @@ This is a control plane, not a raw disk editor. Unsupported commands return
 Each future mutation requires an owning core operation, caller authorization,
 cache/lifetime rules and acceptance tests. Keys and capabilities must not enter logs.
 
+## Command-line control
+
+For initial installation, enable the module in System Settings → General → Login
+Items & Extensions → **By Category → File System Extensions**. In the 26.5.2 test
+VM, the generic By App “FSKit Modules” switch did not enable FSKit admission.
+Check the result through `--control modules` before mounting; a PlugInKit `+`
+marker alone does not establish that FSKit enabled the module.
+
+The installed app executable also accepts `--control`, without opening a window.
+This uses the same signed sandbox, App Group, Keychain and RPC implementation as
+the GUI; an unsigned external socket client is not a substitute for this check.
+Each command writes JSON and exits nonzero on failure. `modules` queries FSKit's
+actual enabled state, independently of PlugInKit's election marker.
+
+```sh
+app='/Applications/Machlin ext4.app/Contents/MacOS/Machlin ext4'
+"$app" --control modules
+"$app" --control list
+"$app" --control request ENDPOINT ping
+"$app" --control request ENDPOINT getCapabilities
+"$app" --control request ENDPOINT setSettings '{"retainReadState":false}'
+"$app" --control request ENDPOINT getSettings
+"$app" --control request ENDPOINT setSettings '{"retainReadState":true}'
+"$app" --control keys VOLUME_UUID
+"$app" --control import-key VOLUME_UUID - < TEST_KEY_FILE
+"$app" --control remove-key VOLUME_UUID KEY_IDENTIFIER
+```
+
+Use the endpoint name and volume UUID returned by `list`. Endpoint selection is
+restricted to discovered manifests; output excludes their capability tokens.
+For headless fixture tests, redirect a mode `0600` synthetic key file into stdin.
+The importer requires exactly 64 binary bytes followed by EOF, bounds its input
+buffer and wipes it after use. Key bytes never enter command arguments or JSON.
+This avoids copying test keys into another process's protected app container.
+Passing a file path remains supported if the app already has sandbox access;
+arbitrary paths do not grant that access. The GUI retains its security-scoped file picker.
+An optional final import argument supplies the fscrypt v1 descriptor. Key changes
+still require a new mount; neither interface exports saved master keys.
+
+Use immutable filenames for artifacts transferred through a running VM's shared
+folder. Copy executables into the guest and compare their SHA-256 with the host
+artifact before running them. The test VM has returned old bytes after a host
+executable was replaced at the same shared path; an exit code without this check
+does not prove execution of the new diagnostic.
+
+The clean test VM runs the guest RPC agent as a user LaunchAgent with RunAtLoad
+and KeepAlive. It uses `--run-rpc` only. This permits CLI installation and tests
+in the logged-in session; it does not establish unattended startup before login.
+Normal updates copy a uniquely named archive into the guest, verify its hash,
+unmount task volumes, stop the old app and extension, install and verify both
+signed bundles, and register them with LaunchServices and PlugInKit. Check both
+bundle versions and `--control modules` after every update. System enablement
+persisted across these CLI updates; no repeated Settings interaction was needed.
+
 ## Encryption and key lifetime
 
 The native provider uses public CommonCrypto AES and HMAC operations. AES-256-XTS
@@ -140,11 +194,11 @@ and installed acceptance on each supported OS version.
 | Area | Implemented boundary | Remaining work |
 | --- | --- | --- |
 | Resource reads | Exact aligned and unaligned reads | Mounted resource failure and removal |
-| File reads | Held state and restricted kernel mapping | Installed I/O, mmap, EOF, cache and concurrent reclaim |
+| File reads | Held state and restricted kernel mapping; mounted read/mmap/EOF checks on 26.5.2 | Native cache/reclaim stress, resource failures and removal |
 | User xattrs | Read/list Linux user namespace; macOS names omit the namespace prefix | Native roundtrip and writable policy; Linux ACL/security/trusted namespaces stay hidden |
-| IPC and GUI | Entitlements, discovery, bounded authenticated RPC and live settings | Signed sandbox POC, same-user identity, unmount and extension restart on supported OS versions |
+| IPC and GUI | Signed same-user App Group RPC, live settings and normal unmount cleanup on 26.5.2 | Root-mounted/user-app coordination, crash recovery and GUI workflow acceptance |
 | Writes | Portable core has mutations and durability | Device persistence contract, native mutation/authorization/cache integration |
-| Crypto and ACLs | CommonCrypto fscrypt provider, immutable mount key set, app Keychain import/removal; protected files cannot bypass core reads | Signed Keychain sharing, mounted encrypted I/O, verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
+| Crypto and ACLs | CommonCrypto fscrypt provider; signed Keychain sharing and mounted v2 encrypted reads on 26.5.2 | Native v1 fixtures, verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
 | Maintenance | Clean read-only quick check | Native recovery flow and full check/repair tooling |
 
 **Block-device mounts remain read-only.** The public SDK documents direct writes
@@ -265,6 +319,33 @@ independent Linux guest verifier. Repeat with 1 KiB and 4 KiB images, then remov
 the key and prove a new mount denies encrypted reads. A component test or a
 successful Keychain import does not establish this mounted behavior.
 
+The repeatable encrypted acceptance runner executes every command through a
+specified Tart VM. It never installs or mounts on the host. Stage the two encrypted
+images and manifests, `ext4-mounted-manifest-test`, and the synthetic
+`fscrypt-fixture-v2.key` in the shared fixture directory. Keep the key mode `0600`.
+Generate exports with the current `ext4-encrypt-test --write` and verify them with
+`tests/run_linux_encrypt.py --verify-core`. Older exports used mode 0640 for
+directories and cannot test ordinary-user traversal; do not repair an old image
+in place or interpret that permissions failure as proof of key enforcement.
+From the absolute lab directory, with the signed app already installed and enabled:
+
+```sh
+python3 ../ext4/scripts/test_fskit_installed_encryption.py \
+  --tart scripts/tart.sh --vm ext4-fskit-stock-clean \
+  --fixtures artifacts/ext4-fskit/acceptance/searchable \
+  --guest-share '/Volumes/My Shared Files/lxnu-artifacts/ext4-fskit/acceptance/searchable' \
+  --guest-workdir /Users/admin/ext4-fskit-acceptance/encrypted-RUN \
+  --build-number BUILD \
+  --output artifacts/ext4-fskit/installed-clean/encrypted-RUN
+```
+
+Choose fresh work and report directories and the actual installed build number.
+The runner requires no active control endpoints, verifies transferred hashes and
+read-only attachments, and tests both block sizes. It checks missing-key denial,
+signed import, immutable current-mount keys, digest/EOF/symlink readback, removal,
+remount denial and endpoint cleanup. It removes only the fixture keys and its own
+mounts; failed steps and cleanup errors retain a failing status with command logs.
+
 ## Platform references
 
 - [App Groups entitlement](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.security.application-groups): IPC and container requirements.
@@ -294,8 +375,8 @@ The base VM had SIP disabled and Gatekeeper assessments enabled, so this run doe
 not establish behavior with ordinary macOS security settings.
 Normal unmount and device detach succeeded. The adapter now rejects write opens
 explicitly, with focused open/close tests passing; installed verification on the
-new minimum of macOS 26.5 remains pending. A deployment-target change alone does
-not establish that those runtime failures are fixed. These reports are in the
+new minimum is recorded separately below. A deployment-target change alone does
+not establish that runtime failures are fixed. These earlier reports are in the
 lab's `artifacts/ext4-fskit/installed/`.
 
 The focused adapter tests exercise direct versus bounced resource I/O,
@@ -334,3 +415,37 @@ a new mount without the keys refuses encrypted contents. The key-store test
 replaces the three Security storage entry points, checks exact query scope and
 failure behavior, and never accesses the host Keychain. Real signed Keychain access
 is not established by this test. Logs are in `artifacts/checks/fskit-crypto/`.
+
+## Installed evidence on macOS 26.5.2
+
+The restored test VM loads Apple's stock kernel with SIP and authenticated-root
+enabled. RPC, signed app updates and test execution now work through the CLI in
+the logged-in guest session. The installed signed app confirms actual FSKit
+enablement and passes same-user App Group IPC: ping, capabilities, settings and
+read-state invalidation. Normal unmount removes the endpoint. Key import through
+stdin succeeds without opening the GUI; a new extension instance loads the saved
+Keychain key while an existing mount keeps its original key set.
+
+On both 1 KiB and 4 KiB fixtures, the ordinary mounted suite passes read-only
+flags, file/directory reads, sparse data, links, private mmap/EOF, concurrent
+open/read/close and read-only admission. The metadata group remains failed at
+UID/GID: the actual user mount has `noowners`, exposing the mounting user's
+identity instead of the on-disk owners. Its later timestamp assertions have not
+run. Explicit `owners` on mount did not change the flags, and the public ownership
+configuration command requires root. Do not omit this failure or count the suite
+as passed. Reports are under the lab's `artifacts/ext4-fskit/installed-clean/`.
+
+The corrected encrypted exports pass independent Linux readback, no-key name
+comparison and `e2fsck`, then the native signed lifecycle runner passes both
+block sizes: all 36 manifest entries per image, including digests, EOF and symlink
+targets. The ordinary-user runner first proves plain-file access and encrypted
+inode lookup. With no saved key the encrypted read fails; import leaves that
+mount unchanged, and a fresh mount loads one key and reads all entries. Removing
+the saved key leaves the existing mount readable; the next mount has no loaded
+keys and denies the encrypted read. Final unmount removes each endpoint, and the
+test deletes its synthetic Keychain records and detaches its read-only images.
+Evidence is in `build8-encryption-searchable/` under that installed report tree;
+the independent Linux reports are in the lab's
+`artifacts/ext4-encrypt/fskit-searchable-{1k,4k}/`. These checks establish fscrypt
+v2 on this OS and development-signed installation, not native writes, v1 mounted
+acceptance, distribution signing or the Linux throughput target.

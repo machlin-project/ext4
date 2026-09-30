@@ -2938,9 +2938,9 @@ I/O, sandboxed control IPC, shared Keychain access or distribution readiness.
 
 The initial 26.4 mount failed `ST_RDONLY` and write-open rejection assertions;
 the app also discovered no control endpoint. Normal unmount and detach succeeded.
-Explicit write-open admission now passes component tests, but installed acceptance
-on the new 26.5 minimum remains pending. Earlier successful builds and installation
-must not be reported as a passing mounted suite.
+Explicit write-open admission now passes component tests and the later clean
+26.5.2 installed run below. Earlier successful builds and installation must not
+be reported as a passing mounted suite.
 
 `ext4-mounted-test MOUNTPOINT` reports mount flags, file I/O and write admission
 independently, retaining a failing overall status for any failed group.
@@ -2952,6 +2952,46 @@ Use images from the current fixture generator, including `metadata.txt`; the
 initial local `artifacts/fixtures/` image predates that case. The corrected staged
 images come from `artifacts/fixtures-metadata/` and have independently checked
 ownership and timestamps. No missing-metadata failure is counted as driver evidence.
+
+The restored macOS 26.5.2 guest loads Apple's stock VMAPPLE kernel with SIP and
+authenticated-root enabled, Gatekeeper enabled and no custom boot arguments.
+Its user RPC LaunchAgent now permits CLI installation and test execution in the
+logged-in session. Signed updates preserve FSKit enablement. Both 1 KiB and 4 KiB
+native mounts pass read-only flags, ordinary/sparse reads, directory cookies,
+links, private mmap/EOF checks, concurrent open/read/close and write-open/create
+rejection. The inode metadata group remains failed: these user mounts show
+`noowners`, exposing UID/GID 501/20 instead of the fixture's 70001/80002. Explicit
+`owners` mount options did not change that result; `diskutil enableOwnership`
+requires root. The failed assertion remains in the suite, and later assertions
+in that group were not reached. This is not a complete metadata acceptance pass.
+
+The installed signed app's command-line entry point passes actual FSKit discovery,
+App Group IPC, ping, capabilities, settings changes and read-state invalidation.
+Normal unmount removes discovery endpoints. Native Keychain import and sharing
+also work: a fresh extension instance loads the saved key, while the existing
+mount retains its original key set. The first encrypted content check found a
+fixture defect: its directories had mode 0640, so ordinary callers could not
+traverse them. Linux's earlier root-only check did not expose that defect.
+The fixture generator now assigns executable directory modes at creation and
+asserts them; the native runner proves an unencrypted read and encrypted inode
+lookup before accepting a missing-key denial. No exported image is patched to
+change permissions after an operation. Detailed native reports are in the lab's
+`artifacts/ext4-fskit/installed-clean/`; the repeatable encrypted runner is
+`scripts/test_fskit_installed_encryption.py`.
+
+Regenerated 1 KiB and 4 KiB encryption exports pass independent Linux readback,
+all 37 expected no-key names/targets and `e2fsck` with exit 0. On the unchanged
+signed FSKit build, the corrected native runner passes all 36 manifest objects per
+image, then repeats those reads after removing the saved key to verify the
+current mount's immutable snapshot. A subsequent mount loads no key and denies
+encrypted reads. Before the initial denial, the runner separately proves access
+to plain-file contents and encrypted inode metadata.
+Each final unmount leaves no control endpoint, and all fixture keys and attached
+devices are cleaned up. Native reports are in
+`artifacts/ext4-fskit/installed-clean/build8-encryption-searchable/`; independent
+reports are in `artifacts/ext4-encrypt/fskit-searchable-{1k,4k}/`, both under the lab.
+This establishes installed fscrypt v2 and signed Keychain sharing for the same user
+on 26.5.2, separately from the still-failing UID/GID group and unaccepted writes.
 
 ## Kernel build evidence
 

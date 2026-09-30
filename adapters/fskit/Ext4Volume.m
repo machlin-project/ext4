@@ -277,7 +277,8 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	capabilities.supportsHardLinks = YES;
 	capabilities.supportsSparseFiles = YES;
 	capabilities.supportsFastStatFS = YES;
-	capabilities.doesNotSupportSettingFilePermissions = YES;
+	/* Read-only is a mount policy; ext4 retains POSIX permissions and owners. */
+	capabilities.doesNotSupportSettingFilePermissions = NO;
 	capabilities.doesNotSupportImmutableFiles = YES;
 	capabilities.caseFormat = FSVolumeCaseFormatSensitive;
 	return capabilities;

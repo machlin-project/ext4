@@ -73,6 +73,7 @@ targets:
     platform: macOS
     sources:
       - App.swift
+      - ControlCommand.swift
       - Ext4Control.m
       - Ext4Control.h
       - Ext4Crypto.m
@@ -85,6 +86,7 @@ targets:
         embed: true
       - sdk: Security.framework
       - sdk: LocalAuthentication.framework
+      - sdk: FSKit.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.machlin.ext4

@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 /* The test build renames these three Security entry points in both this file
@@ -103,6 +104,47 @@ SecItemDelete(CFDictionaryRef value)
 	return errSecItemNotFound;
 }
 
+static void
+check_stream_import(const uint8_t *master)
+{
+	NSUUID *volume = NSUUID.UUID;
+	NSError *error = nil;
+	NSString *identifier;
+	int descriptors[2];
+	int fd;
+	size_t length;
+	uint8_t oversized[EXT4_NATIVE_MASTER_SIZE + 1];
+
+	memcpy(oversized, master, EXT4_NATIVE_MASTER_SIZE);
+	oversized[EXT4_NATIVE_MASTER_SIZE] = 0;
+	for (length = EXT4_NATIVE_MASTER_SIZE - 1; length <= sizeof(oversized); length++) {
+		assert(pipe(descriptors) == 0);
+		assert(write(descriptors[1], oversized, length) == (ssize_t)length);
+		assert(close(descriptors[1]) == 0);
+		fd = descriptors[0];
+		error = nil;
+		identifier = [Ext4KeyStore importKeyFromFileDescriptor:fd
+								volume:volume
+							  v1Descriptor:@""
+								 error:&error];
+		assert(fcntl(fd, F_GETFD) >= 0);
+		assert(close(fd) == 0);
+		if (length == EXT4_NATIVE_MASTER_SIZE) {
+			assert([identifier isEqual:@"v2:a525b310d975604e26c761134e6c35d1"]);
+			assert(error == nil && records.count == 1);
+			assert([Ext4KeyStore removeKey:identifier volume:volume error:&error]);
+		} else {
+			assert(identifier == nil && error.code == EINVAL);
+		}
+		assert(records.count == 0);
+	}
+	assert([Ext4KeyStore importKeyFromFileDescriptor:-1
+						  volume:volume
+					    v1Descriptor:@""
+						   error:&error] == nil);
+	assert(error.code == EBADF && records.count == 0);
+}
+
 int
 main(void)
 {
@@ -135,6 +177,7 @@ main(void)
 		for (index = 0; index < sizeof(master); index++) {
 			master[index] = (uint8_t)(index * 7 + 3);
 		}
+		check_stream_import(master);
 		fd = open(url.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL, 0600);
 		assert(fd >= 0 && write(fd, master, sizeof(master)) == sizeof(master));
 		assert(close(fd) == 0);

@@ -24,6 +24,7 @@
 #define LARGE_FILE_BYTES (3U * 65536U + 777U)
 #define SYNTHETIC_FILES 6U
 #define PERMISSIONS 0640U
+#define DIRECTORY_PERMISSIONS 0755U
 #define CHANGED_PERMISSIONS 0600U
 
 static const struct ext4_timestamp encrypt_time = { ENCRYPT_SECONDS, 0 };
@@ -552,6 +553,7 @@ model_create(struct ext4_fs *fs, struct model *model, enum model_kind kind, uint
 			   strlen(name), &update, &encrypt_time, &inode),
 		    EXT4_OK);
 	} else if (kind == MODEL_DIRECTORY) {
+		update.permissions = DIRECTORY_PERMISSIONS;
 		EXPECT(ext4_mkdir(fs, parent.number, parent.generation, (const uint8_t *)name,
 			   strlen(name), &update, &encrypt_time, &inode),
 		    EXT4_OK);
@@ -582,6 +584,7 @@ model_list(struct ext4_fs *fs, struct model *model, uint32_t directory)
 	uint32_t expected = 2;
 	uint32_t index;
 
+	CHECK((inode.mode & 07777U) == DIRECTORY_PERMISSIONS);
 	listing.count = 0;
 	EXPECT(ext4_iterate_dir(fs, &inode, &cookie, collect, &listing), EXT4_NOT_FOUND);
 	CHECK(listed(&listing, ".") && listed(&listing, ".."));
@@ -1249,6 +1252,8 @@ keyed_write(struct device *device, const char *exports, const char *source)
 	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
 	crypto = keyring_environment(&keyring);
 	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	/* Exported fixtures must be traversable by the ordinary native test user. */
+	update.permissions = DIRECTORY_PERMISSIONS;
 	EXPECT(ext4_mkdir(fs, EXT4_ROOT_INODE, 0, (const uint8_t *)"vault", 5, &update,
 		   &encrypt_time, &model.directories[MODEL_VAULT]),
 	    EXT4_OK);

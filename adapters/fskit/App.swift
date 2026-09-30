@@ -3,7 +3,7 @@ import SwiftUI
 import Darwin
 import AppKit
 
-private func controlResult(_ request: [String: Any], endpoint: URL) throws -> [String: Any] {
+func controlResult(_ request: [String: Any], endpoint: URL) throws -> [String: Any] {
     let response = try Ext4ControlClient.request(request, endpoint: endpoint)
     if let error = response["error"] as? [String: Any] {
         throw NSError(
@@ -164,7 +164,6 @@ private final class ControlModel: ObservableObject {
     }
 }
 
-@main
 struct MachlinExt4App: App {
     @StateObject private var model = ControlModel()
 

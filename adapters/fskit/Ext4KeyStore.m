@@ -198,7 +198,40 @@ failed:
 		  v1Descriptor:(NSString *)descriptor
 			 error:(NSError **)error
 {
-	uint8_t master[EXT4_NATIVE_MASTER_SIZE];
+	struct stat status;
+	int fd;
+	BOOL scoped = [url startAccessingSecurityScopedResource];
+	NSString *answer = nil;
+
+	fd = open(url.fileSystemRepresentation, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+	if (fd < 0) {
+		ext4_key_error(error, errno, NO);
+	} else if (fstat(fd, &status) != 0) {
+		ext4_key_error(error, errno, NO);
+	} else if (!S_ISREG(status.st_mode) || status.st_size != EXT4_NATIVE_MASTER_SIZE) {
+		ext4_key_error(error, EINVAL, NO);
+	} else {
+		answer = [self importKeyFromFileDescriptor:fd
+						    volume:volume
+					      v1Descriptor:descriptor
+						     error:error];
+	}
+	if (fd >= 0) {
+		close(fd);
+	}
+	if (scoped) {
+		[url stopAccessingSecurityScopedResource];
+	}
+	return answer;
+}
+
++ (NSString *)importKeyFromFileDescriptor:(int)fd
+				   volume:(NSUUID *)volume
+			     v1Descriptor:(NSString *)descriptor
+				    error:(NSError **)error
+{
+	/* One extra byte detects an oversized stream without buffering its contents. */
+	uint8_t master[EXT4_NATIVE_MASTER_SIZE + 1];
 	uint8_t identifier[EXT4_NATIVE_IDENTIFIER_SIZE];
 	volatile uint8_t *wipe = master;
 	uint8_t version = descriptor.length == 0 ? 2 : 1;
@@ -206,9 +239,6 @@ failed:
 	size_t index;
 	size_t completed = 0;
 	ssize_t count;
-	struct stat status;
-	int fd = -1;
-	BOOL scoped = [url startAccessingSecurityScopedResource];
 	NSMutableDictionary *query;
 	NSMutableString *account;
 	NSMutableData *secret = nil;
@@ -220,29 +250,26 @@ failed:
 		ext4_key_error(error, EINVAL, NO);
 		goto done;
 	}
-	fd = open(url.fileSystemRepresentation, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-	if (fd < 0) {
-		ext4_key_error(error, errno, NO);
-		goto done;
-	}
-	if (fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) ||
-	    status.st_size != sizeof(master)) {
-		ext4_key_error(error, EINVAL, NO);
-		goto done;
-	}
 	while (completed < sizeof(master)) {
 		count = read(fd, master + completed, sizeof(master) - completed);
 		if (count < 0 && errno == EINTR) {
 			continue;
 		}
-		if (count <= 0) {
-			ext4_key_error(error, count < 0 ? errno : EIO, NO);
+		if (count < 0) {
+			ext4_key_error(error, errno, NO);
 			goto done;
+		}
+		if (count == 0) {
+			break;
 		}
 		completed += (size_t)count;
 	}
+	if (completed != EXT4_NATIVE_MASTER_SIZE) {
+		ext4_key_error(error, EINVAL, NO);
+		goto done;
+	}
 	if (version == 2) {
-		ext4_native_crypto_identifier(master, sizeof(master), identifier);
+		ext4_native_crypto_identifier(master, EXT4_NATIVE_MASTER_SIZE, identifier);
 	}
 	account = [NSMutableString stringWithFormat:@"v%u:", version];
 	for (index = 0; index < size; index++) {
@@ -257,7 +284,7 @@ failed:
 		goto done;
 	}
 	query = ext4_key_query(volume);
-	secret = [NSMutableData dataWithBytes:master length:sizeof(master)];
+	secret = [NSMutableData dataWithBytes:master length:EXT4_NATIVE_MASTER_SIZE];
 	query[(__bridge id)kSecAttrAccount] = account;
 	query[(__bridge id)kSecValueData] = secret;
 	query[(__bridge id)kSecAttrAccessible] =
@@ -272,12 +299,6 @@ done:
 	[secret resetBytesInRange:NSMakeRange(0, secret.length)];
 	for (index = 0; index < sizeof(master); index++) {
 		wipe[index] = 0;
-	}
-	if (fd >= 0) {
-		close(fd);
-	}
-	if (scoped) {
-		[url stopAccessingSecurityScopedResource];
 	}
 	return answer;
 }

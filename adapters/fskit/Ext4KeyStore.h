@@ -16,6 +16,11 @@ NS_ASSUME_NONNULL_BEGIN
 				 volume:(NSUUID *)volume
 			   v1Descriptor:(NSString *)descriptor
 				  error:(NSError *_Nullable *_Nullable)error;
+/* Reads exactly one raw key followed by EOF. The caller retains the descriptor. */
++ (nullable NSString *)importKeyFromFileDescriptor:(int)fd
+					    volume:(NSUUID *)volume
+				      v1Descriptor:(NSString *)descriptor
+					     error:(NSError *_Nullable *_Nullable)error;
 + (BOOL)removeKey:(NSString *)identifier
 	   volume:(NSUUID *)volume
 	    error:(NSError *_Nullable *_Nullable)error;
