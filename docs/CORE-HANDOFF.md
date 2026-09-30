@@ -140,7 +140,13 @@ for the integration contracts and outstanding native acceptance.
 
 Both adapters remain read-only. FSKit integration precedes LXNU policy; signing
 is deferred. FSKit now adopts held reads; installed mapping and lifetime acceptance remains
-pending. The kernel adapter has not yet adopted these APIs.
+pending. FSKit now has a CommonCrypto fscrypt provider and Keychain-backed immutable
+mount keys; the app can import v1/v2 raw master keys. Native crypto/manifest tests
+pass; signed Keychain sharing and mounted encrypted I/O are still unaccepted.
+The minimum stays 26.4, with 27-only APIs separated by availability and compile
+guards. The public durable device-barrier contract is still unresolved; do not
+wire metadataFlush or callback completion into a falsely successful barrier.
+The kernel adapter has not yet adopted these APIs.
 XNU/LXNU retains UBC/cluster I/O; do not build a replacement file page cache in core.
 Native cryptography, writes, concurrency and page-cache integration require their
 own acceptance. No host kernel, boot policy, NVRAM or system-file changes.

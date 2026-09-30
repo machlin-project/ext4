@@ -45,11 +45,30 @@ ext4_item_type(uint16_t mode)
 		      filesystem:(struct ext4_fs *)fs
 		   resourceOwner:(id)resourceOwner
 {
+	return [self initWithResource:resource
+			   filesystem:fs
+			resourceOwner:resourceOwner
+			       crypto:NULL];
+}
+
+- (instancetype)initWithResource:(FSBlockDeviceResource *)resource
+		      filesystem:(struct ext4_fs *)fs
+		   resourceOwner:(id)resourceOwner
+			  crypto:(struct ext4_native_crypto *)crypto
+{
+	struct ext4_crypto_environment environment;
 	struct ext4_info info;
 	NSUUID *uuid;
 	FSVolumeIdentifier *identifier;
 	FSFileName *name;
 
+	if (crypto != NULL) {
+		ext4_native_crypto_seal(crypto);
+		environment = ext4_native_crypto_environment(crypto);
+		if (ext4_set_crypto(fs, &environment) != EXT4_OK) {
+			return nil;
+		}
+	}
 	ext4_get_info(fs, &info);
 	uuid = [[NSUUID alloc] initWithUUIDBytes:info.uuid];
 	identifier = [[FSVolumeIdentifier alloc] initWithUUID:uuid];
@@ -58,6 +77,7 @@ ext4_item_type(uint16_t mode)
 	self = [super initWithVolumeID:identifier volumeName:name];
 	if (self != nil) {
 		_fs = fs;
+		_crypto = crypto;
 		_info = info;
 		_resource = resource;
 		_resourceOwner = resourceOwner;
@@ -72,6 +92,7 @@ ext4_item_type(uint16_t mode)
 {
 	[_control stop];
 	ext4_unmount(_fs);
+	ext4_native_crypto_destroy(_crypto);
 }
 
 - (void)releaseHold:(struct ext4_inode_hold *)hold
@@ -298,13 +319,14 @@ ext4_item_type(uint16_t mode)
 - (void)reclaimItem:(FSItem *)item replyHandler:(void (^)(NSError *))reply
 {
 	@synchronized(self) {
-		Ext4Item *owned = (Ext4Item *)item;
-
 		if (![item isKindOfClass:Ext4Item.class]) {
 			reply(ext4_error(EXT4_INVALID_ARGUMENT));
 			return;
 		}
+#if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
 		if (@available(macOS 27.0, *)) {
+			Ext4Item *owned = (Ext4Item *)item;
+
 			[item tryReclaimWithBlock:^{
 			  if (owned->owner == self) {
 				  [self->_items removeObjectForKey:@(owned->inode.number)];
@@ -313,6 +335,7 @@ ext4_item_type(uint16_t mode)
 			  }
 			}];
 		}
+#endif
 		/* Older FSKit has no conditional reclaim. Retain the core hold until the
 		 * framework releases its last strong FSItem reference; the index is weak. */
 		reply(nil);
@@ -441,14 +464,19 @@ ext4_item_type(uint16_t mode)
 			reply(nil, ext4_error(EXT4_UNSUPPORTED));
 			return;
 		}
-		bytes = [NSMutableData dataWithLength:(NSUInteger)owned->inode.size];
+		/* Encryption stores a length header and padding, while a no-key name
+		 * can be longer than a short ciphertext. Read the whole bounded target. */
+		bytes = [NSMutableData dataWithLength:_info.block_size];
 		error = [self readItem:owned
 				offset:0
 				buffer:bytes.mutableBytes
 				length:bytes.length
 			     completed:&completed];
-		if (error == EXT4_OK && completed != bytes.length) {
+		if (error == EXT4_OK && completed > bytes.length) {
 			error = EXT4_IO;
+		}
+		if (error == EXT4_OK) {
+			bytes.length = completed;
 		}
 		reply(error == EXT4_OK ? [FSFileName nameWithData:bytes] : nil, ext4_error(error));
 	}

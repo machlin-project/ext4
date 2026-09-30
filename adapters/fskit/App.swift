@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 import SwiftUI
 import Darwin
+import AppKit
 
 private func controlResult(_ request: [String: Any], endpoint: URL) throws -> [String: Any] {
     let response = try Ext4ControlClient.request(request, endpoint: endpoint)
@@ -19,6 +20,9 @@ private func controlResult(_ request: [String: Any], endpoint: URL) throws -> [S
 
 private struct MountedVolume: Identifiable {
     let endpoint: URL
+    let volumeID: UUID
+    let keys: [String]
+    let loadedKeys: Int
     let details: String
     let retainReadState: Bool
     var id: String { endpoint.absoluteString }
@@ -44,12 +48,24 @@ private final class ControlModel: ObservableObject {
                     do {
                         let info = try controlResult(["command": "getInfo"], endpoint: endpoint)
                         let settings = try controlResult(["command": "getSettings"], endpoint: endpoint)
-                        let identifier = info["volume"] as? String ?? "Unknown volume"
+                        guard let identifier = info["volume"] as? String,
+                              let volumeID = UUID(uuidString: identifier) else {
+                            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPROTO))
+                        }
+                        var keys: [String] = []
+                        do {
+                            keys = try Ext4KeyStore.keys(forVolume: volumeID)
+                        } catch {
+                            failures.append("Saved encryption keys are unavailable: " + error.localizedDescription)
+                        }
                         let blockSize = (info["blockSize"] as? NSNumber)?.stringValue ?? "Unknown"
                         let blocks = (info["blocks"] as? NSNumber)?.stringValue ?? "Unknown"
                         let freeBlocks = (info["freeBlocks"] as? NSNumber)?.stringValue ?? "Unknown"
                         found.append(MountedVolume(
                             endpoint: endpoint,
+                            volumeID: volumeID,
+                            keys: keys,
+                            loadedKeys: (info["loadedKeys"] as? NSNumber)?.intValue ?? 0,
                             details: "Volume: \(identifier)\nBlock size: \(blockSize) bytes\nBlocks: \(blocks), free: \(freeBlocks)",
                             retainReadState: settings["retainReadState"] as? Bool ?? true
                         ))
@@ -68,6 +84,57 @@ private final class ControlModel: ObservableObject {
                 self.volumes = completed
                 self.status = message
                 self.busy = false
+            }
+        }
+    }
+
+    func importKey(volume: MountedVolume) {
+        guard !busy else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Import an fscrypt master key"
+        panel.message = "Select a file containing the 64-byte raw master key. Password-protected fscrypt key files are not supported."
+        let descriptor = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        descriptor.placeholderString = "Leave empty for fscrypt v2"
+        let accessory = NSStackView(views: [
+            NSTextField(labelWithString: "fscrypt v1 descriptor (16 hexadecimal characters):"), descriptor
+        ])
+        accessory.orientation = .vertical
+        accessory.alignment = .leading
+        panel.accessoryView = accessory
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.resolvesAliases = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let v1Descriptor = descriptor.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        changeKeys {
+            _ = try Ext4KeyStore.importKey(from: url, volume: volume.volumeID, v1Descriptor: v1Descriptor)
+        }
+    }
+
+    func removeKey(_ key: String, volume: MountedVolume) {
+        changeKeys {
+            try Ext4KeyStore.removeKey(key, volume: volume.volumeID)
+        }
+    }
+
+    private func changeKeys(_ operation: @escaping () throws -> Void) {
+        guard !busy else { return }
+        busy = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            var failure: String?
+            do {
+                try operation()
+            } catch {
+                failure = error.localizedDescription
+            }
+            let message = failure
+            DispatchQueue.main.async {
+                self.busy = false
+                if let message {
+                    self.status = message
+                } else {
+                    self.refresh()
+                }
             }
         }
     }
@@ -122,6 +189,19 @@ struct MachlinExt4App: App {
                                 ))
                                 Button("Release read metadata") {
                                     model.command("dropReadState", volume: volume)
+                                }
+                                DisclosureGroup("Encryption keys (\(volume.loadedKeys) loaded)") {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("Keys are stored in Keychain. Import or removal takes effect after unmounting and mounting the volume again; removal does not lock the current mount.")
+                                            .font(.caption)
+                                        ForEach(volume.keys, id: \.self) { key in
+                                            HStack {
+                                                Text(key).font(.system(.caption, design: .monospaced))
+                                                Button("Remove saved key") { model.removeKey(key, volume: volume) }
+                                            }
+                                        }
+                                        Button("Import raw fscrypt key…") { model.importKey(volume: volume) }
+                                    }
                                 }
                             }
                             .disabled(model.busy)

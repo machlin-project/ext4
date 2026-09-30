@@ -44,9 +44,15 @@ targets:
       - Ext4Support.h
       - Ext4Control.m
       - Ext4Control.h
+      - Ext4Crypto.m
+      - Ext4Crypto.h
+      - Ext4KeyStore.m
+      - Ext4KeyStore.h
       - BridgingHeader.h
     dependencies:
       - target: Ext4Core
+      - sdk: Security.framework
+      - sdk: LocalAuthentication.framework
       - sdk: FSKit.framework
       - sdk: ExtensionFoundation.framework
     settings:
@@ -67,10 +73,16 @@ targets:
       - App.swift
       - Ext4Control.m
       - Ext4Control.h
+      - Ext4Crypto.m
+      - Ext4Crypto.h
+      - Ext4KeyStore.m
+      - Ext4KeyStore.h
       - AppBridge.h
     dependencies:
       - target: Ext4FSKitExtension
         embed: true
+      - sdk: Security.framework
+      - sdk: LocalAuthentication.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.machlin.ext4
@@ -78,6 +90,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_ENTITLEMENTS: App.entitlements
         SWIFT_OBJC_BRIDGING_HEADER: AppBridge.h
+        HEADER_SEARCH_PATHS: $(SRCROOT)/../../include
         INFOPLIST_KEY_CFBundleDisplayName: Machlin ext4
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         ENABLE_APP_SANDBOX: YES

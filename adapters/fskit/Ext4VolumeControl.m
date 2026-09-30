@@ -53,6 +53,8 @@
 					@"inodes" : @(_info.inodes),
 					@"freeInodes" : @(_info.free_inodes),
 					@"mounted" : @(_mounted),
+					@"loadedKeys" : @(ext4_native_crypto_count(_crypto)),
+					@"keyStoreAvailable" : @(self.keyStoreError == nil),
 					@"readOnly" : @YES,
 					@"featuresCompat" : @(_info.feature_compat),
 					@"featuresIncompat" : @(_info.feature_incompat),
@@ -70,7 +72,9 @@
 					@"durableWrites" : @NO,
 					@"kernelReadMapping" : @YES,
 					@"aclAuthorization" : @NO,
-					@"keyManagement" : @NO,
+					@"keyManagement" : @YES,
+					@"keyStorage" : @"keychain",
+					@"liveKeyChanges" : @NO,
 					@"onlineFeatureChanges" : @NO
 				}
 			};

@@ -3,6 +3,8 @@
 #import "Ext4Volume.h"
 #import "Ext4ResourceIO.h"
 #import "Ext4Support.h"
+#import "Ext4KeyStore.h"
+#include "Ext4Crypto.h"
 #include <errno.h>
 
 static enum ext4_result
@@ -116,6 +118,9 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 	struct ext4_fs *fs = NULL;
 	__attribute__((objc_precise_lifetime)) Ext4ResourceIO *owner = nil;
 	Ext4Volume *volume = nil;
+	struct ext4_native_crypto *crypto = NULL;
+	struct ext4_info info;
+	NSError *keyError = nil;
 	NSError *loadError = nil;
 	enum ext4_result error;
 
@@ -128,15 +133,22 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 		} else {
 			error = ext4_open_resource(resource, &owner, &fs);
 			if (error == EXT4_OK) {
+				ext4_get_info(fs, &info);
+				crypto = [Ext4KeyStore
+				    loadCryptoForVolume:[[NSUUID alloc] initWithUUIDBytes:info.uuid]
+						  error:&keyError];
 				volume = [[Ext4Volume alloc]
 				    initWithResource:(FSBlockDeviceResource *)resource
 					  filesystem:fs
-				       resourceOwner:owner];
+				       resourceOwner:owner
+					      crypto:crypto];
 				if (volume == nil) {
 					ext4_unmount(fs);
+					ext4_native_crypto_destroy(crypto);
 					error = EXT4_NO_MEMORY;
 				}
 			}
+			volume.keyStoreError = keyError;
 			loadError = ext4_error(error);
 			_volume = volume;
 			self.containerStatus = loadError == nil

@@ -2,6 +2,8 @@
 #import "../adapters/fskit/Ext4ResourceIO.h"
 #import "../adapters/fskit/Ext4Volume.h"
 #import "../adapters/fskit/Ext4Control.h"
+#include "../adapters/fskit/Ext4Crypto.h"
+#include "../core/sha.h"
 #include <stdlib.h>
 #include <unistd.h>
 #include <assert.h>
@@ -355,6 +357,155 @@ read_file(Ext4Volume *volume, FSItem *file, NSData *expected)
 	assert(((const uint8_t *)buffer.data.bytes)[expected.length] == 0xa5);
 }
 
+static FSItem *
+lookup_path(Ext4Volume *volume, FSItem *root, NSString *path)
+{
+	FSItem *current = root;
+
+	for (NSString *component in [path componentsSeparatedByString:@"/"]) {
+		__block FSItem *next = nil;
+
+		[volume lookupItemNamed:[FSFileName nameWithString:component]
+			    inDirectory:current
+			   replyHandler:^(FSItem *item, FSFileName *name, NSError *error) {
+			     assert(error == nil && name != nil && item != nil);
+			     next = item;
+			   }];
+		assert(next != nil);
+		current = next;
+	}
+	return current;
+}
+
+static void
+check_encrypted_volume(const char *imagePath, const char *manifestPath)
+{
+	ImageBlocks *device = [ImageBlocks new];
+	Ext4ResourceIO *resource;
+	struct ext4_fs *fs = NULL;
+	struct ext4_native_crypto *crypto = ext4_native_crypto_create();
+	uint8_t master[EXT4_NATIVE_MASTER_SIZE];
+	uint8_t identifier[EXT4_NATIVE_IDENTIFIER_SIZE];
+	Ext4Volume *volume;
+	__block FSItem *root = nil;
+	NSString *manifest;
+	ReadBuffer *buffer = [ReadBuffer new];
+	size_t index;
+	size_t checked = 0;
+
+	device.image = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:imagePath]];
+	assert(device.image != nil && crypto != NULL);
+	resource = [[Ext4ResourceIO alloc] initWithReader:device];
+	assert([resource open:&fs] == EXT4_OK);
+	for (index = 0; index < sizeof(master); index++) {
+		master[index] = (uint8_t)(index * 7 + 3);
+	}
+	assert(ext4_native_crypto_identifier(master, sizeof(master), identifier) == EXT4_OK);
+	assert(ext4_native_crypto_add(
+		   crypto, 2, identifier, sizeof(identifier), master, sizeof(master)) == EXT4_OK);
+	volume = [[Ext4Volume alloc] initWithResource:(FSBlockDeviceResource *)device
+					   filesystem:fs
+					resourceOwner:resource
+					       crypto:crypto];
+	assert(volume != nil);
+	[volume activateWithOptions:(FSTaskOptions *)[TestOptions new]
+		       replyHandler:^(FSItem *item, NSError *error) {
+			 assert(error == nil);
+			 root = item;
+		       }];
+	assert(root != nil);
+	manifest = [NSString stringWithContentsOfFile:[NSString stringWithUTF8String:manifestPath]
+					     encoding:NSUTF8StringEncoding
+						error:NULL];
+	assert(manifest != nil);
+	for (NSString *line in [manifest componentsSeparatedByString:@"\n"]) {
+		NSArray<NSString *> *fields = [line componentsSeparatedByString:@" "];
+		FSItem *item;
+
+		if (line.length == 0) {
+			continue;
+		}
+		assert(fields.count >= 3);
+		item = lookup_path(volume, root, fields[1]);
+		if ([fields[0] isEqual:@"symlink"]) {
+			__block BOOL called = NO;
+
+			assert(fields.count == 3);
+			[volume readSymbolicLink:item
+				    replyHandler:^(FSFileName *name, NSError *error) {
+				      assert(error == nil &&
+					  [name.data
+					      isEqual:[fields[2]
+							  dataUsingEncoding:NSUTF8StringEncoding]]);
+				      called = YES;
+				    }];
+			assert(called);
+		} else {
+			struct ext4_sha256 hash;
+			uint8_t digest[EXT4_SHA256_DIGEST_SIZE];
+			NSMutableString *hex = [NSMutableString string];
+			size_t remaining = (size_t)fields[2].longLongValue;
+			off_t offset = 0;
+
+			assert([fields[0] isEqual:@"file"] && fields.count == 4 &&
+			    remaining <= 1024 * 1024);
+			ext4_sha256_init(&hash);
+			while (remaining != 0) {
+				size_t amount = MIN(remaining, 8191U);
+				__block size_t transferred = 0;
+
+				buffer.data = [NSMutableData dataWithLength:amount];
+				[volume readFromFile:item
+					      offset:offset
+					      length:amount
+					  intoBuffer:(FSMutableFileDataBuffer *)buffer
+					replyHandler:^(size_t completed, NSError *error) {
+					  assert(error == nil && completed == amount);
+					  transferred = completed;
+					}];
+				assert(transferred == amount);
+				ext4_sha256_update(&hash, buffer.data.bytes, amount);
+				offset += amount;
+				remaining -= amount;
+			}
+			ext4_sha256_final(&hash, digest);
+			for (index = 0; index < sizeof(digest); index++) {
+				[hex appendFormat:@"%02x", digest[index]];
+			}
+			assert([hex isEqual:fields[3]]);
+		}
+		checked++;
+	}
+	assert(checked > 30);
+	assert([[[volume controlRequest:@{ @"command" : @"getInfo" }]
+		   objectForKey:@"result"][@"loadedKeys"] unsignedIntegerValue] == 1);
+	[volume invalidate];
+	root = nil;
+	volume = nil;
+	/* A new mount without keys must still refuse encrypted contents, including
+	 * an encrypted inode linked into an unencrypted directory. */
+	assert([resource open:&fs] == EXT4_OK);
+	volume = [[Ext4Volume alloc] initWithResource:(FSBlockDeviceResource *)device
+					   filesystem:fs
+					resourceOwner:resource];
+	[volume activateWithOptions:(FSTaskOptions *)[TestOptions new]
+		       replyHandler:^(FSItem *item, NSError *error) {
+			 assert(error == nil);
+			 root = item;
+		       }];
+	[volume readFromFile:lookup_path(volume, root, @"plain/block-out")
+		      offset:0
+		      length:1
+		  intoBuffer:(FSMutableFileDataBuffer *)buffer
+		replyHandler:^(size_t completed, NSError *error) {
+		  assert(completed == 0 && error.code == EACCES);
+		}];
+	[volume invalidate];
+	printf("PASS FSKit native crypto: %zu manifest entries, file digests, encrypted names and "
+	       "symlinks; new keyless mount denied\n",
+	    checked);
+}
+
 int
 main(int argc, const char **argv)
 {
@@ -380,7 +531,10 @@ main(int argc, const char **argv)
 		Ext4ControlServer *server;
 		NSError *ipcError = nil;
 
-		assert(argc == 2);
+		assert(argc == 2 || argc == 4);
+		if (argc == 4) {
+			check_encrypted_volume(argv[2], argv[3]);
+		}
 		image = [NSData dataWithContentsOfFile:@(argv[1])];
 		assert(image != nil);
 		check_acl_admission(image);

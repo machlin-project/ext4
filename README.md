@@ -41,8 +41,9 @@ App Group Unix socket for the control app. FSKit builds unsigned, but installati
 mount acceptance await a signing profile with FSKit Module capability. The arm64e
 kext has read-only acceptance in a dedicated custom-kernel VM; x86_64 has compilation
 evidence. Native writes, page-cache integration for mutation, ACL enforcement and
-LXNU policy follow core review, with FSKit first. Encryption providers must also be
-implemented and accepted in each native adapter.
+LXNU policy follow core review, with FSKit first. FSKit has a CommonCrypto provider
+and Keychain-backed mount keys; signed native encryption acceptance and the kernel
+encryption provider remain pending.
 
 ## Layout
 

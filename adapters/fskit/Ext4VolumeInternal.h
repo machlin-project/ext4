@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #import "Ext4Volume.h"
 #import "Ext4Control.h"
+#include "Ext4Crypto.h"
 
 @interface Ext4Item : FSItem {
       @public
@@ -12,6 +13,7 @@
 
 @interface Ext4Volume () {
 	struct ext4_fs *_fs;
+	struct ext4_native_crypto *_crypto;
 	struct ext4_info _info;
 	FSBlockDeviceResource *_resource;
 	id _resourceOwner;
