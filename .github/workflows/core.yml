@@ -59,6 +59,10 @@ jobs:
           persist-credentials: false
       - name: Build independent filesystem tools
         run: |
+          # v1.47.3 misreports malformed UTF-8 found after cursor setup as
+          # ENAMETOOLONG; directory hashing then misses its opaque-byte fallback.
+          git -C vendor/e2fsprogs apply --check "$PWD/tests/patches/e2fsprogs-casefold-invalid-sequence.patch"
+          git -C vendor/e2fsprogs apply "$PWD/tests/patches/e2fsprogs-casefold-invalid-sequence.patch"
           mkdir -p artifacts/checks vendor/e2fsprogs/build
           (
             cd vendor/e2fsprogs/build

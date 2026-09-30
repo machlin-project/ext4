@@ -142,9 +142,44 @@ hash_vector(const unsigned char *input, size_t length)
 	return 0;
 }
 
+/* A malformed name uses its original bytes in a relaxed directory. An oracle
+ * error here leaves e2fsck's previous hash intact and can falsely reject a leaf.
+ * Check all disk hash versions against libext2fs's non-normalizing entry point. */
+static int
+opaque_hashes(const unsigned char *input, size_t length)
+{
+	static const __u32 seed[] = { 0x4807861cU, 0xae47b954U, 0x7ddcb6acU, 0xed207c31U };
+	ext2_dirhash_t hash;
+	ext2_dirhash_t minor;
+	ext2_dirhash_t expected;
+	ext2_dirhash_t expected_minor;
+	errcode_t error;
+	int version;
+
+	for (version = EXT2_HASH_LEGACY; version <= EXT2_HASH_TEA_UNSIGNED; version++) {
+		if (ext2fs_dirhash(version, (const char *)input, (int)length, seed, &expected,
+			&expected_minor) != 0) {
+			return 1;
+		}
+		error = ext2fs_dirhash2(version, (const char *)input, (int)length, table,
+		    EXT4_CASEFOLD_FL, seed, &hash, &minor);
+		if (error != 0 || hash != expected || minor != expected_minor) {
+			fprintf(stderr,
+			    "libext2fs opaque-name hashing failed: version %d, status %ld\n",
+			    version, (long)error);
+			return 1;
+		}
+		printf("H %d %08x %08x %08x %08x ", version, seed[0], seed[1], seed[2], seed[3]);
+		hex(input, length);
+		printf(" %08x %08x\n", hash, minor);
+	}
+	return 0;
+}
+
 int
 main(void)
 {
+	static const unsigned char opaque[] = { 'b', 'a', 'd', 0xff, 'x' };
 	static const unsigned char malformed[][4] = { { 0x80 }, { 0xc0, 0x80 }, { 0xc1, 0xbf },
 		{ 0xe0, 0x80, 0x80 }, { 0xed, 0xa0, 0x80 }, { 0xf4, 0x90, 0x80, 0x80 },
 		{ 0xf8, 0x88, 0x80, 0x80 }, { 0xc3 }, { 0xe2, 0x82 }, { 0xff } };
@@ -160,12 +195,24 @@ main(void)
 	if (table == NULL) {
 		return 1;
 	}
+	if (opaque_hashes(opaque, sizeof(opaque)) != 0) {
+		return 1;
+	}
 	for (code = 0; code < UNICODE_LIMIT; code++) {
 		length = encode(code, input);
 		fold(input, length);
 	}
 	for (index = 0; index < sizeof(malformed_lengths) / sizeof(malformed_lengths[0]); index++) {
 		fold(malformed[index], malformed_lengths[index]);
+		if (opaque_hashes(malformed[index], malformed_lengths[index]) != 0) {
+			return 1;
+		}
+		input[0] = 'a';
+		memcpy(input + 1, malformed[index], malformed_lengths[index]);
+		input[malformed_lengths[index] + 1U] = 'z';
+		if (opaque_hashes(input, malformed_lengths[index] + 2U) != 0) {
+			return 1;
+		}
 	}
 	for (index = 0; index < SEQUENCE_COUNT; index++) {
 		count = 1U + next() % SEQUENCE_LIMIT;

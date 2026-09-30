@@ -488,6 +488,20 @@ regenerates the casefold tables from the Unicode 12.1.0 `UnicodeData.txt`,
 `CaseFolding.txt`, `DerivedCoreProperties.txt` and `DerivedAge.txt`; it refuses
 files whose SHA-256 differs from the pinned release.
 
+For e2fsprogs 1.47.3, apply
+`tests/patches/e2fsprogs-casefold-invalid-sequence.patch` to an isolated tool
+checkout before building. Use `git apply --check` followed by `git apply`; CI
+performs both explicitly. The patch corrects the error returned for malformed
+UTF-8 encountered after cursor setup, so `ext2fs_dirhash2` can use the required
+opaque-byte fallback. Without it, e2fsck can reuse an earlier hash and falsely
+report an HTREE minimum-hash error. This is a test-tool correction; no e2fsprogs
+implementation is linked into the core. Keep the original failing image for
+before/after verification and use nonrepairing `e2fsck -fn` in both cases.
+The captured CI image in `artifacts/checks/ci-latest/` returns status 4 with the
+unmodified tool and 0 with this correction, with unchanged bytes. The corrected
+oracle also passes the full vector comparison and independent names/flags check;
+its reports are retained beside that image.
+
 `tests/generate_casefold_vectors.py --tools-root E2FSPROGS_BUILD --output NEW` builds
 `tests/casefold_oracle.c` against that build's `libext2fs.a`, which implements
 Linux's utf8data semantics, and writes `vectors.txt`: the fold of every code point,
@@ -497,15 +511,19 @@ and zero seeds, and 4,000 near-maximal names of expanding code points whose fold
 exceed 255 bytes, each folded and hashed. Configure
 `-Dcasefold_vectors=NEW/vectors.txt` to add `casefold-oracle` to the `format` suite;
 `ext4-casefold-test` requires identical folds, opaque classification and hashes,
-and at least one hash of a fold longer than 255 bytes.
+and at least one hash of a fold longer than 255 bytes. Before emitting the main
+vector set, the oracle checks malformed names against non-normalizing hashing
+for all six versions, including the seed and opaque name from the CI failure.
+An uncorrected oracle fails this self-check instead of producing misleading
+filesystem evidence.
 Vectors containing NUL are skipped because libext2fs stops at NUL and no ext4 name
 contains one.
 
 `tests/generate_casefold_fixtures.py --tools-root E2FSPROGS_BUILD --output NEW` makes a
 4 KiB strict and a 1 KiB relaxed volume. debugfs writes six names with case, NFD,
 ignorable and expansion variants and 400 bulk names into `cf`, and the six names into
-the linear `small` directory; the relaxed profile adds an opaque non-UTF-8 name to
-`small`, because e2fsck cannot rebuild an index holding one. `e2fsck -fyD` then
+the linear `small` directory; the relaxed profile seeds an opaque non-UTF-8 name in
+`small`, and the writable test later inserts one into the index. `e2fsck -fyD` then
 indexes `cf` with e2fsprogs' casefolded hashes, and strict fsck must pass. The
 manifest lists equivalent lookups, absent names and the strict flag.
 

@@ -67,8 +67,8 @@ def main():
         names = [stored.encode() for stored, _ in EQUIVALENT]
         small = list(names)
         names += [f"Bulk-{index:04d}-ÉTÉ".encode() for index in range(BULK_NAMES)]
-        # e2fsck -D cannot rebuild an index holding a non-UTF-8 name, so the opaque
-        # name stays in the linear directory.
+        # Seed opaque lookup in the linear directory; writable tests separately
+        # insert an opaque name into the independently authored index.
         if not profile["strict"]:
             small.append(OPAQUE)
         script = [b"mkdir cf", f"sif cf flags {CASEFOLD_FLAGS:#x}".encode(), b"mkdir small",
