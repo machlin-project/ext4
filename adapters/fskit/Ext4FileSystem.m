@@ -108,7 +108,8 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 	uuid = [[NSUUID alloc] initWithUUIDBytes:info.uuid];
 	identifier = [[FSContainerIdentifier alloc] initWithUUID:uuid];
 	ext4_unmount(fs);
-	reply([FSProbeResult usableButLimitedProbeResultWithName:name containerID:identifier], nil);
+	/* The validated resource is usable; read-only access is a separate mount policy. */
+	reply([FSProbeResult usableProbeResultWithName:name containerID:identifier], nil);
 }
 
 - (void)loadResource:(FSResource *)resource

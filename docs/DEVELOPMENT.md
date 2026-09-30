@@ -59,12 +59,25 @@ The extension needs a profile with the FSKit Module capability. An unsigned buil
 does not establish that macOS will load the extension.
 
 Install and enable the app only in the dedicated disposable guest for development
-acceptance. Use the platform's File System Extensions controls, then mount the
-identified fixture device read-only with `mount -F -t machlin_ext4 -o rdonly`.
-The exact guest device must be verified before mounting. Run `ext4-mounted-test`
-against that mount and verify clean unmount and unchanged image bytes afterward.
-These installed steps have not yet passed. See [FSKit](FSKIT.md) for signing,
-App Group provisioning and the current component-level evidence.
+acceptance. Use the platform's File System Extensions controls, then let Disk
+Arbitration discover and mount the raw fixture together. In the guest, with a new
+empty mount directory:
+
+```sh
+hdiutil attach -readonly -owners on -nobrowse -mountpoint MOUNTPOINT \
+  -plist -imagekey diskimage-class=CRawDiskImage IMAGE
+ext4-mounted-test MOUNTPOINT
+diskutil info -plist MOUNTPOINT
+```
+
+Verify the returned device, mount point, `machlinext4` volume kind and enabled
+ownership. Detach that exact device with `hdiutil detach DEVICE`, then verify
+endpoint cleanup and unchanged image bytes. These ordinary-user checks pass on
+stock macOS 26.5.2. A separate `diskutil mount` after `hdiutil attach -nomount`
+failed for the same raw-image setup; it is not the accepted reproduction path.
+Direct `mount -F -t machlinext4` also bypasses Disk Arbitration and did not preserve
+ownership in this setup. See [FSKit](FSKIT.md) for signing, App Group provisioning,
+the encrypted runner and remaining native acceptance requirements.
 
 ## Kernel extension
 

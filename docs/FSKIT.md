@@ -12,6 +12,25 @@ reads. Aligned requests use the caller's buffer; unaligned requests use a checke
 bounce buffer. Short transfers are errors. The adapter does not mix direct and
 metadata-cache I/O on overlapping ranges.
 
+Resource probing validates the image through the core and returns `usable` for
+an admitted format. Read-only access is a separate mount policy, enforced through
+`requestedMountOptions` and mutation rejection. The earlier unconditional
+`usableButLimited` result prevented Disk Arbitration from recognizing the volume
+on macOS 26.5.2, even though direct FSKit mounts could read it. The guest's Disk
+Arbitration log explicitly rejected that result. A successful direct mount is
+therefore not sufficient evidence for `diskutil` discovery and mounting.
+
+The FSKit short name and reported file-system type are `machlinext4`. Do not add
+an underscore: Disk Arbitration appends `_fskit` internally and strips that suffix
+at the first underscore, truncating the former `machlin_ext4` name to `machlin`.
+Fixture acceptance uses `hdiutil attach -readonly -owners on -mountpoint ...` to
+exercise Disk Arbitration discovery and mounting together. `diskutil info` must
+report the actual mount point and enabled ownership; VFS must omit `noowners`.
+A separate `diskutil mount` after attaching the raw image with `-nomount` failed
+in the tested setup. Direct FSKit mounting also did not establish ownership.
+The encryption runner uses the same automount path with `-owners off` because its
+Linux-owned fixtures test key enforcement separately from ownership preservation.
+
 Each volume serializes core calls, item publication and control commands through
 one recursive monitor. Items retain a core inode hold and the volume; the weak
 identity index introduces no cycle. The last item keeps callback storage alive
@@ -136,6 +155,15 @@ unmount task volumes, stop the old app and extension, install and verify both
 signed bundles, and register them with LaunchServices and PlugInKit. Check both
 bundle versions and `--control modules` after every update. System enablement
 persisted across these CLI updates; no repeated Settings interaction was needed.
+
+After changing extension metadata, verify discovery again after registration has
+settled. On 26.5.2, PlugInKit registered the new extension identity while the user's
+existing `fskit_agent` stopped exposing the module through the public FSKit API.
+In the dedicated VM, with no FSKit mounts or control endpoints, restarting only
+that user's agent restored discovery and preserved enablement. `SIGTERM` did not
+replace the process; verify an actual PID change and two successful public module
+queries before resuming tests. Do not treat the registration command's exit status
+or an immediately cached discovery result as installation acceptance.
 
 ## Encryption and key lifetime
 
@@ -340,11 +368,14 @@ python3 ../ext4/scripts/test_fskit_installed_encryption.py \
 ```
 
 Choose fresh work and report directories and the actual installed build number.
-The runner requires no active control endpoints, verifies transferred hashes and
-read-only attachments, and tests both block sizes. It checks missing-key denial,
+The runner requires no active control endpoints, verifies transferred hashes,
+read-only attachments and Disk Arbitration mount/ownership state, and tests both
+block sizes. Each new mount detaches and reattaches its own image through `hdiutil`.
+It checks missing-key denial,
 signed import, immutable current-mount keys, digest/EOF/symlink readback, removal,
 remount denial and endpoint cleanup. It removes only the fixture keys and its own
-mounts; failed steps and cleanup errors retain a failing status with command logs.
+mounts, then verifies unchanged image bytes; failed steps and cleanup errors retain
+a failing status with command logs.
 
 ## Platform references
 
@@ -352,6 +383,7 @@ mounts; failed steps and cleanup errors retain a failing status with command log
 - [Provisioned macOS App Groups](https://developer.apple.com/documentation/xcode/accessing-app-group-containers): profile authorization and automatic group registration.
 - [Registering test devices](https://developer.apple.com/help/account/devices/register-a-single-device/): the Provisioning UDID requirement for Apple silicon Macs.
 - [Block device resources](https://developer.apple.com/documentation/fskit/fsblockdeviceresource): direct versus cached I/O.
+- [Disk Arbitration FSKit naming](https://github.com/apple-oss-distributions/DiskArbitration/blob/main/diskarbitrationd/DASupport.m): `DSFSKitGetBundleNameWithoutSuffix` splits at the first underscore.
 - [Apple HFS extension source](https://github.com/apple-oss-distributions/hfs/blob/main/hfs_appex/HFSFileSystem.m): private descriptor access and unsupported volume loading.
 - [Metadata flush](https://developer.apple.com/documentation/fskit/fsblockdeviceresource/metadataflush()): buffer-cache contract.
 - [Kernel I/O](https://developer.apple.com/documentation/fskit/fsvolume/kerneloffloadediooperations): mapping lifetime and inhibition.
@@ -426,14 +458,15 @@ read-state invalidation. Normal unmount removes the endpoint. Key import through
 stdin succeeds without opening the GUI; a new extension instance loads the saved
 Keychain key while an existing mount keeps its original key set.
 
-On both 1 KiB and 4 KiB fixtures, the ordinary mounted suite passes read-only
-flags, file/directory reads, sparse data, links, private mmap/EOF, concurrent
-open/read/close and read-only admission. The metadata group remains failed at
-UID/GID: the actual user mount has `noowners`, exposing the mounting user's
-identity instead of the on-disk owners. Its later timestamp assertions have not
-run. Explicit `owners` on mount did not change the flags, and the public ownership
-configuration command requires root. Do not omit this failure or count the suite
-as passed. Reports are under the lab's `artifacts/ext4-fskit/installed-clean/`.
+Disk Arbitration automount with ownership enabled passes all six mounted groups
+on both 1 KiB and 4 KiB fixtures: read-only flags, inode metadata, UID/GID
+preservation, signed/extended timestamps, file/directory reads and read-only
+admission. The owner is the fixture's 70001:80002, not the mounting user's identity.
+Read coverage includes sparse data, links, private mmap/EOF and concurrent
+open/read/close. Ownership and timestamp assertions run independently, so either
+failure remains visible. Normal detach removes endpoints and leaves both image
+hashes unchanged. Reports are in `build10-hdi-owners/` and
+`build10-hdi-owners-4k/` under the lab's `artifacts/ext4-fskit/installed-clean/`.
 
 The corrected encrypted exports pass independent Linux readback, no-key name
 comparison and `e2fsck`, then the native signed lifecycle runner passes both
@@ -444,7 +477,10 @@ mount unchanged, and a fresh mount loads one key and reads all entries. Removing
 the saved key leaves the existing mount readable; the next mount has no loaded
 keys and denies the encrypted read. Final unmount removes each endpoint, and the
 test deletes its synthetic Keychain records and detaches its read-only images.
-Evidence is in `build8-encryption-searchable/` under that installed report tree;
+The same lifecycle passes through Disk Arbitration automount after the probe/name
+fixes, with `-owners off` explicitly verified for these encryption fixtures and
+unchanged image hashes after final detach.
+Evidence is in `build10-encryption-da/` under that installed report tree;
 the independent Linux reports are in the lab's
 `artifacts/ext4-encrypt/fskit-searchable-{1k,4k}/`. These checks establish fscrypt
 v2 on this OS and development-signed installation, not native writes, v1 mounted

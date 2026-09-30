@@ -39,12 +39,14 @@ Both native adapters remain read-only. The [FSKit adapter](docs/FSKIT.md) requir
 macOS 26.5 or later and
 uses held inode state, restricted kernel read mappings, user xattr reads and an
 App Group Unix socket for the control app. The app and extension build with Apple
-Development signing and profiles authorizing FSKit Module and the shared App Group;
-installed mount acceptance remains pending. The arm64e
+Development signing and profiles authorizing FSKit Module and the shared App Group.
+Installed tests on stock macOS 26.5.2 pass ordinary reads, inode ownership and
+timestamps, signed control IPC and fscrypt v2 key import/read/removal across mounts.
+The arm64e
 kext has read-only acceptance in a dedicated custom-kernel VM; x86_64 has compilation
 evidence. Native writes, page-cache integration for mutation, ACL enforcement and
 LXNU policy follow core review, with FSKit first. FSKit has a CommonCrypto provider
-and Keychain-backed mount keys; signed native encryption acceptance and the kernel
+and Keychain-backed mount keys; native fscrypt v1 acceptance and the kernel
 encryption provider remain pending.
 
 ## Layout

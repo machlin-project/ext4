@@ -288,7 +288,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 {
 	@synchronized(self) {
 		FSStatFSResult *statistics =
-		    [[FSStatFSResult alloc] initWithFileSystemTypeName:@"machlin_ext4"];
+		    [[FSStatFSResult alloc] initWithFileSystemTypeName:@"machlinext4"];
 
 		statistics.blockSize = _info.block_size;
 		statistics.ioSize = _info.block_size;

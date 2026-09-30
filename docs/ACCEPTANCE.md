@@ -14,17 +14,17 @@ safe rejection of a feature is recorded separately from supporting it.
 | Contract | Required evidence | Current state |
 | --- | --- | --- |
 | Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Accepted for the documented format/geometry matrix, including large logical files and high physical addresses; preserve the explicitly recorded exceptions |
-| Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader and mounted arm64e kext profiles pass; FSKit runtime pending |
+| Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader, mounted arm64e kext and stock macOS 26.5.2 read-only FSKit profiles pass |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Functional core queue accepted with documented feature/mode limits; see the queue and per-feature evidence below |
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Bounded writes, allocation, growth and truncate/freeing pass independent and Linux checks; live shrink spans transactions; create/mkdir/symlink/link/unlink/rmdir/rename and bounded indexed mutation pass portable, independent and Linux checks; core holds retain open-unlinked or replaced objects; scale and sustained-operation core acceptance pass; native writes and concurrency acceptance pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Bounded internal and single-user external journals, legacy lists and modern orphan files pass portable faults, independent recovery, Linux reuse and the full regression; fast commit is accepted with the interrupted-Linux-replay limitation below; platform write integration remains pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list, atomic attribute batches and mutation lifetime integration pass portable tests and targeted independent checks; bidirectional Linux attribute/ACL/security checks and direct replay of core attribute transactions pass eight profiles; the linked-truncate e2fsck defect remains explicit below; ACL enforcement and platform policy pending |
-| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Read-only adapter builds with development signing, held reads, restricted kernel mappings, user xattrs, native fscrypt and control IPC; focused native component and encrypted-image tests pass; installed acceptance pending (see [FSKit](FSKIT.md)) |
-| FSKit control app | Signed app-to-mounted-extension IPC on supported macOS versions, authorization and teardown | App Group entitlements, Unix socket protocol and Keychain import/removal implemented; standalone process, parser, lifetime and isolated key-store tests pass; signed sandbox, Keychain sharing and installed volume acceptance pending |
+| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Development-signed read-only mounts on stock 26.5.2 pass reads, inode metadata/ownership/timestamps, mmap, concurrent reads, mutation rejection and fscrypt v2 lifecycle; resource failures, cache/reclaim stress and writes remain pending (see [FSKit](FSKIT.md)) |
+| FSKit control app | Signed app-to-mounted-extension IPC on supported macOS versions, authorization and teardown | Signed same-user App Group IPC, settings, Keychain import/removal, next-mount key snapshots and normal teardown pass on 26.5.2; root-mounted/user-app coordination, crash recovery and GUI workflow acceptance remain pending |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
 | LXNU policy | CAP_FSETID and privilege removal, xattrs, mixed-ABI races, inherited descriptions and attachment restrictions | Not implemented |
 | Compatibility and regression | Shared Linux/LXNU fixtures, native controls and identified stock/custom boots | Not run |
-| Distribution | Reproducible standalone build, packaged FSKit extension, documented installation and supported versions | Development-signed app with embedded extension builds; installed acceptance, distribution signing and notarization pending |
+| Distribution | Reproducible standalone build, packaged FSKit extension, documented installation and supported versions | Development-signed app installs and runs in the dedicated stock 26.5.2 VM; distribution signing, notarization and broader OS/hardware acceptance pending |
 
 Each accepted row must identify its test command and generated evidence location.
 Raw identities, hashes and logs stay in ignored artifacts; source revisions stay
@@ -2942,8 +2942,10 @@ Explicit write-open admission now passes component tests and the later clean
 26.5.2 installed run below. Earlier successful builds and installation must not
 be reported as a passing mounted suite.
 
-`ext4-mounted-test MOUNTPOINT` reports mount flags, file I/O and write admission
-independently, retaining a failing overall status for any failed group.
+`ext4-mounted-test MOUNTPOINT` reports mount flags, inode metadata, ownership,
+timestamps, file I/O and write admission independently, retaining a failing
+overall status for any failed group. Ownership failures do not suppress timestamp
+checks.
 It checks ordinary reads, metadata, hard links and symlinks, indexed directory
 enumeration, sparse data, mmap, concurrent opens/reads/closes and read-only
 enforcement. Fixtures and the arm64 test executable are staged under the lab's
@@ -2959,11 +2961,16 @@ Its user RPC LaunchAgent now permits CLI installation and test execution in the
 logged-in session. Signed updates preserve FSKit enablement. Both 1 KiB and 4 KiB
 native mounts pass read-only flags, ordinary/sparse reads, directory cookies,
 links, private mmap/EOF checks, concurrent open/read/close and write-open/create
-rejection. The inode metadata group remains failed: these user mounts show
-`noowners`, exposing UID/GID 501/20 instead of the fixture's 70001/80002. Explicit
-`owners` mount options did not change that result; `diskutil enableOwnership`
-requires root. The failed assertion remains in the suite, and later assertions
-in that group were not reached. This is not a complete metadata acceptance pass.
+rejection. Disk Arbitration automount with `hdiutil -owners on` also passes inode
+metadata, ownership and signed/extended timestamps: VFS omits `noowners`,
+`diskutil info` reports enabled ownership, and UID/GID remain 70001/80002. This
+requires the corrected `usable` probe result and unambiguous `machlinext4` short
+name. Direct FSKit mounts had exposed the mounting user's UID/GID instead, even
+when given `owners`; their failure remains in the generated reports. The mounted
+checker now runs ownership and timestamp groups independently. No metadata is
+repaired and no ownership assertion is skipped. Normal detach leaves no endpoint
+and both fixture hashes remain unchanged. Reports are in `build10-hdi-owners/`
+and `build10-hdi-owners-4k/` under the lab's installed-clean evidence directory.
 
 The installed signed app's command-line entry point passes actual FSKit discovery,
 App Group IPC, ping, capabilities, settings changes and read-state invalidation.
@@ -2980,18 +2987,20 @@ change permissions after an operation. Detailed native reports are in the lab's
 `scripts/test_fskit_installed_encryption.py`.
 
 Regenerated 1 KiB and 4 KiB encryption exports pass independent Linux readback,
-all 37 expected no-key names/targets and `e2fsck` with exit 0. On the unchanged
-signed FSKit build, the corrected native runner passes all 36 manifest objects per
+all 37 expected no-key names/targets and `e2fsck` with exit 0. On the signed
+FSKit build with corrected probing and naming, the native runner passes all 36 manifest objects per
 image, then repeats those reads after removing the saved key to verify the
 current mount's immutable snapshot. A subsequent mount loads no key and denies
 encrypted reads. Before the initial denial, the runner separately proves access
 to plain-file contents and encrypted inode metadata.
-Each final unmount leaves no control endpoint, and all fixture keys and attached
-devices are cleaned up. Native reports are in
-`artifacts/ext4-fskit/installed-clean/build8-encryption-searchable/`; independent
+Each mount uses Disk Arbitration automount with ownership explicitly ignored for
+these Linux-owned encryption fixtures; metadata ownership has its separate
+acceptance above. Each final detach leaves no control endpoint, all fixture keys
+and attached devices are cleaned up, and image hashes remain unchanged. Native reports are in
+`artifacts/ext4-fskit/installed-clean/build10-encryption-da/`; independent
 reports are in `artifacts/ext4-encrypt/fskit-searchable-{1k,4k}/`, both under the lab.
 This establishes installed fscrypt v2 and signed Keychain sharing for the same user
-on 26.5.2, separately from the still-failing UID/GID group and unaccepted writes.
+on 26.5.2, separately from ownership preservation and unaccepted writes.
 
 ## Kernel build evidence
 

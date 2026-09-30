@@ -61,18 +61,43 @@ def control(label, *arguments):
     return json.loads(guest(label, APP, '--control', *arguments).stdout)
 
 
-def mount(device, directory, label):
-    guest(label, '/sbin/mount', '-F', '-t', 'machlin_ext4', '-o', 'rdonly', device, directory)
-    volumes = control(label + '-control', 'list')
-    assert len(volumes) == 1, f'{label}: expected one active endpoint'
-    value = volumes[0]
-    assert value['info']['mounted'] is True and value['info']['readOnly'] is True
-    return value
+class ReadOnlyImage:
+    def __init__(self, name, directory):
+        self.path = ROOT + '/' + name
+        self.size = (STAGED / name).stat().st_size
+        self.directory = directory
+        self.device = None
 
+    def mount(self, label):
+        assert self.device is None, f'{label}: image already attached'
+        # Let Disk Arbitration discover and mount together. The encrypted fixtures
+        # retain Linux owners; ownership preservation has its own mounted suite.
+        attached = plistlib.loads(guest(label, '/usr/bin/hdiutil', 'attach',
+                                        '-readonly', '-owners', 'off', '-nobrowse',
+                                        '-mountpoint', self.directory, '-plist', '-imagekey',
+                                        'diskimage-class=CRawDiskImage', self.path).stdout)
+        entities = [entry for entry in attached['system-entities'] if 'dev-entry' in entry]
+        assert len(entities) == 1 and re.fullmatch(r'/dev/disk[0-9]+', entities[0]['dev-entry'])
+        # Record ownership before checking the mount so failure cleanup can detach it.
+        self.device = entities[0]['dev-entry']
+        assert entities[0].get('mount-point') == self.directory
+        assert entities[0].get('volume-kind') == 'machlinext4'
+        info = plistlib.loads(guest(label + '-disk-arbitration', '/usr/sbin/diskutil',
+                                   'info', '-plist', self.device).stdout)
+        assert info.get('MountPoint') == self.directory, f'{label}: Disk Arbitration lost the mount point'
+        assert info['Writable'] is False and info['TotalSize'] == self.size
+        assert info['GlobalPermissionsEnabled'] is False, f'{label}: unexpected ownership policy'
+        volumes = control(label + '-control', 'list')
+        assert len(volumes) == 1, f'{label}: expected one active endpoint'
+        value = volumes[0]
+        assert value['info']['mounted'] is True and value['info']['readOnly'] is True
+        return value
 
-def unmount(directory, label):
-    guest(label, '/sbin/umount', directory)
-    assert control(label + '-endpoints', 'list') == [], f'{label}: endpoint leaked'
+    def unmount(self, label):
+        if self.device is not None:
+            guest(label, '/usr/bin/hdiutil', 'detach', self.device)
+            self.device = None
+            assert control(label + '-endpoints', 'list') == [], f'{label}: endpoint leaked'
 
 
 def denied(directory, label):
@@ -102,8 +127,7 @@ for profile in ('4k', '1k'):
     image = f'encrypted-ext4-{profile}.img'
     manifest = f'encrypted-ext4-{profile}.manifest'
     checker = 'ext4-mounted-manifest-test'
-    device = None
-    mounted = False
+    resource = ReadOnlyImage(image, directory)
     volume_id = None
     imported = None
     try:
@@ -119,17 +143,7 @@ chmod 755 "$3/$6"
                        *(ROOT + '/' + name for name in names)).stdout.decode().splitlines()
         expected = [hashlib.sha256((STAGED / name).read_bytes()).hexdigest() for name in names]
         assert [line.split()[0] for line in hashes] == expected
-        attached = plistlib.loads(guest(profile + '-attach', '/usr/bin/hdiutil', 'attach',
-                                        '-readonly', '-nomount', '-plist', '-imagekey',
-                                        'diskimage-class=CRawDiskImage', ROOT + '/' + image).stdout)
-        devices = [entry['dev-entry'] for entry in attached['system-entities'] if 'dev-entry' in entry]
-        assert len(devices) == 1 and re.fullmatch(r'/dev/disk[0-9]+', devices[0])
-        device = devices[0]
-        info = plistlib.loads(guest(profile + '-device', '/usr/sbin/diskutil', 'info',
-                                   '-plist', device).stdout)
-        assert info['Writable'] is False and info['TotalSize'] == (STAGED / image).stat().st_size
-        initial = mount(device, directory, profile + '-mount-no-key')
-        mounted = True
+        initial = resource.mount(profile + '-mount-no-key')
         volume_id = initial['info']['volume']
         assert initial['info']['keyStoreAvailable'] and initial['info']['loadedKeys'] == 0
         assert initial['info']['blockSize'] == (4096 if profile == '4k' else 1024)
@@ -158,10 +172,8 @@ chmod 600 "$2"
         assert control(profile + '-current-after-import', 'request', initial['endpoint'],
                        'getInfo')['loadedKeys'] == 0
         denied(directory, profile + '-import-does-not-mutate-mount')
-        unmount(directory, profile + '-unmount-before-key')
-        mounted = False
-        keyed = mount(device, directory, profile + '-mount-keyed')
-        mounted = True
+        resource.unmount(profile + '-unmount-before-key')
+        keyed = resource.mount(profile + '-mount-keyed')
         assert keyed['endpoint'] != initial['endpoint']
         assert keyed['info']['volume'] == volume_id
         assert keyed['info']['loadedKeys'] == 1 and keyed['info']['keyStoreAvailable']
@@ -175,15 +187,15 @@ chmod 600 "$2"
                        'getInfo')['loadedKeys'] == 1
         guest(profile + '-mounted-key-retained', ROOT + '/' + checker, directory,
               ROOT + '/' + manifest, timeout=90)
-        unmount(directory, profile + '-unmount-after-removal')
-        mounted = False
-        removed = mount(device, directory, profile + '-mount-key-removed')
-        mounted = True
+        resource.unmount(profile + '-unmount-after-removal')
+        removed = resource.mount(profile + '-mount-key-removed')
         assert removed['info']['loadedKeys'] == 0 and removed['info']['keyStoreAvailable']
         denied(directory, profile + '-removed-key-read')
         results[profile] = {'passed': True, 'image_sha256': expected[0],
                             'manifest_sha256': expected[1], 'checker_sha256': expected[2],
                             'manifest_entries': 36,
+                            'mount_method': 'hdiutil Disk Arbitration automount',
+                            'ownership': 'ignored for encryption fixtures',
                             'key_import_next_mount': True, 'key_removal_next_mount': True}
     except Exception as error:
         results[profile] = {'passed': False, 'error': str(error)}
@@ -193,9 +205,7 @@ chmod 600 "$2"
             ('staged-key', lambda: guest(profile + '-cleanup-keyfile', '/bin/rm', '-f', KEY)),
             ('saved-key', lambda: control(profile + '-cleanup-keychain', 'remove-key', volume_id, imported)
              if imported is not None else None),
-            ('unmount', lambda: unmount(directory, profile + '-cleanup-unmount') if mounted else None),
-            ('detach', lambda: guest(profile + '-cleanup-detach', '/usr/bin/hdiutil', 'detach', device)
-             if device is not None else None),
+            ('detach', lambda: resource.unmount(profile + '-cleanup-detach')),
         ):
             try:
                 operation()
@@ -204,6 +214,14 @@ chmod 600 "$2"
         if cleanup:
             results[profile]['cleanup_errors'] = cleanup
             results[profile]['passed'] = False
+        if results[profile]['passed']:
+            try:
+                digest = guest(profile + '-final-image-hash', '/usr/bin/shasum', '-a', '256',
+                               resource.path).stdout.decode().split()[0]
+                assert digest == expected[0], 'read-only fixture changed'
+                results[profile]['image_unchanged'] = True
+            except Exception as error:
+                results[profile].update(passed=False, error=str(error))
         (OUT / 'summary.json').write_text(json.dumps(results, indent=2) + '\n')
         print(json.dumps({profile: results[profile]}), flush=True)
     if not results[profile]['passed']:

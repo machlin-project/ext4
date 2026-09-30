@@ -58,7 +58,7 @@
         <key>FSRequiresSecurityScopedPathURLResources</key>
         <false/>
         <key>FSShortName</key>
-        <string>machlin_ext4</string>
+        <string>machlinext4</string>
         <key>FSSupportsBlockResources</key>
         <true/>
         <key>FSSupportsGenericURLResources</key>

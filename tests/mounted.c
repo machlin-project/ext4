@@ -21,6 +21,8 @@
 #define SPARSE_SIZE (2U * 1024U * 1024U)
 #define WORKER_COUNT 8U
 #define DIRECTORY_COUNT 400U
+#define METADATA_UID 70001U
+#define METADATA_GID 80002U
 
 static unsigned int failures;
 
@@ -124,7 +126,42 @@ check_metadata(const char *path)
 	CHECK(hello.st_ino == hardlink.st_ino && hello.st_nlink == 2);
 	CHECK(fstatat(root, "metadata.txt", &metadata, 0) == 0);
 	CHECK(S_ISREG(metadata.st_mode) && (metadata.st_mode & 07777) == 0640);
-	CHECK(metadata.st_uid == 70001 && metadata.st_gid == 80002);
+out:
+	if (root >= 0) {
+		close(root);
+	}
+}
+
+static void
+check_ownership(const char *path)
+{
+	struct stat metadata;
+	int root = -1;
+
+	root = open(path, O_RDONLY | O_DIRECTORY);
+	CHECK(root >= 0);
+	CHECK(fstatat(root, "metadata.txt", &metadata, 0) == 0);
+	if (metadata.st_uid != METADATA_UID || metadata.st_gid != METADATA_GID) {
+		fprintf(stderr, "metadata owner: %lu:%lu; expected %u:%u\n",
+		    (unsigned long)metadata.st_uid, (unsigned long)metadata.st_gid, METADATA_UID,
+		    METADATA_GID);
+	}
+	CHECK(metadata.st_uid == METADATA_UID && metadata.st_gid == METADATA_GID);
+out:
+	if (root >= 0) {
+		close(root);
+	}
+}
+
+static void
+check_timestamps(const char *path)
+{
+	struct stat metadata;
+	int root = -1;
+
+	root = open(path, O_RDONLY | O_DIRECTORY);
+	CHECK(root >= 0);
+	CHECK(fstatat(root, "metadata.txt", &metadata, 0) == 0);
 #ifdef __APPLE__
 	CHECK(metadata.st_atimespec.tv_sec == -1 && metadata.st_atimespec.tv_nsec == 123456789);
 	CHECK(metadata.st_mtimespec.tv_sec == INT64_C(2147483648) &&
@@ -344,6 +381,8 @@ main(int argc, char **argv)
 	}
 	run_check("read-only mount flags", check_mount_flags, argv[1]);
 	run_check("mounted inode metadata", check_metadata, argv[1]);
+	run_check("mounted inode ownership", check_ownership, argv[1]);
+	run_check("mounted inode timestamps", check_timestamps, argv[1]);
 	run_check("mounted file and directory reads", check_mounted, argv[1]);
 	run_check("read-only operation admission", check_readonly_operations, argv[1]);
 	if (failures != 0) {
