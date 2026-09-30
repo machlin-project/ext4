@@ -1,7 +1,7 @@
 # FSKit adapter and control app
 
 FSKit is the current native integration priority, before LXNU. The deployment
-target remains macOS 26.4. Unsigned builds and standalone adapter tests do not
+target is macOS 26.5. Unsigned builds and standalone adapter tests do not
 establish installed FSKit behavior.
 
 ## Ownership and I/O
@@ -18,6 +18,11 @@ identity index introduces no cycle. The last item keeps callback storage alive
 through release and unmount. On macOS 27, conditional reclaim uses the same monitor
 as lookup publication. On older systems, a hold survives until FSKit releases its
 last strong item reference. Both paths need installed concurrency acceptance.
+
+The open/close protocol rejects write and read/write opens with `EROFS` before
+the kernel can admit cached writes or shared writable mappings. Item lifetime
+continues to own inode holds independently of the open count. This complements
+the requested read-only mount flag; acceptance checks both contracts separately.
 
 Regular, block-aligned files with ordinary extent or indirect data can supply
 validated mappings to FSKit's kernel I/O path. Inline, encrypted and verity files
@@ -104,13 +109,13 @@ replace an existing key.
 
 The key set is sealed before publishing a volume and retained through its last
 item. Adding or removing a saved key affects the next mount. Removing a saved key
-**does not revoke access on the current mount**. Unmount/remount is required on
-26.4; live key replacement would need accepted name and data-cache invalidation.
+**does not revoke access on the current mount**. Unmount/remount is required with
+the current adapter; live key replacement needs accepted name and data-cache invalidation.
 Signed, same-user Keychain sharing remains a separate installation requirement.
 
 ## OS compatibility
 
-Keep macOS 26.4 as the deployment target. A modern SDK can build one binary with
+Keep macOS 26.5 as the deployment target. A modern SDK can build one binary with
 27-only calls guarded by runtime availability; compile guards additionally keep
 those calls out when building against an older SDK. Conditional reclaim uses this
 boundary. An older SDK build has not yet been accepted.
@@ -246,6 +251,15 @@ passes for both architectures of the app and its embedded extension. The embedde
 profiles authorize the shared App Group, and the extension profile also authorizes
 FSKit Module. Signing reports are under `artifacts/checks/fskit-signed/`; these are
 development builds, not notarized distribution artifacts.
+
+An earlier signed installation in the stock macOS 26.4 VM passed extension
+discovery, system enablement and an ordinary-user mount. It failed the read-only
+mount-flag and write-open assertions, and the control app found no mounted endpoint.
+Normal unmount and device detach succeeded. The adapter now rejects write opens
+explicitly, with focused open/close tests passing; installed verification on the
+new minimum of macOS 26.5 remains pending. A deployment-target change alone does
+not establish that those runtime failures are fixed. These reports are in the
+lab's `artifacts/ext4-fskit/installed/`.
 
 The focused adapter tests exercise direct versus bounced resource I/O,
 short/failing reads, two distinct instances with one volume UUID, a separate IPC

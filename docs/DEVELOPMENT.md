@@ -51,7 +51,7 @@ configuration; Meson exposes the same formatting targets after setup.
 `make fskit` uses XcodeGen and the selected Xcode toolchain to build an unsigned
 app under `artifacts/fskit/DerivedData/Build/Products/Debug/Machlin ext4.app`.
 XcodeGen generates its project from `adapters/fskit/project.yml`; the generated
-project and build outputs stay ignored. macOS 26.4 is the deployment target.
+project and build outputs stay ignored. macOS 26.5 is the FSKit deployment target.
 
 For a signed build, run `python3 scripts/build_fskit.py --team PERSONAL_TEAM_ID`.
 Add `--provision` to let Xcode retrieve profiles using its configured account.

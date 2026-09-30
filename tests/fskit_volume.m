@@ -338,6 +338,31 @@ lookup(Ext4Volume *volume, FSItem *directory, NSString *name)
 }
 
 static void
+check_open(Ext4Volume *volume, FSItem *item, FSVolumeOpenModes modes, NSInteger expected)
+{
+	__block unsigned calls = 0;
+
+	[volume openItem:item
+	       withModes:modes
+	    replyHandler:^(NSError *error) {
+	      assert(expected == 0 ? error == nil
+				   : error != nil && error.code == expected &&
+			  [error.domain isEqual:NSPOSIXErrorDomain]);
+	      calls++;
+	    }];
+	assert(calls == 1);
+	if (expected == 0) {
+		[volume closeItem:item
+		     keepingModes:0
+		     replyHandler:^(NSError *error) {
+		       assert(error == nil);
+		       calls++;
+		     }];
+		assert(calls == 2);
+	}
+}
+
+static void
 read_file(Ext4Volume *volume, FSItem *file, NSData *expected)
 {
 	ReadBuffer *buffer = [ReadBuffer new];
@@ -561,6 +586,10 @@ main(int argc, const char **argv)
 		hello = lookup(volume, root, @"hello.txt");
 		alias = lookup(volume, root, @"hello-hardlink");
 		assert(hello == alias);
+		assert(!volume.isOpenCloseInhibited);
+		check_open(volume, hello, FSVolumeOpenModesRead, 0);
+		check_open(volume, hello, FSVolumeOpenModesWrite, EROFS);
+		check_open(volume, hello, FSVolumeOpenModesRead | FSVolumeOpenModesWrite, EROFS);
 		read_file(volume, hello, expected);
 		reads = device.reads;
 		read_file(volume, alias, expected);
@@ -644,6 +673,7 @@ main(int argc, const char **argv)
 		[server stop];
 		assert(rmdir(ipcPath) == 0);
 		[volume invalidate];
+		check_open(volume, hello, FSVolumeOpenModesRead, ESTALE);
 		response = [volume controlRequest:@{ @"command" : @"ping" }];
 		assert([response[@"error"][@"code"] intValue] == ENXIO);
 		[volume readFromFile:hello

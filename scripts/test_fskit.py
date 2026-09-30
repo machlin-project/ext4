@@ -47,7 +47,7 @@ def main() -> None:
         command = [
             clang, "-isysroot", sdk, "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror",
             "-Wdeclaration-after-statement", "-g", "-O1",
-            "-fsanitize=address,undefined", "-mmacosx-version-min=26.4",
+            "-fsanitize=address,undefined", "-mmacosx-version-min=26.5",
             "-I", str(ROOT / "include"), "-I", str(ROOT / "core"), "-framework", "Foundation", "-framework", "FSKit",
             *overrides,
             str(ROOT / f"tests/fskit_{name}.m"),

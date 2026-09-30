@@ -35,7 +35,8 @@ separately. AES and key
 management are adapter services, while the core has portable SHA, ARM64 userspace
 SHA-256 acceleration and metadata checksums.
 
-Both native adapters remain read-only. The [FSKit adapter](docs/FSKIT.md) now
+Both native adapters remain read-only. The [FSKit adapter](docs/FSKIT.md) requires
+macOS 26.5 or later and
 uses held inode state, restricted kernel read mappings, user xattr reads and an
 App Group Unix socket for the control app. The app and extension build with Apple
 Development signing and profiles authorizing FSKit Module and the shared App Group;

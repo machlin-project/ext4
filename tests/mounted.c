@@ -93,12 +93,27 @@ read_worker(void *context)
 }
 
 static void
+check_mount_flags(const char *path)
+{
+	struct statvfs filesystem;
+	int root = -1;
+
+	root = open(path, O_RDONLY | O_DIRECTORY);
+	CHECK(root >= 0);
+	CHECK(fstatvfs(root, &filesystem) == 0);
+	CHECK((filesystem.f_flag & ST_RDONLY) != 0);
+out:
+	if (root >= 0) {
+		close(root);
+	}
+}
+
+static void
 check_mounted(const char *path)
 {
 	struct stat hello;
 	struct stat hardlink;
 	struct stat metadata;
-	struct statvfs filesystem;
 	struct dirent *entry;
 	struct reader_worker workers[WORKER_COUNT];
 	pthread_t threads[WORKER_COUNT];
@@ -126,8 +141,6 @@ check_mounted(const char *path)
 
 	root = open(path, O_RDONLY | O_DIRECTORY);
 	CHECK(root >= 0);
-	CHECK(fstatvfs(root, &filesystem) == 0);
-	CHECK((filesystem.f_flag & ST_RDONLY) != 0);
 	CHECK(fstatat(root, "hello.txt", &hello, 0) == 0);
 	CHECK(fstatat(root, "hello-hardlink", &hardlink, 0) == 0);
 	CHECK(S_ISREG(hello.st_mode) && hello.st_size == 13);
@@ -253,12 +266,6 @@ check_mounted(const char *path)
 		joined++;
 		CHECK(workers[joined - 1].error == 0);
 	}
-	errno = 0;
-	fd = openat(root, "hello.txt", O_WRONLY);
-	CHECK(fd == -1 && errno == EROFS);
-	errno = 0;
-	fd = openat(root, "must-not-be-created", O_CREAT | O_EXCL | O_WRONLY, 0600);
-	CHECK(fd == -1 && errno == EROFS);
 out:
 	while (joined < started) {
 		pthread_join(threads[joined], NULL);
@@ -282,6 +289,38 @@ out:
 	free(sparse);
 }
 
+static void
+check_readonly_operations(const char *path)
+{
+	int root = -1;
+	int fd = -1;
+
+	root = open(path, O_RDONLY | O_DIRECTORY);
+	CHECK(root >= 0);
+	errno = 0;
+	fd = openat(root, "hello.txt", O_WRONLY);
+	CHECK(fd == -1 && errno == EROFS);
+	errno = 0;
+	fd = openat(root, "must-not-be-created", O_CREAT | O_EXCL | O_WRONLY, 0600);
+	CHECK(fd == -1 && errno == EROFS);
+out:
+	if (fd >= 0) {
+		close(fd);
+	}
+	if (root >= 0) {
+		close(root);
+	}
+}
+
+static void
+run_check(const char *name, void (*check)(const char *), const char *path)
+{
+	unsigned int before = failures;
+
+	check(path);
+	printf("%s: %s\n", failures == before ? "PASS" : "FAIL", name);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -289,7 +328,9 @@ main(int argc, char **argv)
 		fprintf(stderr, "usage: ext4-mounted-test MOUNTPOINT\n");
 		return 2;
 	}
-	check_mounted(argv[1]);
+	run_check("read-only mount flags", check_mount_flags, argv[1]);
+	run_check("mounted reads and metadata", check_mounted, argv[1]);
+	run_check("read-only operation admission", check_readonly_operations, argv[1]);
 	if (failures != 0) {
 		fprintf(stderr, "FAIL: %u mounted filesystem assertions\n", failures);
 		return 1;

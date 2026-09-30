@@ -21,8 +21,8 @@ struct ext4_native_crypto;
 
 @end
 
-@interface Ext4Volume (FileIO) <FSVolumeReadWriteOperations, FSVolumeXattrOperations,
-    FSVolumeKernelOffloadedIOOperations>
+@interface Ext4Volume (FileIO) <FSVolumeReadWriteOperations, FSVolumeOpenCloseOperations,
+    FSVolumeXattrOperations, FSVolumeKernelOffloadedIOOperations>
 @end
 
 @interface Ext4Volume (Control)

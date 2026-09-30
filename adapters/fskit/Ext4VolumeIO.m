@@ -8,6 +8,38 @@
 
 @implementation Ext4Volume (FileIO)
 
+- (BOOL)isOpenCloseInhibited
+{
+	return NO;
+}
+
+- (void)openItem:(FSItem *)item
+       withModes:(FSVolumeOpenModes)modes
+    replyHandler:(void (^)(NSError *))reply
+{
+	@synchronized(self) {
+		enum ext4_result result = [self validateItem:(Ext4Item *)item];
+
+		/* Refuse write access before the kernel admits cached writes or shared
+		 * writable mappings, independently of the exported mount flags. */
+		if (result == EXT4_OK && (modes & FSVolumeOpenModesWrite) != 0) {
+			result = EXT4_READ_ONLY;
+		}
+		reply(ext4_error(result));
+	}
+}
+
+- (void)closeItem:(FSItem *)item
+     keepingModes:(FSVolumeOpenModes)modes
+     replyHandler:(void (^)(NSError *))reply
+{
+	(void)modes;
+	@synchronized(self) {
+		/* FSItem lifetime, rather than the open count, owns the inode hold. */
+		reply(ext4_error([self validateItem:(Ext4Item *)item]));
+	}
+}
+
 /* The caller holds the volume monitor through completion. This is also used
  * by symbolic links, so every held read obeys the same retention policy. */
 - (enum ext4_result)readItem:(Ext4Item *)item

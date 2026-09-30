@@ -5,7 +5,8 @@ in Machlin through a kernel adapter, with the agreed Linux metadata contracts.
 Complete and validate the portable core first, then integrate FSKit on stock macOS,
 then implement LXNU-specific policy. Adapter development is deferred until the
 core's required format, mutation, metadata and recovery contracts are accepted.
-Unsigned builds remain the development default while signing is deferred.
+Unsigned builds remain the local development default; personal development signing
+is configured for installed acceptance in the dedicated stock macOS VM.
 The rows below are requirements, not claims of implementation. A checkpoint does
 not complete the project. Format support must expand with tested real images;
 safe rejection of a feature is recorded separately from supporting it.
@@ -2909,24 +2910,45 @@ internal ext4 symbols in either kext. Reports are in
 `artifacts/checks/space-platform-builds.json`. Both adapters remain read-only;
 these builds add no installed or mounted native acceptance.
 
-## FSKit build evidence
+## FSKit build and installation evidence
 
 The app and embedded extension compile using the macOS 27 SDK with deployment
-target macOS 26.4. The adapter maps resource I/O, inode identity, attributes,
+target macOS 26.5. The adapter maps resource I/O, inode identity, attributes,
 lookup, directory cookies, links and reads to the same C library. Mutations return
 `EROFS`; its requested mount options include read-only. Only a quick clean-volume
 check is implemented; it is not a full consistency checker or repair utility.
 
-Unsigned build reports are in `artifacts/checks/fskit-reader-final-build.log` and
-the earlier FSKit build logs. Automatic signing found no Xcode
-account or provisioning profile for `org.machlin.ext4.filesystem`. Signing is
-deferred by the user. No extension has been installed or mounted.
+The app and embedded extension build both unsigned and with personal Apple
+Development signing. Strict verification of the complete bundle passes for both
+architectures. Separate development profiles authorize the shared App Group,
+the extension's FSKit Module capability and the dedicated VM's Provisioning UDID.
+The build helper verifies nested code after signing and supports explicit profiles
+per target; use a clean build when changing profiles. Signing evidence is in
+`artifacts/checks/fskit-signed/`.
 
-`ext4-mounted-test MOUNTPOINT` is built, but its FSKit runtime results remain pending.
+The earlier 26.4-targeted signed app was installed and its File System Extension
+enabled through System Settings in the dedicated macOS 26.4 VM. The actual loaded
+kernel was Apple's stock VMAPPLE kernel. Guest signature verification and extension discovery passed;
+no host installation or security-policy change was required. Installation evidence
+is in the lab's `artifacts/ext4-fskit/installed/`. This does not establish mounted
+I/O, sandboxed control IPC, shared Keychain access or distribution readiness.
+
+The initial 26.4 mount failed `ST_RDONLY` and write-open rejection assertions;
+the app also discovered no control endpoint. Normal unmount and detach succeeded.
+Explicit write-open admission now passes component tests, but installed acceptance
+on the new 26.5 minimum remains pending. Earlier successful builds and installation
+must not be reported as a passing mounted suite.
+
+`ext4-mounted-test MOUNTPOINT` reports mount flags, file I/O and write admission
+independently, retaining a failing overall status for any failed group.
 It checks ordinary reads, metadata, hard links and symlinks, indexed directory
 enumeration, sparse data, mmap, concurrent opens/reads/closes and read-only
-enforcement. The disposable stock macOS guest was booted and its actual loaded
-Apple kernel identified, then shut down. This proves guest readiness only.
+enforcement. Fixtures and the arm64 test executable are staged under the lab's
+`artifacts/ext4-fskit/acceptance/`; preparation is separate from mounted results.
+Use images from the current fixture generator, including `metadata.txt`; the
+initial local `artifacts/fixtures/` image predates that case. The corrected staged
+images come from `artifacts/fixtures-metadata/` and have independently checked
+ownership and timestamps. No missing-metadata failure is counted as driver evidence.
 
 ## Kernel build evidence
 

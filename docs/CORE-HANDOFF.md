@@ -144,7 +144,7 @@ mapping and lifetime acceptance remains pending. FSKit now has a CommonCrypto
 fscrypt provider and Keychain-backed immutable mount keys; the app can import
 v1/v2 raw master keys. Native crypto/manifest tests
 pass; signed Keychain sharing and mounted encrypted I/O are still unaccepted.
-The minimum stays 26.4, with 27-only APIs separated by availability and compile
+The FSKit minimum is 26.5, with 27-only APIs separated by availability and compile
 guards. The public durable device-barrier contract is still unresolved; do not
 wire metadataFlush or callback completion into a falsely successful barrier.
 The kernel adapter has not yet adopted these APIs.

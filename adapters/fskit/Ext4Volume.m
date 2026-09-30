@@ -221,6 +221,9 @@ ext4_item_type(uint16_t mode)
 
 - (FSMountOptions)requestedMountOptions
 {
+#if DEBUG
+	NSLog(@"Machlin ext4 requested read-only mount flags");
+#endif
 	return FSMountOptionsReadOnly;
 }
 
@@ -259,6 +262,9 @@ ext4_item_type(uint16_t mode)
 
 - (void)mountWithOptions:(FSTaskOptions *)options replyHandler:(void (^)(NSError *))reply
 {
+#if DEBUG
+	NSLog(@"Machlin ext4 mount callback");
+#endif
 	@synchronized(self) {
 		(void)options;
 		if (!_active) {
@@ -273,6 +279,9 @@ ext4_item_type(uint16_t mode)
 
 - (void)unmountWithReplyHandler:(void (^)(void))reply
 {
+#if DEBUG
+	NSLog(@"Machlin ext4 unmount callback");
+#endif
 	@synchronized(self) {
 		_mounted = NO;
 		[_control stop];
@@ -293,6 +302,9 @@ ext4_item_type(uint16_t mode)
 - (void)activateWithOptions:(FSTaskOptions *)options
 	       replyHandler:(void (^)(FSItem *, NSError *))reply
 {
+#if DEBUG
+	NSLog(@"Machlin ext4 activate callback");
+#endif
 	@synchronized(self) {
 		struct ext4_inode root;
 		Ext4Item *item = nil;
