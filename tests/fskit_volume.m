@@ -15,6 +15,7 @@
 }
 @property NSData *image;
 @property size_t reads;
+@property size_t failRead;
 @end
 
 @implementation ImageBlocks
@@ -42,12 +43,55 @@
 	unsigned active = atomic_fetch_add(&_activeReads, 1);
 
 	assert(active == 0);
-	(void)error;
 	assert(offset >= 0 && (uint64_t)offset + length <= self.image.length);
 	self.reads++;
+	if (self.failRead != 0 && self.reads == self.failRead) {
+		*error = [NSError errorWithDomain:NSPOSIXErrorDomain code:EIO userInfo:nil];
+		assert(atomic_fetch_sub(&_activeReads, 1) == 1);
+		return 0;
+	}
 	memcpy(buffer, (const uint8_t *)self.image.bytes + offset, length);
 	assert(atomic_fetch_sub(&_activeReads, 1) == 1);
 	return length;
+}
+
+@end
+
+@interface TestDirectoryPacker : NSObject
+@property NSMutableArray<NSDictionary *> *entries;
+@property NSUInteger capacity;
+@property BOOL stopWhenFull;
+@property ImageBlocks *device;
+@property NSUInteger failAfterEntries;
+- (BOOL)packEntryWithName:(FSFileName *)name
+		 itemType:(FSItemType)type
+		   itemID:(FSItemID)itemID
+	       nextCookie:(FSDirectoryCookie)cookie
+	       attributes:(FSItemAttributes *)attributes;
+@end
+
+@implementation TestDirectoryPacker
+
+- (BOOL)packEntryWithName:(FSFileName *)name
+		 itemType:(FSItemType)type
+		   itemID:(FSItemID)itemID
+	       nextCookie:(FSDirectoryCookie)cookie
+	       attributes:(FSItemAttributes *)attributes
+{
+	if (self.entries.count == self.capacity) {
+		return NO;
+	}
+	[self.entries addObject:@{
+		@"name" : [[NSString alloc] initWithData:name.data encoding:NSUTF8StringEncoding],
+		@"type" : @(type),
+		@"inode" : @(itemID),
+		@"cookie" : @(cookie),
+		@"attributes" : attributes ?: NSNull.null
+	}];
+	if (self.entries.count == self.failAfterEntries) {
+		self.device.failRead = self.device.reads + 1;
+	}
+	return !self.stopWhenFull || self.entries.count < self.capacity;
 }
 
 @end
@@ -362,6 +406,134 @@ check_open(Ext4Volume *volume, FSItem *item, FSVolumeOpenModes modes, NSInteger 
 	}
 }
 
+static FSDirectoryVerifier
+enumerate(Ext4Volume *volume, FSItem *directory, FSDirectoryCookie cookie,
+    FSDirectoryVerifier verifier, FSItemGetAttributesRequest *attributes,
+    TestDirectoryPacker *packer, NSInteger expectedError)
+{
+	__block unsigned calls = 0;
+	__block FSDirectoryVerifier result = FSDirectoryVerifierInitial;
+
+	[volume enumerateDirectory:directory
+		  startingAtCookie:cookie
+			  verifier:verifier
+	       providingAttributes:attributes
+		       usingPacker:(FSDirectoryEntryPacker *)packer
+		      replyHandler:^(FSDirectoryVerifier current, NSError *error) {
+			assert(expectedError == 0 ? error == nil
+						  : error.code == expectedError &&
+				    [error.domain isEqual:NSPOSIXErrorDomain]);
+			result = current;
+			calls++;
+		      }];
+	assert(calls == 1);
+	return result;
+}
+
+static void
+check_directory(Ext4Volume *volume, FSItem *root, ImageBlocks *device)
+{
+	FSItem *directory = lookup(volume, root, @"many");
+	TestDirectoryPacker *packer = [TestDirectoryPacker new];
+	FSItemGetAttributesRequest *attributes;
+	NSMutableSet<NSString *> *expected;
+	NSMutableSet<NSString *> *seen;
+	FSDirectoryCookie cookie;
+	FSDirectoryVerifier verifier;
+	const NSUInteger capacities[] = { 1, 7, 512 };
+	NSUInteger capacity;
+	unsigned mode;
+	unsigned number;
+	size_t reads;
+
+	packer.entries = [NSMutableArray array];
+	packer.device = device;
+	for (mode = 0; mode < 4; mode++) {
+		attributes = mode & 1 ? [FSItemGetAttributesRequest new] : nil;
+		packer.stopWhenFull = (mode & 2) != 0;
+		expected = [NSMutableSet set];
+		for (number = 0; number < 400; number++) {
+			[expected addObject:[NSString stringWithFormat:@"entry-%04u", number]];
+		}
+		if (attributes == nil) {
+			[expected addObject:@"."];
+			[expected addObject:@".."];
+		}
+		for (capacity = 0; capacity < sizeof(capacities) / sizeof(capacities[0]);
+		    capacity++) {
+			packer.capacity = capacities[capacity];
+			cookie = FSDirectoryCookieInitial;
+			verifier = FSDirectoryVerifierInitial;
+			seen = [NSMutableSet set];
+			reads = device.reads;
+			for (;;) {
+				[packer.entries removeAllObjects];
+				verifier = enumerate(
+				    volume, directory, cookie, verifier, attributes, packer, 0);
+				assert(verifier != FSDirectoryVerifierInitial);
+				if (packer.entries.count == 0) {
+					break;
+				}
+				for (NSDictionary *entry in packer.entries) {
+					NSString *name = entry[@"name"];
+					NSString *contents;
+					BOOL dot = [name isEqual:@"."] || [name isEqual:@".."];
+					FSItemAttributes *actual = entry[@"attributes"];
+					FSDirectoryCookie next =
+					    [entry[@"cookie"] unsignedLongLongValue];
+
+					assert([expected containsObject:name] &&
+					    ![seen containsObject:name]);
+					assert([entry[@"type"] intValue] ==
+					    (dot ? FSItemTypeDirectory : FSItemTypeFile));
+					assert([entry[@"inode"] unsignedLongLongValue] >=
+					    EXT4_ROOT_INODE);
+					assert(next > cookie);
+					if (attributes != nil) {
+						assert(
+						    [actual isKindOfClass:FSItemAttributes.class]);
+						assert(actual.fileID ==
+						    [entry[@"inode"] unsignedLongLongValue]);
+						assert(actual.type == FSItemTypeFile);
+						contents = [NSString stringWithFormat:@"%d\n",
+						    [name substringFromIndex:6].intValue];
+						assert(actual.size == contents.length);
+					} else {
+						assert((id)actual == NSNull.null);
+					}
+					[seen addObject:name];
+					cookie = next;
+				}
+			}
+			assert([seen isEqual:expected]);
+			if (packer.capacity == 512 && !packer.stopWhenFull) {
+				printf("FSKit directory: attributes=%u entries=%zu "
+				       "resource-reads=%zu\n",
+				    mode & 1, (size_t)seen.count, device.reads - reads);
+			}
+		}
+	}
+	/* Neither a stale verifier nor a failed read may become a successful EOF. */
+	[packer.entries removeAllObjects];
+	reads = device.reads;
+	(void)enumerate(volume, directory, 0, verifier + 1, nil, packer, ESTALE);
+	assert(packer.entries.count == 0 && device.reads == reads);
+	device.failRead = device.reads + 1;
+	(void)enumerate(volume, directory, 0, verifier, nil, packer, EIO);
+	assert(packer.entries.count == 0);
+	device.failRead = 0;
+	packer.failAfterEntries = 3;
+	(void)enumerate(volume, directory, 0, verifier, nil, packer, EIO);
+	assert(packer.entries.count == 3);
+	device.failRead = 0;
+	packer.failAfterEntries = 0;
+	[packer.entries removeAllObjects];
+	(void)enumerate(volume, directory, 0, verifier, nil, packer, 0);
+	assert(packer.entries.count == 402);
+	puts("PASS FSKit directory: paginated names and attributes, dot policy, verifier and read "
+	     "errors");
+}
+
 static void
 read_file(Ext4Volume *volume, FSItem *file, NSData *expected)
 {
@@ -583,6 +755,7 @@ main(int argc, const char **argv)
 				 replies++;
 			       }];
 		assert(replies == 1);
+		check_directory(volume, root, device);
 		hello = lookup(volume, root, @"hello.txt");
 		alias = lookup(volume, root, @"hello-hardlink");
 		assert(hello == alias);

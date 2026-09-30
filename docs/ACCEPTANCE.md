@@ -2928,8 +2928,11 @@ per target; use a clean build when changing profiles. Signing evidence is in
 
 The earlier 26.4-targeted signed app was installed and its File System Extension
 enabled through System Settings in the dedicated macOS 26.4 VM. The actual loaded
-kernel was Apple's stock VMAPPLE kernel. Guest signature verification and extension discovery passed;
-no host installation or security-policy change was required. Installation evidence
+kernel was Apple's stock VMAPPLE kernel. Guest signature verification and extension discovery passed.
+The base VM was later found to have SIP disabled, with Gatekeeper assessments
+enabled. These results do not establish installation with ordinary macOS security
+settings; that requires a separate run with SIP enabled. No host installation or
+security-policy change was made. Installation evidence
 is in the lab's `artifacts/ext4-fskit/installed/`. This does not establish mounted
 I/O, sandboxed control IPC, shared Keychain access or distribution readiness.
 

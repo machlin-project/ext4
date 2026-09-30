@@ -31,6 +31,7 @@
 - (void)releaseHold:(struct ext4_inode_hold *)hold;
 - (enum ext4_result)validateItem:(Ext4Item *)item;
 - (BOOL)canOffload:(const struct ext4_inode *)inode;
+- (FSItemAttributes *)attributesForInode:(const struct ext4_inode *)inode;
 - (enum ext4_result)readItem:(Ext4Item *)item
 		      offset:(uint64_t)offset
 		      buffer:(void *)buffer

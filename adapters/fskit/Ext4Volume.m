@@ -7,6 +7,15 @@
 #include <sys/param.h>
 #include <sys/stat.h>
 
+/* Borrowed only for the synchronous visit under the volume monitor. */
+struct ext4_directory_visit {
+	struct ext4_fs *fs;
+	__unsafe_unretained Ext4Volume *volume;
+	__unsafe_unretained FSDirectoryEntryPacker *packer;
+	BOOL attributes;
+	enum ext4_result error;
+};
+
 static FSItemType
 ext4_item_type(uint16_t mode)
 {
@@ -28,6 +37,35 @@ ext4_item_type(uint16_t mode)
 	default:
 		return FSItemTypeUnknown;
 	}
+}
+
+static enum ext4_dir_action
+ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uint64_t next_cookie)
+{
+	struct ext4_directory_visit *visit = context;
+	struct ext4_inode inode;
+	FSItemAttributes *attributes;
+	FSFileName *name;
+
+	/* FSKit requests dot entries only for enumeration without attributes. */
+	if (visit->attributes &&
+	    ((entry->name_length == 1 && entry->name[0] == '.') ||
+		(entry->name_length == 2 && entry->name[0] == '.' && entry->name[1] == '.'))) {
+		return EXT4_DIR_ACCEPT;
+	}
+	visit->error = ext4_get_inode(visit->fs, entry->inode, &inode);
+	if (visit->error != EXT4_OK) {
+		return EXT4_DIR_STOP;
+	}
+	name = [FSFileName nameWithBytes:(const char *)entry->name length:entry->name_length];
+	attributes = visit->attributes ? [visit->volume attributesForInode:&inode] : nil;
+	return [visit->packer packEntryWithName:name
+				       itemType:ext4_item_type(inode.mode)
+					 itemID:inode.number
+				     nextCookie:next_cookie
+				     attributes:attributes]
+	    ? EXT4_DIR_ACCEPT
+	    : EXT4_DIR_STOP;
 }
 
 @implementation Ext4Item
@@ -410,10 +448,8 @@ ext4_item_type(uint16_t mode)
 {
 	@synchronized(self) {
 		Ext4Item *parent = (Ext4Item *)directory;
-		struct ext4_dir_entry entry;
-		struct ext4_inode inode;
-		FSItemAttributes *itemAttributes;
-		FSFileName *name;
+		struct ext4_directory_visit visit = { _fs, self, packer, attributes != nil,
+			EXT4_OK };
 		uint64_t next = cookie;
 		FSDirectoryVerifier current = FSDirectoryVerifierInitial;
 		enum ext4_result error;
@@ -429,27 +465,10 @@ ext4_item_type(uint16_t mode)
 			    [NSError errorWithDomain:NSPOSIXErrorDomain code:ESTALE userInfo:nil]);
 			return;
 		}
-		while ((error = ext4_next_dir(_fs, &parent->inode, &next, &entry)) == EXT4_OK) {
-			if (attributes != nil &&
-			    ((entry.name_length == 1 && entry.name[0] == '.') ||
-				(entry.name_length == 2 && entry.name[0] == '.' &&
-				    entry.name[1] == '.'))) {
-				continue;
-			}
-			error = ext4_get_inode(_fs, entry.inode, &inode);
-			if (error != EXT4_OK) {
-				break;
-			}
-			name = [FSFileName nameWithBytes:(const char *)entry.name
-						  length:entry.name_length];
-			itemAttributes = attributes == nil ? nil : [self attributesForInode:&inode];
-			if (![packer packEntryWithName:name
-					      itemType:ext4_item_type(inode.mode)
-						itemID:inode.number
-					    nextCookie:next
-					    attributes:itemAttributes]) {
-				break;
-			}
+		error =
+		    ext4_iterate_dir(_fs, &parent->inode, &next, ext4_pack_directory_entry, &visit);
+		if (visit.error != EXT4_OK) {
+			error = visit.error;
 		}
 		reply(current, error == EXT4_NOT_FOUND ? nil : ext4_error(error));
 	}

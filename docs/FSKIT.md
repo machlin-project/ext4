@@ -30,6 +30,13 @@ retain core reads. Partial EOF blocks also retain core reads to avoid exposing
 stale on-disk padding. These mappings require an immutable read-only block
 resource. Writable mapping lifetime and cache invalidation are separate work.
 
+Directory enumeration uses the core's streaming visitor, validating and reading
+each directory block once per call. A synchronous packing callback supplies names,
+checked inode types and optional attributes. FSKit owns the cookie of the last
+packed entry; a full packer stops the visit without retaining directory storage.
+The volume monitor covers both traversal and packing. Dot entries, verifier
+checks and inode-read errors keep their existing contracts.
+
 ## Private control protocol
 
 Both the app and extension declare `group.org.machlin.ext4`. The App Group must
@@ -258,9 +265,11 @@ profiles authorize the shared App Group, and the extension profile also authoriz
 FSKit Module. Signing reports are under `artifacts/checks/fskit-signed/`; these are
 development builds, not notarized distribution artifacts.
 
-An earlier signed installation in the stock macOS 26.4 VM passed extension
+An earlier signed installation in the macOS 26.4 VM with Apple's stock kernel passed extension
 discovery, system enablement and an ordinary-user mount. It failed the read-only
 mount-flag and write-open assertions, and the control app found no mounted endpoint.
+The base VM had SIP disabled and Gatekeeper assessments enabled, so this run does
+not establish behavior with ordinary macOS security settings.
 Normal unmount and device detach succeeded. The adapter now rejects write opens
 explicitly, with focused open/close tests passing; installed verification on the
 new minimum of macOS 26.5 remains pending. A deployment-target change alone does
@@ -275,6 +284,16 @@ and 4 KiB fixtures: hard-link identity, held reads, sparse/EOF contents, paginat
 kernel mapping reconstruction against independent fixture bytes, user xattrs,
 ACL rejection, concurrent reads/control requests, late lifecycle rejection and
 resource retention through the final item.
+
+The streamed enumeration tests cover 400-file directories with and without
+attributes, page capacities of 1, 7 and 512, both a packer that stops after accepting
+its last entry and one that rejects the next entry, dot-entry policy, stale
+verifiers and failures before or during delivery. They pass with ASan/UBSan on
+1 KiB and 4 KiB fixtures. Compared with the prior adapter under the same tests,
+one complete attribute-bearing scan reduces resource reads from 1,205 to 803
+on the 4 KiB fixture and from 1,624 to 820 on the 1 KiB fixture. These are resource
+callback counts, not mounted throughput. Evidence is in
+`artifacts/checks/fskit-directory-stream/`.
 
 The portable `file-read-ranges` and `held-file-reads` checks pass (2/2, no skips),
 including guards that prevent crypto/verity/inline data from being offloaded.
