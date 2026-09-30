@@ -109,10 +109,45 @@ out:
 }
 
 static void
-check_mounted(const char *path)
+check_metadata(const char *path)
 {
 	struct stat hello;
 	struct stat hardlink;
+	struct stat metadata;
+	int root = -1;
+
+	root = open(path, O_RDONLY | O_DIRECTORY);
+	CHECK(root >= 0);
+	CHECK(fstatat(root, "hello.txt", &hello, 0) == 0);
+	CHECK(fstatat(root, "hello-hardlink", &hardlink, 0) == 0);
+	CHECK(S_ISREG(hello.st_mode) && hello.st_size == 13);
+	CHECK(hello.st_ino == hardlink.st_ino && hello.st_nlink == 2);
+	CHECK(fstatat(root, "metadata.txt", &metadata, 0) == 0);
+	CHECK(S_ISREG(metadata.st_mode) && (metadata.st_mode & 07777) == 0640);
+	CHECK(metadata.st_uid == 70001 && metadata.st_gid == 80002);
+#ifdef __APPLE__
+	CHECK(metadata.st_atimespec.tv_sec == -1 && metadata.st_atimespec.tv_nsec == 123456789);
+	CHECK(metadata.st_mtimespec.tv_sec == INT64_C(2147483648) &&
+	    metadata.st_mtimespec.tv_nsec == 987654321);
+	CHECK(metadata.st_ctimespec.tv_sec == INT64_C(4294967296) &&
+	    metadata.st_ctimespec.tv_nsec == 42);
+	CHECK(metadata.st_birthtimespec.tv_sec == 1700000000 &&
+	    metadata.st_birthtimespec.tv_nsec == 999999999);
+#else
+	CHECK(metadata.st_atim.tv_sec == -1 && metadata.st_atim.tv_nsec == 123456789);
+	CHECK(metadata.st_mtim.tv_sec == INT64_C(2147483648) &&
+	    metadata.st_mtim.tv_nsec == 987654321);
+	CHECK(metadata.st_ctim.tv_sec == INT64_C(4294967296) && metadata.st_ctim.tv_nsec == 42);
+#endif
+out:
+	if (root >= 0) {
+		close(root);
+	}
+}
+
+static void
+check_mounted(const char *path)
+{
 	struct stat metadata;
 	struct dirent *entry;
 	struct reader_worker workers[WORKER_COUNT];
@@ -141,27 +176,6 @@ check_mounted(const char *path)
 
 	root = open(path, O_RDONLY | O_DIRECTORY);
 	CHECK(root >= 0);
-	CHECK(fstatat(root, "hello.txt", &hello, 0) == 0);
-	CHECK(fstatat(root, "hello-hardlink", &hardlink, 0) == 0);
-	CHECK(S_ISREG(hello.st_mode) && hello.st_size == 13);
-	CHECK(hello.st_ino == hardlink.st_ino && hello.st_nlink == 2);
-	CHECK(fstatat(root, "metadata.txt", &metadata, 0) == 0);
-	CHECK(S_ISREG(metadata.st_mode) && (metadata.st_mode & 07777) == 0640);
-	CHECK(metadata.st_uid == 70001 && metadata.st_gid == 80002);
-#ifdef __APPLE__
-	CHECK(metadata.st_atimespec.tv_sec == -1 && metadata.st_atimespec.tv_nsec == 123456789);
-	CHECK(metadata.st_mtimespec.tv_sec == INT64_C(2147483648) &&
-	    metadata.st_mtimespec.tv_nsec == 987654321);
-	CHECK(metadata.st_ctimespec.tv_sec == INT64_C(4294967296) &&
-	    metadata.st_ctimespec.tv_nsec == 42);
-	CHECK(metadata.st_birthtimespec.tv_sec == 1700000000 &&
-	    metadata.st_birthtimespec.tv_nsec == 999999999);
-#else
-	CHECK(metadata.st_atim.tv_sec == -1 && metadata.st_atim.tv_nsec == 123456789);
-	CHECK(metadata.st_mtim.tv_sec == INT64_C(2147483648) &&
-	    metadata.st_mtim.tv_nsec == 987654321);
-	CHECK(metadata.st_ctim.tv_sec == INT64_C(4294967296) && metadata.st_ctim.tv_nsec == 42);
-#endif
 	fd = openat(root, "hello-link", O_RDONLY);
 	CHECK(fd >= 0);
 	CHECK(read(fd, bytes, sizeof(bytes)) == 13);
@@ -329,7 +343,8 @@ main(int argc, char **argv)
 		return 2;
 	}
 	run_check("read-only mount flags", check_mount_flags, argv[1]);
-	run_check("mounted reads and metadata", check_mounted, argv[1]);
+	run_check("mounted inode metadata", check_metadata, argv[1]);
+	run_check("mounted file and directory reads", check_mounted, argv[1]);
 	run_check("read-only operation admission", check_readonly_operations, argv[1]);
 	if (failures != 0) {
 		fprintf(stderr, "FAIL: %u mounted filesystem assertions\n", failures);
