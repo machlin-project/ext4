@@ -1,0 +1,95 @@
+name: FSKit adapter
+
+on:
+  push:
+    branches: [development, main]
+    paths:
+      - '.github/workflows/fskit.yml'
+      - 'adapters/fskit/**'
+      - 'core/**'
+      - 'include/**'
+      - 'scripts/build_fskit.py'
+      - 'scripts/test_fskit.py'
+      - 'tests/fskit_*.m'
+      - 'tests/generate_fixtures.py'
+  pull_request:
+    paths:
+      - '.github/workflows/fskit.yml'
+      - 'adapters/fskit/**'
+      - 'core/**'
+      - 'include/**'
+      - 'scripts/build_fskit.py'
+      - 'scripts/test_fskit.py'
+      - 'tests/fskit_*.m'
+      - 'tests/generate_fixtures.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fskit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  adapter:
+    name: Unsigned FSKit with SDK 26.5
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build and fixture tools
+        run: |
+          brew install xcodegen e2fsprogs
+          echo "$(brew --prefix e2fsprogs)/sbin" >> "$GITHUB_PATH"
+      - name: Record platform and SDK
+        run: |
+          mkdir -p artifacts/fskit-ci/reports
+          {
+            sw_vers
+            uname -a
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-version
+            xcrun --find clang
+            xcodegen --version
+          } | tee artifacts/fskit-ci/reports/platform.log
+          test "$(xcrun --sdk macosx --show-sdk-version)" = '26.5'
+      - name: Generate bounded fixtures
+        run: |
+          python3 tests/generate_fixtures.py --output artifacts/fskit-ci/fixtures \
+            2>&1 | tee artifacts/fskit-ci/reports/fixtures.log
+      - name: Build unsigned app and extension
+        run: |
+          python3 scripts/build_fskit.py --derived-data artifacts/fskit-ci/DerivedData \
+            2>&1 | tee artifacts/fskit-ci/reports/build.log
+      # No profiles, app installation, native mounts or real Keychain access.
+      - name: Check adapter components with sanitizers
+        run: |
+          python3 scripts/test_fskit.py \
+            --derived-data artifacts/fskit-ci/DerivedData \
+            --image artifacts/fskit-ci/fixtures/ext4-4k.img \
+            --output artifacts/fskit-ci/tests \
+            2>&1 | tee artifacts/fskit-ci/reports/components.log
+          artifacts/fskit-ci/tests/fskit-volume artifacts/fskit-ci/fixtures/ext4-1k.img \
+            2>&1 | tee artifacts/fskit-ci/reports/volume-1k.log
+          artifacts/fskit-ci/tests/fskit-volume artifacts/fskit-ci/fixtures/ext4-indexed.img \
+            2>&1 | tee artifacts/fskit-ci/reports/volume-indexed.log
+      - name: Preserve build and test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fskit-sdk26-reports
+          retention-days: 7
+          path: |
+            artifacts/fskit-ci/reports/*.log
+            artifacts/fskit-ci/fixtures/*.log
+            artifacts/fskit-ci/fixtures/features.txt
+            artifacts/fskit-ci/fixtures/tool-versions.txt

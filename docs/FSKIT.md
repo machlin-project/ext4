@@ -163,6 +163,13 @@ support. User xattr names longer than macOS supports are not exported.
 
 ## Focused checks
 
+The separate FSKit GitHub Actions workflow builds an unsigned universal app with
+the macOS 26.5 SDK on a macOS 26 runner. It runs the sanitizer-instrumented resource,
+control, volume, crypto and fake Keychain checks, then repeats volume checks on
+1 KiB and indexed-directory fixtures. It uploads platform, build and test logs.
+This job needs no signing secrets and does not install an extension or establish
+mounted behavior. The portable core retains its separate Linux CI suites.
+
 For automatic signing, Xcode must have the personal Apple Developer account in
 Settings > Apple Accounts, and Keychain must contain a usable signing identity.
 A local certificate alone does not let Xcode fetch provisioning profiles. Both
