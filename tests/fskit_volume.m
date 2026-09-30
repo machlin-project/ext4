@@ -4,6 +4,7 @@
 #import "../adapters/fskit/Ext4Control.h"
 #include "../adapters/fskit/Ext4Crypto.h"
 #include "../core/sha.h"
+#include "../core/internal.h"
 #include <stdlib.h>
 #include <unistd.h>
 #include <assert.h>
@@ -535,6 +536,59 @@ check_directory(Ext4Volume *volume, FSItem *root, ImageBlocks *device)
 }
 
 static void
+check_dangling_directory_entry(NSData *source)
+{
+	NSMutableData *image = [source mutableCopy];
+	ImageBlocks *device = [ImageBlocks new];
+	Ext4ResourceIO *resource;
+	struct ext4_fs *fs = NULL;
+	struct ext4_inode root;
+	struct ext4_inode directory;
+	struct ext4_inode file;
+	struct ext4_inode_disk *disk;
+	uint64_t offset;
+	Ext4Volume *volume;
+	__block FSItem *rootItem = nil;
+	TestDirectoryPacker *packer = [TestDirectoryPacker new];
+
+	device.image = image;
+	resource = [[Ext4ResourceIO alloc] initWithReader:device];
+	assert([resource open:&fs] == EXT4_OK);
+	assert(ext4_get_inode(fs, EXT4_ROOT_INODE, &root) == EXT4_OK);
+	assert(
+	    ext4_lookup(fs, &root, (const uint8_t *)"many", strlen("many"), &directory) == EXT4_OK);
+	assert(ext4_lookup(fs, &directory, (const uint8_t *)"entry-0000", strlen("entry-0000"),
+		   &file) == EXT4_OK);
+	assert(ext4_inode_location(fs, file.number, &offset) == EXT4_OK);
+	assert(offset <= image.length && fs->inode_size <= image.length - offset);
+	/* Preserve the directory entry and valid metadata checksums, but leave its
+	 * allocated inode without a live mode. Build the malformed fixture before
+	 * giving a fresh, immutable view to the adapter. */
+	disk = (struct ext4_inode_disk *)((uint8_t *)image.mutableBytes + offset);
+	ext4_encode16(&disk->mode, 0);
+	ext4_inode_checksum_set(fs, file.number, disk);
+	ext4_unmount(fs);
+	assert([resource open:&fs] == EXT4_OK);
+	assert(ext4_get_inode(fs, file.number, &file) == EXT4_NOT_FOUND);
+	volume = [[Ext4Volume alloc] initWithResource:(FSBlockDeviceResource *)device
+					   filesystem:fs
+					resourceOwner:resource];
+	[volume activateWithOptions:(FSTaskOptions *)[TestOptions new]
+		       replyHandler:^(FSItem *item, NSError *error) {
+			 assert(error == nil && item != nil);
+			 rootItem = item;
+		       }];
+	assert(rootItem != nil);
+	packer.entries = [NSMutableArray array];
+	packer.capacity = 512;
+	(void)enumerate(volume, lookup(volume, rootItem, @"many"), FSDirectoryCookieInitial,
+	    FSDirectoryVerifierInitial, [FSItemGetAttributesRequest new], packer, EIO);
+	assert(packer.entries.count < 400);
+	[volume invalidate];
+	puts("PASS FSKit directory: dangling inode reports EIO rather than successful EOF");
+}
+
+static void
 read_file(Ext4Volume *volume, FSItem *file, NSData *expected)
 {
 	ReadBuffer *buffer = [ReadBuffer new];
@@ -736,6 +790,7 @@ main(int argc, const char **argv)
 		assert(image != nil);
 		check_acl_admission(image);
 		check_item_lifetime(image);
+		check_dangling_directory_entry(image);
 		device = [ImageBlocks new];
 		device.image = image;
 		resource = [[Ext4ResourceIO alloc] initWithReader:device];

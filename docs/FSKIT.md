@@ -289,7 +289,9 @@ The streamed enumeration tests cover 400-file directories with and without
 attributes, page capacities of 1, 7 and 512, both a packer that stops after accepting
 its last entry and one that rejects the next entry, dot-entry policy, stale
 verifiers and failures before or during delivery. They pass with ASan/UBSan on
-1 KiB and 4 KiB fixtures. Compared with the prior adapter under the same tests,
+1 KiB and 4 KiB fixtures. A dangling entry with a valid inode checksum but no live
+inode mode reports `EIO`; an inode lookup failure cannot become successful EOF.
+Compared with the prior adapter under the same tests,
 one complete attribute-bearing scan reduces resource reads from 1,205 to 803
 on the 4 KiB fixture and from 1,624 to 820 on the 1 KiB fixture. These are resource
 callback counts, not mounted throughput. Evidence is in

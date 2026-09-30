@@ -54,6 +54,9 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 		return EXT4_DIR_ACCEPT;
 	}
 	visit->error = ext4_get_inode(visit->fs, entry->inode, &inode);
+	if (visit->error == EXT4_NOT_FOUND) {
+		visit->error = EXT4_CORRUPT;
+	}
 	if (visit->error != EXT4_OK) {
 		return EXT4_DIR_STOP;
 	}
@@ -468,7 +471,8 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 		error =
 		    ext4_iterate_dir(_fs, &parent->inode, &next, ext4_pack_directory_entry, &visit);
 		if (visit.error != EXT4_OK) {
-			error = visit.error;
+			reply(current, ext4_error(visit.error));
+			return;
 		}
 		reply(current, error == EXT4_NOT_FOUND ? nil : ext4_error(error));
 	}
