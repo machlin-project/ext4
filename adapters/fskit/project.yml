@@ -62,6 +62,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_ENTITLEMENTS: Extension.entitlements
         ENABLE_APP_SANDBOX: YES
+        REGISTER_APP_GROUPS: YES
         SWIFT_OBJC_BRIDGING_HEADER: BridgingHeader.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/../../include
         OTHER_CFLAGS: -Wdeclaration-after-statement
@@ -94,6 +95,7 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Machlin ext4
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         ENABLE_APP_SANDBOX: YES
+        REGISTER_APP_GROUPS: YES
 schemes:
   Ext4FSKitApp:
     build:

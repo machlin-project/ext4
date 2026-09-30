@@ -38,7 +38,10 @@ def main() -> None:
         "-jobs", "4", "CLANG_ENABLE_EXPLICIT_MODULES=NO", f"CC={clang}",
     ]
     if args.team:
-        command.extend(["CODE_SIGN_STYLE=Automatic", f"DEVELOPMENT_TEAM={args.team}"])
+        command.extend([
+            "CODE_SIGN_STYLE=Automatic", "CODE_SIGN_IDENTITY=Apple Development",
+            f"DEVELOPMENT_TEAM={args.team}",
+        ])
         if args.provision:
             command.append("-allowProvisioningUpdates")
     else:

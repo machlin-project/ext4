@@ -138,10 +138,11 @@ Do not replace the fixed pread comparator, exclude a profile, or call unsigned
 adapter tests production FSKit/LXNU performance evidence. See [FSKit](FSKIT.md)
 for the integration contracts and outstanding native acceptance.
 
-Both adapters remain read-only. FSKit integration precedes LXNU policy; signing
-is deferred. FSKit now adopts held reads; installed mapping and lifetime acceptance remains
-pending. FSKit now has a CommonCrypto fscrypt provider and Keychain-backed immutable
-mount keys; the app can import v1/v2 raw master keys. Native crypto/manifest tests
+Both adapters remain read-only. FSKit integration precedes LXNU policy; signed
+installation acceptance remains pending. FSKit now adopts held reads; installed
+mapping and lifetime acceptance remains pending. FSKit now has a CommonCrypto
+fscrypt provider and Keychain-backed immutable mount keys; the app can import
+v1/v2 raw master keys. Native crypto/manifest tests
 pass; signed Keychain sharing and mounted encrypted I/O are still unaccepted.
 The minimum stays 26.4, with 27-only APIs separated by availability and compile
 guards. The public durable device-barrier contract is still unresolved; do not

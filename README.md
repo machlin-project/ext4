@@ -37,8 +37,9 @@ SHA-256 acceleration and metadata checksums.
 
 Both native adapters remain read-only. The [FSKit adapter](docs/FSKIT.md) now
 uses held inode state, restricted kernel read mappings, user xattr reads and an
-App Group Unix socket for the control app. FSKit builds unsigned, but installation and
-mount acceptance await a signing profile with FSKit Module capability. The arm64e
+App Group Unix socket for the control app. The app and extension build with Apple
+Development signing and profiles authorizing FSKit Module and the shared App Group;
+installed mount acceptance remains pending. The arm64e
 kext has read-only acceptance in a dedicated custom-kernel VM; x86_64 has compilation
 evidence. Native writes, page-cache integration for mutation, ACL enforcement and
 LXNU policy follow core review, with FSKit first. FSKit has a CommonCrypto provider

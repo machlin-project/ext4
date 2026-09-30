@@ -151,6 +151,23 @@ support. User xattr names longer than macOS supports are not exported.
 
 ## Focused checks
 
+For automatic signing, Xcode must have the personal Apple Developer account in
+Settings > Apple Accounts, and Keychain must contain a usable signing identity.
+A local certificate alone does not let Xcode fetch provisioning profiles. Both
+targets set `REGISTER_APP_GROUPS=YES` so Xcode provisions their shared group.
+From the absolute Machlin lab directory, build with the personal team identifier:
+
+```sh
+python3 ../ext4/scripts/build_fskit.py --team YOUR_TEAM_ID --provision \
+  --derived-data ../ext4/artifacts/checks/fskit-signed/DerivedData
+```
+
+This permits Xcode to manage the app identifiers and provisioning profiles. It
+does not install or launch the app. Verify the app and embedded extension signatures
+and their profile entitlements before transferring them to the dedicated test VM.
+Development profiles must also include the test Mac's provisioning identifier;
+host build success does not establish permission to run in a different VM.
+
 From the absolute Machlin lab directory:
 
 ```sh
@@ -183,7 +200,7 @@ from the unsigned build. It tests transfers, protocol failures and a separate IP
 client process without registering an extension or mounting a volume. Core sanitizer
 acceptance remains in the portable matrix.
 
-Signing remains deferred. The first signed VM run must prove app-to-mounted-
+The first signed VM run must prove app-to-mounted-
 extension `ping → pong`, settings, unmount cleanup and restart before advanced
 commands are accepted. Report actual results per OS version separately from builds
 and standalone tests. No host extension installation or system modification is
@@ -192,6 +209,7 @@ part of the unsigned checks.
 ## Platform references
 
 - [App Groups entitlement](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.security.application-groups): IPC and container requirements.
+- [Provisioned macOS App Groups](https://developer.apple.com/documentation/xcode/accessing-app-group-containers): profile authorization and automatic group registration.
 - [Block device resources](https://developer.apple.com/documentation/fskit/fsblockdeviceresource): direct versus cached I/O.
 - [Apple HFS extension source](https://github.com/apple-oss-distributions/hfs/blob/main/hfs_appex/HFSFileSystem.m): private descriptor access and unsupported volume loading.
 - [Metadata flush](https://developer.apple.com/documentation/fskit/fsblockdeviceresource/metadataflush()): buffer-cache contract.
@@ -202,8 +220,14 @@ part of the unsigned checks.
 
 ## Current standalone evidence
 
-On macOS 26.6.2, the unsigned application and extension compile for arm64 and
-x86_64. The focused adapter tests exercise direct versus bounced resource I/O,
+On macOS 26.6.2, the application and extension compile for arm64 and x86_64,
+both unsigned and with Apple Development signing. Strict signature verification
+passes for both architectures of the app and its embedded extension. The embedded
+profiles authorize the shared App Group, and the extension profile also authorizes
+FSKit Module. Signing reports are under `artifacts/checks/fskit-signed/`; these are
+development builds, not notarized distribution artifacts.
+
+The focused adapter tests exercise direct versus bounced resource I/O,
 short/failing reads, two distinct instances with one volume UUID, a separate IPC
 client process, malformed/oversized/truncated requests, wrong capabilities and
 versions, unsafe manifests, timeout and cleanup. The volume tests pass on 1 KiB

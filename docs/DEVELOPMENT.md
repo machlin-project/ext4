@@ -63,7 +63,8 @@ acceptance. Use the platform's File System Extensions controls, then mount the
 identified fixture device read-only with `mount -F -t machlin_ext4 -o rdonly`.
 The exact guest device must be verified before mounting. Run `ext4-mounted-test`
 against that mount and verify clean unmount and unchanged image bytes afterward.
-These installed steps have not yet passed; signing is deferred.
+These installed steps have not yet passed. See [FSKit](FSKIT.md) for signing,
+App Group provisioning and the current component-level evidence.
 
 ## Kernel extension
 
