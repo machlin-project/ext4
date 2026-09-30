@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/auxv.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
@@ -34,7 +35,20 @@
 #define PERMUTATION_ADDEND 17U
 #define LINUX_SECTOR_BYTES 512U
 
-enum reader_kind { READER_LINUX, READER_CORE, READER_RAW };
+enum reader_kind {
+	READER_LINUX,
+	READER_CORE,
+	READER_RAW,
+	READER_CORE_DEMAND,
+	READER_LINUX_MAPPED,
+	READER_CORE_MAPPED
+};
+
+struct read_source {
+	int fd;
+	size_t length;
+	const uint8_t *mapping;
+};
 
 struct device_io {
 	unsigned long long reads;
@@ -42,7 +56,7 @@ struct device_io {
 };
 
 struct device {
-	int fd;
+	struct read_source source;
 	uint64_t reads;
 	uint64_t bytes;
 	uint64_t allocations;
@@ -55,7 +69,7 @@ struct reader {
 	struct ext4_inode inode;
 	struct ext4_inode_hold *hold;
 	uint64_t raw_offset;
-	int fd;
+	struct read_source source;
 	bool sparse;
 	uint8_t *buffer;
 };
@@ -117,7 +131,53 @@ device_read(void *context, uint64_t offset, void *buffer, size_t size)
 
 	device->reads++;
 	device->bytes += size;
-	return read_exact(device->fd, offset, buffer, size) ? EXT4_OK : EXT4_IO;
+	if (device->source.mapping != NULL) {
+		require(offset <= device->source.length && size <= device->source.length - offset,
+		    "mapped device bounds");
+		memcpy(buffer, device->source.mapping + offset, size);
+		return EXT4_OK;
+	}
+	return read_exact(device->source.fd, offset, buffer, size) ? EXT4_OK : EXT4_IO;
+}
+
+static bool
+core_reader(enum reader_kind kind)
+{
+	return kind == READER_CORE || kind == READER_CORE_DEMAND || kind == READER_CORE_MAPPED;
+}
+
+static struct read_source *
+mapped_source(struct reader *reader, enum reader_kind kind)
+{
+	if (kind == READER_CORE_MAPPED) {
+		return &reader->device.source;
+	}
+	return kind == READER_LINUX_MAPPED ? &reader->source : NULL;
+}
+
+static void
+source_map(struct read_source *source, bool random)
+{
+	void *mapping;
+
+	if (source == NULL) {
+		return;
+	}
+	require(source->mapping == NULL, "mapping ownership");
+	mapping = mmap(NULL, source->length, PROT_READ, MAP_SHARED, source->fd, 0);
+	require(mapping != MAP_FAILED, "map diagnostic source");
+	source->mapping = mapping;
+	require(madvise(mapping, source->length, random ? MADV_RANDOM : MADV_SEQUENTIAL) == 0,
+	    "mapped access advice");
+}
+
+static void
+source_unmap(struct read_source *source)
+{
+	if (source != NULL && source->mapping != NULL) {
+		require(munmap((void *)source->mapping, source->length) == 0, "unmap source");
+		source->mapping = NULL;
+	}
 }
 
 static void *
@@ -158,7 +218,7 @@ read_file(struct reader *reader, enum reader_kind kind, uint64_t offset, size_t 
 {
 	size_t completed;
 
-	if (kind == READER_CORE) {
+	if (core_reader(kind)) {
 		require(ext4_read_held(reader->hold, offset, reader->buffer, size, &completed) ==
 			    EXT4_OK &&
 			completed == size,
@@ -169,8 +229,12 @@ read_file(struct reader *reader, enum reader_kind kind, uint64_t offset, size_t 
 		require(device_read(&reader->device, reader->raw_offset + offset, reader->buffer,
 			    size) == EXT4_OK,
 		    "raw backend read");
+	} else if (kind == READER_LINUX_MAPPED) {
+		require(offset <= reader->source.length && size <= reader->source.length - offset,
+		    "mapped Linux file bounds");
+		memcpy(reader->buffer, reader->source.mapping + offset, size);
 	} else {
-		require(read_exact(reader->fd, offset, reader->buffer, size), "Linux pread");
+		require(read_exact(reader->source.fd, offset, reader->buffer, size), "Linux pread");
 	}
 }
 
@@ -236,7 +300,9 @@ static void
 sample(struct reader *reader, const char *name, enum reader_kind kind, bool cold, bool random,
     unsigned int sample_number)
 {
-	static const char *reader_names[] = { "linux", "core", "raw" };
+	static const char *reader_names[] = { "linux", "core", "raw", "core-demand", "linux-mapped",
+		"core-mapped" };
+	struct read_source *mapped = mapped_source(reader, kind);
 	struct device_io before;
 	struct device_io after;
 	size_t request = random ? PAGE_BYTES : SEQUENTIAL_BYTES;
@@ -257,11 +323,13 @@ sample(struct reader *reader, const char *name, enum reader_kind kind, bool cold
 
 	/* The same full-file warmup, validation and advice precede each contender.
 	 * Cold passes then evict guest pages outside the timed region. */
-	require(posix_fadvise(
-		    reader->fd, 0, 0, random ? POSIX_FADV_RANDOM : POSIX_FADV_SEQUENTIAL) == 0 &&
-		posix_fadvise(reader->device.fd, 0, 0,
-		    random ? POSIX_FADV_RANDOM : POSIX_FADV_SEQUENTIAL) == 0,
+	require(posix_fadvise(reader->source.fd, 0, 0,
+		    random ? POSIX_FADV_RANDOM : POSIX_FADV_SEQUENTIAL) == 0 &&
+		posix_fadvise(reader->device.source.fd, 0, 0,
+		    random || kind == READER_CORE_DEMAND ? POSIX_FADV_RANDOM
+							 : POSIX_FADV_SEQUENTIAL) == 0,
 	    "matching access advice");
+	source_map(mapped, random);
 	verify_file(reader, kind);
 	live = reader->device.live;
 	for (index = 0; index < count; index++) {
@@ -278,13 +346,19 @@ sample(struct reader *reader, const char *name, enum reader_kind kind, bool cold
 		if (cold) {
 			/* The core's retained metadata must not survive the cold reset.
 			 * Lazy snapshot/leaf reconstruction is charged inside the read loop. */
-			if (kind == READER_CORE) {
+			if (core_reader(kind)) {
 				ext4_drop_read_cache(reader->hold);
 			}
+			/* Mapped pages must lose every PTE reference before cache eviction.
+			 * Recreating the mapping and all page faults belong to the timed work. */
+			source_unmap(mapped);
 			drop_caches();
 		}
 		cpu_start = now(CLOCK_PROCESS_CPUTIME_ID);
 		start = now(CLOCK_MONOTONIC_RAW);
+		if (cold) {
+			source_map(mapped, random);
+		}
 		for (index = 0; index < count; index++) {
 			offset = request_offset(index, request, random);
 			read_file(reader, kind, offset, request);
@@ -300,6 +374,7 @@ sample(struct reader *reader, const char *name, enum reader_kind kind, bool cold
 		require(reader->buffer[byte] == expected_byte(offset + byte, reader->sparse),
 		    "last read contents");
 	}
+	source_unmap(mapped);
 	printf("READ_SAMPLE {\"file\":\"%s\",\"reader\":\"%s\",\"cache\":\"%s\","
 	       "\"access\":\"%s\",\"sample\":%u,\"request_bytes\":%zu,\"bytes\":%" PRIu64
 	       ",\"elapsed_ns\":%" PRIu64 ",\"cpu_ns\":%" PRIu64 ",\"core_read_callbacks\":%" PRIu64
@@ -317,6 +392,12 @@ main(void)
 	static const char *modules[] = { "virtio_blk", "crc32c_generic", "crc16", "mbcache", "jbd2",
 		"ext4" };
 	static const char *names[] = { "contiguous.bin", "sparse.bin" };
+
+	static const enum reader_kind readers[] = { READER_LINUX, READER_CORE,
+#if defined(EXT4_READ_BACKEND_DIAGNOSTICS)
+		READER_CORE_DEMAND, READER_LINUX_MAPPED, READER_CORE_MAPPED,
+#endif
+		READER_RAW };
 	struct reader reader = { 0 };
 	struct ext4_environment environment = { 0 };
 	struct ext4_inode root;
@@ -346,6 +427,11 @@ main(void)
 	    identity.machine, getauxval(AT_HWCAP));
 	puts("CORE_READ_API=ext4_read_held metadata_cache=bounded file_data_cache=none "
 	     "cold_metadata=discarded_per_pass");
+#if defined(EXT4_READ_BACKEND_DIAGNOSTICS)
+	puts("READ_BACKENDS=core-demand disables raw-device speculation; "
+	     "mapped readers are diagnostics, reset mappings before cold eviction, "
+	     "include remap/fault/copy costs, and require a fault-free immutable resource");
+#endif
 	CPU_ZERO(&cpus);
 	CPU_SET(0, &cpus);
 	require(sched_setaffinity(0, sizeof(cpus), &cpus) == 0, "pin benchmark CPU");
@@ -362,9 +448,12 @@ main(void)
 	}
 	require(mount("/dev/vda", "/mnt", "ext4", MS_RDONLY | MS_NOATIME, "noload") == 0,
 	    "mount immutable benchmark image");
-	reader.device.fd = open("/dev/vda", O_RDONLY | O_CLOEXEC);
-	require(reader.device.fd >= 0 && ioctl(reader.device.fd, BLKGETSIZE64, &device_bytes) == 0,
+	reader.device.source.fd = open("/dev/vda", O_RDONLY | O_CLOEXEC);
+	require(reader.device.source.fd >= 0 &&
+		ioctl(reader.device.source.fd, BLKGETSIZE64, &device_bytes) == 0 &&
+		device_bytes <= SIZE_MAX,
 	    "open raw benchmark device");
+	reader.device.source.length = (size_t)device_bytes;
 	environment = (struct ext4_environment){ &reader.device, device_bytes, device_read,
 		allocate, release };
 	require(ext4_mount(&environment, &reader.fs) == EXT4_OK &&
@@ -376,10 +465,11 @@ main(void)
 	for (profile = 0; profile < sizeof(names) / sizeof(names[0]); profile++) {
 		reader.sparse = profile != 0;
 		snprintf(path, sizeof(path), "/mnt/%s", names[profile]);
-		reader.fd = open(path, O_RDONLY | O_CLOEXEC);
-		require(reader.fd >= 0 && fstat(reader.fd, &status) == 0 &&
+		reader.source.fd = open(path, O_RDONLY | O_CLOEXEC);
+		require(reader.source.fd >= 0 && fstat(reader.source.fd, &status) == 0 &&
 			status.st_size == FILE_BYTES,
 		    "open Linux file");
+		reader.source.length = FILE_BYTES;
 		require(ext4_lookup(reader.fs, &root, (const uint8_t *)names[profile],
 			    strlen(names[profile]), &reader.inode) == EXT4_OK &&
 			reader.inode.size == FILE_BYTES,
@@ -387,7 +477,10 @@ main(void)
 		require(ext4_hold_inode(reader.fs, reader.inode.number, reader.inode.generation,
 			    &reader.hold) == EXT4_OK,
 		    "hold core file");
-		contenders = reader.sparse ? 2U : 3U;
+		contenders = (unsigned int)(sizeof(readers) / sizeof(readers[0]));
+		if (reader.sparse) {
+			contenders--;
+		}
 		if (!reader.sparse) {
 			require(ext4_map_read(reader.fs, &reader.inode, 0, FILE_BYTES, &mapping) ==
 				    EXT4_OK &&
@@ -400,18 +493,18 @@ main(void)
 				for (iteration = 0; iteration < SAMPLES; iteration++) {
 					for (contender = 0; contender < contenders; contender++) {
 						sample(&reader, names[profile],
-						    (enum reader_kind)(
-							(iteration + contender) % contenders),
+						    readers[(iteration + contender) % contenders],
 						    cold != 0, random != 0, iteration);
 					}
 				}
 			}
 		}
-		require(close(reader.fd) == 0, "close Linux file");
+		require(close(reader.source.fd) == 0, "close Linux file");
 		require(ext4_release_inode(reader.hold) == EXT4_OK, "release core file");
 	}
 	ext4_unmount(reader.fs);
-	require(reader.device.live == 0 && close(reader.device.fd) == 0 && umount("/mnt") == 0,
+	require(
+	    reader.device.live == 0 && close(reader.device.source.fd) == 0 && umount("/mnt") == 0,
 	    "clean benchmark teardown");
 	free(reader.buffer);
 	finish(true);

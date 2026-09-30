@@ -12,6 +12,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('console', type=Path)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--require-target', action='store_true',
+                        help='fail unless the eight-profile reading target is met')
     args = parser.parse_args()
     text = args.console.read_text()
     if 'LINUX_READ_RESULT=PASS' not in text or 'LINUX_READ_RESULT=FAIL' in text:
@@ -37,9 +39,14 @@ def main():
         (line.removeprefix('CORE_READ_API=') for line in text.splitlines()
          if line.startswith('CORE_READ_API=')),
         'ext4_read; mapping state retained only within each request')
+    report['backend_diagnostics'] = next(
+        (line.removeprefix('READ_BACKENDS=') for line in text.splitlines()
+         if line.startswith('READ_BACKENDS=')), None)
     for key in sorted(groups):
         contenders = groups[key]
-        if set(contenders) not in ({'core', 'linux'}, {'core', 'linux', 'raw'}):
+        baseline = {'core', 'linux'} | ({'raw'} if key[0] == 'contiguous.bin' else set())
+        diagnostics = {'core-demand', 'core-mapped', 'linux-mapped'}
+        if set(contenders) not in (baseline, baseline | diagnostics):
             raise RuntimeError('missing contender')
         if 'raw' in contenders and key[0] != 'contiguous.bin':
             raise RuntimeError('raw diagnostic requires a contiguous file')
@@ -73,6 +80,17 @@ def main():
         result['all_pairs_at_least_15_percent_faster'] = min(pairs) >= 1.15
         if 'raw' in result:
             result['raw_diagnostic_ratio_to_linux'] = result['linux']['median_ns'] / result['raw']['median_ns']
+        result['backend_comparisons'] = []
+        for candidate, reference in [('core-demand', 'linux'), ('core-mapped', 'linux'),
+                                     ('core-mapped', 'linux-mapped')]:
+            if candidate not in contenders:
+                continue
+            ratios = [contenders[reference][sample]['elapsed_ns'] /
+                      contenders[candidate][sample]['elapsed_ns'] for sample in sorted(core)]
+            comparison = dict(candidate=candidate, reference=reference,
+                              median_throughput_ratio=result[reference]['median_ns'] /
+                              result[candidate]['median_ns'], paired_ratios=ratios)
+            result['backend_comparisons'].append(comparison)
         report['profiles'].append(result)
         print(f"{key}: Linux {result['linux']['mib_per_second']:.1f} MiB/s; "
               f"core {result['core']['mib_per_second']:.1f} MiB/s; "
@@ -80,7 +98,27 @@ def main():
               f"paired range {min(pairs):.3f}..{max(pairs):.3f}")
         if 'raw' in result:
             print(f"  Raw backend only (not core): {result['raw_diagnostic_ratio_to_linux']:.3f}x Linux")
+        for comparison in result['backend_comparisons']:
+            ratios = comparison['paired_ratios']
+            print(f"  Diagnostic {comparison['candidate']}/{comparison['reference']}: "
+                  f"{comparison['median_throughput_ratio']:.3f}; "
+                  f"paired range {min(ratios):.3f}..{max(ratios):.3f}")
+    ratios = [profile['throughput_ratio_core_to_linux'] for profile in report['profiles']]
+    mean = statistics.geometric_mean(ratios)
+    below_linux = [{field: profile[field] for field in ('file', 'cache', 'access')}
+                   for profile in report['profiles']
+                   if profile['throughput_ratio_core_to_linux'] < 1.0]
+    report['read_target'] = dict(
+        comparison='Ratio of median throughput in each of the eight fixed profiles; '
+                   'paired ranges are reported separately, with no noise tolerance',
+        geometric_mean=mean, required_geometric_mean=1.15,
+        required_minimum_profile_ratio=1.0, profiles_below_linux=below_linux,
+        met=mean >= 1.15 and not below_linux)
+    print(f"Read target: mean {mean:.4f}x; {len(below_linux)} profiles below Linux; "
+          f"{'MET' if report['read_target']['met'] else 'NOT MET'}")
     args.output.write_text(json.dumps(report, indent=2) + '\n')
+    if args.require_target and not report['read_target']['met']:
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':

@@ -22,12 +22,16 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(*, write=False):
+    parser = argparse.ArgumentParser(description=(
+        'Prepare a static same-guest core/Linux write benchmark; never boot the VM.'
+        if write else __doc__))
     parser.add_argument('--lab', type=Path, required=True)
     parser.add_argument('--prepared', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--image', type=Path, help='Reuse an independently checked benchmark image')
+    parser.add_argument('--backend-diagnostics', action='store_true',
+                        help='Include demand-pread and mapped-I/O diagnostic controls')
     args = parser.parse_args()
     lab, prepared, output = (p.resolve() for p in (args.lab, args.prepared, args.output))
     if Path.cwd() != lab:
@@ -78,10 +82,16 @@ def main():
         raise RuntimeError('unaccepted prepared kernel')
     command = previous[0]['commands'][1]['command'].copy()
     source_index = command.index(str(ROOT / 'tests/linux_external_journal.c'))
-    sources = [ROOT / p for p in re.findall(r"'(core/[^']+\.c)'", (ROOT / 'meson.build').read_text())]
-    probe = ROOT / 'tests/linux_read_benchmark.c'
+    core_sources = re.search(r'^core_sources = files\((.*?)^\)',
+                             (ROOT / 'meson.build').read_text(), re.MULTILINE | re.DOTALL)
+    if core_sources is None:
+        raise RuntimeError('Meson core source list not found')
+    sources = [ROOT / p for p in re.findall(r"'(core/[^']+\.c)'", core_sources.group(1))]
+    probe = ROOT / ('tests/linux_write_benchmark.c' if write else 'tests/linux_read_benchmark.c')
     command[source_index:source_index + 1] = [str(probe)] + [str(p) for p in sources]
     command[1:1] = ['-march=armv8-a+crc', '-ffreestanding', '-fno-builtin', '-Wframe-larger-than=2048']
+    if args.backend_diagnostics:
+        command.insert(1, '-DEXT4_READ_BACKEND_DIAGNOSTICS')
     command[-1] = str(output / 'init')
     run(command, timeout=180)
     root = output / 'root'
@@ -99,11 +109,17 @@ def main():
     runner = lab / '.cache/linux-reference/linux-vm-external'
     run(['/usr/bin/codesign', '--verify', '--strict', runner])
     headers = sorted((ROOT / 'core').glob('*.h')) + sorted((ROOT / 'include').rglob('*.h'))
-    report.update(passed=True, kernel=str(kernel), kernel_sha256=digest(kernel),
+    disks = [str(image)]
+    if write:
+        core_image = output / 'core.img'
+        shutil.copyfile(image, core_image)
+        report['core_image_sha256'] = digest(core_image)
+        disks.append(str(core_image))
+    report.update(passed=True, mode='write' if write else 'read', kernel=str(kernel), kernel_sha256=digest(kernel),
                   probe_sha256=digest(output / 'init'), archive_sha256=digest(archive),
                   sources_sha256={str(p.relative_to(ROOT)): digest(p) for p in [probe] + sources + headers},
                   runner_command=[str(runner), str(kernel), str(archive), '2', '512',
-                                  'console=hvc0 rdinit=/init panic=-1 loglevel=4', str(image)])
+                                  'console=hvc0 rdinit=/init panic=-1 loglevel=4', *disks])
     save()
     print(f'Prepared {output}; no VM was started')
 

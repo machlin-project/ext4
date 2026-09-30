@@ -176,7 +176,11 @@ measurements, not from that marker alone.
 The agreed target is **at least 1.15 times Linux's filesystem throughput on matched
 workloads**, with SHA/AES reported separately. A 15% throughput increase is not the
 same as a 15% reduction in elapsed time. Report the ratio and both raw measurements.
-The target remains open until a matched Linux comparison passes.
+For the eight agreed read profiles (dense/sparse, warm/guest-cold,
+sequential/random), the geometric mean must reach 1.15 and **every profile must
+be at least as fast as Linux**. Reads and writes are evaluated separately;
+adding write results cannot compensate for a read regression. The target remains
+open until both read conditions pass in a matched comparison.
 
 Use the same hardware, storage/image geometry, data set and CPU/power conditions.
 Run one contender at a time. Match ext4 features, encryption modes, Merkle geometry,
@@ -807,3 +811,178 @@ in the focused run. This is a test-harness improvement, not a filesystem speedup
 The published Linux format job now passes with the timeout unchanged. Other jobs
 in that matrix were still active at the recorded snapshot. Raw failure and fixed
 test logs are retained in the write optimization evidence directories above.
+
+
+## Shared read state, bounded zeroing and journal emission
+
+The held snapshot/cache owner is separate from byte delivery. Native
+`ext4_map_read_held` uses the same checked state as `ext4_read_held`, including
+transaction invalidation, explicit refresh, memory-pressure discard and final
+release. The common mapping contract retains EOF padding, current-journal
+exclusion and encryption/verity restrictions. ARM64 large-range zeroing uses
+permitted, bounded `DC ZVA` blocks and ordinary-store edges; it uses general
+registers only. Both optimized and portable paths have canary/guard-page coverage.
+
+The unchanged buffered-pread stand produced these seven-pair read measurements:
+
+| File | Cache | Access | Linux MiB/s | Core MiB/s | Core/Linux |
+| --- | --- | --- | ---: | ---: | ---: |
+| Contiguous | Warm | Sequential | 32,612.6 | 31,341.5 | 0.961 |
+| Contiguous | Warm | Random | 4,244.2 | 4,101.1 | 0.966 |
+| Contiguous | Guest-cold | Sequential | 8,919.3 | 8,252.4 | 0.925 |
+| Contiguous | Guest-cold | Random | 169.8 | 167.9 | 0.988 |
+| Sparse | Warm | Sequential | 22,638.3 | 33,515.2 | 1.480 |
+| Sparse | Warm | Random | 9,696.0 | 16,457.6 | 1.697 |
+| Sparse | Guest-cold | Sequential | 6,155.3 | 10,590.6 | 1.721 |
+| Sparse | Guest-cold | Random | 305.4 | 325.3 | 1.065 |
+
+The geometric mean is **1.186**, exceeding 1.15. **Acceptance remains open**:
+all four contiguous profiles remain below Linux. Separate-boot comparison with
+the preceding 1.143 baseline is not an isolated old/new-core measurement.
+The actual Linux guest identified itself, all 140 samples and independent byte
+checks passed, shutdown was clean and the read image stayed unchanged. Evidence:
+lab `artifacts/ext4-journal/read-memory-candidate/`.
+
+A preceding backend diagnostic retained the original pread comparison and added
+both Linux/core mmap controls plus demand-pread. Mappings were removed before cold
+cache eviction; recreation, faults and copying were timed. Mmap improved warm
+core reads but hurt cold reads, and did not beat Linux mmap on contiguous data.
+Demand-pread removed speculative device traffic but also reduced sequential
+throughput. Neither is adopted as a production backend or a portable-core win.
+All 308 diagnostic samples passed; evidence is in lab
+`artifacts/ext4-journal/read-backend-diagnostics/`.
+
+Journal log payloads now borrow unescaped snapshots directly. Tag checksums and
+submission take the encoded bytes explicitly; the shared encoding helper uses
+scratch only for JBD2 escaping. V1 checksums preserve descriptor/data order without
+copying every ordinary payload again. Fragmented journal runs use binary search.
+The complete ordering/barrier contract is unchanged.
+
+Against the preceding core, B-C-C-B RAM measurements with 500,000 random 64 KiB
+overwrites took median 3,975.749 ms versus 3,716.778 ms with journaled data (1.070x
+throughput), and 2,905.393 ms versus 2,888.298 ms with ordered data (1.006x).
+Short 64 MiB sequential phases took 25.089/25.549 ms and 23.426/24.865 ms,
+respectively; these slower, short samples do not support a sequential speedup.
+Allocation, peak memory and all I/O/barrier counters matched, output hashes matched
+within each mode, and all eight output images passed independent e2fsck. These are
+RAM old/new-core measurements, **not Linux write acceptance**. Evidence:
+`artifacts/checks/journal-payload/measurements/`.
+
+Focused validation passed four memory/range/held-read tests, removal smoke on 1 KiB
+and 4 KiB images, ten journal checksum/async/ownership/range tests, and the 4 KiB
+deferred-commit profile. Optimized freestanding compilation retained the 2 KiB
+frame bound. These results do not replace a final full regression or native builds.
+
+## Ordered data ownership and Linux write comparison
+
+Transaction storage, indexing, detachment and transfer now live in
+`core/transaction.c`, separate from journal ordering. Complete unencrypted blocks
+can borrow immutable caller bytes through the synchronous operation. Commit fixes
+their data/home classification after quota updates, copies any data that must be
+retained, then reserves compound storage before writing. Selected adjacent home
+blocks share a callback only within the caller's explicit source bound. No caller
+pointer remains in a compound or checkpoint set. Partial/encrypted blocks keep
+their owned storage; no file-data cache or native object enters the core.
+
+The source-ownership tests use read-only mapped caller pages, detach failure and
+retry, cancellation, source overwrite after return, contiguous/fragmented/bounded
+ranges, prior compound/checkpoint versions, freed-block protection and allocation/
+write failures. The crash models now track every dirty block in a multi-block
+callback and tear a batch inside a block after its complete prefix. Existing
+single-block cut behavior remains covered. Before the final module split, the
+12 focused journal/read cases and 1 KiB/4 KiB deferred/write fault checks passed;
+the final full regression is recorded separately in
+`artifacts/checks/ordered-source-final/`.
+
+That full run completed 718 cases: 716 passed and both partial-write fault profiles
+failed when pre-I/O allocation refusal incorrectly poisoned the filesystem owner.
+There were also 29 explicit applicability skips in 17 tests, distinct from the
+Meson pass count. The correction classifies clean memory/quota refusal using the
+journal's aborted state, so identical errors from write callbacks remain fatal.
+Its ownership tests cover both classes. The final rebuild and 68 focused ASan/UBSan
+tests pass, including both failed partial-write profiles, with no explicit skips.
+Evidence is separate in `artifacts/checks/ordered-source-rejection-fix/`; the
+original full result is retained without relabeling its failures.
+
+Checked inode resolution now shares one validated group descriptor between bitmap
+allocation checks and locating the inode record. Writes, held refresh and xattr
+reads avoid one descriptor read/allocation per resolution. Geometry tests check
+the saved I/O across group layouts and inject every remaining read/allocation
+failure, preserving both the output address and live allocation balance.
+Unsigned FSKit and arm64e/x86_64 kext builds pass on the corrected source, including
+these changes; evidence is in `artifacts/checks/ordered-source-native/`. These are
+compilation checks, not installed or mounted native write acceptance.
+
+The first direct Linux write baseline, before caller-source optimization, used two
+identical preallocated volumes, warm overwrites, ordered data and durability every
+1 MiB, included in timing. Each of seven interleaved pairs writes 256 MiB. Sequential
+requests are 64 KiB; random requests are 4 KiB. Source bytes and final core output
+are independently checked, the latter through Linux. This measures the library
+against Linux VFS on the current guest, not FSKit/LXNU performance.
+
+| Profile | Linux MiB/s | Core MiB/s | Core/Linux | Linux/core CPU ms |
+| --- | ---: | ---: | ---: | ---: |
+| Sequential | 90.0 | 83.7 | 0.931 | 118.7 / 349.5 |
+| Random | 82.5 | 72.2 | 0.875 | 198.0 / 792.2 |
+
+Paired ratios range from 0.644 to 1.583 and 0.574 to 1.375, respectively, so small
+timing differences cannot establish an optimization win. Device write amplification
+is about 1.012 for both; median flush counts are 512 per sample (Linux random: 513).
+Both output images pass strict nonrepairing fsck. The 28-sample report is in lab
+`artifacts/ext4-journal/write-compare-admitted/`. Two preceding probe attempts failed
+at compilation and API admission; neither provides performance evidence.
+
+The ordered-source candidate completed the same 28-sample Linux protocol with
+independent final Linux readback, clean guest shutdown and nonrepairing fsck of
+both resulting volumes. Evidence is in lab
+`artifacts/ext4-journal/write-compare-ordered-source/`.
+
+| Profile | Linux MiB/s | Core MiB/s | Core/Linux | Linux/core CPU ms |
+| --- | ---: | ---: | ---: | ---: |
+| Sequential | 85.7 | 79.4 | 0.926 | 180.2 / 254.9 |
+| Random | 78.0 | 70.4 | 0.903 | 315.2 / 823.8 |
+
+Paired throughput ratios span 0.554–1.561 and 0.540–1.489. This run's small wall-time
+changes are inconclusive, and neither write profile beats Linux. Exact counters
+show the portable effect without making a timing claim:
+
+| Core work per 256 MiB | Before | Ordered source |
+| --- | ---: | ---: |
+| Sequential read callbacks | 20,480 | 16,384 |
+| Sequential write callbacks | 66,304 | 4,864 |
+| Sequential allocations | 102,656 | 33,024 |
+| Random read callbacks | 327,680 | 262,144 |
+| Random allocations | 655,616 | 524,544 |
+
+Write bytes remain 271,581,184 and flushes 512 in both profiles; random write
+callbacks remain 66,304. Device-sector/write/flush medians are unchanged, so fewer
+core callbacks are not claimed as fewer physical writes. This measurement used
+byte-sized source bounds in transaction entries. A following layout refinement
+stores complete-block bounds capped at transaction capacity, restoring compact
+entries and preserving the one-byte-short coalescing boundary; it does not supply
+a new Linux timing result.
+
+The compact-bound refinement passes 13 focused ownership, journal and partial-write
+fault tests, plus unsigned FSKit and arm64e/x86_64 builds and formatting. Before/after
+counter runs preserve every deterministic I/O/allocation count and produce identical
+output images, both accepted by nonrepairing fsck. Peak live memory falls by 4,096
+bytes for sequential writes, random overwrites and truncation. Evidence is in
+`artifacts/checks/source-block-bounds/`; short local timings are not acceptance data.
+
+## Casefold oracle correction
+
+The latest Linux format failure was reproduced from its exact retained relaxed
+casefold image. Unmodified e2fsprogs returned status 4 for an HTREE minimum-hash
+error. Its UTF-8 folder misclassified malformed sequences encountered after cursor
+initialization as ENAMETOOLONG. The directory hash wrapper therefore did not take
+the opaque-byte fallback, and e2fsck used a previous hash instead.
+
+The recorded one-line tool patch selects the existing invalid-sequence path.
+The same image passes nonrepairing fsck and the independent 604-name/flag check
+with unchanged bytes. The original oracle fails its new opaque-name self-check;
+the corrected oracle produces 1,318,086 folds and 24,120 hashes that match the core,
+including all six disk hash versions and 3,995 long-fold hashes. Evidence remains
+in `artifacts/checks/ci-latest/`. CI applies the patch explicitly to its pinned
+tool source. No core hash algorithm, filesystem check or timeout was weakened.
+The corrected remote Linux format job passes; the remaining matrix is checked
+asynchronously.
