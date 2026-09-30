@@ -28,6 +28,7 @@
 enum source_case {
 	SOURCE_CONTIGUOUS,
 	SOURCE_BOUNDED,
+	SOURCE_PARTIAL_BOUND,
 	SOURCE_FRAGMENTED,
 	SOURCE_LOGGED,
 	SOURCE_COMPOUND,
@@ -269,6 +270,7 @@ check_source(uint32_t block_size, enum source_case kind, size_t fail_allocation,
 	uint32_t second = DATA_SECOND + (kind == SOURCE_FRAGMENTED ? 1U : 0U);
 	size_t allocations;
 	size_t live;
+	size_t available = 2U * block_size;
 	bool retain_first = kind >= SOURCE_LOGGED;
 	bool retain_second = kind == SOURCE_LOGGED || kind == SOURCE_REUSED;
 	enum ext4_result error;
@@ -335,8 +337,12 @@ check_source(uint32_t block_size, enum source_case kind, size_t fail_allocation,
 	CHECK(ext4_transaction_begin(&journal, TRANSACTION_CREDITS, &transaction) == EXT4_OK);
 	stage(transaction, METADATA_FIRST, false, 0x41U);
 	allocations = device.allocations;
-	CHECK(ext4_transaction_data_source(transaction, DATA_FIRST, source,
-		  kind == SOURCE_BOUNDED ? block_size : 2U * block_size) == EXT4_OK);
+	if (kind == SOURCE_BOUNDED) {
+		available = block_size;
+	} else if (kind == SOURCE_PARTIAL_BOUND) {
+		available--;
+	}
+	CHECK(ext4_transaction_data_source(transaction, DATA_FIRST, source, available) == EXT4_OK);
 	CHECK(ext4_transaction_data_source(transaction, second, source + block_size, block_size) ==
 	    EXT4_OK);
 	CHECK(device.allocations == allocations);

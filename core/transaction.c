@@ -187,7 +187,7 @@ ext4_transaction_own(struct ext4_fs *fs, struct ext4_transaction_entry *entry)
 {
 	void *buffer;
 
-	if (entry->source_remaining == 0) {
+	if (entry->source_blocks == 0) {
 		return EXT4_OK;
 	}
 	buffer = fs->environment.allocate(fs->environment.context, fs->info.block_size);
@@ -196,14 +196,14 @@ ext4_transaction_own(struct ext4_fs *fs, struct ext4_transaction_entry *entry)
 	}
 	ext4_copy(buffer, entry->buffer, fs->info.block_size);
 	entry->buffer = buffer;
-	entry->source_remaining = 0;
+	entry->source_blocks = 0;
 	return EXT4_OK;
 }
 
 void
 ext4_transaction_release(struct ext4_fs *fs, const struct ext4_transaction_entry *entry)
 {
-	if (entry->source_remaining == 0) {
+	if (entry->source_blocks == 0) {
 		fs->environment.release(
 		    fs->environment.context, entry->buffer, fs->info.block_size);
 	}
@@ -250,7 +250,7 @@ ext4_transaction_snapshot(struct ext4_transaction *transaction, uint64_t block, 
 	}
 	transaction->entries[transaction->count].block = block;
 	transaction->entries[transaction->count].buffer = buffer;
-	transaction->entries[transaction->count].source_remaining = 0;
+	transaction->entries[transaction->count].source_blocks = 0;
 	transaction->entries[transaction->count].data = data;
 	ext4_transaction_index(transaction, transaction->count++);
 	*result = buffer;
@@ -292,6 +292,7 @@ ext4_transaction_data_source(
 {
 	struct ext4_transaction_entry *entry;
 	uint32_t index;
+	size_t blocks;
 	enum ext4_result error;
 
 	if (transaction == NULL || source == NULL ||
@@ -303,14 +304,16 @@ ext4_transaction_data_source(
 		return error;
 	}
 	entry = &transaction->entries[index];
-	if (index != transaction->count && entry->source_remaining == 0) {
+	if (index != transaction->count && entry->source_blocks == 0) {
 		/* Preserve an earlier snapshot's ownership and data/metadata role. */
 		ext4_copy(entry->buffer, source, transaction->journal->fs->info.block_size);
 		return EXT4_OK;
 	}
 	entry->block = block;
 	entry->buffer = (void *)source;
-	entry->source_remaining = available;
+	blocks = available / transaction->journal->fs->info.block_size;
+	entry->source_blocks =
+	    blocks < transaction->capacity ? (uint32_t)blocks : transaction->capacity;
 	entry->data = true;
 	if (index == transaction->count) {
 		ext4_transaction_index(transaction, transaction->count++);
@@ -510,7 +513,7 @@ ext4_transaction_take(struct ext4_transaction *set, struct ext4_transaction *tra
 			ext4_transaction_release(fs, &set->entries[position]);
 		}
 		set->entries[position].buffer = entry->buffer;
-		set->entries[position].source_remaining = 0;
+		set->entries[position].source_blocks = 0;
 	}
 	transaction->count = 0;
 }

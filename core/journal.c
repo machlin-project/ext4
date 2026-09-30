@@ -1152,7 +1152,7 @@ ext4_transaction_prepare_data(struct ext4_transaction *transaction)
 	for (index = 0; index < transaction->count; index++) {
 		entry = &transaction->entries[index];
 		entry->data = entry->data && ext4_transaction_in_place(transaction, entry->block);
-		if (entry->source_remaining != 0 && !entry->data) {
+		if (entry->source_blocks != 0 && !entry->data) {
 			error = ext4_transaction_own(transaction->journal->fs, entry);
 			if (error != EXT4_OK) {
 				return error;
@@ -1172,9 +1172,9 @@ ext4_transaction_data_run(const struct ext4_transaction *transaction, uint32_t i
 	uint32_t block_size = transaction->journal->fs->info.block_size;
 	uint32_t count = 1;
 
-	while (count < transaction->count - index && count < first->source_remaining / block_size) {
+	while (count < transaction->count - index && count < first->source_blocks) {
 		next = &transaction->entries[index + count];
-		if (!next->data || next->source_remaining == 0 ||
+		if (!next->data || next->source_blocks == 0 ||
 		    next->block != first->block + count ||
 		    next->buffer != (const uint8_t *)first->buffer + (size_t)count * block_size) {
 			break;
@@ -1215,7 +1215,7 @@ ext4_transaction_write_data(struct ext4_transaction *transaction)
 			if (error == EXT4_OK) {
 				/* A coalesced caller range owns no buffers. Owned storage
 				 * always consumes a single entry. */
-				if (entry->source_remaining == 0) {
+				if (entry->source_blocks == 0) {
 					ext4_transaction_release(fs, entry);
 				}
 				index += count - 1U;

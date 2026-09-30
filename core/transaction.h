@@ -9,9 +9,10 @@
 struct ext4_transaction_entry {
 	uint64_t block;
 	void *buffer;
-	/* Nonzero only for a private, immutable caller view. Its remaining range
-	 * bounds coalescing; any retained journal snapshot must own its buffer. */
-	size_t source_remaining;
+	/* Complete blocks left in a private, immutable caller view, capped at the
+	 * transaction capacity. Zero denotes owned storage. This bound also keeps
+	 * the entry compact; retained journal snapshots always own their buffers. */
+	uint32_t source_blocks;
 	/* Regular-file data, which ordered data writes in place. */
 	bool data;
 };
