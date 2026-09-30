@@ -125,7 +125,8 @@ Signed, same-user Keychain sharing remains a separate installation requirement.
 Keep macOS 26.5 as the deployment target. A modern SDK can build one binary with
 27-only calls guarded by runtime availability; compile guards additionally keep
 those calls out when building against an older SDK. Conditional reclaim uses this
-boundary. An older SDK build has not yet been accepted.
+boundary. CI passes the unsigned universal build and focused adapter tests with
+the macOS 26.5 SDK; installed runtime acceptance is separate.
 
 Future 27-only context/cache handlers must delegate to the same volume engine,
 not duplicate the filesystem algorithms. Caller UID/GID in `FSContext` is useful
@@ -187,6 +188,10 @@ and their profile entitlements before transferring them to the dedicated test VM
 Development profiles must also include the test Mac's provisioning identifier;
 host build success does not establish permission to run in a different VM.
 For an Apple silicon Mac, use its Provisioning UDID, not its Hardware UUID.
+Read it again after a clean restore: the macOS 26.5.2 test VM retained its Tart
+configuration and platform UUID but acquired a different Provisioning UDID.
+Compare the actual identifier against both embedded profiles before installation;
+preserving the virtual machine identifier alone does not preserve that permission.
 If automatic profiles omit the registered VM, create a Mac App Development
 profile for each bundle ID including the intended test devices, then let Xcode
 download and select the two profiles explicitly:
