@@ -45,12 +45,15 @@ gap. Demand-pread and mmap diagnostics hurt cold performance and were not adopte
 The user prioritizes algorithms and architecture usable by both FSKit and LXNU.
 
 The latest matched write run is in lab
-`artifacts/ext4-journal/write-compare-ordered-source/`: 28 samples, final Linux
+`artifacts/ext4-journal/write-held-inode/`: 28 samples, final Linux
 readback and strict host fsck of both volumes pass. Sequential and random median
-ratios are 0.926 and 0.903, with wide paired ranges. These wall times do not support
-small speedup claims. Against the preserved baseline in `write-compare-admitted/`,
-sequential callbacks fall from 66,304 to 4,864 and allocations from 102,656 to
-33,024 per 256 MiB. Write bytes, barriers and device-write medians are unchanged.
+ratios are 0.969 and 0.966, with wide paired ranges. These wall times do not support
+precise speedup claims. The core now holds its inode for the Linux file descriptor's
+lifetime, explicitly identified by `CORE_WRITE_INODE`. Against the preceding
+`write-compare-ordered-source/` run, sequential metadata reads fall from 16,384 to
+8,192 and allocations from 33,024 to 24,832 per 256 MiB; random reads fall from
+262,144 to 131,072 and allocations from 524,544 to 393,472. Write bytes, barriers
+and device-write medians are unchanged.
 Both use identical preallocated files, ordered data and a timed durability barrier
 every 1 MiB. Neither write profile beats Linux.
 
@@ -78,6 +81,12 @@ every 1 MiB. Neither write profile beats Linux.
   returned by a write callback: an aborted journal always makes the failure fatal.
 - Checked inode resolution shares one group descriptor between allocation-bitmap
   validation and record location for writes, held refresh and xattr reads.
+- Held inodes retain the checked record address while the writable owner prevents
+  freeing/relocation. Edits still check current record checksum, generation and
+  operation policy. Read-only owners and failed refresh cannot use the shortcut.
+  Hold creation now uses the common refresh/validation path. Eight focused tests,
+  including complete 1 KiB/4 KiB/indirect removal fault profiles, and all three
+  native builds pass in `artifacts/checks/held-inode-location/`, without skips.
 
 Focused ownership/fault checks before the module split passed in
 `artifacts/checks/ordered-source/`. The final split's full 718-test run is recorded
@@ -94,8 +103,9 @@ A final compact transaction-entry layout stores bounded source lengths in comple
 blocks. Its 13 focused tests and unsigned FSKit/arm64e/x86_64 builds pass in
 `artifacts/checks/source-block-bounds/`. Before/after counter runs produced identical
 images and deterministic counters, both passed nonrepairing fsck, and peak live
-memory fell by 4,096 bytes in all three workloads. The Linux write timing above
-predates this layout refinement; it was not repeated for a small memory-only change.
+memory fell by 4,096 bytes in all three workloads. The latest Linux writer includes
+this refinement and held-inode resolution; its peak reduction is their combined
+effect, not an isolated measurement of one change.
 
 The last prior complete regression was 716/716 with 29 explicit applicability
 skips, recorded in `artifacts/checks/write-targets/`. Later snapshot initialization
@@ -119,9 +129,13 @@ inspect the remaining matrix asynchronously.
 
 ## Next work
 
-Commit the reviewed implementation and benchmark batches and inspect CI
-asynchronously. Continue closing the per-profile read deficits without
+Implementation and benchmark batches are committed. Inspect CI asynchronously.
+Continue closing the per-profile read deficits without
 weakening the comparator; writes remain a separate performance direction.
+The user was asked whether the next I/O pass should target native integration
+(FSKit first) or the laboratory Linux backend. No answer is recorded yet. Do not
+silently replace the fixed pread comparator, exclude a profile, or call a diagnostic
+backend a production FSKit/LXNU result.
 
 Both adapters remain read-only. FSKit integration precedes LXNU policy; signing
 is deferred. The held-read APIs are not yet adopted by the native adapters.
