@@ -102,6 +102,8 @@ foreach name : ['mounted', 'mounted-symlink']
   executable('ext4-' + name + '-test', 'tests/' + source, dependencies: threads,
     override_options: ['b_sanitize=none'])
 endforeach
+executable('ext4-mounted-manifest-test', 'tests/mounted_manifest.c',
+  override_options: ['b_sanitize=none'])
 if host_machine.system() == 'darwin'
   executable('ext4-mounted-lifetime-test', 'tests/mounted_lifetime.c',
     override_options: ['b_sanitize=none'])

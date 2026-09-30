@@ -250,6 +250,16 @@ commands are accepted. Report actual results per OS version separately from buil
 and standalone tests. No host extension installation or system modification is
 part of the unsigned checks.
 
+For installed encryption acceptance, import the fixture's test key through the
+control app, unmount, and mount again so the extension loads its immutable key set.
+Run `ext4-mounted-manifest-test MOUNTPOINT MANIFEST` against the corresponding
+Linux-verified encrypted fixture manifest. This ordinary POSIX reader checks every
+file's size, SHA-256 and EOF, plus symlink targets and object types, without calling
+the core or FSKit callbacks directly. Its digest implementation is the existing
+independent Linux guest verifier. Repeat with 1 KiB and 4 KiB images, then remove
+the key and prove a new mount denies encrypted reads. A component test or a
+successful Keychain import does not establish this mounted behavior.
+
 ## Platform references
 
 - [App Groups entitlement](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.security.application-groups): IPC and container requirements.
