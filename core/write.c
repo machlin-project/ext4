@@ -242,7 +242,7 @@ ext4_edit_inode_record(struct ext4_fs *fs, struct ext4_transaction *transaction,
 	    ext4_quota_system_inode(fs, number)) {
 		return EXT4_UNSUPPORTED;
 	}
-	error = ext4_inode_resolve(fs, number, &offset);
+	error = ext4_inode_resolve_live(fs, number, &offset);
 	if (error != EXT4_OK) {
 		return error;
 	}

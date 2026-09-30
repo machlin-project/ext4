@@ -324,6 +324,8 @@ is missed; diagnostic readers never contribute to the score.
 `tests/prepare_write_benchmark.py` takes the same preparation options and creates
 two identical disposable volumes. The guest writes one through Linux VFS and one
 through the core, with ordered data and a timed durability barrier every 1 MiB.
+The core holds its inode for the Linux file descriptor's lifetime, declared in
+the console and summary. Older reports without that marker do not retain a hold.
 Seven interleaved pairs each overwrite 256 MiB, using 64 KiB sequential requests
 or permuted 4 KiB requests on a preallocated 16 MiB file. All samples verify the
 expected payload; after core teardown Linux independently reads its final volume.

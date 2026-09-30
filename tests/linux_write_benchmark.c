@@ -46,6 +46,7 @@ struct writer {
 	struct device device;
 	struct ext4_fs *fs;
 	struct ext4_inode inode;
+	struct ext4_inode_hold *hold;
 	int fd;
 	uint8_t *data;
 	uint8_t *read_buffer;
@@ -348,6 +349,8 @@ main(void)
 	puts("WRITE_CONTRACT=preallocated warm overwrites; ordered data; "
 	     "durable fsync/commit each 1 MiB included in timing; "
 	     "same guest and initial images; library versus VFS; no native-adapter claim");
+	puts("CORE_WRITE_INODE=ext4_hold_inode for the Linux file descriptor lifetime; "
+	     "current inode contents and mutation policy checked on every write");
 	CPU_ZERO(&cpus);
 	CPU_SET(0, &cpus);
 	require(sched_setaffinity(0, sizeof(cpus), &cpus) == 0, "pin benchmark CPU");
@@ -380,6 +383,9 @@ main(void)
 	expect(ext4_lookup(writer.fs, &root, (const uint8_t *)"contiguous.bin", 14, &writer.inode),
 	    "open core file");
 	require(writer.inode.size == FILE_BYTES, "preallocated core file size");
+	expect(
+	    ext4_hold_inode(writer.fs, writer.inode.number, writer.inode.generation, &writer.hold),
+	    "hold core file");
 	require(posix_memalign((void **)&writer.data, RANDOM_BYTES, FILE_BYTES) == 0 &&
 		posix_memalign((void **)&writer.read_buffer, RANDOM_BYTES, SEQUENTIAL_BYTES) == 0,
 	    "allocate aligned caller buffers");
@@ -397,6 +403,7 @@ main(void)
 		}
 	}
 	expect(ext4_sync(writer.fs), "finish core checkpoint");
+	expect(ext4_release_inode(writer.hold), "release core file");
 	ext4_unmount(writer.fs);
 	require(writer.device.live_bytes == 0 && close(writer.device.fd) == 0 &&
 		close(writer.fd) == 0 && umount("/mnt") == 0,

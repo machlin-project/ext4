@@ -99,10 +99,14 @@ struct ext4_inode_hold {
 	struct ext4_fs *fs;
 	struct ext4_inode_hold *next;
 	struct ext4_read_state *reader;
+	/* An exclusive writer cannot relocate or free an inode while it is held.
+	 * Explicit refresh revalidates this address before making it usable again. */
+	uint64_t inode_offset;
 	uint32_t number;
 	uint32_t generation;
 	uint32_t references;
 	bool unlinked;
+	bool location_valid;
 };
 
 struct ext4_fs {
@@ -230,6 +234,9 @@ enum ext4_result ext4_inode_location(struct ext4_fs *fs, uint32_t number, uint64
 /* Locate an allocated inode with one descriptor read and a checked bitmap.
  * The exclusive owner keeps both observations stable; errors preserve offset. */
 enum ext4_result ext4_inode_resolve(struct ext4_fs *fs, uint32_t number, uint64_t *offset);
+/* Reuse a held allocation only under the exclusive writable owner. The record
+ * itself still needs live checksum, generation and operation-policy checks. */
+enum ext4_result ext4_inode_resolve_live(struct ext4_fs *fs, uint32_t number, uint64_t *offset);
 enum ext4_result ext4_inode_decode(
     struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4_inode *inode);
 /* Offline orphan ownership may inspect allocated inodes with no links. */

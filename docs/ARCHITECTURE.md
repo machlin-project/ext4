@@ -75,6 +75,16 @@ allocation. An error publishes no address; descriptor and bitmap checksums and
 the inode allocation bit retain their checks. Unchecked location remains separate
 for callers that must locate an inode before allocating it.
 
+An inode hold also owns its checked record address. Under an exclusive writable
+mount, the allocation cannot be freed or relocated before the last hold is
+released, including after unlink. Inode edits can reuse that address without
+another descriptor/bitmap read. They still snapshot the current record and verify
+its checksum, generation, live-link state and operation policy. Read-only owners
+always resolve allocation afresh. Explicit refresh revokes the remembered address
+before any fallible work and republishes it only after successful identity checks;
+failed refresh, aborted owners and final release cannot revive it. Creating a hold
+uses that same checked refresh path instead of a separate allocation/location walk.
+
 BIGALLOC keeps extent offsets and public accounting in filesystem blocks, while
 group bitmaps and their on-disk free counts use clusters. The allocator rounds
 metadata allocations to whole clusters. A data hole first searches its logical

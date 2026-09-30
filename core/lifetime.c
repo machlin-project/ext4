@@ -17,6 +17,24 @@ ext4_inode_find_hold(struct ext4_fs *fs, uint32_t number)
 }
 
 enum ext4_result
+ext4_inode_resolve_live(struct ext4_fs *fs, uint32_t number, uint64_t *offset)
+{
+	struct ext4_inode_hold *hold;
+
+	if (fs->aborted) {
+		return EXT4_RECOVERY_REQUIRED;
+	}
+	if (fs->journal != NULL) {
+		hold = ext4_inode_find_hold(fs, number);
+		if (hold != NULL && hold->references != 0 && hold->location_valid) {
+			*offset = hold->inode_offset;
+			return EXT4_OK;
+		}
+	}
+	return ext4_inode_resolve(fs, number, offset);
+}
+
+enum ext4_result
 ext4_inode_decode_live(struct ext4_fs *fs, uint32_t number, void *buffer, struct ext4_inode *inode)
 {
 	struct ext4_inode_hold *hold = ext4_inode_find_hold(fs, number);
@@ -56,6 +74,7 @@ ext4_refresh_inode(struct ext4_inode_hold *hold, struct ext4_inode *result)
 	}
 	fs = hold->fs;
 	/* Explicit refresh also observes changes from a replaced backing view. */
+	hold->location_valid = false;
 	ext4_drop_read_cache(hold);
 	if (fs->aborted) {
 		return EXT4_RECOVERY_REQUIRED;
@@ -77,6 +96,8 @@ ext4_refresh_inode(struct ext4_inode_hold *hold, struct ext4_inode *result)
 		error = EXT4_STALE;
 	}
 	if (error == EXT4_OK) {
+		hold->inode_offset = offset;
+		hold->location_valid = true;
 		*result = inode;
 	}
 	return error;
@@ -87,6 +108,7 @@ ext4_hold_inode(
     struct ext4_fs *fs, uint32_t number, uint32_t generation, struct ext4_inode_hold **result)
 {
 	struct ext4_inode_hold *hold;
+	struct ext4_inode_hold fresh = { 0 };
 	struct ext4_inode inode;
 	enum ext4_result error;
 
@@ -118,26 +140,19 @@ ext4_hold_inode(
 	if (fs->hold_count == EXT4_INODE_HOLD_LIMIT) {
 		return EXT4_UNSUPPORTED;
 	}
-	error = ext4_inode_allocated(fs, number);
-	if (error == EXT4_OK) {
-		error = ext4_get_inode(fs, number, &inode);
-	}
+	fresh.fs = fs;
+	fresh.number = number;
+	fresh.generation = generation;
+	fresh.references = 1;
+	error = ext4_refresh_inode(&fresh, &inode);
 	if (error != EXT4_OK) {
 		return error;
-	}
-	if (inode.generation != generation) {
-		return EXT4_STALE;
 	}
 	hold = fs->environment.allocate(fs->environment.context, sizeof(*hold));
 	if (hold == NULL) {
 		return EXT4_NO_MEMORY;
 	}
-	hold->fs = fs;
-	hold->reader = NULL;
-	hold->number = number;
-	hold->generation = generation;
-	hold->references = 1;
-	hold->unlinked = false;
+	*hold = fresh;
 	hold->next = fs->holds;
 	fs->holds = hold;
 	fs->hold_count++;

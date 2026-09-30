@@ -38,6 +38,10 @@ def main():
         scope='Core library over an exclusive buffered raw device versus Linux ext4 VFS; '
               'same guest and identical initial volumes, ordered data, preallocated warm '
               'overwrites, durability every 1 MiB included in timing; no native-adapter claim',
+        core_inode_lifetime=next(
+            (line.removeprefix('CORE_WRITE_INODE=') for line in text.splitlines()
+             if line.startswith('CORE_WRITE_INODE=')),
+            'no retained inode hold; mutation identifies inode by number and generation'),
         kernel=kernel, samples=rows, profiles=[],
         validation='Every sample checked against expected bytes; Linux independently read '
                    'the final core output. Host nonrepairing fsck must be checked separately.',

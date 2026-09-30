@@ -142,6 +142,144 @@ hold_faults(struct device *device)
 }
 
 static void
+held_inode_resolution(struct device *device)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode root;
+	struct ext4_inode inode;
+	struct ext4_inode refreshed;
+	struct ext4_inode_hold *hold;
+	struct ext4_inode_disk *disk;
+	struct ext4_inode_update update = write_attributes();
+	uint64_t offset;
+	uint64_t result;
+	uint32_t reads;
+	uint32_t allocations;
+	uint32_t writes;
+	size_t completed;
+	const uint8_t payload = 0x5a;
+
+	device_reset(device, device->base);
+	fs = mount_writer(device, &root);
+	EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"hello.txt", 9, &inode), EXT4_OK);
+	EXPECT(ext4_inode_resolve(fs, inode.number, &offset), EXT4_OK);
+	EXPECT(ext4_hold_inode(fs, inode.number, inode.generation, &hold), EXT4_OK);
+	reads = device->reads;
+	allocations = device->allocations;
+	result = UINT64_MAX;
+	EXPECT(ext4_inode_resolve_live(fs, inode.number, &result), EXT4_OK);
+	CHECK(result == offset && device->reads == reads && device->allocations == allocations);
+	/* Admission still checks the current record, not just the held identity. */
+	writes = device->writes;
+	disk = (struct ext4_inode_disk *)(device->cache + offset);
+	ext4_encode32(&disk->generation, inode.generation + 1U);
+	ext4_inode_checksum_set(fs, inode.number, disk);
+	EXPECT(ext4_write(fs, inode.number, inode.generation, 0, &payload, 1, &update, &completed),
+	    EXT4_STALE);
+	CHECK(completed == 0 && device->writes == writes && !fs->aborted);
+	ext4_encode32(&disk->generation, inode.generation);
+	ext4_inode_checksum_set(fs, inode.number, disk);
+	if (fs->metadata_checksum) {
+		disk->checksum_lo.bytes[0] ^= 1U;
+		EXPECT(ext4_write(
+			   fs, inode.number, inode.generation, 0, &payload, 1, &update, &completed),
+		    EXT4_CORRUPT);
+		CHECK(completed == 0 && device->writes == writes && !fs->aborted);
+		disk->checksum_lo.bytes[0] ^= 1U;
+	}
+	/* A failed explicit refresh revokes the allocation observation. Resolving
+	 * again must reach the device instead of reviving the old address. */
+	device->fail_read = device->reads + 1U;
+	EXPECT(ext4_refresh_inode(hold, &refreshed), EXT4_IO);
+	device->fail_read = device->reads + 1U;
+	result = UINT64_MAX;
+	EXPECT(ext4_inode_resolve_live(fs, inode.number, &result), EXT4_IO);
+	CHECK(result == UINT64_MAX);
+	device->fail_read = 0;
+	EXPECT(ext4_refresh_inode(hold, &refreshed), EXT4_OK);
+	fs->aborted = true;
+	EXPECT(ext4_inode_resolve_live(fs, inode.number, &result), EXT4_RECOVERY_REQUIRED);
+	CHECK(result == UINT64_MAX);
+	fs->aborted = false;
+	EXPECT(ext4_release_inode(hold), EXT4_OK);
+	device->fail_read = device->reads + 1U;
+	EXPECT(ext4_inode_resolve_live(fs, inode.number, &result), EXT4_IO);
+	CHECK(result == UINT64_MAX);
+	device->fail_read = 0;
+	ext4_unmount(fs);
+	CHECK(device->live == 0 && device->writes == writes);
+
+	/* A read-only hold supplies no exclusive allocation guarantee. */
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	EXPECT(ext4_hold_inode(fs, inode.number, inode.generation, &hold), EXT4_OK);
+	device->fail_read = device->reads + 1U;
+	EXPECT(ext4_inode_resolve_live(fs, inode.number, &result), EXT4_IO);
+	CHECK(result == UINT64_MAX);
+	device->fail_read = 0;
+	EXPECT(ext4_release_inode(hold), EXT4_OK);
+	ext4_unmount(fs);
+	CHECK(device->live == 0 && memcmp(device->cache, device->base, device->size) == 0);
+	puts("PASS held inode location, current generation/checksum, refresh failure and read-only "
+	     "guards");
+}
+
+static void
+held_write_metadata(struct device *device)
+{
+	struct ext4_fs *fs;
+	struct ext4_inode root;
+	struct ext4_inode inode;
+	struct ext4_inode_hold *hold = NULL;
+	struct ext4_inode_update update = write_attributes();
+	uint8_t *expected = malloc(device->size);
+	const uint8_t payload[] = { 0x45, 0x58, 0x54, 0x34 };
+	uint32_t reads[2];
+	uint32_t allocations[2];
+	uint32_t writes[2];
+	uint32_t flushes[2];
+	unsigned int held;
+	size_t completed;
+
+	CHECK(expected != NULL);
+	for (held = 0; held < 2U; held++) {
+		device_reset(device, device->base);
+		fs = mount_writer(device, &root);
+		EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"hello.txt", 9, &inode), EXT4_OK);
+		if (held != 0) {
+			EXPECT(ext4_hold_inode(fs, inode.number, inode.generation, &hold), EXT4_OK);
+		}
+		reads[held] = device->reads;
+		allocations[held] = device->allocations;
+		writes[held] = device->writes;
+		flushes[held] = device->events - device->writes;
+		EXPECT(ext4_write(fs, inode.number, inode.generation, 0, payload, sizeof(payload),
+			   &update, &completed),
+		    EXT4_OK);
+		CHECK(completed == sizeof(payload));
+		reads[held] = device->reads - reads[held];
+		allocations[held] = device->allocations - allocations[held];
+		writes[held] = device->writes - writes[held];
+		flushes[held] = device->events - device->writes - flushes[held];
+		if (held != 0) {
+			EXPECT(ext4_release_inode(hold), EXT4_OK);
+		}
+		EXPECT(ext4_sync(fs), EXT4_OK);
+		ext4_unmount(fs);
+		CHECK(
+		    device->live == 0 && memcmp(device->cache, device->stable, device->size) == 0);
+		if (held == 0) {
+			memcpy(expected, device->cache, device->size);
+		} else {
+			CHECK(memcmp(expected, device->cache, device->size) == 0);
+		}
+	}
+	CHECK(reads[1] + 2U == reads[0] && allocations[1] + 2U == allocations[0]);
+	CHECK(writes[1] == writes[0] && flushes[1] == flushes[0]);
+	free(expected);
+	puts("PASS held writes save two metadata reads/allocations with identical durable image");
+}
+
+static void
 guards(struct device *device)
 {
 	struct ext4_fs *fs;
@@ -1179,6 +1317,8 @@ main(int argc, char **argv)
 			continue;
 		}
 		hold_faults(&device);
+		held_inode_resolution(&device);
+		held_write_metadata(&device);
 		guards(&device);
 		credit_guard(&device);
 		malformed(&device);
