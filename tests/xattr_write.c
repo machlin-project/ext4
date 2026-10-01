@@ -16,13 +16,16 @@ enum operation {
 	FREE_UNIQUE_BLOCK,
 	REPLACE_MAPPED_SYMLINK,
 	UPDATE_SECURITY_METADATA,
+	REMOVE_OPTIONAL_ATTRIBUTE,
+	PRESERVE_SHARED_ATTRIBUTES,
+	PRESERVE_EMPTY_ATTRIBUTES,
 	OPERATION_COUNT
 };
 
 static const char *const operation_names[] = { "create", "cow", "detach", "release", "replace",
-	"metadata" };
+	"metadata", "remove-optional", "preserve-shared", "preserve-empty" };
 static const char *const operation_paths[] = { "plain", "block", "block", "symlink",
-	"mapped-symlink", "many" };
+	"mapped-symlink", "many", "block", "block", "plain" };
 static const uint8_t high_name[] = "high-\xc3\xa9";
 
 struct operation_data {
@@ -179,6 +182,15 @@ prepare(struct ext4_fs *fs, const struct ext4_inode *inode, enum operation opera
 	case FREE_UNIQUE_BLOCK:
 		data->changes[0] = change(EXT4_XATTR_REMOVE, EXT4_XATTR_USER, "binary", NULL, 0);
 		break;
+	case REMOVE_OPTIONAL_ATTRIBUTE:
+		data->changes[0] =
+		    change(EXT4_XATTR_REMOVE_IF_PRESENT, EXT4_XATTR_USER, "binary", NULL, 0);
+		break;
+	case PRESERVE_SHARED_ATTRIBUTES:
+	case PRESERVE_EMPTY_ATTRIBUTES:
+		data->changes[0] = change(
+		    EXT4_XATTR_REMOVE_IF_PRESENT, EXT4_XATTR_SECURITY, "capability", NULL, 0);
+		break;
 	case UPDATE_SECURITY_METADATA:
 		EXPECT(ext4_get_xattr(fs, inode->number, inode->generation,
 			   EXT4_XATTR_POSIX_ACL_ACCESS, NULL, 0, data->acl, sizeof(data->acl),
@@ -252,6 +264,7 @@ verify(struct device *device, struct ext4_fs *fs, const struct ext4_inode *befor
 		break;
 	case DROP_SHARED_REFERENCE:
 	case FREE_UNIQUE_BLOCK:
+	case REMOVE_OPTIONAL_ATTRIBUTE:
 		count_is(fs, after, 0);
 		returned = SIZE_MAX;
 		EXPECT(ext4_get_xattr(fs, after->number, after->generation, EXT4_XATTR_USER,
@@ -260,8 +273,18 @@ verify(struct device *device, struct ext4_fs *fs, const struct ext4_inode *befor
 		CHECK(returned == SIZE_MAX && new_block == 0 &&
 		    after->blocks_512 == before->blocks_512 - sectors);
 		CHECK(fs->info.free_blocks == free_blocks + (operation == FREE_UNIQUE_BLOCK));
-		if (operation == DROP_SHARED_REFERENCE) {
+		if (operation != FREE_UNIQUE_BLOCK) {
 			CHECK(references(device, old_block) == 1);
+		}
+		break;
+	case PRESERVE_SHARED_ATTRIBUTES:
+	case PRESERVE_EMPTY_ATTRIBUTES:
+		count_is(fs, after, operation == PRESERVE_SHARED_ATTRIBUTES ? 1 : 0);
+		CHECK(new_block == old_block && after->blocks_512 == before->blocks_512 &&
+		    fs->info.free_blocks == free_blocks);
+		if (operation == PRESERVE_SHARED_ATTRIBUTES) {
+			CHECK(references(device, old_block) == 2);
+			value_is(fs, after, EXT4_XATTR_USER, "binary", original, sizeof(original));
 		}
 		break;
 	case REPLACE_MAPPED_SYMLINK:
@@ -442,7 +465,7 @@ rejected(struct device *device)
 	inode = lookup(fs, "block");
 	live = device->live;
 	memset(&untouched, 0xa5, sizeof(untouched));
-	for (index = 0; index < 15; index++) {
+	for (index = 0; index < 19; index++) {
 		changes[0] = change(EXT4_XATTR_CREATE, EXT4_XATTR_USER, "new", "abc", 3);
 		changes[1] = change(EXT4_XATTR_CREATE, EXT4_XATTR_USER, "binary", "abc", 3);
 		update = attributes(changes, 2);
@@ -477,7 +500,8 @@ rejected(struct device *device)
 			changes[0].name_index = 0;
 			break;
 		case 9:
-			changes[0].policy = (enum ext4_xattr_policy)(EXT4_XATTR_REMOVE + 1);
+			changes[0].policy =
+			    (enum ext4_xattr_policy)(EXT4_XATTR_REMOVE_IF_PRESENT + 1);
 			break;
 		case 10:
 			changes[0].policy = EXT4_XATTR_REMOVE;
@@ -495,6 +519,23 @@ rejected(struct device *device)
 		case 14:
 			changes[0].value_size = (size_t)fs->info.block_size + 1;
 			expected = EXT4_NO_SPACE;
+			break;
+		case 15:
+			changes[0].policy = EXT4_XATTR_REMOVE_IF_PRESENT;
+			break;
+		case 16:
+		case 18:
+			if (index == 18) {
+				inode = lookup(fs, "plain");
+			}
+			changes[0] = change(
+			    EXT4_XATTR_REMOVE_IF_PRESENT, EXT4_XATTR_USER, "missing", NULL, 0);
+			changes[1] = changes[0];
+			break;
+		case 17:
+			changes[0] =
+			    change(EXT4_XATTR_REMOVE_IF_PRESENT, EXT4_XATTR_USER, "new", NULL, 0);
+			changes[1] = change(EXT4_XATTR_CREATE, EXT4_XATTR_USER, "new", "abc", 3);
 			break;
 		}
 		result = untouched;
@@ -516,7 +557,7 @@ rejected(struct device *device)
 	    EXT4_READ_ONLY);
 	CHECK(memcmp(&result, &untouched, sizeof(result)) == 0 && device->writes == 0);
 	ext4_unmount(fs);
-	puts("PASS xattr batch policy and argument rejection: 17 unchanged-image/output cases");
+	puts("PASS xattr batch policy and argument rejection: 21 unchanged-image/output cases");
 }
 
 static void
@@ -550,6 +591,12 @@ storage_transitions(struct device *device, const char *exports, const char *path
 	    fs->info.free_blocks == free_blocks && result.blocks_512 == inode.blocks_512 &&
 	    references(device, block) == 2 &&
 	    memcmp(before, device->cache + block * device->block_size, device->block_size) == 0);
+	batch[0] = change(EXT4_XATTR_REMOVE_IF_PRESENT, EXT4_XATTR_SECURITY, "capability", NULL, 0);
+	EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &result), EXT4_OK);
+	CHECK(attribute_block(device, fs, &result) == block &&
+	    fs->info.free_blocks == free_blocks && result.blocks_512 == inode.blocks_512 &&
+	    references(device, block) == 2 &&
+	    memcmp(before, device->cache + block * device->block_size, device->block_size) == 0);
 	if (fs->inode_size != EXT4_INODE_BASE_SIZE) {
 		batch[0] = change(EXT4_XATTR_CREATE, EXT4_XATTR_USER, "tiny", "abc", 3);
 		EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &result),
@@ -558,7 +605,9 @@ storage_transitions(struct device *device, const char *exports, const char *path
 		    references(device, block) == 2 && fs->info.free_blocks == free_blocks &&
 		    memcmp(before, device->cache + block * device->block_size,
 			device->block_size) == 0);
-		batch[0] = change(EXT4_XATTR_REMOVE, EXT4_XATTR_USER, "tiny", NULL, 0);
+		batch[0] = change(EXT4_XATTR_REMOVE_IF_PRESENT, EXT4_XATTR_USER, "tiny", NULL, 0);
+		EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &result),
+		    EXT4_OK);
 		EXPECT(ext4_set_attributes(fs, inode.number, inode.generation, &update, &result),
 		    EXT4_OK);
 		CHECK(memcmp(before, device->cache + block * device->block_size,
@@ -576,7 +625,8 @@ storage_transitions(struct device *device, const char *exports, const char *path
 	ext4_unmount(fs);
 	storage_export(device, exports, path, "xattr-references-");
 	free(before);
-	puts("PASS xattr references: identical updates, inode-body changes, shared detach and "
+	puts("PASS xattr references: identical updates, conditional removal, inode-body changes, "
+	     "shared detach and "
 	     "final block release");
 }
 

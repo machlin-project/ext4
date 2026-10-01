@@ -142,9 +142,7 @@
 			error = EXT4_INVALID_ARGUMENT;
 		}
 		if (error == EXT4_OK) {
-			error = [self writeUpdateForItem:owned update:&update change:&change];
-		}
-		if (error == EXT4_OK) {
+			[self writeUpdateForItem:owned update:&update change:&change];
 			error = ext4_write_partial(_fs, owned->inode.number,
 			    owned->inode.generation, (uint64_t)offset, contents.bytes,
 			    contents.length, &update, &completed);

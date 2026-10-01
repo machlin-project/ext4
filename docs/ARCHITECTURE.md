@@ -1080,7 +1080,14 @@ values and zero external entry hashes. That case establishes reader compatibilit
 not clean filesystem acceptance.
 
 `EXT4_ATTR_XATTRS` selects a batch of distinct raw keys in `ext4_set_attributes`.
-SET, CREATE, REPLACE and REMOVE test existence against the original inode. A batch
+SET, CREATE, REPLACE and REMOVE test existence against the original inode.
+REMOVE_IF_PRESENT removes an existing key and also admits an absent key, without
+masking malformed storage or I/O errors. This lets adapters remove file capabilities
+atomically with data or ownership changes without a separate attribute lookup.
+Both removal policies require a NULL, zero-length value, and duplicate keys remain
+invalid even when every requested key is absent. An empty, validated snapshot needs
+no merge allocation for a single conditional removal; unchanged shared blocks retain
+their storage and references. A batch
 requires a captured ctime and commits with the other selected inode fields, allowing
 an owner to supply one admitted ACL/security and permission/ownership transition.
 Names and values remain caller-owned until return. Values are opaque; this storage

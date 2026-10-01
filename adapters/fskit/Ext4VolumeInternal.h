@@ -76,9 +76,9 @@
 - (enum ext4_result)validateMutation:(Ext4Item *)item;
 - (Ext4Item *)itemForInode:(const struct ext4_inode *)inode error:(enum ext4_result *)error;
 - (void)changedDirectory:(Ext4Item *)directory;
-- (enum ext4_result)writeUpdateForItem:(Ext4Item *)item
-				update:(struct ext4_inode_update *)update
-				change:(struct ext4_xattr_change *)change;
+- (void)writeUpdateForItem:(Ext4Item *)item
+		    update:(struct ext4_inode_update *)update
+		    change:(struct ext4_xattr_change *)change;
 - (BOOL)canOffload:(const struct ext4_inode *)inode;
 - (FSItemAttributes *)attributesForInode:(const struct ext4_inode *)inode;
 - (enum ext4_result)readItem:(Ext4Item *)item

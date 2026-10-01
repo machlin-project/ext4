@@ -274,14 +274,21 @@ struct ext4_xattr_key {
 	uint8_t name[EXT4_NAME_MAX];
 };
 
-enum ext4_xattr_policy { EXT4_XATTR_SET, EXT4_XATTR_CREATE, EXT4_XATTR_REPLACE, EXT4_XATTR_REMOVE };
+enum ext4_xattr_policy {
+	EXT4_XATTR_SET,
+	EXT4_XATTR_CREATE,
+	EXT4_XATTR_REPLACE,
+	EXT4_XATTR_REMOVE,
+	EXT4_XATTR_REMOVE_IF_PRESENT
+};
 
 #define EXT4_XATTR_MAX_CHANGES 8192U
 
 /* EXT4_ATTR_XATTRS selects an admitted batch of distinct raw keys, changed in one
  * transaction with the other selected inode fields. CHANGE_TIME is required. CREATE/REPLACE
- * enforce existence against the original inode; REMOVE requires an existing key
- * and NULL/zero value. Caller-owned names and values remain valid through return.
+ * enforce existence against the original inode; REMOVE requires an existing key,
+ * while REMOVE_IF_PRESENT also accepts an absent key. Both require NULL/zero value.
+ * Caller-owned names and values remain valid through return.
  * ACL/security values are opaque; the owner supplies their admitted transition.
  * EA_INODE filesystems admit values up to 64 KiB, subject to transaction capacity.
  * Other formats require values to fit the inode body and external attribute block.

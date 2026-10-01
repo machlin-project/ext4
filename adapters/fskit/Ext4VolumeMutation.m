@@ -21,6 +21,21 @@ ext4_item_time(struct timespec value)
 	return (struct ext4_timestamp){ value.tv_sec, (uint32_t)value.tv_nsec };
 }
 
+static void
+ext4_remove_capability(struct ext4_inode_update *update, struct ext4_xattr_change *change)
+{
+	static const uint8_t name[] = "capability";
+
+	/* Resolve existence inside the same transaction as the data/owner change. */
+	*change = (struct ext4_xattr_change){ .policy = EXT4_XATTR_REMOVE_IF_PRESENT,
+		.name_index = EXT4_XATTR_SECURITY,
+		.name = name,
+		.name_length = sizeof(name) - 1 };
+	update->fields |= EXT4_ATTR_XATTRS;
+	update->xattrs = change;
+	update->xattr_count = 1;
+}
+
 static FSItemAttribute
 ext4_supplied_attributes(FSItemSetAttributesRequest *request)
 {
@@ -126,34 +141,9 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 	directory->directoryVersion = _directoryVersion;
 }
 
-- (enum ext4_result)removeCapabilityFromItem:(Ext4Item *)item
-				      update:(struct ext4_inode_update *)update
-				      change:(struct ext4_xattr_change *)change
-{
-	static const uint8_t name[] = "capability";
-	size_t size = 0;
-	enum ext4_result error;
-
-	update->fields |= EXT4_ATTR_XATTRS;
-	error = ext4_get_xattr(_fs, item->inode.number, item->inode.generation, EXT4_XATTR_SECURITY,
-	    name, sizeof(name) - 1, NULL, 0, &size);
-	if (error == EXT4_NOT_FOUND) {
-		return EXT4_OK;
-	}
-	if (error == EXT4_OK) {
-		*change = (struct ext4_xattr_change){ .policy = EXT4_XATTR_REMOVE,
-			.name_index = EXT4_XATTR_SECURITY,
-			.name = name,
-			.name_length = sizeof(name) - 1 };
-		update->xattrs = change;
-		update->xattr_count = 1;
-	}
-	return error;
-}
-
-- (enum ext4_result)writeUpdateForItem:(Ext4Item *)item
-				update:(struct ext4_inode_update *)update
-				change:(struct ext4_xattr_change *)change
+- (void)writeUpdateForItem:(Ext4Item *)item
+		    update:(struct ext4_inode_update *)update
+		    change:(struct ext4_xattr_change *)change
 {
 	struct ext4_timestamp now = ext4_current_time();
 
@@ -164,7 +154,7 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 		.permissions = item->inode.mode & ALLPERMS & ~(S_ISUID | S_ISGID),
 		.modify_time = now,
 		.change_time = now };
-	return [self removeCapabilityFromItem:item update:update change:change];
+	ext4_remove_capability(update, change);
 }
 
 - (void)createNamed:(FSFileName *)name
@@ -442,7 +432,7 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 		}
 		truncate = (supplied & supported & FSItemAttributeSize) != 0;
 		if (truncate || (supplied & (FSItemAttributeUID | FSItemAttributeGID)) != 0) {
-			error = [self removeCapabilityFromItem:item update:&update change:&change];
+			ext4_remove_capability(&update, &change);
 			if ((supplied & FSItemAttributeMode) == 0) {
 				update.fields |= EXT4_ATTR_PERMISSIONS;
 				update.permissions =
@@ -509,9 +499,7 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 			error = ext4_allocation_end(_fs, &item->inode, &start);
 		}
 		if (error == EXT4_OK) {
-			error = [self writeUpdateForItem:item update:&update change:&change];
-		}
-		if (error == EXT4_OK) {
+			[self writeUpdateForItem:item update:&update change:&change];
 			error = ext4_fallocate(_fs, item->inode.number, item->inode.generation,
 			    start, length, EXT4_FALLOC_KEEP_SIZE, &update, &completed);
 		}

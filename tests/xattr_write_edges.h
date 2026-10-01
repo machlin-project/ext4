@@ -160,6 +160,7 @@ ownership_cases(struct device *device)
 	item = change(EXT4_XATTR_CREATE, EXT4_XATTR_USER, "new", "abc", 3);
 	update = attributes(&item, 1);
 	for (damage = 0; damage < 5; damage++) {
+		item = change(EXT4_XATTR_CREATE, EXT4_XATTR_USER, "new", "abc", 3);
 		device_reset(device, device->base);
 		fs = mount_writer(device);
 		inode = lookup(fs, damage == 1 ? "mapped-symlink" : "block");
@@ -199,6 +200,9 @@ ownership_cases(struct device *device)
 			break;
 		}
 		ext4_inode_checksum_set(fs, inode.number, disk);
+		reject_unchanged(device, fs, &inode, &update, EXT4_CORRUPT);
+		item = change(
+		    EXT4_XATTR_REMOVE_IF_PRESENT, EXT4_XATTR_SECURITY, "capability", NULL, 0);
 		reject_unchanged(device, fs, &inode, &update, EXT4_CORRUPT);
 		ext4_unmount(fs);
 	}

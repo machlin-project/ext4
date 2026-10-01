@@ -51,11 +51,13 @@ ext4_xattr_changes_validate(
 	}
 	for (index = 0; index < count; index++) {
 		change = &changes[index];
-		if (change->policy < EXT4_XATTR_SET || change->policy > EXT4_XATTR_REMOVE ||
-		    change->name_index == 0 || change->name_length > EXT4_NAME_MAX ||
+		if (change->policy < EXT4_XATTR_SET ||
+		    change->policy > EXT4_XATTR_REMOVE_IF_PRESENT || change->name_index == 0 ||
+		    change->name_length > EXT4_NAME_MAX ||
 		    (change->name_length != 0 && change->name == NULL) ||
 		    (change->value_size != 0 && change->value == NULL) ||
-		    (change->policy == EXT4_XATTR_REMOVE &&
+		    ((change->policy == EXT4_XATTR_REMOVE ||
+			 change->policy == EXT4_XATTR_REMOVE_IF_PRESENT) &&
 			(change->value != NULL || change->value_size != 0))) {
 			return EXT4_INVALID_ARGUMENT;
 		}
@@ -182,7 +184,8 @@ ext4_xattr_merge(struct ext4_xattr_edit *edit, const struct ext4_xattr_change *c
 		if (order == 0) {
 			change->record.external = edit->snapshot.records[old++].external;
 		}
-		if (change->policy != EXT4_XATTR_REMOVE) {
+		if (change->policy != EXT4_XATTR_REMOVE &&
+		    change->policy != EXT4_XATTR_REMOVE_IF_PRESENT) {
 			edit->records[edit->count++] = change->record;
 		}
 	}
@@ -584,6 +587,12 @@ ext4_xattr_apply(struct ext4_allocation *allocation, struct ext4_inode *inode,
 		goto out;
 	}
 	if (count == 0) {
+		goto out;
+	}
+	/* A single conditional removal on an empty, validated snapshot needs no
+	 * merge storage. Larger batches must still validate distinct keys. */
+	if (edit.snapshot.count == 0 && count == 1 &&
+	    changes[0].policy == EXT4_XATTR_REMOVE_IF_PRESENT) {
 		goto out;
 	}
 	error = ext4_xattr_merge(&edit, changes);

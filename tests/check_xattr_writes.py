@@ -16,8 +16,12 @@ from check_xattrs import PREFIXES, listed_name
 from generate_fixtures import resolve_tools
 from generate_xattr_fixtures import XATTR_BLOCK_HEADER, XATTR_HEADER_FIELDS, XATTR_MAGIC
 
-OPERATIONS = ("create", "cow", "detach", "release", "replace", "metadata")
-PATHS = dict(zip(OPERATIONS, ("/plain", "/block", "/block", "/symlink", "/mapped-symlink", "/many")))
+PATHS = {
+    "create": "/plain", "cow": "/block", "detach": "/block", "release": "/symlink",
+    "replace": "/mapped-symlink", "metadata": "/many", "remove-optional": "/block",
+    "preserve-shared": "/block", "preserve-empty": "/plain",
+}
+OPERATIONS = tuple(PATHS)
 CHANGE_SECONDS = 1700000070
 SECTOR_BYTES = 512
 INODE_BASE_BYTES = 128
@@ -61,11 +65,13 @@ def expected_state(fixture, values, counts, operation):
         values[PATHS[operation], 1, "binary"] = changed_value(700)
         if operation == "cow":
             counts["Free blocks"] -= 1
-    elif operation in ("detach", "release", "references"):
+    elif operation in ("detach", "release", "references", "remove-optional"):
         for path in paths:
             del values[path, 1, "binary"]
             objects[path]["blocks"] -= sectors
-        counts["Free blocks"] += operation != "detach"
+        counts["Free blocks"] += operation not in ("detach", "remove-optional")
+    elif operation in ("preserve-shared", "preserve-empty"):
+        pass
     elif operation == "metadata":
         del values["/many", 1, "empty"]
         values["/many", 1, "binary"] = changed_value(700)

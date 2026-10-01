@@ -17,6 +17,15 @@ enum mutation_barrier {
 	MutationJournalReset
 };
 
+enum security_mutation {
+	SecurityWrite,
+	SecurityTruncate,
+	SecurityOwner,
+	SecurityGroup,
+	SecurityPreallocate,
+	SecurityMutationCount
+};
+
 /* FSTaskOptions has no public initializer. The adapter only reads taskOptions. */
 @interface MutationOptions : NSObject
 @property NSArray<NSString *> *taskOptions;
@@ -28,6 +37,7 @@ enum mutation_barrier {
 	atomic_uint _active;
 }
 @property NSMutableData *bytes;
+@property NSUInteger reads;
 @property NSUInteger writes;
 @property NSUInteger barriers;
 @property BOOL failWrite;
@@ -60,6 +70,7 @@ enum mutation_barrier {
 	(void)error;
 	assert(atomic_fetch_add(&_active, 1) == 0);
 	assert(offset >= 0 && (uint64_t)offset + length <= self.bytes.length);
+	self.reads++;
 	memcpy(buffer, (const uint8_t *)self.bytes.bytes + offset, length);
 	assert(atomic_fetch_sub(&_active, 1) == 1);
 	return length;
@@ -101,7 +112,7 @@ name(NSString *value)
 }
 
 static Ext4LegacyVolume *
-open_volume(WritableImage *image, BOOL writable)
+open_volume_with_core(WritableImage *image, BOOL writable, struct ext4_fs **core)
 {
 	Ext4ResourceIO *io = [[Ext4ResourceIO alloc] initWithReader:image];
 	struct ext4_fs *fs = NULL;
@@ -120,7 +131,16 @@ open_volume(WritableImage *image, BOOL writable)
 						     crypto:NULL
 						   writable:writable];
 	assert(volume != nil);
+	if (core != NULL) {
+		*core = fs;
+	}
 	return volume;
+}
+
+static Ext4LegacyVolume *
+open_volume(WritableImage *image, BOOL writable)
+{
+	return open_volume_with_core(image, writable, NULL);
 }
 
 static FSItem *
@@ -454,6 +474,111 @@ check_mutations(WritableImage *image)
 }
 
 static void
+check_security_mutations(NSData *fixture)
+{
+	static const uint8_t capability[] = "capability";
+	static const uint8_t marker[] = "preserved";
+	static const uint8_t value[] = "opaque security metadata";
+	static const char *const operations[] = { "write", "truncate", "owner", "group",
+		"preallocate" };
+	WritableImage *image;
+	Ext4LegacyVolume *volume;
+	Ext4Item *file;
+	FSItemSetAttributesRequest *request;
+	struct ext4_fs *fs;
+	struct ext4_inode inode;
+	struct ext4_xattr_change changes[2];
+	struct ext4_inode_update update;
+	uint8_t returned[sizeof(value)];
+	size_t size;
+	NSUInteger reads;
+	unsigned int state;
+	enum security_mutation operation;
+
+	for (operation = SecurityWrite; operation < SecurityMutationCount; operation++) {
+		for (state = 0; state < 3; state++) {
+			image = [WritableImage new];
+			image.bytes = [fixture mutableCopy];
+			volume = open_volume_with_core(image, YES, &fs);
+			file = (Ext4Item *)create_item(
+			    volume, root_item(volume), @"security-policy", FSItemTypeFile);
+			changes[0] = (struct ext4_xattr_change){ .policy = EXT4_XATTR_CREATE,
+				.name_index = EXT4_XATTR_USER,
+				.name = marker,
+				.name_length = sizeof(marker) - 1,
+				.value = value,
+				.value_size = sizeof(value) };
+			changes[1] = changes[0];
+			changes[1].name_index = EXT4_XATTR_SECURITY;
+			changes[1].name = capability;
+			changes[1].name_length = sizeof(capability) - 1;
+			update = (struct ext4_inode_update){ .fields = EXT4_ATTR_XATTRS |
+				    EXT4_ATTR_CHANGE_TIME,
+				.change_time = file->inode.change_time,
+				.xattrs = changes,
+				.xattr_count = state };
+			assert(ext4_set_attributes(fs, file->inode.number, file->inode.generation,
+				   &update, &inode) == EXT4_OK);
+			request = [FSItemSetAttributesRequest new];
+			reads = image.reads;
+			switch (operation) {
+			case SecurityWrite:
+				write_bytes(volume, file,
+				    [NSData dataWithBytes:value length:sizeof(value)], 0);
+				break;
+			case SecurityTruncate:
+				set_size(volume, file, sizeof(value));
+				break;
+			case SecurityOwner:
+			case SecurityGroup:
+				if (operation == SecurityOwner) {
+					request.uid = 502;
+				} else {
+					request.gid = 21;
+				}
+				[volume setAttributes:request
+					       onItem:file
+					 replyHandler:^(FSItemAttributes *result, NSError *error) {
+					   assert(error == nil && result != nil);
+					 }];
+				break;
+			case SecurityPreallocate:
+				[volume
+				    preallocateSpaceForItem:file
+						   atOffset:0
+						     length:4096
+						      flags:FSPreallocateFlagsPersist
+					       replyHandler:^(size_t allocated, NSError *error) {
+						 assert(error == nil && allocated == 4096);
+					       }];
+				break;
+			case SecurityMutationCount:
+				assert(false);
+			}
+			printf("FSKit security mutation: operation=%s xattr-state=%u reads=%lu\n",
+			    operations[operation], state, (unsigned long)(image.reads - reads));
+			assert(ext4_get_inode(fs, file->inode.number, &inode) == EXT4_OK);
+			assert((inode.mode & ALLPERMS) == 0740);
+			assert(inode.uid == (operation == SecurityOwner ? 502 : 501));
+			assert(inode.gid == (operation == SecurityGroup ? 21 : 20));
+			assert(ext4_get_xattr(fs, inode.number, inode.generation,
+				   EXT4_XATTR_SECURITY, capability, sizeof(capability) - 1, NULL, 0,
+				   &size) == EXT4_NOT_FOUND);
+			if (state != 0) {
+				assert(ext4_get_xattr(fs, inode.number, inode.generation,
+					   EXT4_XATTR_USER, marker, sizeof(marker) - 1, returned,
+					   sizeof(returned), &size) == EXT4_OK);
+				assert(size == sizeof(value) && memcmp(returned, value, size) == 0);
+			}
+			sync_volume(volume);
+			[volume invalidate];
+		}
+	}
+	puts("PASS FSKit security transitions: set-ID and optional capabilities removed, unrelated "
+	     "attributes preserved");
+}
+
+static void
 check_remount(WritableImage *image)
 {
 	Ext4LegacyVolume *volume = open_volume(image, NO);
@@ -719,6 +844,7 @@ main(int argc, const char *argv[])
 			return 0;
 		}
 		check_api_selection(fixture);
+		check_security_mutations(fixture);
 		@autoreleasepool {
 			check_mutations(image);
 		}
