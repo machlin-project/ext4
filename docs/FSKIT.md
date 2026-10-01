@@ -13,6 +13,16 @@ checked bounce buffer and unaligned writes preserve both surrounding edges with
 read-modify-write. Short transfers are errors. The adapter does not mix direct and
 metadata-cache I/O on overlapping ranges.
 
+The resource owner checks `FSResource.isRevoked` before device I/O and before
+serving retained inode state. Revocation permanently fails that volume owner with
+EIO, cancels its MMP heartbeat, rejects control commands and prevents orphan
+release, final sync or MMP release through the unavailable device. Unloading a
+revoked mounted resource may proceed without writing; stale retained items are
+invalidated. Recovery and a later mount require a fresh owner. An unaligned
+read-modify-write checks revocation again between its device read and write.
+Component checks cover read-only cached reads, writable requests, orphan lifetime
+and recovery, including no additional device calls after revocation.
+
 Resource probing validates the image through the core and returns `usable` for
 an admitted format. Pending journals are discovered through superblock-only
 inspection, without reading potentially uncheckpointed root metadata. Recovery
@@ -143,6 +153,27 @@ as root; file operations remain ordinary-user operations. Before each signal,
 the helper validates the process UID and the kernel-reported executable path.
 Passwords never enter arguments or evidence. Cleanup resumes a stopped service,
 but a timed-out filesystem operation leaves its devices intact for diagnosis.
+
+Installed resource lifetime checks on 26.5.2 and 27.0.1 pass the four combinations
+of 1/4 KiB blocks and read-only/read-write mounts. An ordinary-user checker holds
+both a descriptor and a shared read mapping while the controller force-detaches
+only its disposable image. Subsequent uncached reads and writable-file mutations
+return EIO; accessing the unavailable mapping page in a child produces SIGBUS.
+The descriptors close without error. A previously clean descriptor's final fsync
+may succeed because it has no pending writes; this is not acknowledgement of a
+new write. Read-only remount verifies every previously acknowledged byte, ordinary
+detach succeeds, endpoints disappear and each exported image passes fsck. The
+read-only images and source fixtures remain byte-identical.
+
+`scripts/test_fskit_installed_removal.py` runs this matrix with
+`ext4-mounted-removal-test`, built by Meson on macOS. Its arguments identify the
+Tart wrapper, dedicated VM, host fixture/checker files, new absolute guest work
+directory, installed build number, independent e2fsck and new host evidence
+directory. Inputs are staged and hash-verified through the CLI transport. Forced
+detach is the injected fault, never a cleanup fallback after a timeout. This
+accepts forced-unmount lifetime and retained file/mapping behavior, separately
+from component resource revocation. It does not establish physical device
+removal without final sync, volatile-cache power-loss safety or all I/O races.
 
 The original 64 MiB pressure workload passes on 26.5.2 with 4 KiB blocks,
 including ENOSPC at 53,215,232 bytes, readback, space reuse, remount and fsck.
@@ -284,6 +315,18 @@ The separate `diskutil renameVolume` invocation still rejects the requested name
 on stock 26.5.2 and 27.0.1; it is a remaining system-tool integration failure. A direct
 public `DADiskRename` call succeeds for both short and exact-limit labels on the
 4 KiB fixture, with the result independently checked after detach.
+Focused 27 registration diagnostics confirm that the declared short name and
+subtype match the public
+[type-name](https://developer.apple.com/documentation/fskit/fsstatfsresult/filesystemtypename)
+and [subtype](https://developer.apple.com/documentation/fskit/fsstatfsresult/filesystemsubtype)
+contracts. `diskutil info -plist` nevertheless omits filesystem/personality names
+for this mounted volume, while reporting its label, UUID, mount point and writable
+state. A single fresh-image rename again fails before the module callback.
+Comparison with Apple's public exfat/msdos module plists does not establish a
+registration defect. `diskutil listFilesystems` lists personalities available for
+formatting, as its man page specifies; absence there does not prove mount or rename
+support is missing. No dummy formatter or alternative filesystem identity is used
+to change that observation.
 Attribute updates leave directory/symlink sizes and unavailable creation times
 unconsumed, as FSKit requires, while still applying other supported fields in the
 same request. Available-space reporting excludes reserved ext4 blocks.
@@ -575,11 +618,11 @@ Keep failed groups and interrupted-run cleanup distinct from passed groups.
 
 | Area | Implemented boundary | Remaining work |
 | --- | --- | --- |
-| Resource reads | Exact aligned and unaligned reads | Mounted resource failure and removal |
-| File reads | Held state and restricted kernel mapping; mounted read/mmap/EOF checks on 26.5.2 | Native cache/reclaim stress, resource failures and removal |
+| Resource reads | Exact aligned/unaligned reads; component revocation and native forced-detach matrix on 26.5.2/27.0.1 | Physical device loss without final sync and additional failure races |
+| File reads | Held state and restricted kernel mapping; native read/mmap/EOF checks and retained descriptor/mapping forced detach | Native cache/reclaim stress and physical device loss |
 | User xattrs | Native read/list/set/remove roundtrip; macOS names omit the Linux user namespace prefix | Linux ACL/security/trusted namespaces stay hidden |
 | IPC and GUI | Signed same-user RPC and key lifecycle on 26.5.2/27.0.1; sudo-mounted/admin-app operation and basic GUI controls on 27.0.1; abandoned endpoint recovery on 26.5.2 | GUI key import/removal, cross-user or root-owned extension coordination |
-| Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded ENOSPC, extension/service termination and service timeout, recovery, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, cache stress and device removal |
+| Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded ENOSPC, extension/service termination and timeout, forced-detach durability, recovery, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, cache stress and physical device loss |
 | Crypto and ACLs | CommonCrypto fscrypt v1/v2 reads and writes; native key import/removal and remounts on 26.5.2 and 27.0.1 | Verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
 | Maintenance | Native Disk Arbitration recovery of interrupted transactions; read-only dirty media remain unchanged; component crash cuts | Full check/repair tooling |
 

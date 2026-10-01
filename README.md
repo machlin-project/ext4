@@ -54,7 +54,9 @@ admission fixes the short ENOSPC consistency cases on both OS versions. A larger
 write spanning several native requests still leaves a committed prefix unreadable
 through the live mount; read-only remount reads it correctly, and independent
 inode inspection and fsck agree. This remaining native contract is unaccepted.
-ACL authorization, device-loss stress, broader OS/hardware
+Retained descriptor and mmap checks pass forced image detach on both OS versions;
+resource revocation rejects cached operations and avoids final disk cleanup.
+ACL authorization, physical device-loss stress, broader OS/hardware
 acceptance and production distribution remain unaccepted.
 This is not a production release.
 

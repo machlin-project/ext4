@@ -3342,6 +3342,58 @@ Additional diagnosis is in `installed-clean/build31-native-diagnosis-1`,
 `installed-27/build31-native-diagnosis-2` and
 `installed-27/build31-native-component-2` under the lab's ignored evidence tree.
 
+## FSKit revoked resources and forced removal
+
+The volume owner now latches EIO when its block resource is revoked, including
+operations that could otherwise succeed from retained inode or read state.
+Resource I/O checks aligned, unaligned and zero-length requests; an unaligned
+write checks again after its read-modify-write read. A revoked owner cancels MMP
+maintenance, rejects control requests and avoids disk writes during orphan
+release, sync and unloading. An already mounted revoked resource may be unloaded;
+retained framework items cannot use freed core state. Only a fresh owner may
+recover and reopen the image.
+
+Sanitizer component checks pass the resource suite and 1/4 KiB volume and mutation
+suites. They verify that revocation changes neither device counters nor bytes,
+that cached read-only state is rejected, and that an unlinked held inode is not
+freed through the inaccessible device. Explicit recovery under a fresh owner
+cleans that orphan and preserves the durable ordinary file. Both legacy and
+modern owner variants pass the focused revocation check on actual macOS 27;
+the modern write handler returns nil result with EIO. Written and recovered
+component exports pass independent fsck. The initial new test omitted explicit
+recovery before reopening its orphan-bearing image; the setup failure and fixed
+run remain separate. An expected unsigned host App Group permission diagnostic
+does not make the successful component checks fail.
+
+The signed app and extension pass strict signature verification and installed
+version checks on stock 26.5.2 and 27.0.1. Both systems pass all four native forced
+image-detach cases: 1/4 KiB blocks with read-only/read-write mounts. While an
+ordinary-user checker retains a descriptor and shared read mapping, the controller
+removes only the task image. Uncached read and writable-file write return EIO;
+the unavailable mapping page signals SIGBUS in the child, without hanging the
+parent or framework. Descriptor close succeeds. A clean descriptor's final fsync
+can succeed after removal; no new data was acknowledged by the refused write.
+Read-only remount checks the complete payload, not just a checksum or last byte.
+Normal detach, empty endpoint/device lists, unchanged read-only/source images and
+independent fsck all pass. All eight exported native images are clean.
+
+This accepts logical forced-unmount lifetime. The hdiutil fault can perform a
+final sync and is not physical unplugging, storage power loss or a substitute for
+volatile-cache qualification. The remaining set-ID, larger ENOSPC and diskutil
+rename failures remain mandatory failed groups; this batch does not fix them.
+Read-only registration inspection confirms the documented type/subtype matches,
+but still lacks a proven cause or public fix for DiskManagement's early rename
+rejection.
+
+Component evidence is in `artifacts/checks/fskit-revocation/components` in the
+standalone repository. Native evidence is in the lab's
+`artifacts/ext4-fskit/installed-clean/build33-removal` and
+`installed-27/build33-removal`; modern component execution is in
+`installed-27/build33-components`. Installation/signature metadata live in each
+VM's `build33-install`, and registration inspection in
+`installed-27/build33-registration`. The earlier signed-build integer-width
+compile failure is retained separately from the corrected successful build.
+
 ## Kernel build evidence
 
 `make kext` compiles every shared core source with the selected Xcode kernel
