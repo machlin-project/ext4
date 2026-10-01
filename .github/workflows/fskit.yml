@@ -9,9 +9,17 @@ on:
       - 'core/**'
       - 'include/**'
       - 'scripts/build_fskit.py'
+      - 'scripts/build_fskit_check.py'
+      - 'scripts/combine_fskit_check.py'
+      - 'scripts/package_fskit_check.py'
       - 'scripts/test_fskit.py'
       - 'scripts/test_fskit_installed_write.py'
+      - 'scripts/test_fskit_installed_check.py'
       - 'tests/fskit_*.m'
+      - 'tests/fskit_*.c'
+      - 'tests/fskit_check_resource.py'
+      - 'tests/run_fskit_check.py'
+      - 'tools/maintenance/**'
       - 'tests/mounted_cache.c'
       - 'tests/generate_fixtures.py'
       - 'tests/generate_fskit_owned.py'
@@ -22,9 +30,17 @@ on:
       - 'core/**'
       - 'include/**'
       - 'scripts/build_fskit.py'
+      - 'scripts/build_fskit_check.py'
+      - 'scripts/combine_fskit_check.py'
+      - 'scripts/package_fskit_check.py'
       - 'scripts/test_fskit.py'
       - 'scripts/test_fskit_installed_write.py'
+      - 'scripts/test_fskit_installed_check.py'
       - 'tests/fskit_*.m'
+      - 'tests/fskit_*.c'
+      - 'tests/fskit_check_resource.py'
+      - 'tests/run_fskit_check.py'
+      - 'tools/maintenance/**'
       - 'tests/mounted_cache.c'
       - 'tests/generate_fixtures.py'
       - 'tests/generate_fskit_owned.py'
@@ -86,7 +102,7 @@ jobs:
             -Wdeclaration-after-statement -O2 -arch arm64 -arch x86_64 \
             tests/mounted_cache.c -o artifacts/fskit-ci/mounted-cache-checker \
             2>&1 | tee artifacts/fskit-ci/reports/mounted-cache-build.log
-          python3 -m py_compile scripts/test_fskit_installed_write.py
+          python3 -m py_compile scripts/test_fskit_installed_write.py scripts/test_fskit_installed_check.py
       # No profiles, app installation, native mounts or real Keychain access.
       - name: Check adapter components with sanitizers
         run: |
@@ -119,6 +135,14 @@ jobs:
             e2fsck -fn "artifacts/fskit-ci/capacity/written-$profile.img" \
               2>&1 | tee "artifacts/fskit-ci/reports/capacity-fsck-$profile.log"
           done
+      - name: Check offline maintenance ownership and repair
+        run: |
+          python3 tests/run_fskit_check.py \
+            --derived-data artifacts/fskit-ci/DerivedData \
+            --fixtures artifacts/fskit-ci/fixtures \
+            --debugfs "$(command -v debugfs)" --e2fsck "$(command -v e2fsck)" \
+            --output artifacts/fskit-ci/checks \
+            2>&1 | tee artifacts/fskit-ci/reports/checks.log
       - name: Preserve build and test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -130,3 +154,5 @@ jobs:
             artifacts/fskit-ci/fixtures/*.log
             artifacts/fskit-ci/fixtures/features.txt
             artifacts/fskit-ci/fixtures/tool-versions.txt
+            artifacts/fskit-ci/checks/**/*.log
+            artifacts/fskit-ci/checks/**/*.json

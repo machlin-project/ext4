@@ -106,6 +106,22 @@ ext4_resource_release(void *context, void *allocation, size_t size)
 	return _reader.isRevoked;
 }
 
+- (uint64_t)sizeBytes
+{
+	return _size;
+}
+
+- (uint64_t)blockSize
+{
+	return _reader.blockSize;
+}
+
+- (BOOL)writable
+{
+	return _barrier != nil && !_reader.isRevoked &&
+	    [_reader respondsToSelector:@selector(writeFrom:startingAt:length:error:)];
+}
+
 - (enum ext4_result)open:(struct ext4_fs **)filesystem
 {
 	struct ext4_environment environment = [self environment];

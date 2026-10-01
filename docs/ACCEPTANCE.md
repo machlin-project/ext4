@@ -2928,8 +2928,8 @@ The app and embedded extension compile using the macOS 27 SDK with deployment
 target macOS 26.5. The adapter maps resource I/O, inode identity, attributes,
 lookup, directory cookies, links, reads and mutations to the same C library.
 Read-only resources and explicit read-only loads reject mutation with `EROFS`.
-Only a quick clean-volume
-check is implemented; it is not a full consistency checker or repair utility.
+The initial adapter implemented only a quick clean-volume check. Full checker
+component evidence is recorded separately below; native acceptance remains open.
 
 The app and embedded extension build both unsigned and with personal Apple
 Development signing. Strict verification of the complete bundle passes for both
@@ -3548,6 +3548,58 @@ Evidence is under the lab's `installed-clean/build37-memory-{warn,critical}` and
 
 These simulations do not allocate system-stressing memory, force native vnode
 reclamation or establish physical device-loss behavior. Those gates remain open.
+
+## Full FSKit checker component evidence
+
+The separate resource-bound e2fsprogs helper and FSKit supervisor compile for
+arm64 and x86_64 with the macOS 27 SDK and a macOS 26.5 deployment target. The
+portable engine and FSKit binary do not link the checker. The exported Developer
+ID application passes strict nested signature verification, including the helper's
+inherited-sandbox entitlements. Notarization accepts this application; the outer
+app and setup helper have validated tickets, and Gatekeeper accepts the export.
+The complete corresponding-source package rebuilds
+the arm64 helper from an extracted tree without a Git database. These establish
+compilation, source packaging and signing, not native sandbox execution.
+
+Independent file-backed protocol tests pass on 1/4 KiB fixtures: clean read-only
+checks preserve every byte, deliberately damaged media fail verification, repair
+succeeds, and independent `e2fsck -fn` accepts each repaired export. Malformed
+replies, disconnects and read/write/flush failures retain failing verdicts.
+
+The sanitizer-instrumented adapter supervisor additionally passes exclusive
+ownership, retained-item rejection, core release/reopen, maintenance-only owners,
+hostile child protocols and cancellation before launch and during resource I/O.
+Both block-size exports pass independent fsck. The broader resource/control/
+crypto/key-store/volume/mutation batch passes, including reused 1 KiB executables
+and independent checks of changed/recovered media. Original fixtures remain
+unchanged. No native mount or real resource proxy participates in these checks.
+
+Reports live in the ext4 repository's
+`artifacts/checks/fskit-maintenance-helper/{component2,parent-component1,source-release1}`
+and `adapter-regression-summary.json`; signed build evidence is under
+`artifacts/checks/fskit-check-distribution/`. The GitHub adapter job now includes
+full checker ownership and repair components. Native maintenance, invalid-primary-
+superblock repair and formatting remain unaccepted.
+
+Focused reverse diagnostics on the exact stock 27.0.1 DiskManagement image show
+that its filesystem catalog scans `.fs` bundles in the system and local filesystem
+directories. A diagnostic-only private catalog query in its own process has no
+`machlinext4` or `ext4` entry, despite the registered extension. These observations
+narrow the `diskutil` integration failure. A temporary metadata-only `.fs` bundle
+with the same filesystem identity makes the exact catalog query find `machlinext4`
+and accept short and sixteen-byte names. No formatter or different identity is
+declared. The fixture is removed after the diagnostic; actual `diskutil` behavior
+has not yet been accepted. The diagnostic never enters production code. Its image/probe identities
+and raw results are in the lab's
+`artifacts/ext4-fskit/native-issues/fskit-userspace-27/`.
+
+The signed checker build installs on stock 27.0.1 with matching executable hashes
+and valid signatures. PlugInKit registers the extension, but the first FSKit client
+query and Settings sheet omit it. One normal VM reboot makes the unchanged module
+appear enabled, with the authenticated device service enabled and no endpoints.
+This is a controlled session recovery, not successful seamless update continuity
+or native checker execution. Original discovery failures remain in
+`installed-27/build38-check-install` under the lab's `artifacts/ext4-fskit`.
 
 ## Kernel build evidence
 

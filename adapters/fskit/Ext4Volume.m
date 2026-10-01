@@ -114,9 +114,6 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 {
 	struct ext4_crypto_environment environment;
 	struct ext4_info info;
-	NSUUID *uuid;
-	FSVolumeIdentifier *identifier;
-	FSFileName *name;
 
 	if (crypto != NULL) {
 		ext4_native_crypto_seal(crypto);
@@ -126,22 +123,45 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 		}
 	}
 	ext4_get_info(fs, &info);
-	uuid = [[NSUUID alloc] initWithUUIDBytes:info.uuid];
-	identifier = [[FSVolumeIdentifier alloc] initWithUUID:uuid];
-	name = [FSFileName nameWithBytes:info.volume_name
-				  length:strnlen(info.volume_name, EXT4_VOLUME_NAME_SIZE)];
-	self = [super initWithVolumeID:identifier volumeName:name];
+	self = [self initForCheckingResource:resource
+					info:&info
+			       resourceOwner:resourceOwner
+				      crypto:crypto
+				    writable:writable
+				   openError:EXT4_OK];
 	if (self != nil) {
 		_fs = fs;
+		[self startResourceMaintenance];
+	}
+	return self;
+}
+
+- (instancetype)initForCheckingResource:(FSBlockDeviceResource *)resource
+				   info:(const struct ext4_info *)info
+			  resourceOwner:(Ext4ResourceIO *)resourceOwner
+				 crypto:(struct ext4_native_crypto *)crypto
+			       writable:(BOOL)writable
+			      openError:(enum ext4_result)error
+{
+	NSUUID *uuid;
+	FSVolumeIdentifier *identifier;
+	FSFileName *name;
+
+	uuid = [[NSUUID alloc] initWithUUIDBytes:info->uuid];
+	identifier = [[FSVolumeIdentifier alloc] initWithUUID:uuid];
+	name = [FSFileName nameWithBytes:info->volume_name
+				  length:strnlen(info->volume_name, EXT4_VOLUME_NAME_SIZE)];
+	self = [super initWithVolumeID:identifier volumeName:name];
+	if (self != nil) {
 		_crypto = crypto;
-		_info = info;
+		_info = *info;
 		_resource = resource;
 		_resourceOwner = resourceOwner;
+		_openError = error;
 		_active = YES;
 		_writable = writable;
 		_retainReadState = YES;
 		_items = [NSMapTable strongToWeakObjectsMapTable];
-		[self startResourceMaintenance];
 	}
 	return self;
 }
@@ -178,6 +198,9 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	if (!_active) {
 		return EXT4_STALE;
 	}
+	if (_check != nil) {
+		return EXT4_BUSY;
+	}
 	/* Do not serve retained core state or release an orphan through a revoked
 	 * device. This owner cannot recover when a different device is attached. */
 	if (_lifetimeError == EXT4_OK && _resourceOwner.isRevoked) {
@@ -187,7 +210,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 			_mmpTimer = nil;
 		}
 	}
-	return _lifetimeError;
+	return _lifetimeError != EXT4_OK ? _lifetimeError : (_fs == NULL ? _openError : EXT4_OK);
 }
 
 - (Ext4Item *)itemForInode:(const struct ext4_inode *)inode error:(enum ext4_result *)error
@@ -491,6 +514,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	NSLog(@"Machlin ext4 unmount callback");
 #endif
 	@synchronized(self) {
+		[_check cancel];
 		if (self.writable && !_writeClosed && [self ownerError] == EXT4_OK) {
 			_lifetimeError = ext4_sync(_fs);
 			if (_lifetimeError == EXT4_OK) {
@@ -512,6 +536,9 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 - (NSError *)finishUnloadedResource
 {
 	@synchronized(self) {
+		if (_check != nil) {
+			return ext4_error(EXT4_BUSY);
+		}
 		(void)[self ownerError];
 		if (_mounted && !_resourceOwner.isRevoked) {
 			return [NSError errorWithDomain:NSPOSIXErrorDomain code:EBUSY userInfo:nil];
@@ -730,6 +757,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 - (void)invalidate
 {
 	@synchronized(self) {
+		[_check cancel];
 		[self stopReadStateMaintenance];
 		if (_mmpTimer != nil) {
 			dispatch_source_cancel(_mmpTimer);

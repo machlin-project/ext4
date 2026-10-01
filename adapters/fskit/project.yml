@@ -15,6 +15,38 @@ settings:
     MARKETING_VERSION: '0.1.0'
     CURRENT_PROJECT_VERSION: '1'
 targets:
+  Ext4CheckResource:
+    type: tool
+    platform: macOS
+    sources:
+      - ../../tools/maintenance/main.c
+      - ../../tools/maintenance/io.c
+      - Ext4CheckWire.c
+    preBuildScripts:
+      - name: Build separate maintenance libraries
+        basedOnDependencyAnalysis: false
+        script: |
+          set -eu
+          for arch in $ARCHS; do
+            python3 "$SRCROOT/../../scripts/build_fskit_check.py" --arch "$arch" --output "$DERIVED_FILE_DIR/Maintenance"
+          done
+          python3 "$SRCROOT/../../scripts/combine_fskit_check.py" --output "$DERIVED_FILE_DIR/libe2fsck-resource.a" $ARCHS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.machlin.ext4.check
+        CLANG_ENABLE_MODULES: NO
+        OTHER_CODE_SIGN_FLAGS: --identifier org.machlin.ext4.check
+        CODE_SIGN_ENTITLEMENTS: Check.entitlements
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        HEADER_SEARCH_PATHS:
+          - $(DERIVED_FILE_DIR)/Maintenance/$(CURRENT_ARCH)
+          - $(DERIVED_FILE_DIR)/Maintenance/$(CURRENT_ARCH)/lib
+          - $(SRCROOT)/../../vendor/e2fsprogs-maintenance/lib
+        OTHER_LDFLAGS: $(DERIVED_FILE_DIR)/libe2fsck-resource.a -lpthread
+        OTHER_CFLAGS: -Wdeclaration-after-statement
+        SKIP_INSTALL: YES
   Ext4DeviceBarrier:
     type: tool
     platform: macOS
@@ -82,12 +114,19 @@ targets:
       - Ext4VolumeInternal.h
       - Ext4VolumeIO.m
       - Ext4VolumeReadState.m
+      - Ext4VolumeCheck.m
       - Ext4VolumeCompatibility.m
       - Ext4VolumeModern.m
       - Ext4VolumeMutation.m
       - Ext4VolumeControl.m
       - Ext4ResourceIO.m
       - Ext4ResourceIO.h
+      - Ext4CheckTask.h
+      - Ext4CheckTask.m
+      - Ext4CheckProtocol.h
+      - Ext4CheckWire.c
+      - path: e2fsprogs-NOTICE
+        buildPhase: resources
       - Ext4DeviceBarrier.h
       - Ext4DeviceBarrier.m
       - Ext4PeerIdentity.m
@@ -102,6 +141,12 @@ targets:
       - BridgingHeader.h
     dependencies:
       - target: Ext4Core
+      - target: Ext4CheckResource
+        embed: true
+        link: false
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
       - sdk: Security.framework
       - sdk: LocalAuthentication.framework
       - sdk: FSKit.framework

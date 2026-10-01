@@ -78,20 +78,41 @@
 
 @end
 
+static Class
+ext4_volume_class(BOOL writable, BOOL checking)
+{
+	Class volumeClass =
+	    writable || checking ? Ext4LegacyVolume.class : Ext4LegacyMappedVolume.class;
+
+#if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
+	if (@available(macOS 27.0, *)) {
+		volumeClass =
+		    writable || checking ? Ext4ModernVolume.class : Ext4ModernMappedVolume.class;
+	}
+#endif
+	return volumeClass;
+}
+
 Ext4Volume *
 ext4_volume_create(FSBlockDeviceResource *resource, struct ext4_fs *filesystem,
     Ext4ResourceIO *resourceOwner, struct ext4_native_crypto *crypto, BOOL writable)
 {
-	Class volumeClass = writable ? Ext4LegacyVolume.class : Ext4LegacyMappedVolume.class;
+	return [[ext4_volume_class(writable, NO) alloc] initWithResource:resource
+							      filesystem:filesystem
+							   resourceOwner:resourceOwner
+								  crypto:crypto
+								writable:writable];
+}
 
-#if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
-	if (@available(macOS 27.0, *)) {
-		volumeClass = writable ? Ext4ModernVolume.class : Ext4ModernMappedVolume.class;
-	}
-#endif
-	return [[volumeClass alloc] initWithResource:resource
-					  filesystem:filesystem
-				       resourceOwner:resourceOwner
-					      crypto:crypto
-					    writable:writable];
+Ext4Volume *
+ext4_volume_create_for_check(FSBlockDeviceResource *resource, const struct ext4_info *info,
+    Ext4ResourceIO *resourceOwner, struct ext4_native_crypto *crypto, BOOL writable,
+    enum ext4_result error)
+{
+	return [[ext4_volume_class(writable, YES) alloc] initForCheckingResource:resource
+									    info:info
+								   resourceOwner:resourceOwner
+									  crypto:crypto
+									writable:writable
+								       openError:error];
 }

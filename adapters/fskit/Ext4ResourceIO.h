@@ -29,6 +29,9 @@
 
 @interface Ext4ResourceIO : NSObject
 @property(nonatomic, readonly, getter=isRevoked) BOOL revoked;
+@property(nonatomic, readonly) uint64_t sizeBytes;
+@property(nonatomic, readonly) uint64_t blockSize;
+@property(nonatomic, readonly) BOOL writable;
 - (instancetype)initWithReader:(id<Ext4BlockReader>)reader;
 - (void)enableWritesWithBarrier:(id<Ext4PersistenceBarrier>)barrier deviceName:(NSString *)name;
 - (enum ext4_result)open:(struct ext4_fs **)filesystem;

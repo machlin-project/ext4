@@ -1506,3 +1506,11 @@ through an untrusted user ioctl. Missing bridge support remains an explicit gap.
 The implementation is original code based on the format specification. External
 utilities generate and inspect fixtures; no Linux or e2fsprogs implementation is
 copied or linked into the core.
+
+FSKit full consistency checks and repair use a separate e2fsprogs executable,
+with its upstream licenses and complete corresponding source distributed beside
+the application. The portable engine and FSKit binary do not link that executable.
+An inherited socket exposes only the exclusively owned FSKit block resource;
+the adapter validates every request and owns alignment, revocation and durability.
+All core state is released before repair and rebuilt after successful checking.
+See [the maintenance contract](FSKIT.md#offline-consistency-checks-and-repair).

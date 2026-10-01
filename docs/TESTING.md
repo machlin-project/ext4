@@ -604,6 +604,35 @@ Keep CPU sanitizers, freestanding stack checks, unsigned FSKit builds, kext buil
 stock FSKit mounts, custom-kernel execution and LXNU acceptance as distinct rows.
 The current evidence and missing rows are recorded in [ACCEPTANCE.md](ACCEPTANCE.md).
 
+Full FSKit consistency checking is covered by `tests/run_fskit_check.py` without
+installing an extension. It compiles the adapter supervisor with ASan/UBSan, then
+uses the real separate checker on independently damaged 1/4 KiB fixtures. The
+cases require exclusive ownership, unchanged read-only bytes, safe core reopen,
+hostile-peer rejection, read/write/barrier errors and cancellation both before
+launch and during I/O. Independent `e2fsck -fn` must accept repaired exports.
+The GitHub FSKit job includes this suite and preserves per-command logs/status.
+`tests/fskit_check_resource.py` separately exercises the helper's stream protocol
+against a file-backed resource. Neither suite establishes native sandbox launch.
+
+From the lab directory, reuse an existing unsigned Debug build and fixtures:
+
+```sh
+python3 ../ext4/tests/run_fskit_check.py \
+  --derived-data ../ext4/artifacts/fskit/DerivedData \
+  --fixtures ../ext4/artifacts/fixtures \
+  --debugfs /path/to/debugfs --e2fsck /path/to/e2fsck \
+  --output ../ext4/artifacts/checks/fskit-maintenance
+```
+
+Use a new output directory. Signed native acceptance must separately exercise
+`fsck_fskit` on unmounted disposable devices and verify repaired media after detach.
+`scripts/test_fskit_installed_check.py` performs that native path with clean and
+independently damaged 1/4 KiB images. It requires byte-preserving verification,
+failure for damaged media, successful repair, independent fsck and a read-only
+remount through the installed extension. An optional `--sudo` authorizes native
+administrative checking using the existing no-echo guest password mechanism.
+Timeouts retain the task device for diagnosis; they do not start another checker.
+
 Prepared builds and test execution run on Luna; VM preparation belongs to Sol.
 The main agent writes tests, investigates failures and reviews evidence. Workers
 preserve complete command output in ignored artifacts and never repair a failing

@@ -676,7 +676,7 @@ Keep failed groups and interrupted-run cleanup distinct from passed groups.
 | IPC and GUI | Signed same-user RPC and key lifecycle and actual GUI v1/v2 key import/removal on 26.5.2/27.0.1; sudo-mounted/admin-app operation and basic controls on 27.0.1; abandoned endpoint recovery on 26.5.2 | Cross-user or root-owned extension coordination |
 | Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded cached-write/truncate/rename stress, bounded ENOSPC, extension/service termination and timeout, forced-detach durability, recovery, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, memory-pressure stress and physical device loss |
 | Crypto and ACLs | CommonCrypto fscrypt v1/v2 reads and writes; native key import/removal and remounts on 26.5.2 and 27.0.1 | Verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
-| Maintenance | Native Disk Arbitration recovery of interrupted transactions; read-only dirty media remain unchanged; component crash cuts | Full check/repair tooling |
+| Maintenance | Native Disk Arbitration recovery of interrupted transactions; separate full consistency checker and repair helper with component fault/cancellation acceptance | Signed helper execution inside FSKit, native check/repair and damaged primary-superblock admission |
 | Distribution | Universal Xcode Release archive/export, Developer ID signatures, hardened runtime, timestamps, matching app/extension profiles, notarization, Gatekeeper, installed native write/remount/policy/fsck and actual settings-button GUI on 26.5.2/27.0.1 | Automatic module enable continuity fails after the tested update on 27; broader OS/hardware acceptance and native failures above remain open |
 
 The public SDK documents direct writes
@@ -704,6 +704,51 @@ control, volume, crypto and fake Keychain checks, then repeats volume checks on
 1 KiB and indexed-directory fixtures. It uploads platform, build and test logs.
 This job needs no signing secrets and does not install an extension or establish
 mounted behavior. The portable core retains its separate Linux CI suites.
+
+## Offline consistency checks and repair
+
+Forced checks use a separate e2fsprogs `e2fsck` executable embedded in the extension.
+Neither the portable engine nor the FSKit binary links that implementation. The
+helper receives one resource through an inherited private stream socket. It cannot
+choose a device path or request another resource. The parent validates frames,
+resource bounds and write admission, and supplies the same aligned resource I/O
+and authenticated persistence barriers used by the filesystem.
+
+`-f -n` performs a full read-only scan; `-f -y` requests repair and `-f -p` requests
+automatic safe repairs. Conflicting modes are rejected. Ordinary quick checks and
+automatic journal recovery retain their existing path. Formatting remains
+unsupported. Public `/sbin/fsck_fskit -t machlinext4` is the native check entry
+point; `diskutil verifyVolume` still has the catalog limitation described above.
+
+Checking requires an unmounted volume with no retained items. A writable owner
+must synchronize and release MMP before the checker can write. The adapter drops
+its complete core instance and metadata state, then reopens and validates the
+engine only after a successful check. Failed or canceled work leaves the volume
+unmountable until another explicit check succeeds or the resource is unloaded.
+Verification requires a read-only resource, so it cannot accidentally replay a
+journal or publish an MMP change. A validated superblock with an unreadable root
+can create a maintenance-only owner; an invalid primary superblock is still
+rejected rather than given invented geometry.
+
+Cancellation shuts down the connection, terminates the owned child and escalates
+after five seconds. The child is reaped before the resource is released. Frames
+have absolute thirty-second deadlines, and inactivity has a five-minute limit.
+Malformed messages, abandoned channels and read/write/barrier failures cannot
+produce a clean verdict, even if the child exits with status zero. Checker output
+is forwarded through `FSTask` with bounded line buffering.
+
+The helper inherits the extension's sandbox; it has no device entitlement or
+privileged repair service. Unsigned universal compilation and 1/4 KiB component
+checks pass, including cancellation, hostile protocol peers, resource faults,
+repair and independent `e2fsck` verification. These checks do not establish that
+the signed FSKit process is allowed to launch and use the helper; native sandbox
+and maintenance acceptance remain required.
+
+The build pins the official e2fsprogs release and preserves its complete license
+notice. Archives and exports include a corresponding-source package beside the
+app. It contains the upstream source, resource bridge and build script, and can
+rebuild the helper without a Git database using explicit `--source-release`.
+Distribute that source package together with the app and preserve the notices.
 
 For automatic signing, Xcode must have the personal Apple Developer account in
 Settings > Apple Accounts, and Keychain must contain a usable signing identity.

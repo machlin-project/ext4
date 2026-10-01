@@ -4,6 +4,7 @@
 
 struct ext4_native_crypto;
 @class Ext4ResourceIO;
+@class Ext4CheckTask;
 
 @interface Ext4Volume : FSVolume <FSVolumePathConfOperations>
 /* Takes ownership of filesystem on success. ResourceOwner retains callback
@@ -22,6 +23,14 @@ struct ext4_native_crypto;
 		   resourceOwner:(Ext4ResourceIO *)resourceOwner
 			  crypto:(struct ext4_native_crypto *)crypto
 			writable:(BOOL)writable;
+/* A valid superblock with an unreadable root can be checked before activation.
+ * This owner publishes no items and cannot mount until a full check succeeds. */
+- (instancetype)initForCheckingResource:(FSBlockDeviceResource *)resource
+				   info:(const struct ext4_info *)info
+			  resourceOwner:(Ext4ResourceIO *)resourceOwner
+				 crypto:(struct ext4_native_crypto *)crypto
+			       writable:(BOOL)writable
+			      openError:(enum ext4_result)error;
 @property(nonatomic, strong) NSError *keyStoreError;
 @property(nonatomic, strong) NSError *writeAvailabilityError;
 @property(nonatomic, readonly) BOOL writable;
@@ -72,3 +81,6 @@ API_AVAILABLE(macos(27.0))
 /* Select the runtime API, retaining the same ownership contract as init. */
 Ext4Volume *ext4_volume_create(FSBlockDeviceResource *resource, struct ext4_fs *filesystem,
     Ext4ResourceIO *resourceOwner, struct ext4_native_crypto *crypto, BOOL writable);
+Ext4Volume *ext4_volume_create_for_check(FSBlockDeviceResource *resource,
+    const struct ext4_info *info, Ext4ResourceIO *resourceOwner, struct ext4_native_crypto *crypto,
+    BOOL writable, enum ext4_result error);

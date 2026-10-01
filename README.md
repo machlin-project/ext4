@@ -61,6 +61,9 @@ write/key-lifecycle checks on both test OS versions. The app's settings button
 passes both versions; the tested update on 27 requires one ordinary module
 reenable. ACL authorization, physical device-loss stress and broader OS/hardware
 acceptance remain unaccepted.
+Full consistency checking and repair now use a separate resource-bound helper;
+unsigned universal builds and fault/cancellation component checks pass. Signed
+native maintenance acceptance and formatting remain pending.
 This is not a production release.
 
 The kernel adapter remains read-only. The arm64e kext has read-only acceptance in

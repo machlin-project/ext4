@@ -5,7 +5,9 @@ import argparse
 import os
 from pathlib import Path
 import pwd
+import shutil
 import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -97,6 +99,11 @@ def main() -> None:
         app = (archive_path / "Products/Applications/Machlin ext4.app" if archive_path else
                derived_data / "Build/Products" / configuration / "Machlin ext4.app")
         verify_app(app, environment)
+    source_package = None
+    if archive_path:
+        source_package = archive_path / 'SharedSupport/Machlin-ext4-check-source.tar.gz'
+        subprocess.run([sys.executable, str(ROOT / 'scripts/package_fskit_check.py'),
+                        '--output', str(source_package)], check=True, cwd=ROOT, env=environment)
     if export_path:
         command = [
             "xcodebuild", "-exportArchive", "-archivePath", str(archive_path),
@@ -106,6 +113,7 @@ def main() -> None:
             command.append("-allowProvisioningUpdates")
         subprocess.run(command, check=True, cwd=ROOT, env=environment)
         verify_app(export_path / "Machlin ext4.app", environment)
+        shutil.copyfile(source_package, export_path / source_package.name)
 
 
 if __name__ == "__main__":

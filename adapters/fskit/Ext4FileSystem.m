@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #import "Ext4FileSystem.h"
 #import "Ext4Volume.h"
+#import "Ext4VolumeInternal.h"
 #import "Ext4ResourceIO.h"
 #import "Ext4Support.h"
 #import "Ext4KeyStore.h"
@@ -34,37 +35,35 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 {
 	Ext4Volume *volume;
 	NSProgress *progress;
+	Ext4CheckTask *check;
+	dispatch_group_t work;
+	NSURL *executable;
 	BOOL automaticRecovery;
 	BOOL quick = [options.taskOptions containsObject:@"-q"];
+	BOOL force = [options.taskOptions containsObject:@"-f"];
+	BOOL verify = [options.taskOptions containsObject:@"-n"];
+	BOOL repair = [options.taskOptions containsObject:@"-y"];
+	BOOL preen = [options.taskOptions containsObject:@"-p"];
+	Ext4CheckMode mode = repair ? Ext4CheckRepair : (preen ? Ext4CheckPreen : Ext4CheckVerify);
 
 	@synchronized(self) {
 		volume = _volume;
 		automaticRecovery = _recoveredOnLoad && volume.writable;
 	}
 	for (NSString *option in options.taskOptions) {
+		if (![@[ @"-q", @"-n", @"-p", @"-y", @"-f" ] containsObject:option] ||
+		    (verify && (repair || preen)) || (repair && preen)) {
+			if (error != NULL) {
+				*error = ext4_error(EXT4_INVALID_ARGUMENT);
+			}
+			return nil;
+		}
 		if (![option isEqualToString:@"-q"] && ![option isEqualToString:@"-n"]) {
 			quick = NO;
 		}
 		if (![option isEqualToString:@"-p"] && ![option isEqualToString:@"-y"]) {
 			automaticRecovery = NO;
 		}
-	}
-	/* DA first checks read-only, then requests automatic repair after reopening
-	 * writable. Load has already replayed its journal and validated the root.
-	 * A forced/full consistency scan remains a different, unsupported operation. */
-	if (!quick && !automaticRecovery) {
-		if (error != NULL) {
-			*error =
-			    [NSError errorWithDomain:NSPOSIXErrorDomain
-						code:ENOTSUP
-					    userInfo:@{
-						    NSLocalizedDescriptionKey :
-							@"A full consistency scan is unavailable; "
-							@"quick checks and automatic journal "
-							@"recovery are supported."
-					    }];
-		}
-		return nil;
 	}
 	if (volume == nil) {
 		if (error != NULL) {
@@ -75,13 +74,54 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 		return nil;
 	}
 	progress = [NSProgress progressWithTotalUnitCount:1];
-	progress.cancellable = NO;
+	/* Keep Disk Arbitration's ordinary quick/recovery path small. Explicit
+	 * forced checks always run the separate full checker. */
+	if (!force && (quick || automaticRecovery)) {
+		progress.cancellable = NO;
+		dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+		  NSError *checkError = [volume checkMountEligibility];
+
+		  progress.completedUnitCount = 1;
+		  [task didCompleteWithError:checkError];
+		});
+		return progress;
+	}
+	executable = [NSBundle.mainBundle.bundleURL
+	    URLByAppendingPathComponent:@"Contents/Helpers/Ext4CheckResource"];
+	check = [volume beginCheck:mode executable:executable error:error];
+	if (check == nil) {
+		return nil;
+	}
+	work = dispatch_group_create();
+	dispatch_group_enter(work);
+	progress.cancellable = YES;
+	progress.localizedDescription =
+	    mode == Ext4CheckVerify ? @"Checking ext4" : @"Repairing ext4";
+	progress.cancellationHandler = ^{
+	  [check cancel];
+	};
+	task.cancellationHandler = ^NSError * {
+	  [check cancel];
+	  if (dispatch_group_wait(work, dispatch_time(DISPATCH_TIME_NOW, 45 * NSEC_PER_SEC)) != 0) {
+		  return [NSError errorWithDomain:NSPOSIXErrorDomain code:ETIMEDOUT userInfo:nil];
+	  }
+	  return nil;
+	};
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
 	  NSError *checkError;
 
-	  checkError = [volume checkMountEligibility];
+	  checkError = [volume finishCheck:check error:[check runWithTask:task]];
+	  @synchronized(self) {
+		  if (self->_volume == volume) {
+			  self.containerStatus = checkError == nil
+			      ? FSContainerStatus.ready
+			      : [FSContainerStatus blockedWithStatus:checkError];
+		  }
+	  }
 	  progress.completedUnitCount = 1;
+	  progress.cancellationHandler = nil;
 	  [task didCompleteWithError:checkError];
+	  dispatch_group_leave(work);
 	});
 	return progress;
 }
@@ -107,12 +147,12 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 	NSUUID *uuid;
 	NSString *name;
 	FSContainerIdentifier *identifier;
-	BOOL needsRecovery;
+	BOOL needsCheck;
 	enum ext4_result error;
 
 	error = ext4_open_resource(resource, &owner, &fs);
-	needsRecovery = error == EXT4_RECOVERY_REQUIRED;
-	if (needsRecovery) {
+	needsCheck = error == EXT4_RECOVERY_REQUIRED || error == EXT4_CORRUPT;
+	if (needsCheck) {
 		error = [owner inspect:&info];
 	}
 	if (error != EXT4_OK) {
@@ -120,7 +160,7 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 		    ext4_error(error == EXT4_NOT_EXT4 ? EXT4_OK : error));
 		return;
 	}
-	if (!needsRecovery) {
+	if (!needsCheck) {
 		ext4_get_info(fs, &info);
 	}
 	name = [[NSString alloc] initWithBytes:info.volume_name
@@ -132,8 +172,8 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 	uuid = [[NSUUID alloc] initWithUUIDBytes:info.uuid];
 	identifier = [[FSContainerIdentifier alloc] initWithUUID:uuid];
 	ext4_unmount(fs);
-	/* Disk Arbitration only dispatches usable formats to loadResource. A pending
-	 * journal is a supported format; load still requires authorized recovery. */
+	/* A validated superblock identifies supported media even when its root
+	 * needs repair. Load still cannot publish items or mount a damaged root. */
 	reply([FSProbeResult usableProbeResultWithName:name containerID:identifier], nil);
 }
 
@@ -150,6 +190,7 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 	NSError *loadError = nil;
 	NSError *writeError = nil;
 	BOOL writable = NO;
+	BOOL inspectable = NO;
 	enum ext4_result error;
 
 	@synchronized(self) {
@@ -160,19 +201,23 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 		} else {
 			_recoveredOnLoad = NO;
 			error = ext4_open_resource(resource, &owner, &fs);
-			if (error == EXT4_OK || error == EXT4_RECOVERY_REQUIRED) {
+			if (error == EXT4_OK || error == EXT4_RECOVERY_REQUIRED ||
+			    error == EXT4_CORRUPT) {
 				/* Keychain access must not delay the heartbeat of a claimed MMP
 				 * owner. Resolve keys before writable admission and recovery. */
 				if (error == EXT4_OK) {
 					ext4_get_info(fs, &info);
+					inspectable = YES;
 				} else {
 					enum ext4_result inspected = [owner inspect:&info];
 
 					if (inspected != EXT4_OK) {
 						error = inspected;
+					} else {
+						inspectable = YES;
 					}
 				}
-				if (error == EXT4_OK || error == EXT4_RECOVERY_REQUIRED) {
+				if (inspectable) {
 					crypto = [Ext4KeyStore
 					    loadCryptoForVolume:[[NSUUID alloc]
 								    initWithUUIDBytes:info.uuid]
@@ -188,8 +233,7 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 				[(FSBlockDeviceResource *)resource isWritable],
 			    error);
 #endif
-			if ((error == EXT4_OK || error == EXT4_RECOVERY_REQUIRED) &&
-			    ![options.taskOptions containsObject:@"--rdonly"] &&
+			if (inspectable && ![options.taskOptions containsObject:@"--rdonly"] &&
 			    [(FSBlockDeviceResource *)resource isWritable]) {
 				FSBlockDeviceResource *device = (FSBlockDeviceResource *)resource;
 				Ext4DeviceBarrier *barrier =
@@ -229,13 +273,21 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 					ext4_unmount(fs);
 					error = EXT4_NO_MEMORY;
 				}
+			} else if (inspectable &&
+			    (error == EXT4_CORRUPT || error == EXT4_RECOVERY_REQUIRED)) {
+				volume =
+				    ext4_volume_create_for_check((FSBlockDeviceResource *)resource,
+					&info, owner, crypto, owner.writable, error);
+				if (volume == nil) {
+					error = EXT4_NO_MEMORY;
+				}
 			}
 			if (volume == nil) {
 				ext4_native_crypto_destroy(crypto);
 			}
 			volume.keyStoreError = keyError;
 			volume.writeAvailabilityError = writeError;
-			loadError = ext4_error(error);
+			loadError = volume != nil ? nil : ext4_error(error);
 			_volume = volume;
 			self.containerStatus = loadError == nil
 			    ? FSContainerStatus.ready
