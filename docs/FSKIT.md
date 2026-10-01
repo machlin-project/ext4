@@ -552,10 +552,11 @@ lifecycle on both OS versions is recorded separately.
 A bounded GUI check on 27.0.1 also passes Refresh, active-volume geometry and service
 status, both values of the read-state retention setting and Release read metadata.
 The signed CLI independently verifies the setting changes. The raw-key file picker
-opens, but the VM input transport could not complete its selection dialog, so GUI
-key import and removal remain unaccepted; the signed CLI key lifecycle above is
-separate evidence. After canceling the dialog, normal detach leaves no endpoint,
-Refresh shows no volume, and the read-only image is unchanged. Evidence is in the
+opens, but this run could not complete its selection dialog through the VM input
+transport. It therefore did not accept GUI key import or removal; later actual
+v1/v2 GUI checks on both OS versions are recorded below. The signed CLI key
+lifecycle above is separate evidence. After canceling the dialog, normal detach
+leaves no endpoint, Refresh shows no volume, and the read-only image is unchanged. Evidence is in the
 lab's `artifacts/ext4-fskit/installed-27/build24-gui-1/`.
 
 ## OS compatibility
@@ -627,6 +628,16 @@ read-only remount label verification and independent fsck pass. The failure is
 not confined to the maximum label length. Evidence is in the lab's
 `artifacts/ext4-fskit/installed-clean/build31-rename-short-1/`.
 
+Static inspection of the test guest's `diskutil` localizes that exact refusal:
+`DiskMount` first asks DiskManagement for the disk's filesystem description, then
+validates the label through that description. A missing description and a rejected
+label both reach the same error message before the actual rename request. Existing
+filtered logs do not distinguish those branches. This proves the validation
+boundary, not a missing naming utility or a fix through undocumented registration
+keys. The selected binary slice was inspected without invoking private methods;
+its runtime-selected UUID was not independently observed. Evidence is in the lab's
+`artifacts/ext4-fskit/native-issues/rename-gate-investigation`.
+
 Generated evidence lives in the lab's ignored `artifacts/ext4-fskit/` tree:
 `installed-27/build22-native-1`, `installed-27/build23-attributes-1-install`,
 `installed-27/build23-barrier-1` and `installed-clean/build21-large-pressure-1`.
@@ -643,6 +654,7 @@ Keep failed groups and interrupted-run cleanup distinct from passed groups.
 | Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded cached-write/truncate/rename stress, bounded ENOSPC, extension/service termination and timeout, forced-detach durability, recovery, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, memory-pressure stress and physical device loss |
 | Crypto and ACLs | CommonCrypto fscrypt v1/v2 reads and writes; native key import/removal and remounts on 26.5.2 and 27.0.1 | Verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
 | Maintenance | Native Disk Arbitration recovery of interrupted transactions; read-only dirty media remain unchanged; component crash cuts | Full check/repair tooling |
+| Distribution | Universal Xcode Release archive/export, Developer ID signatures, hardened runtime, timestamps, matching app/extension profiles and a notarized export accepted by Gatekeeper | Writable distribution installation and broader OS/hardware acceptance |
 
 The public SDK documents direct writes
 and a metadata buffer-cache flush, but does not establish that a barrier persists
@@ -710,6 +722,98 @@ positive bundle build number to the app and its extension; increase it when
 installing a replacement build so the system can distinguish the versions.
 Configuration does not change the signing identity or profile type: a Release
 build with development profiles is still a development artifact.
+For distribution, use Xcode's archive/export pipeline instead of replacing the
+outer app's signature. `--archive-path` creates a fresh archive and defaults to
+Release; all nested products are embedded in the main application and excluded
+as independent archive products. The app, extension and device-service executables
+enable hardened runtime. `--export-path` also requires a signing team and an
+explicit `--export-options` plist. Existing archive or export destinations are
+rejected so a failed or accepted artifact is retained.
+
+An automatic Developer ID export uses the following `ExportOptions.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key><string>developer-id</string>
+    <key>teamID</key><string>YOUR_TEAM_ID</string>
+    <key>signingStyle</key><string>automatic</string>
+    <key>manageAppVersionAndBuildNumber</key><false/>
+</dict>
+</plist>
+```
+
+From the absolute lab directory:
+
+```sh
+python3 ../ext4/scripts/build_fskit.py --team YOUR_TEAM_ID --provision \
+  --configuration Release --build-number N \
+  --derived-data ../ext4/artifacts/fskit-distribution/DerivedData \
+  --archive-path ../ext4/artifacts/fskit-distribution/Machlin-ext4.xcarchive \
+  --export-path ../ext4/artifacts/fskit-distribution/export \
+  --export-options ../ext4/artifacts/fskit-distribution/ExportOptions.plist
+```
+
+Archiving uses the development identity; Xcode export selects the distribution
+identity and profiles, including those for restricted extension entitlements.
+`--provision` permits Xcode to fetch profiles through the configured personal
+account. For manual export, supply the corresponding `signingCertificate` and
+per-bundle `provisioningProfiles` in the export plist. Check the selected Xcode's
+`xcodebuild -help` for its supported export options. Both the signed archive app
+and exported app undergo strict nested signature verification. Distribution also
+requires verified Developer ID authorities, secure timestamps, profile entitlement
+agreement, notarization and a clean dedicated-VM installation. Export alone does
+not establish these remaining gates or functional acceptance. See Apple's
+[distribution signing workflow](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac/)
+and [packaging guidance](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution).
+
+The first direct-distribution export passes these signing checks for both
+architectures: the app, filesystem extension, installer helper and barrier tool
+all carry Developer ID Application signatures for the personal team, hardened
+runtime and secure timestamps. The main app and extension embed all-device
+direct-distribution profiles that authorize their application identifiers and
+shared App Group; only the extension requests the FSKit module entitlement.
+Neither requests debugging permission. Profile authorizations may contain
+wildcards or broader grants than the signed code uses; compare authorization
+coverage rather than requiring identical entitlement arrays. The requested and
+Xcode-normalized export options are retained separately. This accepts export and
+signing, not a native installation result. Evidence is in
+`artifacts/checks/fskit-distribution` in the standalone repository.
+
+Xcode Organizer's direct-distribution upload completes notarization through the
+configured personal Apple Account. The successful notarized export passes
+`stapler validate`, strict nested signature verification and Gatekeeper assessment.
+All four executable targets retain both compiled Mach-O UUIDs from the Release
+archive, and the final app/extension profiles authorize their signed entitlements.
+No credential reset, new certificate, policy change or second submission is
+needed. Organizer imported a registered copy of the source archive; attempting
+`xcodebuild -exportNotarizedApp` on the original artifact fails because it lacks
+the upload metadata. Export from the registered Ready to distribute archive
+succeeds. Retain the source archive, registered archive location and selected
+export separately; an earlier failed CLI export is not a notarization rejection.
+See Apple's [Organizer notarization workflow](https://help.apple.com/xcode/mac/current/en.lproj/dev88332a81e.html).
+
+The dedicated 26.5.2 and 27.0.1 installations of that notarized app pass complete
+bundle byte/symlink equality, strict signatures and Gatekeeper. The device-cache
+service fails to launch after replacement of the development-signed build:
+launchd reports a code-signing launch constraint violation, while the public
+ServiceManagement status reports enabled. Public unregister/register,
+normal app/helper launch and an exact-job kickstart on 26.5.2 have not established
+an authenticated running service. On 27.0.1, unregistering the old service before
+replacing the bundle and initially registering the new one fails at the same
+constraint. Both guests retain the complete notarized app, but neither has a
+running service or an enabled filesystem module after this migration. These are
+failed installation gates, so no writable distribution test is admitted.
+Do not replace the constraint, use an alternate launchd plist or weaken
+signature/authorization checks to obtain a pass. Apple's
+[service-upgrade discussion](https://developer.apple.com/forums/thread/795022)
+describes the same error fields and a possible stale registration; that does not
+prove the cause in either guest. Installation and bounded public lifecycle
+evidence live in the lab's `installed-clean/build35-distribution-install` and
+`installed-27/build35-distribution-install` trees.
+
 The optimized Release configuration passes the ordinary native write and permission
 checks on both supported test OS versions, with 1 KiB and 4 KiB blocks. It also
 passes the four retained-descriptor/mapping removal cases on each OS, followed by

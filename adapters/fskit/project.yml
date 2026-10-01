@@ -113,6 +113,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_ENTITLEMENTS: Extension.entitlements
         ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
         REGISTER_APP_GROUPS: YES
         SWIFT_OBJC_BRIDGING_HEADER: BridgingHeader.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/../../include
@@ -161,6 +162,8 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         ENABLE_APP_SANDBOX: YES
         REGISTER_APP_GROUPS: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        SKIP_INSTALL: NO
 schemes:
   Ext4FSKitApp:
     build:
@@ -168,3 +171,5 @@ schemes:
         Ext4FSKitApp: all
     run:
       config: Debug
+    archive:
+      config: Release
