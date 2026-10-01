@@ -16,10 +16,10 @@ safe rejection of a feature is recorded separately from supporting it.
 | Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Accepted for the documented format/geometry matrix, including large logical files and high physical addresses; preserve the explicitly recorded exceptions |
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader, mounted arm64e kext and stock macOS 26.5.2 read-only FSKit profiles pass |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Functional core queue accepted with documented feature/mode limits; see the queue and per-feature evidence below |
-| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Portable, independent and Linux checks pass with the recorded format limits; stock FSKit 1/4 KiB writes, shared mmap, concurrent writers, namespace mutations and open-unlinked lifetime pass; native full-disk and failure acceptance remain pending |
+| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Portable, independent and Linux checks pass with the recorded format limits; stock FSKit 1/4 KiB writes, shared mmap, concurrent writers, namespace mutations, open-unlinked lifetime, bounded ENOSPC and persistence-service failures pass; larger pressure and device-removal acceptance remain pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Portable journals and orphan recovery pass the recorded matrix; stock FSKit Disk Arbitration recovery passes both block sizes while dirty read-only media remain unchanged; physical device-loss qualification remains pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list, atomic attribute batches and mutation lifetime integration pass portable tests and targeted independent checks; bidirectional Linux attribute/ACL/security checks and direct replay of core attribute transactions pass eight profiles; the linked-truncate e2fsck defect remains explicit below; ACL enforcement and platform policy pending |
-| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Signed stock 26.5.2 reads/writes, namespace, mmap, concurrent I/O, user xattrs, recovery, bounded ENOSPC, native label changes and fscrypt v1/v2 key lifecycle pass 1/4 KiB profiles; live set-ID metadata and diskutil rename fail; device-loss/failure stress remains unaccepted (see [FSKit](FSKIT.md)) |
+| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Signed stock 26.5.2 reads/writes, namespace, mmap, concurrent I/O, user xattrs, recovery, bounded ENOSPC, native label changes, service-failure recovery and fscrypt v1/v2 key lifecycle pass 1/4 KiB profiles; live set-ID metadata and diskutil rename fail; device-loss stress remains unaccepted (see [FSKit](FSKIT.md)) |
 | FSKit control app | Signed app-to-mounted-extension IPC on supported macOS versions, authorization and teardown | Signed same-user App Group IPC, settings, Keychain import/removal, next-mount key snapshots and normal teardown pass on 26.5.2; independent-process crash discovery passes component checks and legacy crash discovery passes in the guest; root-mounted/user-app coordination and GUI workflow acceptance remain pending |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
 | LXNU policy | CAP_FSETID and privilege removal, xattrs, mixed-ABI races, inherited descriptions and attachment restrictions | Not implemented |
@@ -3168,6 +3168,11 @@ passes the corrected JSON boolean types through the actual IPC serialization.
 Evidence is in `artifacts/checks/fskit-seek21/`. Native 27 seeking, particularly
 visibility of buffered writes, remains unaccepted.
 
+The configured portable regression for this batch passes all 535 Meson tests.
+Internal scenario applicability skips remain in its retained reports; they are
+not additional passed scenarios. This configured matrix is separate from the
+earlier 718-test recovery configuration. All nine Linux CI suites also pass.
+
 The signed sparse-query build is installed and enabled on the 26.5.2 guest.
 Ordinary write/mmap/namespace tests, read-only remount verification and independent
 fsck pass on both block sizes. Installed control responses now contain actual JSON
@@ -3175,6 +3180,22 @@ booleans for `readOnly` and `keyStoreAvailable`. Both final endpoint lists are e
 Evidence is in the lab's `artifacts/ext4-fskit/installed-clean/build21-native-1/`;
 the older-SDK FSKit CI job also passes. This does not change the outstanding
 set-ID, `diskutil` or native 27 verdicts above.
+
+Installed device-barrier failure acceptance passes both 1 KiB and 4 KiB profiles
+for service termination and suspension. The checker retains an ordinary-user
+descriptor after syncing its baseline, then overwrites only part of the file.
+Writes and fsync return `EIO`, after about ten seconds for suspension and promptly
+for termination. After service restoration, fsync, truncation and close on the
+failed owner still return `EIO`. Forced detach removes that failed instance;
+writable remount recovers, preserves the untouched durable bytes and accepts a
+new synced file. Read-only remount verifies both files, ordinary detach cleans
+up, and independent fsck accepts every export. Unacknowledged overwritten bytes
+may be old or new. The test does not claim physical power-loss or device-removal
+survival. Evidence is in the lab's
+`artifacts/ext4-fskit/installed-clean/build21-barrier-3/`, produced by
+`scripts/test_fskit_installed_barrier.py`. Earlier attempts retain a process-path
+guard rejection before fault injection and a corrected expectation for closing
+the directory descriptor of an aborted owner; neither is relabeled as a pass.
 
 A separate native diagnosis narrows the volume-name failure: public
 `DADiskRename` accepts both a short label and the 16-byte label on the same mounted

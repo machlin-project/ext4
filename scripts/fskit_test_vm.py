@@ -13,20 +13,24 @@ class GuestTimeout(RuntimeError):
 def guest_commands(tart, vm, output):
     serial = 0
 
-    def guest(label, *command, required=True, timeout=30, destination=None):
+    def guest(label, *command, required=True, timeout=30, destination=None, stdin=None):
         nonlocal serial
         serial += 1
         prefix = output / f'{serial:03d}-{label}'
-        argv = [str(tart), 'exec', vm, *command]
-        with (destination or prefix.with_suffix('.stdout.log')).open('wb') as stream:
+        # Only argv and results enter evidence. In particular, a sudo password
+        # supplied through stdin must never become an argument or a saved input.
+        argv = [str(tart), 'exec', *(['-i'] if stdin is not None else []), vm, *command]
+        # Stream both channels so a stalled guest retains progress evidence
+        # before its deadline, without buffering the whole diagnostic in memory.
+        with (destination or prefix.with_suffix('.stdout.log')).open('wb') as stream, \
+                prefix.with_suffix('.stderr.log').open('wb') as errors:
             try:
-                result = subprocess.run(argv, stdout=stream, stderr=subprocess.PIPE, timeout=timeout)
+                result = subprocess.run(argv, input=stdin, stdout=stream,
+                                        stderr=errors, timeout=timeout)
             except subprocess.TimeoutExpired as error:
-                prefix.with_suffix('.stderr.log').write_bytes(error.stderr or b'')
                 prefix.with_suffix('.status.json').write_text(json.dumps(
                     {'argv': argv, 'timed_out': True, 'timeout': timeout}, indent=2) + '\n')
                 raise GuestTimeout(f'{label} timed out; inspect the task process before retry') from error
-        prefix.with_suffix('.stderr.log').write_bytes(result.stderr)
         prefix.with_suffix('.status.json').write_text(json.dumps(
             {'argv': argv, 'exit_code': result.returncode}, indent=2) + '\n')
         if required and result.returncode:

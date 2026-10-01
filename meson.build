@@ -107,6 +107,8 @@ executable('ext4-mounted-manifest-test', 'tests/mounted_manifest.c',
 if host_machine.system() == 'darwin'
   executable('ext4-mounted-lifetime-test', 'tests/mounted_lifetime.c',
     override_options: ['b_sanitize=none'])
+  executable('ext4-mounted-failure-test', 'tests/mounted_failure.c',
+    override_options: ['b_sanitize=none'])
 endif
 
 if get_option('fuzzer')

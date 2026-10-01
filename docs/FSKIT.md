@@ -103,6 +103,26 @@ timed-out barrier fails the core transaction; it never acknowledges persistence.
 Public FSKit metadata-buffer flushing alone is not used as a device barrier.
 Signed installed acceptance of this path is separate from component tests.
 
+Installed failure checks on 26.5.2 stop or kill the authenticated service after
+an ordinary-user checker establishes a durable baseline on each block size.
+Writes and fsync return `EIO`; stopping the process exercises the ten-second
+barrier deadline, while termination fails promptly. Restoring service health
+does not revive the failed mounted owner: subsequent fsync and truncation still
+fail. The runner force-detaches that disposable failed mount, then tests writable
+recovery, a new durable write, read-only remount verification and ordinary detach.
+All four recovered images pass independent fsck. These are service-failure checks,
+not physical device removal or power-loss qualification.
+
+`scripts/test_fskit_installed_barrier.py` uses the owned fixtures and a staged
+`ext4-mounted-failure-test` executable, built by Meson on macOS. Its arguments
+identify the Tart wrapper, dedicated VM, host/guest fixture paths, unique checker,
+fresh work/evidence directories, installed build number and independent e2fsck.
+Run it in a terminal for its no-echo guest sudo prompt. Only the signal helper runs
+as root; file operations remain ordinary-user operations. Before each signal,
+the helper validates the process UID and the kernel-reported executable path.
+Passwords never enter arguments or evidence. Cleanup resumes a stopped service,
+but a timed-out filesystem operation leaves its devices intact for diagnosis.
+
 The mutation engine handles file/directory/symlink creation, links, unlink/rmdir,
 rename and replacement, partial writes, sparse growth, truncate, owner/mode/time
 changes and user xattrs. Namespace changes advance directory verifiers. Data
@@ -360,7 +380,7 @@ a candidate solution on 27, not evidence that either OS's behavior is fixed.
 | File reads | Held state and restricted kernel mapping; mounted read/mmap/EOF checks on 26.5.2 | Native cache/reclaim stress, resource failures and removal |
 | User xattrs | Native read/list/set/remove roundtrip; macOS names omit the Linux user namespace prefix | Linux ACL/security/trusted namespaces stay hidden |
 | IPC and GUI | Signed same-user App Group RPC, live settings, normal cleanup and abandoned endpoint recovery after extension termination on 26.5.2 | Root-mounted/user-app coordination and GUI workflow acceptance |
-| Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded ENOSPC, post-fsync extension termination, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, cache stress and device failures |
+| Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded ENOSPC, extension/service termination and service timeout, recovery, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, cache stress and device removal |
 | Crypto and ACLs | CommonCrypto fscrypt v1/v2 reads and writes; native key import/removal and remounts on 26.5.2 | Verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
 | Maintenance | Native Disk Arbitration recovery of interrupted transactions; read-only dirty media remain unchanged; component crash cuts | Full check/repair tooling |
 
