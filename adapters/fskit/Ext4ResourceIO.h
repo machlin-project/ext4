@@ -5,6 +5,7 @@
 /* The resource owner keeps this object alive through ext4_unmount. Tests use the
  * same interface with a bounded memory device; no FSKit proxy is manufactured. */
 @protocol Ext4BlockReader <NSObject>
+@property(nonatomic, readonly, getter=isRevoked) BOOL revoked;
 @property(readonly) uint64_t blockSize;
 @property(readonly) uint64_t blockCount;
 @property(readonly) uint64_t physicalBlockSize;
@@ -27,6 +28,7 @@
 @end
 
 @interface Ext4ResourceIO : NSObject
+@property(nonatomic, readonly, getter=isRevoked) BOOL revoked;
 - (instancetype)initWithReader:(id<Ext4BlockReader>)reader;
 - (void)enableWritesWithBarrier:(id<Ext4PersistenceBarrier>)barrier deviceName:(NSString *)name;
 - (enum ext4_result)open:(struct ext4_fs **)filesystem;

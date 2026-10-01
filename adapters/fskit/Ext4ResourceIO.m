@@ -78,10 +78,16 @@ ext4_resource_release(void *context, void *allocation, size_t size)
 
 - (instancetype)initWithReader:(id<Ext4BlockReader>)reader
 {
-	uint64_t blockSize = reader.blockSize;
-	uint64_t count = reader.blockCount;
-	uint64_t alignment = reader.physicalBlockSize;
+	uint64_t blockSize;
+	uint64_t count;
+	uint64_t alignment;
 
+	if (reader == nil || reader.isRevoked) {
+		return nil;
+	}
+	blockSize = reader.blockSize;
+	count = reader.blockCount;
+	alignment = reader.physicalBlockSize;
 	if (blockSize == 0 || count == 0 || count > INT64_MAX / blockSize || alignment == 0 ||
 	    alignment > SIZE_MAX || count * blockSize % alignment != 0) {
 		return nil;
@@ -93,6 +99,11 @@ ext4_resource_release(void *context, void *allocation, size_t size)
 		_alignment = (size_t)alignment;
 	}
 	return self;
+}
+
+- (BOOL)isRevoked
+{
+	return _reader.isRevoked;
 }
 
 - (enum ext4_result)open:(struct ext4_fs **)filesystem
@@ -172,6 +183,9 @@ ext4_resource_release(void *context, void *allocation, size_t size)
 {
 	NSError *error = nil;
 
+	if (self.isRevoked) {
+		return EXT4_IO;
+	}
 	if (_barrier == nil) {
 		return EXT4_READ_ONLY;
 	}
@@ -188,6 +202,9 @@ ext4_resource_release(void *context, void *allocation, size_t size)
 	size_t completed;
 	id<Ext4BlockWriter> writer = (id<Ext4BlockWriter>)_reader;
 
+	if (self.isRevoked) {
+		return EXT4_IO;
+	}
 	if (_barrier == nil) {
 		return EXT4_READ_ONLY;
 	}
@@ -219,11 +236,15 @@ ext4_resource_release(void *context, void *allocation, size_t size)
 	}
 	completed = [_reader readInto:bounce startingAt:(off_t)start length:total error:&error];
 	if (error == nil && completed == total) {
-		memcpy(bounce + prefix, buffer, length);
-		completed = [writer writeFrom:bounce
-				   startingAt:(off_t)start
-				       length:total
-					error:&error];
+		if (self.isRevoked) {
+			completed = 0;
+		} else {
+			memcpy(bounce + prefix, buffer, length);
+			completed = [writer writeFrom:bounce
+					   startingAt:(off_t)start
+					       length:total
+						error:&error];
+		}
 	}
 	free(bounce);
 	return error == nil && completed == total ? EXT4_OK : EXT4_IO;
@@ -238,6 +259,9 @@ ext4_resource_release(void *context, void *allocation, size_t size)
 	size_t total;
 	size_t completed;
 
+	if (self.isRevoked) {
+		return EXT4_IO;
+	}
 	if (offset > _size || length > _size - offset || (buffer == NULL && length != 0)) {
 		return EXT4_IO;
 	}

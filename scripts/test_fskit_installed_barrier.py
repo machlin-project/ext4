@@ -19,12 +19,12 @@ from fskit_test_vm import GuestTimeout, guest_commands, image_devices
 class Probe:
     """Coordinate an ordinary-user checker without logging interactive input."""
 
-    def __init__(self, tart, vm, checker, mount, output):
+    def __init__(self, tart, vm, checker, mount, output, mode='fault'):
         self.output = output
         self.pending = b''
         self.stdout = (output / 'probe.stdout.log').open('wb')
         self.stderr = (output / 'probe.stderr.log').open('wb')
-        argv = [str(tart), 'exec', '-i', vm, checker, mount, 'fault']
+        argv = [str(tart), 'exec', '-i', vm, checker, mount, mode]
         (output / 'probe.command.json').write_text(json.dumps(argv, indent=2) + '\n')
         self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=self.stderr)

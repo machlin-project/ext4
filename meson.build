@@ -109,6 +109,8 @@ if host_machine.system() == 'darwin'
     override_options: ['b_sanitize=none'])
   executable('ext4-mounted-failure-test', 'tests/mounted_failure.c',
     override_options: ['b_sanitize=none'])
+  executable('ext4-mounted-removal-test', 'tests/mounted_removal.c',
+    override_options: ['b_sanitize=none'])
   executable('ext4-mounted-capacity-test', 'tests/mounted_capacity.c',
     override_options: ['b_sanitize=none'])
 endif

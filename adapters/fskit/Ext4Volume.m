@@ -86,7 +86,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 
 - (instancetype)initWithResource:(FSBlockDeviceResource *)resource
 		      filesystem:(struct ext4_fs *)fs
-		   resourceOwner:(id)resourceOwner
+		   resourceOwner:(Ext4ResourceIO *)resourceOwner
 {
 	return [self initWithResource:resource
 			   filesystem:fs
@@ -96,7 +96,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 
 - (instancetype)initWithResource:(FSBlockDeviceResource *)resource
 		      filesystem:(struct ext4_fs *)fs
-		   resourceOwner:(id)resourceOwner
+		   resourceOwner:(Ext4ResourceIO *)resourceOwner
 			  crypto:(struct ext4_native_crypto *)crypto
 {
 	return [self initWithResource:resource
@@ -108,7 +108,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 
 - (instancetype)initWithResource:(FSBlockDeviceResource *)resource
 		      filesystem:(struct ext4_fs *)fs
-		   resourceOwner:(id)resourceOwner
+		   resourceOwner:(Ext4ResourceIO *)resourceOwner
 			  crypto:(struct ext4_native_crypto *)crypto
 			writable:(BOOL)writable
 {
@@ -161,7 +161,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	@synchronized(self) {
 		/* A late FSItem release cannot write after journal/MMP teardown. The
 		 * core retains this hold until invalidate frees the entire owner. */
-		if (hold != NULL && !_writeClosed) {
+		if (hold != NULL && !_writeClosed && [self ownerError] == EXT4_OK) {
 			enum ext4_result error = ext4_release_inode(hold);
 
 			if (error != EXT4_OK && _lifetimeError == EXT4_OK) {
@@ -172,6 +172,23 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 }
 
 /* Called under the volume lock, including publication through the reply block. */
+- (enum ext4_result)ownerError
+{
+	if (!_active) {
+		return EXT4_STALE;
+	}
+	/* Do not serve retained core state or release an orphan through a revoked
+	 * device. This owner cannot recover when a different device is attached. */
+	if (_lifetimeError == EXT4_OK && _resourceOwner.isRevoked) {
+		_lifetimeError = EXT4_IO;
+		if (_mmpTimer != nil) {
+			dispatch_source_cancel(_mmpTimer);
+			_mmpTimer = nil;
+		}
+	}
+	return _lifetimeError;
+}
+
 - (Ext4Item *)itemForInode:(const struct ext4_inode *)inode error:(enum ext4_result *)error
 {
 	Ext4Item *item = [_items objectForKey:@(inode->number)];
@@ -209,12 +226,15 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 
 - (enum ext4_result)validateItem:(Ext4Item *)item
 {
+	enum ext4_result error;
+
 	if (!_active || (self.writable && _writeClosed) || ![item isKindOfClass:Ext4Item.class] ||
 	    item->owner != self || item->hold == NULL) {
 		return EXT4_STALE;
 	}
-	if (_lifetimeError != EXT4_OK) {
-		return _lifetimeError;
+	error = [self ownerError];
+	if (error != EXT4_OK) {
+		return error;
 	}
 	return self.writable ? ext4_refresh_inode(item->hold, &item->inode) : EXT4_OK;
 }
@@ -392,6 +412,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	@synchronized(self) {
 		FSStatFSResult *statistics =
 		    [[FSStatFSResult alloc] initWithFileSystemTypeName:@"machlinext4"];
+		enum ext4_result error = [self ownerError];
 
 		if (_fs != NULL) {
 			ext4_get_info(_fs, &_info);
@@ -405,7 +426,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 		statistics.totalBlocks = _info.blocks;
 		statistics.freeBlocks = _info.free_blocks;
 		statistics.availableBlocks =
-		    self.writable && _info.free_blocks > _info.reserved_blocks
+		    self.writable && error == EXT4_OK && _info.free_blocks > _info.reserved_blocks
 		    ? _info.free_blocks - _info.reserved_blocks
 		    : 0;
 		statistics.usedBlocks = _info.blocks - _info.free_blocks;
@@ -421,9 +442,11 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	NSLog(@"Machlin ext4 mount callback");
 #endif
 	@synchronized(self) {
+		enum ext4_result error = [self ownerError];
+
 		(void)options;
-		if (!_active || (self.writable && _writeClosed) || _lifetimeError != EXT4_OK) {
-			reply(ext4_error(_lifetimeError != EXT4_OK ? _lifetimeError : EXT4_STALE));
+		if (error != EXT4_OK || (self.writable && _writeClosed)) {
+			reply(ext4_error(error != EXT4_OK ? error : EXT4_STALE));
 			return;
 		}
 		_mounted = YES;
@@ -451,8 +474,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 			  return;
 		  }
 		  @synchronized(volume) {
-			  if (volume->_active && !volume->_writeClosed &&
-			      volume->_lifetimeError == EXT4_OK) {
+			  if (!volume->_writeClosed && [volume ownerError] == EXT4_OK) {
 				  volume->_lifetimeError = ext4_mmp_update(volume->_fs);
 			  }
 		  }
@@ -467,7 +489,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	NSLog(@"Machlin ext4 unmount callback");
 #endif
 	@synchronized(self) {
-		if (self.writable && !_writeClosed && _lifetimeError == EXT4_OK) {
+		if (self.writable && !_writeClosed && [self ownerError] == EXT4_OK) {
 			_lifetimeError = ext4_sync(_fs);
 			if (_lifetimeError == EXT4_OK) {
 				_lifetimeError = ext4_mmp_release(_fs);
@@ -488,12 +510,13 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 - (NSError *)finishUnloadedResource
 {
 	@synchronized(self) {
-		if (_mounted) {
+		(void)[self ownerError];
+		if (_mounted && !_resourceOwner.isRevoked) {
 			return [NSError errorWithDomain:NSPOSIXErrorDomain code:EBUSY userInfo:nil];
 		}
 		/* A load used only for checking never receives the mounted-volume
 		 * unmount callback. It still owns a writable journal and possibly MMP. */
-		if (_active && self.writable && !_writeClosed) {
+		if (_active && !_writeClosed && (self.writable || _resourceOwner.isRevoked)) {
 			[self unmountWithReplyHandler:^{
 			}];
 		}
@@ -504,7 +527,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 - (void)synchronizeWithFlags:(FSSyncFlags)flags replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply
 {
 	@synchronized(self) {
-		enum ext4_result error = !_active ? EXT4_STALE : _lifetimeError;
+		enum ext4_result error = [self ownerError];
 
 		(void)flags;
 		if (error == EXT4_OK && self.writable && !_writeClosed) {
@@ -529,7 +552,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 		enum ext4_result error;
 
 		(void)options;
-		error = !_active || _writeClosed ? EXT4_STALE : _lifetimeError;
+		error = _writeClosed ? EXT4_STALE : [self ownerError];
 		if (error == EXT4_OK) {
 			error = ext4_get_inode(_fs, EXT4_ROOT_INODE, &root);
 		}
@@ -582,7 +605,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 		struct ext4_inode root;
 		enum ext4_result error;
 
-		error = !_active || _writeClosed ? EXT4_STALE : _lifetimeError;
+		error = _writeClosed ? EXT4_STALE : [self ownerError];
 		if (error == EXT4_OK) {
 			error = ext4_get_inode(_fs, EXT4_ROOT_INODE, &root);
 		}

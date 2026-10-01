@@ -3,22 +3,23 @@
 #include <ext4/ext4.h>
 
 struct ext4_native_crypto;
+@class Ext4ResourceIO;
 
 @interface Ext4Volume : FSVolume <FSVolumePathConfOperations>
 /* Takes ownership of filesystem on success. ResourceOwner retains callback
  * storage through the last item and ext4_unmount. The device view is exclusive. */
 - (instancetype)initWithResource:(FSBlockDeviceResource *)resource
 		      filesystem:(struct ext4_fs *)filesystem
-		   resourceOwner:(id)resourceOwner;
+		   resourceOwner:(Ext4ResourceIO *)resourceOwner;
 /* Also takes crypto ownership on success, with keys fixed for this mount. */
 - (instancetype)initWithResource:(FSBlockDeviceResource *)resource
 		      filesystem:(struct ext4_fs *)filesystem
-		   resourceOwner:(id)resourceOwner
+		   resourceOwner:(Ext4ResourceIO *)resourceOwner
 			  crypto:(struct ext4_native_crypto *)crypto;
 /* Writable ownership starts at construction, including its MMP heartbeat. */
 - (instancetype)initWithResource:(FSBlockDeviceResource *)resource
 		      filesystem:(struct ext4_fs *)filesystem
-		   resourceOwner:(id)resourceOwner
+		   resourceOwner:(Ext4ResourceIO *)resourceOwner
 			  crypto:(struct ext4_native_crypto *)crypto
 			writable:(BOOL)writable;
 @property(nonatomic, strong) NSError *keyStoreError;
@@ -70,4 +71,4 @@ API_AVAILABLE(macos(27.0))
 
 /* Select the runtime API, retaining the same ownership contract as init. */
 Ext4Volume *ext4_volume_create(FSBlockDeviceResource *resource, struct ext4_fs *filesystem,
-    id resourceOwner, struct ext4_native_crypto *crypto, BOOL writable);
+    Ext4ResourceIO *resourceOwner, struct ext4_native_crypto *crypto, BOOL writable);

@@ -15,6 +15,7 @@
 	atomic_uint _activeReads;
 }
 @property NSData *image;
+@property(nonatomic, getter=isRevoked) BOOL revoked;
 @property size_t reads;
 @property size_t failRead;
 @end
@@ -610,6 +611,78 @@ read_file(Ext4LegacyMappedVolume *volume, FSItem *file, NSData *expected)
 	assert(((const uint8_t *)buffer.data.bytes)[expected.length] == 0xa5);
 }
 
+static void
+check_revoked_resource(NSData *image)
+{
+	ImageBlocks *device = [ImageBlocks new];
+	Ext4ResourceIO *resource;
+	struct ext4_fs *fs = NULL;
+	Ext4LegacyMappedVolume *volume;
+	__block FSItem *root = nil;
+	FSItem *file;
+	ReadBuffer *buffer = [ReadBuffer new];
+	NSData *expected = [@"Machlin ext4\n" dataUsingEncoding:NSUTF8StringEncoding];
+	size_t reads;
+	__block unsigned replies = 0;
+
+	device.image = image;
+	resource = [[Ext4ResourceIO alloc] initWithReader:device];
+	assert([resource open:&fs] == EXT4_OK);
+	volume = [[Ext4LegacyMappedVolume alloc] initWithResource:(FSBlockDeviceResource *)device
+						       filesystem:fs
+						    resourceOwner:resource];
+	[volume activateWithOptions:(FSTaskOptions *)[TestOptions new]
+		       replyHandler:^(FSItem *item, NSError *error) {
+			 assert(item != nil && error == nil);
+			 root = item;
+		       }];
+	file = lookup(volume, root, @"hello.txt");
+	read_file(volume, file, expected); /* Populate the retained inode and read state. */
+	reads = device.reads;
+	device.revoked = YES;
+	buffer.data = [NSMutableData dataWithLength:32];
+	memset(buffer.data.mutableBytes, 0xa5, buffer.length);
+	[volume readFromFile:file
+		      offset:0
+		      length:buffer.length
+		  intoBuffer:(FSMutableFileDataBuffer *)buffer
+		replyHandler:^(size_t completed, NSError *error) {
+		  assert(completed == 0 && error.code == EIO);
+		  replies++;
+		}];
+	assert(((const uint8_t *)buffer.data.bytes)[0] == 0xa5);
+	[volume getAttributes:[FSItemGetAttributesRequest new]
+		       ofItem:file
+		 replyHandler:^(FSItemAttributes *attributes, NSError *error) {
+		   assert(attributes == nil && error.code == EIO);
+		   replies++;
+		 }];
+	[volume lookupItemNamed:[FSFileName nameWithString:@"hello.txt"]
+		    inDirectory:root
+		   replyHandler:^(FSItem *item, FSFileName *name, NSError *error) {
+		     assert(item == nil && name == nil && error.code == EIO);
+		     replies++;
+		   }];
+	check_open(volume, file, FSVolumeOpenModesRead, EIO);
+	[volume synchronizeWithFlags:0
+			replyHandler:^(NSError *error) {
+			  assert(error.code == EIO);
+			  replies++;
+			}];
+	assert([volume checkMountEligibility].code == EIO);
+	assert([[volume controlRequest:@{ @"command" : @"getInfo" }][@"error"][@"code"]
+	    isEqual:@(EIO)]);
+	assert(replies == 4 && device.reads == reads);
+	/* A different resource must have a different owner, even if a fake device
+	 * claims to regain access. A terminated owner cannot revive cached items. */
+	device.revoked = NO;
+	assert([volume checkMountEligibility].code == EIO && device.reads == reads);
+	[volume invalidate];
+	check_open(volume, file, FSVolumeOpenModesRead, ESTALE);
+	assert(device.reads == reads);
+	puts("PASS FSKit revoked read-only resource: retained inode, cached reads and late items");
+}
+
 static FSItem *
 lookup_path(Ext4LegacyMappedVolume *volume, FSItem *root, NSString *path)
 {
@@ -792,6 +865,7 @@ main(int argc, const char **argv)
 		assert(image != nil);
 		check_acl_admission(image);
 		check_item_lifetime(image);
+		check_revoked_resource(image);
 		check_dangling_directory_entry(image);
 		device = [ImageBlocks new];
 		device.image = image;

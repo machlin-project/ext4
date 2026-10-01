@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #import "Ext4Volume.h"
 #import "Ext4Control.h"
+#import "Ext4ResourceIO.h"
 #include "Ext4Crypto.h"
 
 @interface Ext4Item : FSItem {
@@ -17,7 +18,7 @@
 	struct ext4_native_crypto *_crypto;
 	struct ext4_info _info;
 	FSBlockDeviceResource *_resource;
-	id _resourceOwner;
+	Ext4ResourceIO *_resourceOwner;
 	BOOL _active;
 	BOOL _mounted;
 	BOOL _writeClosed;
@@ -72,6 +73,7 @@
      replyHandler:(void(NS_NOESCAPE ^)(size_t, NSError *))reply;
 - (void)startResourceMaintenance;
 - (void)releaseHold:(struct ext4_inode_hold *)hold;
+- (enum ext4_result)ownerError;
 - (enum ext4_result)validateItem:(Ext4Item *)item;
 - (enum ext4_result)validateMutation:(Ext4Item *)item;
 - (Ext4Item *)itemForInode:(const struct ext4_inode *)inode error:(enum ext4_result *)error;

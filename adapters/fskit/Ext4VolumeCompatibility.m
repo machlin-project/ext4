@@ -79,8 +79,8 @@
 @end
 
 Ext4Volume *
-ext4_volume_create(FSBlockDeviceResource *resource, struct ext4_fs *filesystem, id resourceOwner,
-    struct ext4_native_crypto *crypto, BOOL writable)
+ext4_volume_create(FSBlockDeviceResource *resource, struct ext4_fs *filesystem,
+    Ext4ResourceIO *resourceOwner, struct ext4_native_crypto *crypto, BOOL writable)
 {
 	Class volumeClass = writable ? Ext4LegacyVolume.class : Ext4LegacyMappedVolume.class;
 

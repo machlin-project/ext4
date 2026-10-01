@@ -100,9 +100,13 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 {
 	@synchronized(self) {
 		NSData *bytes = name.data;
-		enum ext4_result error = !self.writable ? EXT4_READ_ONLY
-		    : !_active || _writeClosed		? EXT4_STALE
-							: _lifetimeError;
+		enum ext4_result error = [self ownerError];
+
+		if (error == EXT4_OK) {
+			error = !self.writable ? EXT4_READ_ONLY
+			    : _writeClosed     ? EXT4_STALE
+					       : EXT4_OK;
+		}
 
 		if (error == EXT4_OK && (bytes == nil || bytes.length == 0)) {
 			error = EXT4_INVALID_ARGUMENT;
@@ -120,7 +124,11 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 
 - (enum ext4_result)validateMutation:(Ext4Item *)item
 {
-	enum ext4_result error;
+	enum ext4_result error = [self ownerError];
+
+	if (error != EXT4_OK) {
+		return error;
+	}
 
 	/* Preserve EROFS even for an operation whose unused arguments are absent. */
 	if (!self.writable) {

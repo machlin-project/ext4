@@ -35,9 +35,12 @@
 	@synchronized(self) {
 		NSString *command = request[@"command"];
 		NSDictionary *arguments = request[@"arguments"] ?: @{};
+		enum ext4_result error = [self ownerError];
 
-		if (!_active) {
-			return ext4_control_error(ENXIO, @"Volume is no longer active.");
+		if (error != EXT4_OK) {
+			return ext4_control_error(
+			    error == EXT4_STALE ? ENXIO : ext4_error(error).code,
+			    @"Volume is no longer available.");
 		}
 		if ([command isEqual:@"ping"]) {
 			return @{ @"result" : @{ @"reply" : @"pong" } };

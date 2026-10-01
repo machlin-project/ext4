@@ -37,6 +37,7 @@ enum security_mutation {
 	atomic_uint _active;
 }
 @property NSMutableData *bytes;
+@property(nonatomic, getter=isRevoked) BOOL revoked;
 @property NSUInteger reads;
 @property NSUInteger writes;
 @property NSUInteger barriers;
@@ -710,6 +711,137 @@ check_failed_mutation(NSData *fixture, NSUInteger barrier, BOOL renameVolume, NS
 }
 
 static void
+check_revoked_owner(NSData *fixture, Class volumeClass)
+{
+	WritableImage *image = [WritableImage new];
+	Ext4ResourceIO *io;
+	struct ext4_recovery_report report = { 0 };
+	Ext4Volume *volume;
+	FSItem *root;
+	FSItem *file;
+	FSItem *orphan;
+	NSData *data = [@"Durable before revocation\n" dataUsingEncoding:NSUTF8StringEncoding];
+	NSData *snapshot;
+	NSUInteger reads;
+	NSUInteger writes;
+	NSUInteger barriers;
+	__block unsigned replies = 0;
+
+	image.bytes = [fixture mutableCopy];
+	volume = open_volume_class(image, YES, NULL, volumeClass);
+	root = root_item(volume);
+	file = create_item(volume, root, @"revocation-durable", FSItemTypeFile);
+	orphan = create_item(volume, root, @"revocation-orphan", FSItemTypeFile);
+	[volume writeFile:file
+		 contents:data
+		   offset:0
+	     replyHandler:^(size_t size, NSError *error) {
+	       assert(size == data.length && error == nil);
+	     }];
+	[volume writeFile:orphan
+		 contents:data
+		   offset:0
+	     replyHandler:^(size_t size, NSError *error) {
+	       assert(size == data.length && error == nil);
+	     }];
+	[volume deleteItem:orphan
+		     named:name(@"revocation-orphan")
+	     fromDirectory:root
+	      replyHandler:^(NSError *error) {
+		assert(error == nil);
+	      }];
+	sync_volume(volume);
+	assert([volume validateItem:(Ext4Item *)orphan] == EXT4_OK);
+	assert(((Ext4Item *)orphan)->inode.links == 0 && ((Ext4Item *)orphan)->hold != NULL);
+	[volume mountWithOptions:nil
+		    replyHandler:^(NSError *error) {
+		      assert(error == nil);
+		    }];
+	assert([volume finishUnloadedResource].code == EBUSY);
+	snapshot = image.bytes.copy;
+	reads = image.reads;
+	writes = image.writes;
+	barriers = image.barriers;
+	image.revoked = YES;
+	[volume writeFile:file
+		 contents:data
+		   offset:0
+	     replyHandler:^(size_t size, NSError *error) {
+	       assert(size == 0 && error.code == EIO);
+	       replies++;
+	     }];
+	[volume setVolumeName:name(@"unavailable")
+		 replyHandler:^(FSFileName *actual, NSError *error) {
+		   assert(actual == nil && error.code == EIO);
+		   replies++;
+		 }];
+	[volume deactivateItem:orphan
+		  replyHandler:^(NSError *error) {
+		    assert(error.code == EIO);
+		    replies++;
+		  }];
+	assert(((Ext4Item *)orphan)->hold != NULL);
+	/* Deallocation can also reach releaseHold without an FSKit callback. */
+	[volume releaseHold:((Ext4Item *)orphan)->hold];
+	[volume synchronizeWithFlags:0
+			replyHandler:^(NSError *error) {
+			  assert(error.code == EIO);
+			  replies++;
+			}];
+	assert(volume.volumeStatistics.availableBlocks == 0);
+	assert([[volume controlRequest:@{ @"command" : @"dropReadState" }][@"error"][@"code"]
+	    isEqual:@(EIO)]);
+#if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
+	if (@available(macOS 27.0, *)) {
+		if ([volume isKindOfClass:Ext4ModernVolume.class]) {
+			[(Ext4ModernVolume *)volume
+			    writeContents:data
+				   toFile:file
+				 atOffset:0
+			     replyHandler:^(FSWriteFileResult *result, NSError *error) {
+			       assert(result == nil && error.code == EIO);
+			     }];
+		}
+	}
+#endif
+	image.revoked = NO;
+	assert([volume validateItem:(Ext4Item *)file] == EXT4_IO);
+	image.revoked = YES;
+	assert([volume finishUnloadedResource].code == EIO);
+	assert(replies == 4 && image.reads == reads && image.writes == writes &&
+	    image.barriers == barriers && [image.bytes isEqualToData:snapshot]);
+	image.revoked = NO; /* Only a test double can undo FSResource revocation. */
+	assert([volume validateItem:(Ext4Item *)file] == EXT4_STALE);
+	[volume invalidate];
+	assert(((Ext4Item *)orphan)->hold == NULL && ((Ext4Item *)file)->hold == NULL);
+	assert(image.reads == reads && image.writes == writes && image.barriers == barriers &&
+	    [image.bytes isEqualToData:snapshot]);
+	/* Recovery belongs to a fresh mounted owner. It may reclaim the orphan;
+	 * the acknowledged ordinary file must survive unchanged. */
+	io = [[Ext4ResourceIO alloc] initWithReader:image];
+	[io enableWritesWithBarrier:image deviceName:@"memory"];
+	assert([io recover:&report] == EXT4_OK && report.cleaned_orphans == 1);
+	volume = open_volume(image, YES);
+	file = lookup((Ext4LegacyVolume *)volume, root_item(volume), @"revocation-durable");
+	check_bytes((Ext4LegacyVolume *)volume, file, data);
+	assert([volume finishUnloadedResource] == nil);
+	[volume invalidate];
+	puts(
+	    "PASS FSKit revoked writable owner: no disk cleanup, orphan recovery and durable file");
+}
+
+static void
+check_revocation(NSData *fixture)
+{
+	check_revoked_owner(fixture, Ext4LegacyVolume.class);
+#if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
+	if (@available(macOS 27.0, *)) {
+		check_revoked_owner(fixture, Ext4ModernVolume.class);
+	}
+#endif
+}
+
+static void
 check_maintenance(WritableImage *image)
 {
 	Ext4ResourceIO *io = [[Ext4ResourceIO alloc] initWithReader:image];
@@ -1036,7 +1168,12 @@ main(int argc, const char *argv[])
 			check_maintenance(image);
 			return 0;
 		}
+		if (argc == 3 && strcmp(argv[2], "--revocation") == 0) {
+			check_revocation(fixture);
+			return 0;
+		}
 		check_api_selection(fixture);
+		check_revocation(fixture);
 		check_failed_preallocation(fixture);
 		check_security_mutations(fixture);
 		@autoreleasepool {
