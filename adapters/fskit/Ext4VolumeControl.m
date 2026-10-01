@@ -39,7 +39,7 @@
 
 		if (error != EXT4_OK) {
 			return ext4_control_error(
-			    error == EXT4_STALE ? ENXIO : ext4_error(error).code,
+			    error == EXT4_STALE ? ENXIO : (int)ext4_error(error).code,
 			    @"Volume is no longer available.");
 		}
 		if ([command isEqual:@"ping"]) {
