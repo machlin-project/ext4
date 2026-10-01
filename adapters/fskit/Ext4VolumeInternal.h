@@ -23,6 +23,8 @@
 	BOOL _mounted;
 	BOOL _writeClosed;
 	BOOL _retainReadState;
+	BOOL _memoryPressureRaised;
+	dispatch_source_t _memoryPressureSource;
 	Ext4ControlServer *_control;
 	NSError *_controlError;
 	NSMapTable<NSNumber *, Ext4Item *> *_items;
@@ -96,6 +98,16 @@
 
 @interface Ext4Volume (ControlLifecycle)
 - (void)startControl;
+@end
+
+/* Read metadata is disposable; inode holds and dirty journal state are not. */
+@interface Ext4Volume (ReadState)
+- (void)startReadStateMaintenance;
+- (void)stopReadStateMaintenance;
+- (void)updateMemoryPressure:(dispatch_source_memorypressure_flags_t)flags;
+- (BOOL)readStateRetentionActive;
+- (void)finishReadStateForItem:(Ext4Item *)item;
+- (void)dropReadState;
 @end
 
 /* Engine callbacks are synchronous under the volume monitor. Version-specific

@@ -24,7 +24,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
 | LXNU policy | CAP_FSETID and privilege removal, xattrs, mixed-ABI races, inherited descriptions and attachment restrictions | Not implemented |
 | Compatibility and regression | Shared Linux/LXNU fixtures, native controls and identified stock/custom boots | Not run |
-| Distribution | Reproducible standalone build, packaged FSKit extension, documented installation and supported versions | Universal Developer ID archive/export, strict nested signatures, hardened runtime, timestamps, profile entitlement agreement, notarization and Gatekeeper pass. Initial development-to-distribution migrations fail with a launch constraint violation. Scoped removal of verified old app copies, normal service approval and the dedicated File System Extensions sheet establish authenticated writable installations on stock 26.5.2/27.0.1. Ordinary native write/remount, permissions, fscrypt v1/v2 key lifecycle and independent fsck pass both block sizes on both OS versions. Broader OS/hardware acceptance and the native failures recorded above remain unaccepted |
+| Distribution | Reproducible standalone build, packaged FSKit extension, documented installation and supported versions | Universal Developer ID archive/export, strict nested signatures, hardened runtime, timestamps, profile entitlement agreement, notarization and Gatekeeper pass. Initial development-to-distribution migrations fail with a launch constraint violation. Scoped removal of verified old app copies, normal service approval and the dedicated File System Extensions sheet establish authenticated writable installations on stock 26.5.2/27.0.1. Ordinary native write/remount, permissions, fscrypt v1/v2 key lifecycle and independent fsck pass both block sizes on both OS versions. The actual settings button passes both OS versions; the tested 27 update needs manual module reenable. Broader OS/hardware acceptance and the native failures recorded above remain unaccepted |
 
 Each accepted row must identify its test command and generated evidence location.
 Raw identities, hashes and logs stay in ignored artifacts; source revisions stay
@@ -3479,6 +3479,24 @@ timeout and its separate persisted-data diagnostics are in
 source evidence are under the ext4 repository's ignored
 `artifacts/checks/fskit-cache/complete-build`. CI compiles this checker for both
 architectures with the supported SDK; it does not install or run native mounts.
+
+## FSKit memory-pressure policy
+
+The unsigned universal adapter build and ASan/UBSan volume and mutation checks
+pass with 1 KiB and 4 KiB fixtures. Simulated component notifications preserve
+the user's preference, prioritize elevated coalesced flags and release only
+accessed read/seek/map metadata. Dormant held caches remain untouched by the
+notification, with no resource read. Reads preserve complete bytes and their
+guarded tail, and concurrent policy changes remain serialized with I/O and
+control operations. Invalidation rejects subsequent operations and the canceled
+observer does not retain its owner. Mutated and recovered exports pass independent
+nonrepairing fsck; journal-recovery-required exports remain a separate class even
+when a read-only checker returns zero while skipping replay. Both original
+fixtures remain unchanged. Evidence is under the ext4 repository's ignored
+`artifacts/checks/fskit-memory-pressure`.
+
+This component batch does not establish native notification delivery, allocated
+memory stress, native vnode reclamation or physical device-loss behavior.
 
 ## Kernel build evidence
 

@@ -398,6 +398,17 @@ optional `arguments`. Responses contain the version and instance, plus either
 | `setSettings` | Exactly one boolean `retainReadState`; disabling drops retained mapping metadata |
 | `dropReadState` | Drops held core read metadata without changing file data or native mappings |
 
+`retainReadState` is the user's preference. `readStateRetentionActive` reports
+whether it currently takes effect. A Dispatch memory-pressure source suspends
+retention at warning or critical pressure and restores the preference when
+pressure returns to normal. Notifications change future read, seek and mapping
+behavior without walking dormant items: an accessed hold releases its disposable
+metadata after the operation. Inode identity, open-unlinked lifetime, journal
+buffers and native mappings retain their owners. Source cancellation and cache
+operations share the volume monitor with invalidation. The app displays a paused
+cache status without changing the user's toggle. See Apple's
+[memory-pressure source](https://developer.apple.com/documentation/dispatch/dispatchsourcememorypressure).
+
 The app performs RPC off its UI thread. Settings last for the current mounted
 instance. Disconnecting the app does not affect mounted I/O. Unmount/invalidation
 removes the endpoint. An already-received command still checks active volume state.
@@ -654,7 +665,7 @@ Keep failed groups and interrupted-run cleanup distinct from passed groups.
 | Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded cached-write/truncate/rename stress, bounded ENOSPC, extension/service termination and timeout, forced-detach durability, recovery, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, memory-pressure stress and physical device loss |
 | Crypto and ACLs | CommonCrypto fscrypt v1/v2 reads and writes; native key import/removal and remounts on 26.5.2 and 27.0.1 | Verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
 | Maintenance | Native Disk Arbitration recovery of interrupted transactions; read-only dirty media remain unchanged; component crash cuts | Full check/repair tooling |
-| Distribution | Universal Xcode Release archive/export, Developer ID signatures, hardened runtime, timestamps, matching app/extension profiles, notarization, Gatekeeper and installed native write/remount/policy/fsck on 26.5.2/27.0.1 | Settings-button GUI acceptance and broader OS/hardware acceptance; native failures above remain open |
+| Distribution | Universal Xcode Release archive/export, Developer ID signatures, hardened runtime, timestamps, matching app/extension profiles, notarization, Gatekeeper, installed native write/remount/policy/fsck and actual settings-button GUI on 26.5.2/27.0.1 | Automatic module enable continuity fails after the tested update on 27; broader OS/hardware acceptance and native failures above remain open |
 
 The public SDK documents direct writes
 and a metadata buffer-cache flush, but does not establish that a barrier persists
@@ -875,6 +886,19 @@ dedicated route when built with the macOS 27 SDK and run on macOS 27. Earlier
 SDKs and systems open Login Items through ServiceManagement; choose **By Category
 → File System Extensions** and enable Machlin ext4 there. The newer call is
 guarded at both compilation and runtime boundaries, retaining the 26.5 target.
+
+The notarized settings-button build passes actual GUI navigation on both test
+systems after an exact whole-bundle update. On 27 it opens the dedicated full
+sheet directly; on 26.5 it opens Login Items & Extensions, followed by ordinary
+By Category/info navigation. The module remains enabled after the 26.5 update,
+but changes from enabled to disabled on 27 without a deliberate disable. One
+ordinary toggle through the product button restores it; automatic enable
+continuity on 27 remains failed. A public Setup refresh unregisters and registers
+the updated device service, retains its approval and verifies a new authenticated
+root process at the installed path. Background notifications are retained as
+evidence, separately from approval actions. Reports are in the lab's
+`installed-{clean,27}/build36-settings-upgrade`. No filesystem workload is rerun
+for this control-app-only change.
 
 The optimized Release configuration passes the ordinary native write and permission
 checks on both supported test OS versions, with 1 KiB and 4 KiB blocks. It also

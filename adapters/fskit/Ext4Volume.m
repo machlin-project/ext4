@@ -148,6 +148,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 
 - (void)dealloc
 {
+	[self stopReadStateMaintenance];
 	if (_mmpTimer != nil) {
 		dispatch_source_cancel(_mmpTimer);
 	}
@@ -457,6 +458,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 
 - (void)startResourceMaintenance
 {
+	[self startReadStateMaintenance];
 	if (self.writable && _info.mmp_interval != 0 && _mmpTimer == nil) {
 		__weak Ext4Volume *weakSelf = self;
 		uint64_t interval = (uint64_t)_info.mmp_interval * NSEC_PER_SEC / 2;
@@ -728,6 +730,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 - (void)invalidate
 {
 	@synchronized(self) {
+		[self stopReadStateMaintenance];
 		if (_mmpTimer != nil) {
 			dispatch_source_cancel(_mmpTimer);
 			_mmpTimer = nil;

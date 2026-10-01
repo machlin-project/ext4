@@ -26,6 +26,7 @@ private struct MountedVolume: Identifiable {
     let loadedKeys: Int
     let details: String
     let retainReadState: Bool
+    let readStateRetentionActive: Bool
     var id: String { endpoint.absoluteString }
 }
 
@@ -86,7 +87,8 @@ private final class ControlModel: ObservableObject {
                             keys: keys,
                             loadedKeys: (info["loadedKeys"] as? NSNumber)?.intValue ?? 0,
                             details: "Mode: \(info["readOnly"] as? Bool == false ? "Read-write" : "Read-only")\nVolume: \(identifier)\nBlock size: \(blockSize) bytes\nBlocks: \(blocks), free: \(freeBlocks)",
-                            retainReadState: settings["retainReadState"] as? Bool ?? true
+                            retainReadState: settings["retainReadState"] as? Bool ?? true,
+                            readStateRetentionActive: settings["readStateRetentionActive"] as? Bool ?? true
                         ))
                     } catch {
                         failures.append(error.localizedDescription)
@@ -211,6 +213,10 @@ struct MachlinExt4App: App {
                                     get: { volume.retainReadState },
                                     set: { model.command("setSettings", volume: volume, arguments: ["retainReadState": $0]) }
                                 ))
+                                if volume.retainReadState && !volume.readStateRetentionActive {
+                                    Text("Read metadata caching is paused while macOS is low on memory.")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
                                 Button("Release read metadata") {
                                     model.command("dropReadState", volume: volume)
                                 }

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #import "../adapters/fskit/Ext4ResourceIO.h"
 #import "../adapters/fskit/Ext4Volume.h"
+#import "../adapters/fskit/Ext4VolumeInternal.h"
 #import "../adapters/fskit/Ext4Control.h"
 #include "../adapters/fskit/Ext4Crypto.h"
 #include "../core/sha.h"
@@ -612,6 +613,72 @@ read_file(Ext4LegacyMappedVolume *volume, FSItem *file, NSData *expected)
 }
 
 static void
+check_read_state_pressure(Ext4LegacyMappedVolume *volume, FSItem *file, FSItem *other,
+    NSData *expected, NSData *image, ImageBlocks *device)
+{
+	Ext4Item *owned = (Ext4Item *)file;
+	Ext4Item *untouched = (Ext4Item *)other;
+	struct ext4_read_state *oldReader;
+	struct ext4_read_state *otherReader;
+	NSDictionary *state;
+	uint64_t position;
+	size_t reads;
+
+	state = [volume controlRequest:@{ @"command" : @"getSettings" }][@"result"];
+	assert([state[@"retainReadState"] isEqual:@YES]);
+	assert([state[@"readStateRetentionActive"] isEqual:@YES]);
+	read_file(volume, file, expected);
+	oldReader = owned->hold->reader;
+	otherReader = untouched->hold->reader;
+	assert(oldReader != NULL && otherReader != NULL);
+	reads = device.reads;
+	[volume updateMemoryPressure:DISPATCH_MEMORYPRESSURE_WARN];
+	assert(device.reads == reads && owned->hold->reader == oldReader &&
+	    untouched->hold->reader == otherReader);
+	state = [volume controlRequest:@{ @"command" : @"getSettings" }][@"result"];
+	assert([state[@"retainReadState"] isEqual:@YES]);
+	assert([state[@"readStateRetentionActive"] isEqual:@NO]);
+	read_file(volume, file, expected);
+	assert(owned->hold->reader == NULL && untouched->hold->reader == otherReader);
+	assert([volume seekItem:owned offset:0 region:EXT4_SEEK_DATA result:&position] == EXT4_OK);
+	assert(position == 0 && owned->hold->reader == NULL);
+	check_mappings(volume, other, file, image);
+	assert(owned->hold->reader == NULL && untouched->hold->reader == NULL);
+	[volume
+	    updateMemoryPressure:DISPATCH_MEMORYPRESSURE_CRITICAL | DISPATCH_MEMORYPRESSURE_NORMAL];
+	state = [volume controlRequest:@{
+		@"command" : @"setSettings",
+		@"arguments" : @{ @"retainReadState" : @YES }
+	}][@"result"];
+	assert([state[@"retainReadState"] isEqual:@YES]);
+	assert([state[@"readStateRetentionActive"] isEqual:@NO]);
+	read_file(volume, file, expected);
+	assert(owned->hold->reader == NULL);
+	state = [volume controlRequest:@{
+		@"command" : @"setSettings",
+		@"arguments" : @{ @"retainReadState" : @NO }
+	}][@"result"];
+	assert([state[@"readStateRetentionActive"] isEqual:@NO]);
+	[volume updateMemoryPressure:DISPATCH_MEMORYPRESSURE_NORMAL];
+	state = [volume controlRequest:@{ @"command" : @"getSettings" }][@"result"];
+	assert([state[@"retainReadState"] isEqual:@NO]);
+	assert([state[@"readStateRetentionActive"] isEqual:@NO]);
+	read_file(volume, file, expected);
+	assert(owned->hold->reader == NULL);
+	state = [volume controlRequest:@{
+		@"command" : @"setSettings",
+		@"arguments" : @{ @"retainReadState" : @YES }
+	}][@"result"];
+	assert([state[@"readStateRetentionActive"] isEqual:@YES]);
+	read_file(volume, file, expected);
+	assert(owned->hold->reader != NULL);
+	[volume updateMemoryPressure:0];
+	assert([volume readStateRetentionActive]);
+	puts("PASS FSKit memory pressure: lazy read/seek/map release, coalesced notifications and "
+	     "preserved user preference");
+}
+
+static void
 check_revoked_resource(NSData *image)
 {
 	ImageBlocks *device = [ImageBlocks new];
@@ -744,6 +811,8 @@ check_encrypted_volume(const char *imagePath, const char *manifestPath)
 					     encoding:NSUTF8StringEncoding
 						error:NULL];
 	assert(manifest != nil);
+	[volume updateMemoryPressure:DISPATCH_MEMORYPRESSURE_WARN];
+	assert(![volume readStateRetentionActive]);
 	for (NSString *line in [manifest componentsSeparatedByString:@"\n"]) {
 		NSArray<NSString *> *fields = [line componentsSeparatedByString:@" "];
 		FSItem *item;
@@ -800,11 +869,14 @@ check_encrypted_volume(const char *imagePath, const char *manifestPath)
 			}
 			assert([hex isEqual:fields[3]]);
 		}
+		assert(((Ext4Item *)item)->hold->reader == NULL);
 		checked++;
 	}
 	assert(checked > 30);
 	assert([[[volume controlRequest:@{ @"command" : @"getInfo" }]
 		   objectForKey:@"result"][@"loadedKeys"] unsignedIntegerValue] == 1);
+	[volume updateMemoryPressure:DISPATCH_MEMORYPRESSURE_NORMAL];
+	assert([volume readStateRetentionActive]);
 	[volume invalidate];
 	root = nil;
 	volume = nil;
@@ -827,8 +899,9 @@ check_encrypted_volume(const char *imagePath, const char *manifestPath)
 		  assert(completed == 0 && error.code == EACCES);
 		}];
 	[volume invalidate];
-	printf("PASS FSKit native crypto: %zu manifest entries, file digests, encrypted names and "
-	       "symlinks; new keyless mount denied\n",
+	printf(
+	    "PASS FSKit native crypto under memory pressure: %zu manifest entries, file digests, "
+	    "encrypted names and symlinks; new keyless mount denied\n",
 	    checked);
 }
 
@@ -939,6 +1012,7 @@ main(int argc, const char **argv)
 			  replies++;
 			}];
 		assert([buffer.data isEqual:[NSMutableData dataWithLength:4096]]);
+		check_read_state_pressure(volume, hello, sparse, expected, image, device);
 		response = [volume controlRequest:@{
 			@"command" : @"setSettings",
 			@"arguments" : @{ @"retainReadState" : @NO }
@@ -977,6 +1051,9 @@ main(int argc, const char **argv)
 		      @autoreleasepool {
 			      NSDictionary *state;
 
+			      [volume updateMemoryPressure:index % 2 == 0
+				      ? DISPATCH_MEMORYPRESSURE_WARN
+				      : DISPATCH_MEMORYPRESSURE_NORMAL];
 			      read_file(volume, hello, expected);
 			      state = [volume controlRequest:@{
 				      @"command" : index % 2 == 0 ? @"dropReadState" : @"getInfo"
@@ -988,6 +1065,7 @@ main(int argc, const char **argv)
 		[server stop];
 		assert(rmdir(ipcPath) == 0);
 		[volume invalidate];
+		[volume updateMemoryPressure:DISPATCH_MEMORYPRESSURE_NORMAL];
 		check_open(volume, hello, FSVolumeOpenModesRead, ESTALE);
 		response = [volume controlRequest:@{ @"command" : @"ping" }];
 		assert([response[@"error"][@"code"] intValue] == ENXIO);

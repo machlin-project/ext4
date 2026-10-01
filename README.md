@@ -56,8 +56,11 @@ through the live mount; read-only remount reads it correctly, and independent
 inode inspection and fsck agree. This remaining native contract is unaccepted.
 Retained descriptor and mmap checks pass forced image detach on both OS versions;
 resource revocation rejects cached operations and avoids final disk cleanup.
-ACL authorization, physical device-loss stress, broader OS/hardware
-acceptance and production distribution remain unaccepted.
+Universal Developer ID archives pass notarization, Gatekeeper and installed
+write/key-lifecycle checks on both test OS versions. The app's settings button
+passes both versions; the tested update on 27 requires one ordinary module
+reenable. ACL authorization, physical device-loss stress and broader OS/hardware
+acceptance remain unaccepted.
 This is not a production release.
 
 The kernel adapter remains read-only. The arm64e kext has read-only acceptance in

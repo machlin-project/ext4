@@ -74,9 +74,7 @@
 {
 	enum ext4_result result = ext4_read_held(item->hold, offset, buffer, length, completed);
 
-	if (!_retainReadState) {
-		ext4_drop_read_cache(item->hold);
-	}
+	[self finishReadStateForItem:item];
 	return result;
 }
 
@@ -87,9 +85,7 @@
 {
 	enum ext4_result status = ext4_seek_region_held(item->hold, offset, region, result);
 
-	if (!_retainReadState) {
-		ext4_drop_read_cache(item->hold);
-	}
+	[self finishReadStateForItem:item];
 	return status;
 }
 
@@ -232,9 +228,7 @@
 				break;
 			}
 		}
-		if (!_retainReadState) {
-			ext4_drop_read_cache(item->hold);
-		}
+		[self finishReadStateForItem:item];
 		reply(ext4_error(result));
 	}
 }

@@ -10,8 +10,63 @@ import plistlib
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from fskit_test_vm import GuestTimeout, guest_commands, image_devices
+
+MEMORY_PRESSURE_SECONDS = 30
+MEMORY_PRESSURE_IO_SECONDS = 20
+
+
+class MemoryPressure:
+    """Bounded notification simulation inside the disposable guest, never the host."""
+
+    def __init__(self, tart, vm, output, label, level, password):
+        self.prefix = output / (label + '-memory-pressure')
+        self.stdout = self.prefix.with_suffix('.stdout.log').open('wb')
+        self.stderr = self.prefix.with_suffix('.stderr.log').open('wb')
+        self.argv = [str(tart), 'exec', '-i', vm, '/usr/bin/sudo', '-S', '-p', '', '--',
+                     '/usr/bin/memory_pressure', '-S', '-l', level,
+                     '-s', str(MEMORY_PRESSURE_SECONDS)]
+        self.process = subprocess.Popen(self.argv, stdin=subprocess.PIPE,
+                                        stdout=self.stdout, stderr=self.stderr)
+        self.prefix.with_suffix('.command.json').write_text(json.dumps({
+            'argv': self.argv, 'host_rpc_pid': self.process.pid,
+        }, indent=2) + '\n')
+        self.process.stdin.write(password)
+        self.process.stdin.close()
+        self.finished = False
+
+    def finish(self):
+        if self.finished:
+            return
+        try:
+            code = self.process.wait(timeout=45)
+            status = {'argv': self.argv, 'exit_code': code,
+                      'scope': 'simulated guest notifications, no allocated-memory stress'}
+        except subprocess.TimeoutExpired as error:
+            status = {'argv': self.argv, 'timed_out': True, 'guest_may_be_running': True}
+            raise GuestTimeout('Memory-pressure simulation did not finish; preserve guest state') from error
+        finally:
+            self.stdout.close()
+            self.stderr.close()
+            self.finished = True
+            self.prefix.with_suffix('.status.json').write_text(json.dumps(status, indent=2) + '\n')
+        if code != 0:
+            raise RuntimeError(f'Memory-pressure simulation: exit {code}')
+
+
+def await_read_state(guest, app, endpoint, label, active):
+    deadline = time.monotonic() + 10
+    while True:
+        settings = json.loads(guest(label, app, '--control', 'request', endpoint, 'getSettings',
+                                    timeout=5))
+        assert settings.get('retainReadState') is True, settings
+        if settings.get('readStateRetentionActive') is active:
+            return settings
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f'{label}: expected retention active={active}, got {settings}')
+        time.sleep(0.25)
 
 
 def main():
@@ -27,6 +82,8 @@ def main():
     parser.add_argument('--owners', choices=('on', 'off'), default='off')
     parser.add_argument('--mount-as-root', action='store_true',
                         help='Use sudo only for image attach/detach; keep file operations and control IPC unprivileged')
+    parser.add_argument('--memory-pressure', choices=('warn', 'critical'),
+                        help='Simulate bounded guest memory-pressure notifications during ordinary I/O')
     parser.add_argument('--extended', action='store_true',
                         help='Exercise native permissions, preallocation, ENOSPC and volume rename')
     parser.add_argument('--extended-checks', nargs='+', choices=('policy', 'setid', 'pressure', 'rename', 'seek'),
@@ -46,7 +103,9 @@ def main():
         parser.error('--profiles must not repeat a block size')
     if args.pressure_timeout <= 0 or args.checker_timeout <= 0:
         parser.error('Checker and pressure deadlines must be positive')
-    if args.mount_as_root and not sys.stdin.isatty():
+    if args.memory_pressure and args.extended:
+        parser.error('Memory-pressure notification checks use the ordinary write/remount suite')
+    if (args.mount_as_root or args.memory_pressure) and not sys.stdin.isatty():
         parser.error('Run in a terminal for the no-echo VM sudo password prompt')
     checks = args.extended_checks or ('policy', 'setid', 'pressure', 'rename')
     if args.build_number < 1 or not args.guest_workdir.startswith('/') or args.guest_workdir == '/':
@@ -82,9 +141,10 @@ def main():
     assert control('modules', 'modules')[0]['enabled'] is True
     assert control('service', 'device-service')['status'] == 'enabled'
     assert control('endpoints', 'list') == []
-    if args.mount_as_root:
+    if args.mount_as_root or args.memory_pressure:
         password = (getpass.getpass('Guest sudo password: ') + '\n').encode()
-        assert device_command('mount-uid', '/usr/bin/id', '-u').strip() == b'0'
+        assert guest('sudo-uid', '/usr/bin/sudo', '-S', '-p', '', '--', '/usr/bin/id', '-u',
+                     stdin=password).strip() == b'0'
     guest('prepare', '/bin/sh', '-eu', '-c', 'umask 077; test ! -e "$1"; mkdir -p "$1"', 'prepare', root)
     guest('copy-checker', '/bin/cp', args.guest_share.rstrip('/') + '/' + args.checker, root + '/checker')
     guest('checker-mode', '/bin/chmod', '755', root + '/checker')
@@ -135,7 +195,36 @@ def main():
                 endpoints = control(label + '-control', 'list')
                 assert len(endpoints) == 1
                 assert endpoints[0]['info']['readOnly'] == (mode == 'verify'), endpoints[0]['info']
-                guest(label + '-check', root + '/checker', mount, mode, timeout=args.checker_timeout)
+                pressure = None
+                try:
+                    if args.memory_pressure:
+                        endpoint = endpoints[0]['endpoint']
+                        await_read_state(guest, app, endpoint, label + '-normal-retention', True)
+                        pressure = MemoryPressure(tart, args.vm, out, label, args.memory_pressure, password)
+                        await_read_state(guest, app, endpoint, label + '-pressure-retention', False)
+                    guest(label + '-check', root + '/checker', mount, mode,
+                          timeout=min(args.checker_timeout, MEMORY_PRESSURE_IO_SECONDS)
+                          if pressure else args.checker_timeout)
+                    if pressure:
+                        await_read_state(guest, app, endpoint, label + '-pressure-after-io', False)
+                        pressure.finish()
+                        await_read_state(guest, app, endpoint, label + '-restored-retention', True)
+                        result.setdefault('memory_pressure', {})[mode] = {
+                            'level': args.memory_pressure, 'passed': True,
+                            'scope': 'simulated notifications; native I/O and automatic policy',
+                            'user_preference_preserved': True,
+                        }
+                finally:
+                    if pressure:
+                        pending = sys.exc_info()[1]
+                        try:
+                            pressure.finish()
+                        except Exception as error:
+                            if pending is None:
+                                raise
+                            result['memory_pressure_cleanup_error'] = str(error)
+                            if isinstance(error, GuestTimeout):
+                                result['recovery_required'] = True
                 if args.extended:
                     if mode == 'write':
                         setup = ('/Applications/Machlin ext4.app/Contents/Helpers/'

@@ -99,15 +99,17 @@
 		}
 		if ([command isEqual:@"dropReadState"] ||
 		    ([command isEqual:@"setSettings"] && !_retainReadState)) {
-			for (Ext4Item *item in _items.objectEnumerator) {
-				if (item->hold != NULL) {
-					ext4_drop_read_cache(item->hold);
-				}
-			}
+			[self dropReadState];
 		}
 		if ([command isEqual:@"getSettings"] || [command isEqual:@"setSettings"] ||
 		    [command isEqual:@"dropReadState"]) {
-			return @{ @"result" : @{ @"retainReadState" : @(_retainReadState) } };
+			return @{
+				@"result" : @{
+					@"retainReadState" : @(_retainReadState),
+					@"readStateRetentionActive" :
+					    @([self readStateRetentionActive])
+				}
+			};
 		}
 		return ext4_control_error(ENOTSUP, @"Unknown or unavailable command.");
 	}
