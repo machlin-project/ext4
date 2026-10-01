@@ -3273,6 +3273,8 @@ bytes and counters on ENOSPC/EDQUOT, smaller retries, encryption, sampled resour
 failures, and sampled interrupted transactions with recovery. Six growth/overwrite
 exports from extent and indirect fixtures pass independent fsck; both quota
 fixtures pass direct enforcement checks, including whole-request refusal.
+The complete configured sanitizer regression passes 538/538 tests with no skips;
+its frozen binaries were retained throughout native diagnosis.
 
 Legacy and modern FSKit component capacity tests pass both block sizes: refused
 requests do not change file size, earlier successful requests remain readable,
@@ -3298,14 +3300,22 @@ capacity acceptance remains open; failures have not become skips.
 Set-ID metadata coherence and diskutil rename remain failed groups. On stock 26,
 ordinary writes, policy checks and native label persistence pass both block sizes
 with independent fsck. Supplying an explicit matching FSSubType does not resolve
-the diskutil failure. No test repairs security metadata to claim a pass.
+the diskutil failure. A focused stock 26 check rejects both the four-byte label
+`ext4` and the valid 16-byte boundary label through diskutil, while native rename
+and remount persistence pass. An ordinary-user APFS control with the same nosuid
+and ownership flags clears set-ID bits in both live and reopened stat. Neither
+label length nor those mount flags explain the remaining failures. No test repairs
+security metadata to claim a pass.
 
 Core and component evidence is in the standalone `artifacts/checks/fskit-request31`
 and `artifacts/checks/fskit-request31-core` directories. Installed evidence is in
 the lab's `artifacts/ext4-fskit/installed-clean/build31-capacity-1`,
 `installed-clean/build31-native-1`, `installed-clean/build31-native-4k-1`,
 `installed-27/build31-capacity-2`, `installed-27/build32-capacity-large-1` and
-`installed-27/build32-modern-capacity-1` directories. The 4 KiB native runner's
+`installed-27/build32-modern-capacity-1` directories. The additional controls are
+in `installed-clean/build31-rename-short-1` and
+`installed-clean/build31-apfs-nosuid-1/attempt4`; full regression logs are in the
+standalone `artifacts/checks/fskit-request31-core/final-regression` directory. The 4 KiB native runner's
 incorrect host fsck executable path failed after its mounted checks and export;
 the corrected independent check passed on that same export, without rerunning
 the VM workload. The failed attempt remains recorded separately.

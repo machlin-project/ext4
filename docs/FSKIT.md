@@ -196,7 +196,7 @@ all exports pass fsck, and read-only mounts preserve every image byte.
 
 The larger case still fails on both systems. Two complete 1 MiB callbacks commit
 before a later callback refuses allocation without changing the file. Native
-`pwrite` reports zero bytes and ENOSPC; `stat` includes the 2 MiB prefix, but live
+`pwrite` fails with ENOSPC without reporting the committed bytes; `stat` includes the 2 MiB prefix, but live
 `pread` at its beginning returns EOF. An ordinary read-only remount reads all
 2 MiB correctly, with matching independent inode size and clean fsck. Complete
 callback admission cannot make a syscall spanning several callbacks atomic.
@@ -506,7 +506,10 @@ attribute mask omits mode. This localizes the observed discrepancy to publicatio
 through the native metadata cache; it does not establish a supported workaround.
 An ordinary-user APFS control on the same 27 guest clears both bits: mode `06740`
 becomes `0740` after a one-byte `pwrite` and `fsync`, including after reopen.
-Thus the expectation is independently reproduced on macOS. The SDK documents
+A second control on 26.5.2 also clears both bits with `nosuid` and ownership
+checking enabled, matching the flags of the ext4 conformance mount; those flags
+do not explain the discrepancy. Thus the expectation is independently reproduced
+on macOS. The SDK documents
 that result objects cache all populated attributes, including ones not requested;
 the adapter already supplies a fresh mode and change time in that result.
 There is no public metadata-invalidation operation in the selected SDK. Its
@@ -515,7 +518,14 @@ Apple's [FSKit cache discussion](https://developer.apple.com/forums/thread/83264
 also distinguishes data-cache management from change notification; that statement
 alone does not diagnose this driver's set-ID discrepancy.
 The failed conformance check remains required. The APFS control evidence is in
-the lab's `artifacts/ext4-fskit/installed-27/build30-setid-control-1/`.
+the lab's `artifacts/ext4-fskit/installed-27/build30-setid-control-1/` and
+`installed-clean/build31-apfs-nosuid-1/attempt4` directories.
+
+An explicit matching `FSSubType` does not fix `diskutil renameVolume`. A stock 26
+control rejects both `ext4` and the valid 16-byte label, while native rename,
+read-only remount label verification and independent fsck pass. The failure is
+not confined to the maximum label length. Evidence is in the lab's
+`artifacts/ext4-fskit/installed-clean/build31-rename-short-1/`.
 
 Generated evidence lives in the lab's ignored `artifacts/ext4-fskit/` tree:
 `installed-27/build22-native-1`, `installed-27/build23-attributes-1-install`,
