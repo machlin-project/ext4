@@ -38,6 +38,10 @@
 #endif
 }
 
+@end
+
+@implementation Ext4LegacyMappedVolume
+
 - (void)blockmapFile:(FSItem *)file
 	      offset:(off_t)offset
 	      length:(size_t)length
@@ -78,11 +82,11 @@ Ext4Volume *
 ext4_volume_create(FSBlockDeviceResource *resource, struct ext4_fs *filesystem, id resourceOwner,
     struct ext4_native_crypto *crypto, BOOL writable)
 {
-	Class volumeClass = Ext4LegacyVolume.class;
+	Class volumeClass = writable ? Ext4LegacyVolume.class : Ext4LegacyMappedVolume.class;
 
 #if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
 	if (@available(macOS 27.0, *)) {
-		volumeClass = Ext4ModernVolume.class;
+		volumeClass = writable ? Ext4ModernVolume.class : Ext4ModernMappedVolume.class;
 	}
 #endif
 	return [[volumeClass alloc] initWithResource:resource

@@ -70,8 +70,13 @@ remain unaccepted, as detailed below.
 
 The shared volume owns operations independently of FSKit's protocol generations.
 `Ext4LegacyVolume` conforms to the 26.x operation protocols; `Ext4ModernVolume`
-conforms to the complete 27 handler family. The factory chooses one family for
-the lifetime of a mount. No class advertises both incompatible I/O reply ABIs.
+conforms to the 27 handler family. The factory chooses one family for the
+lifetime of a mount. Read-only instances use `Ext4LegacyMappedVolume` or
+`Ext4ModernMappedVolume`, which additionally conform to kernel-offloaded I/O.
+Writable instances advertise only core I/O, so the framework never negotiates
+raw block mappings for a mutable owner. Per-file inhibition still selects core
+reads for ineligible files on a read-only volume. No class advertises both
+incompatible I/O reply ABIs; mapping subclasses reuse the same engine and lifetime.
 The modern boundary returns fresh item, parent and overwritten-item attributes
 and available space within the same volume monitor as the operation. It also
 checks fallible result construction. The shared callbacks are explicitly
@@ -188,6 +193,20 @@ Evidence is in the lab's `installed-27/build25-capacity-{apfs,aligned}-1` and
 `installed-27/build26-{modern-capacity,capacity-aligned,capacity-tail}-1`
 directories under `artifacts/ext4-fskit/`. DEBUG builds trace legacy callback
 entry/reply/return and modern short/error results without file contents.
+
+Separating read-only mapping protocols from writable volumes changes the native
+27 write path: the aligned 256 KiB request now reaches one core callback instead
+of separate 128 KiB callbacks. Ordinary mutation, mmap, concurrent I/O, sparse
+queries, native label changes, remount and independent fsck still pass on both
+block sizes. Factory checks cover both protocol families and both mount modes.
+The short capacity checker reports success because native `stat` retains the
+pre-write size, making its tail-read loop empty. Independent inode inspection
+still finds a 132,096-byte committed tail absent from that live size. This is a
+failed consistency contract, not full capacity acceptance. The original summaries
+and the separate diagnostic correction remain in
+`installed-27/build27-capacity-aligned-1`; ordinary and component evidence is in
+`installed-27/build27-native-1` and `installed-27/build27-modern-1` under the lab's
+`artifacts/ext4-fskit/`. Set-ID metadata and `diskutil renameVolume` still fail.
 
 The mutation engine handles file/directory/symlink creation, links, unlink/rmdir,
 rename and replacement, partial writes, sparse growth, truncate, owner/mode/time

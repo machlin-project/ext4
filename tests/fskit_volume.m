@@ -160,7 +160,7 @@
 @end
 
 static void
-check_mappings(Ext4LegacyVolume *volume, FSItem *sparse, FSItem *partialEOF, NSData *image)
+check_mappings(Ext4LegacyMappedVolume *volume, FSItem *sparse, FSItem *partialEOF, NSData *image)
 {
 	TestExtentPacker *packer = [TestExtentPacker new];
 	__block unsigned replies = 0;
@@ -278,7 +278,7 @@ check_acl_admission(NSData *source)
 	struct ext4_inode file;
 	struct ext4_xattr_change acl = { 0 };
 	struct ext4_inode_update update = { 0 };
-	Ext4LegacyVolume *volume;
+	Ext4LegacyMappedVolume *volume;
 	__block FSItem *rootItem;
 	__block unsigned replies = 0;
 	const uint8_t opaqueACL[] = { 0 };
@@ -310,9 +310,9 @@ check_acl_admission(NSData *source)
 	assert(ext4_sync(fs) == EXT4_OK);
 	ext4_unmount(fs);
 	assert([resource open:&fs] == EXT4_OK);
-	volume = [[Ext4LegacyVolume alloc] initWithResource:(FSBlockDeviceResource *)device
-						 filesystem:fs
-					      resourceOwner:resource];
+	volume = [[Ext4LegacyMappedVolume alloc] initWithResource:(FSBlockDeviceResource *)device
+						       filesystem:fs
+						    resourceOwner:resource];
 	[volume activateWithOptions:(FSTaskOptions *)[TestOptions new]
 		       replyHandler:^(FSItem *item, NSError *error) {
 			 assert(error == nil);
@@ -331,7 +331,7 @@ check_acl_admission(NSData *source)
 static void
 check_item_lifetime(NSData *image)
 {
-	__weak Ext4LegacyVolume *weakVolume;
+	__weak Ext4LegacyMappedVolume *weakVolume;
 	__weak Ext4ResourceIO *weakResource;
 	__block FSItem *survivor = nil;
 
@@ -339,14 +339,15 @@ check_item_lifetime(NSData *image)
 		ImageBlocks *device = [ImageBlocks new];
 		Ext4ResourceIO *resource;
 		struct ext4_fs *fs = NULL;
-		Ext4LegacyVolume *volume;
+		Ext4LegacyMappedVolume *volume;
 
 		device.image = image;
 		resource = [[Ext4ResourceIO alloc] initWithReader:device];
 		assert([resource open:&fs] == EXT4_OK);
-		volume = [[Ext4LegacyVolume alloc] initWithResource:(FSBlockDeviceResource *)device
-							 filesystem:fs
-						      resourceOwner:resource];
+		volume =
+		    [[Ext4LegacyMappedVolume alloc] initWithResource:(FSBlockDeviceResource *)device
+							  filesystem:fs
+						       resourceOwner:resource];
 		weakVolume = volume;
 		weakResource = resource;
 		[volume activateWithOptions:(FSTaskOptions *)[TestOptions new]
@@ -366,7 +367,7 @@ check_item_lifetime(NSData *image)
 }
 
 static FSItem *
-lookup(Ext4LegacyVolume *volume, FSItem *directory, NSString *name)
+lookup(Ext4LegacyMappedVolume *volume, FSItem *directory, NSString *name)
 {
 	__block FSItem *found = nil;
 	__block unsigned calls = 0;
@@ -383,7 +384,8 @@ lookup(Ext4LegacyVolume *volume, FSItem *directory, NSString *name)
 }
 
 static void
-check_open(Ext4LegacyVolume *volume, FSItem *item, FSVolumeOpenModes modes, NSInteger expected)
+check_open(
+    Ext4LegacyMappedVolume *volume, FSItem *item, FSVolumeOpenModes modes, NSInteger expected)
 {
 	__block unsigned calls = 0;
 
@@ -408,7 +410,7 @@ check_open(Ext4LegacyVolume *volume, FSItem *item, FSVolumeOpenModes modes, NSIn
 }
 
 static FSDirectoryVerifier
-enumerate(Ext4LegacyVolume *volume, FSItem *directory, FSDirectoryCookie cookie,
+enumerate(Ext4LegacyMappedVolume *volume, FSItem *directory, FSDirectoryCookie cookie,
     FSDirectoryVerifier verifier, FSItemGetAttributesRequest *attributes,
     TestDirectoryPacker *packer, NSInteger expectedError)
 {
@@ -432,7 +434,7 @@ enumerate(Ext4LegacyVolume *volume, FSItem *directory, FSDirectoryCookie cookie,
 }
 
 static void
-check_directory(Ext4LegacyVolume *volume, FSItem *root, ImageBlocks *device)
+check_directory(Ext4LegacyMappedVolume *volume, FSItem *root, ImageBlocks *device)
 {
 	FSItem *directory = lookup(volume, root, @"many");
 	TestDirectoryPacker *packer = [TestDirectoryPacker new];
@@ -547,7 +549,7 @@ check_dangling_directory_entry(NSData *source)
 	struct ext4_inode file;
 	struct ext4_inode_disk *disk;
 	uint64_t offset;
-	Ext4LegacyVolume *volume;
+	Ext4LegacyMappedVolume *volume;
 	__block FSItem *rootItem = nil;
 	TestDirectoryPacker *packer = [TestDirectoryPacker new];
 
@@ -570,9 +572,9 @@ check_dangling_directory_entry(NSData *source)
 	ext4_unmount(fs);
 	assert([resource open:&fs] == EXT4_OK);
 	assert(ext4_get_inode(fs, file.number, &file) == EXT4_NOT_FOUND);
-	volume = [[Ext4LegacyVolume alloc] initWithResource:(FSBlockDeviceResource *)device
-						 filesystem:fs
-					      resourceOwner:resource];
+	volume = [[Ext4LegacyMappedVolume alloc] initWithResource:(FSBlockDeviceResource *)device
+						       filesystem:fs
+						    resourceOwner:resource];
 	[volume activateWithOptions:(FSTaskOptions *)[TestOptions new]
 		       replyHandler:^(FSItem *item, NSError *error) {
 			 assert(error == nil && item != nil);
@@ -589,7 +591,7 @@ check_dangling_directory_entry(NSData *source)
 }
 
 static void
-read_file(Ext4LegacyVolume *volume, FSItem *file, NSData *expected)
+read_file(Ext4LegacyMappedVolume *volume, FSItem *file, NSData *expected)
 {
 	ReadBuffer *buffer = [ReadBuffer new];
 	__block unsigned calls = 0;
@@ -609,7 +611,7 @@ read_file(Ext4LegacyVolume *volume, FSItem *file, NSData *expected)
 }
 
 static FSItem *
-lookup_path(Ext4LegacyVolume *volume, FSItem *root, NSString *path)
+lookup_path(Ext4LegacyMappedVolume *volume, FSItem *root, NSString *path)
 {
 	FSItem *current = root;
 
@@ -637,7 +639,7 @@ check_encrypted_volume(const char *imagePath, const char *manifestPath)
 	struct ext4_native_crypto *crypto = ext4_native_crypto_create();
 	uint8_t master[EXT4_NATIVE_MASTER_SIZE];
 	uint8_t identifier[EXT4_NATIVE_IDENTIFIER_SIZE];
-	Ext4LegacyVolume *volume;
+	Ext4LegacyMappedVolume *volume;
 	__block FSItem *root = nil;
 	NSString *manifest;
 	ReadBuffer *buffer = [ReadBuffer new];
@@ -654,10 +656,10 @@ check_encrypted_volume(const char *imagePath, const char *manifestPath)
 	assert(ext4_native_crypto_identifier(master, sizeof(master), identifier) == EXT4_OK);
 	assert(ext4_native_crypto_add(
 		   crypto, 2, identifier, sizeof(identifier), master, sizeof(master)) == EXT4_OK);
-	volume = [[Ext4LegacyVolume alloc] initWithResource:(FSBlockDeviceResource *)device
-						 filesystem:fs
-					      resourceOwner:resource
-						     crypto:crypto];
+	volume = [[Ext4LegacyMappedVolume alloc] initWithResource:(FSBlockDeviceResource *)device
+						       filesystem:fs
+						    resourceOwner:resource
+							   crypto:crypto];
 	assert(volume != nil);
 	[volume activateWithOptions:(FSTaskOptions *)[TestOptions new]
 		       replyHandler:^(FSItem *item, NSError *error) {
@@ -736,9 +738,9 @@ check_encrypted_volume(const char *imagePath, const char *manifestPath)
 	/* A new mount without keys must still refuse encrypted contents, including
 	 * an encrypted inode linked into an unencrypted directory. */
 	assert([resource open:&fs] == EXT4_OK);
-	volume = [[Ext4LegacyVolume alloc] initWithResource:(FSBlockDeviceResource *)device
-						 filesystem:fs
-					      resourceOwner:resource];
+	volume = [[Ext4LegacyMappedVolume alloc] initWithResource:(FSBlockDeviceResource *)device
+						       filesystem:fs
+						    resourceOwner:resource];
 	[volume activateWithOptions:(FSTaskOptions *)[TestOptions new]
 		       replyHandler:^(FSItem *item, NSError *error) {
 			 assert(error == nil);
@@ -764,7 +766,7 @@ main(int argc, const char **argv)
 		ImageBlocks *device;
 		Ext4ResourceIO *resource;
 		struct ext4_fs *filesystem = NULL;
-		Ext4LegacyVolume *volume;
+		Ext4LegacyMappedVolume *volume;
 		__block FSItem *root;
 		FSItem *hello;
 		FSItem *alias;
@@ -795,9 +797,10 @@ main(int argc, const char **argv)
 		device.image = image;
 		resource = [[Ext4ResourceIO alloc] initWithReader:device];
 		assert([resource open:&filesystem] == EXT4_OK);
-		volume = [[Ext4LegacyVolume alloc] initWithResource:(FSBlockDeviceResource *)device
-							 filesystem:filesystem
-						      resourceOwner:resource];
+		volume =
+		    [[Ext4LegacyMappedVolume alloc] initWithResource:(FSBlockDeviceResource *)device
+							  filesystem:filesystem
+						       resourceOwner:resource];
 		assert(volume != nil);
 		assert(ext4_inode_can_map_read(&ordinary));
 		assert(!ext4_inode_can_map_read(&directory) && !ext4_inode_can_map_read(NULL));

@@ -46,16 +46,25 @@ struct ext4_native_crypto;
  * ABIs; conformance belongs to the runtime-specific classes, never their owner. */
 @interface Ext4LegacyVolume
     : Ext4Volume <FSVolumeOperations, FSVolumeReadWriteOperations, FSVolumeOpenCloseOperations,
-	  FSVolumeXattrOperations, FSVolumeKernelOffloadedIOOperations, FSVolumeItemDeactivation,
-	  FSVolumePreallocateOperations, FSVolumeRenameOperations>
+	  FSVolumeXattrOperations, FSVolumeItemDeactivation, FSVolumePreallocateOperations,
+	  FSVolumeRenameOperations>
+@end
+
+/* Only immutable read-only owners export disk mappings. Writable owners use
+ * core I/O exclusively and do not negotiate a kernel block-mapping protocol. */
+@interface Ext4LegacyMappedVolume : Ext4LegacyVolume <FSVolumeKernelOffloadedIOOperations>
 @end
 
 #if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
 API_AVAILABLE(macos(27.0))
 @interface Ext4ModernVolume
     : Ext4Volume <FSVolumeHandler, FSVolumeReadWriteHandler, FSVolumeOpenCloseHandler,
-	  FSVolumeXattrHandler, FSVolumeKernelOffloadedIOHandler, FSVolumeItemDeactivationHandler,
-	  FSVolumePreallocateHandler, FSVolumeRenameHandler, FSVolumeSeekRegionHandler>
+	  FSVolumeXattrHandler, FSVolumeItemDeactivationHandler, FSVolumePreallocateHandler,
+	  FSVolumeRenameHandler, FSVolumeSeekRegionHandler>
+@end
+
+API_AVAILABLE(macos(27.0))
+@interface Ext4ModernMappedVolume : Ext4ModernVolume <FSVolumeKernelOffloadedIOHandler>
 @end
 #endif
 

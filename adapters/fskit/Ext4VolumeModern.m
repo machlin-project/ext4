@@ -126,22 +126,6 @@ ext4_handler_error(id result, NSError *error)
 		   replyHandler:reply];
 }
 
-- (void)lookupItemNamed:(FSFileName *)name
-	    inDirectory:(FSItem *)directory
-		 packer:(FSExtentPacker *)packer
-		context:(FSContext *)context
-	   replyHandler:(void (^)(FSLookupItemKOIOResult *, NSError *))reply
-{
-	(void)context;
-	(void)packer;
-	[self lookupResultNamed:name
-		    inDirectory:directory
-		    resultClass:FSLookupItemKOIOResult.class
-		   replyHandler:^(FSLookupItemResult *result, NSError *error) {
-		     reply((FSLookupItemKOIOResult *)result, error);
-		   }];
-}
-
 - (void)createResultNamed:(FSFileName *)name
 		     type:(FSItemType)type
 		   parent:(FSItem *)directory
@@ -188,26 +172,6 @@ ext4_handler_error(id result, NSError *error)
 			   link:nil
 		    resultClass:FSCreateItemResult.class
 			  reply:reply];
-}
-
-- (void)createFileNamed:(FSFileName *)name
-	    inDirectory:(FSItem *)directory
-	     attributes:(FSItemSetAttributesRequest *)attributes
-		 packer:(FSExtentPacker *)packer
-		context:(FSContext *)context
-	   replyHandler:(void (^)(FSCreateFileKOIOResult *, NSError *))reply
-{
-	(void)context;
-	(void)packer;
-	[self createResultNamed:name
-			   type:FSItemTypeFile
-			 parent:directory
-		     attributes:attributes
-			   link:nil
-		    resultClass:FSCreateFileKOIOResult.class
-			  reply:^(FSCreateItemResult *result, NSError *error) {
-			    reply((FSCreateFileKOIOResult *)result, error);
-			  }];
 }
 
 - (void)createSymbolicLinkNamed:(FSFileName *)name
@@ -523,56 +487,6 @@ ext4_handler_error(id result, NSError *error)
 	       }];
 }
 
-- (void)blockmapFile:(FSItem *)file
-	      offset:(off_t)offset
-	      length:(size_t)length
-	       flags:(FSBlockmapFlags)flags
-	 operationID:(FSOperationID)operationID
-	      packer:(FSExtentPacker *)packer
-	replyHandler:(void (^)(FSBlockmapResult *, NSError *))reply
-{
-	[self mapFile:file
-		  offset:offset
-		  length:length
-		   flags:flags
-	     operationID:operationID
-		  packer:packer
-	    replyHandler:^(NSError *error) {
-	      FSBlockmapResult *result = error == nil
-		  ? [[FSBlockmapResult alloc] initWithFreeSpace:[self currentFreeSpace]]
-		  : nil;
-
-	      reply(result, ext4_handler_error(result, error));
-	    }];
-}
-
-- (void)completeIOForFile:(FSItem *)file
-		   offset:(off_t)offset
-		   length:(size_t)length
-		   status:(NSError *)status
-		    flags:(FSCompleteIOFlags)flags
-	      operationID:(FSOperationID)operationID
-	     replyHandler:(void (^)(FSCompleteIOResult *, NSError *))reply
-{
-	@synchronized(self) {
-		[self finishIOForFile:file
-			       offset:offset
-			       length:length
-			       status:status
-				flags:flags
-			  operationID:operationID
-			 replyHandler:^(NSError *error) {
-			   FSItemAttributes *attributes = [self refreshedAttributesForItem:file
-										     error:&error];
-			   FSCompleteIOResult *result = error == nil
-			       ? [[FSCompleteIOResult alloc] initWithAttributes:attributes]
-			       : nil;
-
-			   reply(result, ext4_handler_error(result, error));
-			 }];
-	}
-}
-
 - (void)readFromFile:(FSItem *)item
 	      offset:(off_t)offset
 	      length:(size_t)length
@@ -650,6 +564,96 @@ ext4_handler_error(id result, NSError *error)
 #endif
 	      reply(result, error);
 	    }];
+}
+
+@end
+
+@implementation Ext4ModernMappedVolume
+
+- (void)lookupItemNamed:(FSFileName *)name
+	    inDirectory:(FSItem *)directory
+		 packer:(FSExtentPacker *)packer
+		context:(FSContext *)context
+	   replyHandler:(void (^)(FSLookupItemKOIOResult *, NSError *))reply
+{
+	(void)context;
+	(void)packer;
+	[self lookupResultNamed:name
+		    inDirectory:directory
+		    resultClass:FSLookupItemKOIOResult.class
+		   replyHandler:^(FSLookupItemResult *result, NSError *error) {
+		     reply((FSLookupItemKOIOResult *)result, error);
+		   }];
+}
+
+- (void)createFileNamed:(FSFileName *)name
+	    inDirectory:(FSItem *)directory
+	     attributes:(FSItemSetAttributesRequest *)attributes
+		 packer:(FSExtentPacker *)packer
+		context:(FSContext *)context
+	   replyHandler:(void (^)(FSCreateFileKOIOResult *, NSError *))reply
+{
+	(void)context;
+	(void)packer;
+	[self createResultNamed:name
+			   type:FSItemTypeFile
+			 parent:directory
+		     attributes:attributes
+			   link:nil
+		    resultClass:FSCreateFileKOIOResult.class
+			  reply:^(FSCreateItemResult *result, NSError *error) {
+			    reply((FSCreateFileKOIOResult *)result, error);
+			  }];
+}
+
+- (void)blockmapFile:(FSItem *)file
+	      offset:(off_t)offset
+	      length:(size_t)length
+	       flags:(FSBlockmapFlags)flags
+	 operationID:(FSOperationID)operationID
+	      packer:(FSExtentPacker *)packer
+	replyHandler:(void (^)(FSBlockmapResult *, NSError *))reply
+{
+	[self mapFile:file
+		  offset:offset
+		  length:length
+		   flags:flags
+	     operationID:operationID
+		  packer:packer
+	    replyHandler:^(NSError *error) {
+	      FSBlockmapResult *result = error == nil
+		  ? [[FSBlockmapResult alloc] initWithFreeSpace:[self currentFreeSpace]]
+		  : nil;
+
+	      reply(result, ext4_handler_error(result, error));
+	    }];
+}
+
+- (void)completeIOForFile:(FSItem *)file
+		   offset:(off_t)offset
+		   length:(size_t)length
+		   status:(NSError *)status
+		    flags:(FSCompleteIOFlags)flags
+	      operationID:(FSOperationID)operationID
+	     replyHandler:(void (^)(FSCompleteIOResult *, NSError *))reply
+{
+	@synchronized(self) {
+		[self finishIOForFile:file
+			       offset:offset
+			       length:length
+			       status:status
+				flags:flags
+			  operationID:operationID
+			 replyHandler:^(NSError *error) {
+			   FSItemAttributes *attributes = [self refreshedAttributesForItem:file
+										     error:&error];
+			   FSCompleteIOResult *result = error == nil
+			       ? [[FSCompleteIOResult alloc] initWithAttributes:attributes]
+			       : nil;
+
+			   reply(result, ext4_handler_error(result, error));
+			 }];
+	}
 }
 
 @end

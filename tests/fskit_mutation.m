@@ -735,7 +735,7 @@ check_maintenance(WritableImage *image)
 }
 
 static void
-check_api_selection(NSData *fixture)
+check_api_selection_mode(NSData *fixture, BOOL writable)
 {
 	WritableImage *image = [WritableImage new];
 	Ext4ResourceIO *io;
@@ -744,14 +744,20 @@ check_api_selection(NSData *fixture)
 
 	image.bytes = [fixture mutableCopy];
 	io = [[Ext4ResourceIO alloc] initWithReader:image];
-	assert([io open:&fs] == EXT4_OK);
-	volume = ext4_volume_create(nil, fs, io, NULL, NO);
+	if (writable) {
+		[io enableWritesWithBarrier:image deviceName:@"memory"];
+		assert([io openWritable:&fs] == EXT4_OK);
+	} else {
+		assert([io open:&fs] == EXT4_OK);
+	}
+	volume = ext4_volume_create(nil, fs, io, NULL, writable);
 	assert(volume != nil);
 #if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
 	if (@available(macOS 27.0, *)) {
 		assert([volume conformsToProtocol:@protocol(FSVolumeHandler)]);
 		assert([volume conformsToProtocol:@protocol(FSVolumeReadWriteHandler)]);
-		assert([volume conformsToProtocol:@protocol(FSVolumeKernelOffloadedIOHandler)]);
+		assert([volume conformsToProtocol:@protocol(FSVolumeKernelOffloadedIOHandler)] ==
+		    !writable);
 		assert([volume conformsToProtocol:@protocol(FSVolumeXattrHandler)]);
 		assert([volume conformsToProtocol:@protocol(FSVolumePreallocateHandler)]);
 		assert([volume conformsToProtocol:@protocol(FSVolumeSeekRegionHandler)]);
@@ -764,11 +770,22 @@ check_api_selection(NSData *fixture)
 		assert([volume isKindOfClass:Ext4LegacyVolume.class]);
 		assert([volume conformsToProtocol:@protocol(FSVolumeOperations)]);
 		assert([volume conformsToProtocol:@protocol(FSVolumeReadWriteOperations)]);
+		assert([volume conformsToProtocol:@protocol(FSVolumeKernelOffloadedIOOperations)] ==
+		    !writable);
 	}
 	[volume invalidate];
 	[volume unmountWithReplyHandler:^{
 	}];
-	assert(image.writes == 0 && image.barriers == 0);
+	if (!writable) {
+		assert(image.writes == 0 && image.barriers == 0);
+	}
+}
+
+static void
+check_api_selection(NSData *fixture)
+{
+	check_api_selection_mode(fixture, NO);
+	check_api_selection_mode(fixture, YES);
 }
 
 static void
@@ -921,6 +938,7 @@ main(int argc, const char *argv[])
 		if (argc >= 3 && strcmp(argv[2], "--modern-capacity") == 0) {
 #if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
 			if (@available(macOS 27.0, *)) {
+				check_api_selection(fixture);
 				check_capacity_modern(image);
 				if (argc == 4) {
 					assert([image.bytes writeToFile:@(argv[3]) atomically:YES]);
