@@ -3168,6 +3168,14 @@ passes the corrected JSON boolean types through the actual IPC serialization.
 Evidence is in `artifacts/checks/fskit-seek21/`. Native 27 seeking, particularly
 visibility of buffered writes, remains unaccepted.
 
+The signed sparse-query build is installed and enabled on the 26.5.2 guest.
+Ordinary write/mmap/namespace tests, read-only remount verification and independent
+fsck pass on both block sizes. Installed control responses now contain actual JSON
+booleans for `readOnly` and `keyStoreAvailable`. Both final endpoint lists are empty.
+Evidence is in the lab's `artifacts/ext4-fskit/installed-clean/build21-native-1/`;
+the older-SDK FSKit CI job also passes. This does not change the outstanding
+set-ID, `diskutil` or native 27 verdicts above.
+
 A separate native diagnosis narrows the volume-name failure: public
 `DADiskRename` accepts both a short label and the 16-byte label on the same mounted
 4 KiB fixture, while `diskutil renameVolume` rejects both. Disk Arbitration reports
