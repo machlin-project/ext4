@@ -409,6 +409,18 @@ operations share the volume monitor with invalidation. The app displays a paused
 cache status without changing the user's toggle. See Apple's
 [memory-pressure source](https://developer.apple.com/documentation/dispatch/dispatchsourcememorypressure).
 
+Installed warning and critical notification simulations pass write, read-only
+remount and independent fsck checks on 27.0.1 for both block sizes, including
+automatic suspension/restoration and preserved user preference. Component checks
+also preserve encrypted file digests, names, symlinks and loaded keys under
+injected pressure. These checks do not establish allocated-memory stress or native
+vnode reclamation. The [acceptance evidence](ACCEPTANCE.md#fskit-memory-pressure-policy)
+retains the initial checker timeout separately from the completed longer run.
+The equivalent mounted 26.5.2 notification checks remain failed: the simulated
+levels do not suspend retention. Independent canaries show process-dependent
+delivery, so the tool's successful exit is not evidence that the driver received
+the event; its exposure and cause remain unqualified.
+
 The app performs RPC off its UI thread. Settings last for the current mounted
 instance. Disconnecting the app does not affect mounted I/O. Unmount/invalidation
 removes the endpoint. An already-received command still checks active volume state.

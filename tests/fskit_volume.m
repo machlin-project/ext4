@@ -624,6 +624,9 @@ check_read_state_pressure(Ext4LegacyMappedVolume *volume, FSItem *file, FSItem *
 	uint64_t position;
 	size_t reads;
 
+	/* Component events must not race the host's unrelated memory conditions. */
+	[volume stopReadStateMaintenance];
+	[volume updateMemoryPressure:DISPATCH_MEMORYPRESSURE_NORMAL];
 	state = [volume controlRequest:@{ @"command" : @"getSettings" }][@"result"];
 	assert([state[@"retainReadState"] isEqual:@YES]);
 	assert([state[@"readStateRetentionActive"] isEqual:@YES]);
@@ -811,6 +814,7 @@ check_encrypted_volume(const char *imagePath, const char *manifestPath)
 					     encoding:NSUTF8StringEncoding
 						error:NULL];
 	assert(manifest != nil);
+	[volume stopReadStateMaintenance];
 	[volume updateMemoryPressure:DISPATCH_MEMORYPRESSURE_WARN];
 	assert(![volume readStateRetentionActive]);
 	for (NSString *line in [manifest componentsSeparatedByString:@"\n"]) {

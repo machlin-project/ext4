@@ -574,12 +574,19 @@ guest. It requires an ordinary user and a no-echo sudo prompt for the simulation
 file operations and control requests retain the ordinary UID. The runner observes
 automatic retention suspension before and after the checker, unchanged user
 preference and restored effective retention after the tool exits. The simulated
-level lasts thirty seconds, with a twenty-second checker bound, so use the ordinary
-write/remount checker rather than the longer replacement workload. Each exported
+level lasts ninety seconds by default; `--memory-pressure-seconds` sets an explicit
+duration with fifteen seconds reserved around the checker. The runner records its
+effective checker deadline. Use the ordinary write/remount checker. Each exported
 image still requires independent fsck. This tests actual native notification
 delivery and I/O under that policy; it does not allocate memory, force vnode
 reclamation or establish real memory-pressure stress. Do not combine it with
 `--extended` full-disk checks.
+
+Notification delivery must be observed in the mounted owner, not inferred from
+the simulation tool's exit status. The 26.5.2 diagnostic canaries show different
+critical-event delivery with zero versus sixty-four MiB of touched pages, while
+both receive no warning event. Keep such control observations separate from
+driver passes and retain a failed delivery assertion before any I/O.
 
 Before enabling general writes, extend the matrix to platform allocation/full devices,
 create/link/unlink/rename, orphan cleanup, open-but-unlinked files, truncate versus

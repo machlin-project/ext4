@@ -3495,8 +3495,59 @@ when a read-only checker returns zero while skipping replay. Both original
 fixtures remain unchanged. Evidence is under the ext4 repository's ignored
 `artifacts/checks/fskit-memory-pressure`.
 
-This component batch does not establish native notification delivery, allocated
-memory stress, native vnode reclamation or physical device-loss behavior.
+The isolated volume checks cancel the real host observer before injecting component
+events. They pass ordinary and encrypted 1 KiB/4 KiB inputs with ASan/UBSan, reading
+all thirty-six Linux-verified manifest entries, including file digests, encrypted
+names and symlinks. Elevated pressure releases disposable read metadata without
+removing loaded keys; a separate keyless mount still denies encrypted reads. All
+fixtures and manifests remain unchanged. The fresh executable and source evidence
+are under `artifacts/checks/fskit-memory-pressure/isolated-components`.
+
+The universal memory-pressure build passes Developer ID notarization, Gatekeeper,
+strict all-architecture signatures and exact whole-bundle installation on stock
+26.5.2 and 27.0.1. Compiled executable UUIDs remain unchanged through export, and
+the portable core library is unchanged from the previously accepted distribution
+build. The 26.5 module remains enabled after this update; the 27 module again
+requires one ordinary enable through the product's settings button. That update
+continuity failure remains open. Signing and installation reports are under the
+ext4 repository's `artifacts/checks/fskit-memory-distribution` and the lab's
+`artifacts/ext4-fskit/installed-{clean,27}/build37-memory-install`.
+
+On 27.0.1, warning and critical notification simulations pass ordinary writes and
+read-only remount verification for both block sizes. The live control endpoint
+reports automatic read-state retention suspension before and after each checker,
+preserves the user's preference and restores effective retention after the system
+tool resets pressure. Every completed export passes independent nonrepairing fsck;
+task devices and endpoints are empty afterward. Reports are under the lab's
+`installed-27/build37-memory-critical`, `build37-memory-warn` and
+`build37-memory-warn-1k-long` directories within `artifacts/ext4-fskit`.
+
+The first 1 KiB warning run exceeds its original twenty-second checker deadline.
+The checker is absent at diagnosis, the extension is idle and responsive, and
+normal detach, read-only verification and independent fsck pass for the interrupted
+image. Those diagnostics do not establish completed writes, so the original run
+remains failed. The focused rerun uses the same signed driver, fixture and checker
+with a ninety-second simulation and a seventy-five-second checker limit; it
+completes in about forty seconds and passes all notification, remount and fsck
+checks. No driver change is made to obtain that pass. Separate diagnosis and rerun
+provenance remain beside the original failed evidence.
+
+On 26.5.2, both warning and critical simulations fail the first 4 KiB retention
+assertion before checker I/O: the endpoint still reports effective retention
+enabled. Each system tool exits zero, normal detach succeeds, and the final
+endpoint list is empty. The 1 KiB profiles are not run after those failures.
+Independent public Dispatch canaries also receive no warning event, either
+without allocated pages or with sixty-four MiB of touched pages. For critical
+pressure, the sixty-four MiB canary receives the critical flag while the
+zero-allocation canary receives no event. This establishes differing notification
+exposure among these processes, not a confirmed driver or OS defect. The mounted
+26.5 notification gate remains unaccepted; tool success alone cannot close it.
+Evidence is under the lab's `installed-clean/build37-memory-{warn,critical}` and
+`build37-memory-{warn,critical}-diagnosis/observer` directories within
+`artifacts/ext4-fskit`.
+
+These simulations do not allocate system-stressing memory, force native vnode
+reclamation or establish physical device-loss behavior. Those gates remain open.
 
 ## Kernel build evidence
 
