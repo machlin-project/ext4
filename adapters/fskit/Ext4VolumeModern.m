@@ -2,6 +2,7 @@
 #import "Ext4VolumeInternal.h"
 #import "Ext4Support.h"
 #include <errno.h>
+#include <sys/stat.h>
 
 #if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
 static NSError *
@@ -610,6 +611,10 @@ ext4_handler_error(id result, NSError *error)
 	    replyHandler:^(size_t completed, NSError *error) {
 	      FSWriteFileResult *result = nil;
 	      FSItemAttributes *attributes;
+#if DEBUG
+	      uint32_t previousMode =
+		  completed != 0 ? ((Ext4Item *)item)->inode.mode & ALLPERMS : 0;
+#endif
 
 	      /* Handler-style FSKit ignores a result when error is non-nil. A
 	       * committed prefix can instead be a short success if its current
@@ -627,6 +632,16 @@ ext4_handler_error(id result, NSError *error)
 							   itemAttributes:attributes
 								freeSpace:[self currentFreeSpace]];
 	      }
+#if DEBUG
+	      if ((previousMode & (S_ISUID | S_ISGID)) != 0) {
+		      NSLog(@"Machlin ext4 write attributes: inode=%u previous-mode=%o "
+			    @"returned-mode=%o wanted-mode=%d result=%d error=%@",
+			  ((Ext4Item *)item)->inode.number, previousMode, attributes.mode,
+			  [FSWriteFileResult.requestedAttributes
+			      isAttributeWanted:FSItemAttributeMode],
+			  result != nil, error);
+	      }
+#endif
 	      reply(result, ext4_handler_error(result, error));
 	    }];
 }

@@ -70,8 +70,10 @@ The modern boundary returns fresh item, parent and overwritten-item attributes
 and available space within the same volume monitor as the operation. It also
 checks fallible result construction. The shared callbacks are explicitly
 synchronous; the bridge neither retains completion blocks nor duplicates disk
-algorithms. Native macOS 27 acceptance is still required; compiled handlers alone
-do not establish cache coherence. Native authorization and the existing ACL
+algorithms. Native 27.0.1 checks pass ordinary I/O, metadata, namespace, mmap,
+concurrent writers and open-unlinked lifetime on 1 KiB and 4 KiB images, followed
+by ordinary detach, remount and independent fsck. Live set-ID metadata remains
+incorrect as detailed below. Native authorization and the existing ACL
 rejection policy remain in force on both versions.
 
 ## Writable devices and persistence
@@ -103,14 +105,14 @@ timed-out barrier fails the core transaction; it never acknowledges persistence.
 Public FSKit metadata-buffer flushing alone is not used as a device barrier.
 Signed installed acceptance of this path is separate from component tests.
 
-Installed failure checks on 26.5.2 stop or kill the authenticated service after
+Installed failure checks on 26.5.2 and 27.0.1 stop or kill the authenticated service after
 an ordinary-user checker establishes a durable baseline on each block size.
 Writes and fsync return `EIO`; stopping the process exercises the ten-second
 barrier deadline, while termination fails promptly. Restoring service health
 does not revive the failed mounted owner: subsequent fsync and truncation still
 fail. The runner force-detaches that disposable failed mount, then tests writable
 recovery, a new durable write, read-only remount verification and ordinary detach.
-All four recovered images pass independent fsck. These are service-failure checks,
+All four recovered images on each OS pass independent fsck. These are service-failure checks,
 not physical device removal or power-loss qualification.
 
 `scripts/test_fskit_installed_barrier.py` uses the owned fixtures and a staged
@@ -122,6 +124,17 @@ as root; file operations remain ordinary-user operations. Before each signal,
 the helper validates the process UID and the kernel-reported executable path.
 Passwords never enter arguments or evidence. Cleanup resumes a stopped service,
 but a timed-out filesystem operation leaves its devices intact for diagnosis.
+
+The original 64 MiB pressure workload passes on 26.5.2 with 4 KiB blocks,
+including ENOSPC at 53,215,232 bytes, readback, space reuse, remount and fsck.
+The 1 KiB workload exceeded its 600-second deadline after reporting 32,505,856
+bytes of progress. After termination was requested, its checker remained blocked
+in `pwrite` while the extension was idle; ordinary detach also timed out. Killing
+the owning extension released the filesystem mount, but a disposable guest restart
+was required to release the disk image. The exported interrupted image passed
+read-only fsck; that diagnostic does not accept the unfinished workload.
+The runner's `--profiles` and `--pressure-timeout` permit focused, explicitly bounded
+reproduction. Evidence records the chosen deadline and streams progress as it arrives.
 
 The mutation engine handles file/directory/symlink creation, links, unlink/rmdir,
 rename and replacement, partial writes, sparse growth, truncate, owner/mode/time
@@ -144,7 +157,7 @@ journal before publishing the new FSKit name. ext4 labels are at most 16 bytes.
 Native `fsetattrlist` rename, exact-limit labels, oversized rejection and persistence
 pass on both block sizes. `diskutil info` reports the new name after remount.
 The separate `diskutil renameVolume` invocation still rejects the requested name
-on stock 26.5.2; it is a remaining system-tool integration failure. A direct
+on stock 26.5.2 and 27.0.1; it is a remaining system-tool integration failure. A direct
 public `DADiskRename` call succeeds for both short and exact-limit labels on the
 4 KiB fixture, with the result independently checked after detach.
 Attribute updates leave directory/symlink sizes and unavailable creation times
@@ -347,17 +360,18 @@ boundary. Separate sibling volume classes implement the incompatible legacy and
 27 reply signatures. Each class advertises one complete protocol family, while
 both call the same serialized namespace, metadata and I/O engines. The 27 handler
 supplies fresh item and parent attributes and sequenced free space after mutations;
-it cannot publish a stale snapshot after a failed device refresh. Native acceptance
-of this handler family on macOS 27 remains required. Compiling with SDK 27 does
-not establish its runtime behavior.
+it cannot publish a stale snapshot after a failed device refresh. Native 27.0.1
+acceptance covers the ordinary mutation and persistence-service failure workloads
+above; encryption, broader cache/reclaim stress and physical device loss remain
+separate acceptance requirements.
 CI also builds against SDK 26.5, excluding the unavailable declarations.
 
 The 27 seek-region handler delegates to the portable mapping query. It skips
 whole sparse runs, treats unwritten extents as holes, clips at logical EOF and
 shares the held inode's bounded mapping cache with reads. It never exposes raw
 addresses or reads file data. The installed seek check also requires buffered
-writes and truncation to be visible; this cache contract still needs native 27
-acceptance. There is no equivalent public seek handler in the 26.5 API.
+writes and truncation to be visible; these checks pass both block sizes on 27.0.1.
+There is no equivalent public seek handler in the 26.5 API.
 
 Future 27-only context/cache handlers must delegate to the same volume engine,
 not duplicate the filesystem algorithms. Caller UID/GID in `FSContext` is useful
@@ -366,11 +380,19 @@ set. The old API cannot substitute extension credentials for caller credentials.
 Native mutation policy, ACLs and live cache changes still require explicit designs
 and installed acceptance on each supported OS version.
 
-An installed 26.5.2 conformance test currently fails after writing a set-ID file:
+Installed 26.5.2 and 27.0.1 conformance tests fail after writing a set-ID file:
 the core removes the bits on disk, but live and reopened `fstat` still report
 them. The tested mount is `nosuid`; that bounds privilege use but does not satisfy
-the metadata contract. The failed test remains mandatory. The newer reply API is
-a candidate solution on 27, not evidence that either OS's behavior is fixed.
+the metadata contract. The failed test remains mandatory. A focused DEBUG trace
+on 27 confirms that a non-nil `FSWriteFileResult` returns mode `0740` without an
+error, but live/reopened `fstat` retains `06740`. The framework's requested
+attribute mask omits mode. This localizes the observed discrepancy to publication
+through the native metadata cache; it does not establish a supported workaround.
+
+Generated evidence lives in the lab's ignored `artifacts/ext4-fskit/` tree:
+`installed-27/build22-native-1`, `installed-27/build23-attributes-1-install`,
+`installed-27/build23-barrier-1` and `installed-clean/build21-large-pressure-1`.
+Keep failed groups and interrupted-run cleanup distinct from passed groups.
 
 ## Completion requirements
 

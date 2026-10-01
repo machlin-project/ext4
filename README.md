@@ -44,10 +44,12 @@ fscrypt v1/v2 reads, writes and key lifetime pass signed native roundtrips, foll
 by independent fsck. Device-cache service termination and timeout tests return
 I/O errors, retain the failed owner's state and recover through a new mount.
 Bounded full-disk tests and native volume-label changes pass
-on both block sizes. Live set-ID metadata coherence and `diskutil renameVolume`
-currently fail on 26.5.2; ACL authorization, device-loss stress, broader OS/hardware
-acceptance and production distribution remain unaccepted. The macOS 27 handler
-path still needs native acceptance. This is not a production release.
+on both block sizes. Stock 27.0.1 also passes ordinary writes, metadata, namespace,
+mmap, concurrent I/O, sparse-region queries and persistence-service failure recovery.
+Live set-ID metadata coherence and `diskutil renameVolume` fail on both OS versions.
+The larger 1 KiB full-disk scenario timed out; ACL authorization, device-loss stress,
+broader OS/hardware acceptance and production distribution remain unaccepted.
+This is not a production release.
 
 The kernel adapter remains read-only. The arm64e kext has read-only acceptance in
 a dedicated custom-kernel VM; x86_64 has compilation evidence. Kernel encryption

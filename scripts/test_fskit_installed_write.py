@@ -20,11 +20,15 @@ def main():
     parser.add_argument('--guest-share', required=True)
     parser.add_argument('--checker', required=True, help='Unique staged checker filename')
     parser.add_argument('--fixture-prefix', default='ext4-metadata')
+    parser.add_argument('--profiles', nargs='+', choices=('4k', '1k'), default=['4k', '1k'],
+                        help='Select affected block sizes for a focused reproduction')
     parser.add_argument('--owners', choices=('on', 'off'), default='off')
     parser.add_argument('--extended', action='store_true',
                         help='Exercise native permissions, preallocation, ENOSPC and volume rename')
     parser.add_argument('--extended-checks', nargs='+', choices=('policy', 'setid', 'pressure', 'rename', 'seek'),
                         default=None, help='Select affected groups within the extended suite')
+    parser.add_argument('--pressure-timeout', type=int, default=600,
+                        help='Explicit deadline in seconds for the selected pressure workload')
     parser.add_argument('--guest-workdir', required=True, help='New absolute guest directory')
     parser.add_argument('--build-number', type=int, required=True)
     parser.add_argument('--e2fsck', type=Path, required=True)
@@ -32,6 +36,10 @@ def main():
     args = parser.parse_args()
     if args.extended_checks is not None and not args.extended:
         parser.error('--extended-checks requires --extended')
+    if len(set(args.profiles)) != len(args.profiles):
+        parser.error('--profiles must not repeat a block size')
+    if args.pressure_timeout <= 0:
+        parser.error('--pressure-timeout must be positive')
     checks = args.extended_checks or ('policy', 'setid', 'pressure', 'rename')
     if args.build_number < 1 or not args.guest_workdir.startswith('/') or args.guest_workdir == '/':
         parser.error('Use a positive build number and a new absolute guest directory')
@@ -66,12 +74,13 @@ def main():
     assert guest('checker-hash', '/usr/bin/shasum', '-a', '256', root + '/checker').decode().split()[0] == checker_hash
     results = {}
 
-    for profile in ('4k', '1k'):
+    for profile in args.profiles:
         filename = f'{args.fixture_prefix}-{profile}.img'
         image = root + '/' + filename
         mount = root + '/mount-' + profile
         device = None
-        result = {'passed': False, 'checker_sha256': checker_hash}
+        result = {'passed': False, 'checker_sha256': checker_hash,
+                  'pressure_timeout_seconds': args.pressure_timeout}
         results[profile] = result
 
         def check(name, *command, timeout=30):
@@ -117,7 +126,8 @@ def main():
                         assert denial['error']['code'] == errno.EBUSY
                         assert control(label + '-service-retained', 'device-service')['status'] == 'enabled'
                         result['checks'] = {}
-                        for group, timeout in (('policy', 90), ('setid', 90), ('pressure', 600), ('seek', 90)):
+                        for group, timeout in (('policy', 90), ('setid', 90),
+                                               ('pressure', args.pressure_timeout), ('seek', 90)):
                             if group in checks:
                                 check(group, root + '/checker', mount, group, timeout=timeout)
                         if 'rename' in checks:
@@ -160,7 +170,7 @@ def main():
             print(json.dumps({profile: result}), flush=True)
         if 'error' in result or 'cleanup_error' in result:
             break
-    return 0 if len(results) == 2 and all(value['passed'] for value in results.values()) else 1
+    return 0 if len(results) == len(args.profiles) and all(value['passed'] for value in results.values()) else 1
 
 
 if __name__ == '__main__':
