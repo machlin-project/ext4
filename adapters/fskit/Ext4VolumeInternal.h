@@ -86,6 +86,10 @@
 		      buffer:(void *)buffer
 		      length:(size_t)length
 		   completed:(size_t *)completed;
+- (enum ext4_result)seekItem:(Ext4Item *)item
+		      offset:(uint64_t)offset
+		      region:(enum ext4_seek_region)region
+		      result:(uint64_t *)result;
 @end
 
 @interface Ext4Volume (ControlLifecycle)

@@ -805,6 +805,124 @@ logical_limit(struct model *model, struct ext4_inode *inode)
 	puts("PASS logical address limit preserves the completed read prefix");
 }
 
+static void
+seek_regions(struct model *model, struct ext4_inode *inode)
+{
+	struct ext4_read_state state = { 0 };
+	struct ext4_inode_hold hold = { 0 };
+	uint32_t bs = model->fs.info.block_size;
+	const uint64_t offsets[] = { 0, 1, 2U * bs - 1U, 2U * bs, 2U * bs + 17U, 4U * bs - 1U,
+		4U * bs, 4U * bs + 17U, 6U * bs + 1U, 9U * bs - 1U, 9U * bs, 10U * bs - 1U,
+		10U * bs, 10U * bs + 1U, 11U * bs, 11U * bs + 16U };
+	uint8_t *leaf = model_block(model, MODEL_NODE_FIRST);
+	uint64_t result;
+	uint64_t offset;
+	uint64_t expected;
+	size_t index;
+	size_t reads;
+	size_t fault;
+	unsigned int kind;
+	unsigned int mode;
+	enum ext4_result status;
+
+	/* Two data regions separated by both a genuine hole and an unwritten
+	 * reservation. The last allocated block extends beyond a partial EOF. */
+	inode->flags = EXT4_INODE_EXTENTS;
+	inode->size = 11U * bs + 17U;
+	node_header(inode->block_data, sizeof(inode->block_data), 1, 1);
+	node_index(inode->block_data, 0, 0, MODEL_NODE_FIRST);
+	node_header(leaf, bs, 0, 3);
+	node_extent(leaf, 0, 2, 2, MODEL_DATA_FIRST);
+	node_extent(leaf, 1, 6, EXT4_EXTENT_UNWRITTEN_LIMIT + 3U, MODEL_DATA_OTHER);
+	node_extent(leaf, 2, 10, 2, MODEL_DATA_FIRST + 2U);
+	node_seal(model, inode, leaf);
+	for (mode = 0; mode < 2; mode++) {
+		for (index = 0; index < sizeof(offsets) / sizeof(offsets[0]); index++) {
+			model_reset(model);
+			offset = offsets[index];
+			expected = mode == EXT4_SEEK_DATA
+			    ? (offset < 2U * bs				       ? 2U * bs
+				      : offset < 4U * bs || offset >= 10U * bs ? offset
+									       : 10U * bs)
+			    : (offset < 2U * bs || (offset >= 4U * bs && offset < 10U * bs) ? offset
+				      : offset < 4U * bs ? 4U * bs
+							 : inode->size);
+			CHECK(
+			    ext4_seek_region(&model->fs, inode, offset, mode, &result) == EXT4_OK);
+			CHECK(result == expected && model->data_reads == 0 && model->live == 0);
+		}
+	}
+	model_reset(model);
+	CHECK(ext4_seek_region(&model->fs, inode, 0, EXT4_SEEK_DATA, &result) == EXT4_OK);
+	reads = model->reads;
+	CHECK(reads != 0 && model->allocations == 1);
+	for (kind = 0; kind < 2; kind++) {
+		for (fault = 1; fault <= (kind == 0 ? 1 : reads); fault++) {
+			model_reset(model);
+			model->fail_allocation = kind == 0 ? fault : 0;
+			model->fail_read = kind == 1 ? fault : 0;
+			result = UINT64_MAX;
+			status = ext4_seek_region(&model->fs, inode, 0, EXT4_SEEK_DATA, &result);
+			CHECK(status == (kind == 0 ? EXT4_NO_MEMORY : EXT4_IO));
+			CHECK(result == UINT64_MAX && model->live == 0);
+		}
+	}
+	model_reset(model);
+	result = UINT64_MAX;
+	CHECK(ext4_seek_region(&model->fs, inode, inode->size, EXT4_SEEK_HOLE, &result) ==
+	    EXT4_NOT_FOUND);
+	CHECK(ext4_seek_region(&model->fs, inode, UINT64_MAX, EXT4_SEEK_DATA, &result) ==
+	    EXT4_NOT_FOUND);
+	CHECK(ext4_seek_region(NULL, inode, 0, EXT4_SEEK_DATA, &result) == EXT4_INVALID_ARGUMENT);
+	CHECK(ext4_seek_region(&model->fs, inode, 0, 99, &result) == EXT4_INVALID_ARGUMENT);
+	CHECK(ext4_seek_region_held(NULL, 0, EXT4_SEEK_HOLE, &result) == EXT4_INVALID_ARGUMENT);
+	model->fs.aborted = true;
+	CHECK(ext4_seek_region(&model->fs, inode, 0, EXT4_SEEK_DATA, &result) ==
+	    EXT4_RECOVERY_REQUIRED);
+	model->fs.aborted = false;
+	CHECK(result == UINT64_MAX && model->reads == 0 && model->allocations == 0);
+
+	/* The held form shares the checked metadata cache, including on encrypted
+	 * and verity inodes; it never reads ciphertext or bypasses verified data I/O. */
+	state.inode = *inode;
+	state.inode.flags |= EXT4_INODE_ENCRYPT | EXT4_INODE_VERITY;
+	state.revision = model->fs.read_revision;
+	hold.fs = &model->fs;
+	hold.references = 1;
+	hold.reader = &state;
+	CHECK(ext4_seek_region_held(&hold, 0, EXT4_SEEK_DATA, &result) == EXT4_OK);
+	CHECK(result == 2U * bs);
+	reads = model->reads;
+	CHECK(ext4_seek_region_held(&hold, 6U * bs + 1U, EXT4_SEEK_DATA, &result) == EXT4_OK);
+	CHECK(result == 10U * bs && model->reads == reads && model->data_reads == 0);
+	ext4_map_reader_close(&model->fs, &state.mapping);
+
+	/* A huge gap is one mapping traversal, not a block-by-block scan. */
+	model_reset(model);
+	inode->size = (uint64_t)bs << 30;
+	node_header(inode->block_data, sizeof(inode->block_data), 0, 1);
+	node_extent(inode->block_data, 0, (1U << 30) - 1U, 1, MODEL_DATA_FIRST);
+	CHECK(ext4_seek_region(&model->fs, inode, 1, EXT4_SEEK_DATA, &result) == EXT4_OK);
+	CHECK(result == inode->size - bs && model->reads == 0 && model->allocations == 0);
+	node_header(inode->block_data, sizeof(inode->block_data), 0, 0);
+	result = UINT64_MAX;
+	CHECK(ext4_seek_region(&model->fs, inode, 0, EXT4_SEEK_DATA, &result) == EXT4_NOT_FOUND);
+	CHECK(result == UINT64_MAX);
+	CHECK(ext4_seek_region(&model->fs, inode, 1, EXT4_SEEK_HOLE, &result) == EXT4_OK);
+	CHECK(result == 1 && model->reads == 0 && model->allocations == 0);
+	/* Legacy direct block pointers have the same logical region contract. */
+	inode->flags = 0;
+	inode->size = 6U * bs;
+	memset(inode->block_data, 0, sizeof(inode->block_data));
+	ext4_encode32((struct ext4_le32 *)inode->block_data + 3, MODEL_DATA_FIRST);
+	CHECK(ext4_seek_region(&model->fs, inode, 1, EXT4_SEEK_DATA, &result) == EXT4_OK);
+	CHECK(result == 3U * bs);
+	CHECK(ext4_seek_region(&model->fs, inode, result + 1U, EXT4_SEEK_HOLE, &result) == EXT4_OK);
+	CHECK(result == 4U * bs);
+	puts(
+	    "PASS sparse seeks, unwritten extents, partial EOF, held cache, faults and huge holes");
+}
+
 int
 main(void)
 {
@@ -841,6 +959,7 @@ main(void)
 			indirect_cases(&model, &inode);
 			native_mapping_guards(&model, &inode);
 			logical_limit(&model, &inode);
+			seek_regions(&model, &inode);
 			CHECK(model.live == 0);
 			free(model.data);
 			printf(

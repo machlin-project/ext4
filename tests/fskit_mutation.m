@@ -623,6 +623,7 @@ check_api_selection(NSData *fixture)
 		assert([volume conformsToProtocol:@protocol(FSVolumeKernelOffloadedIOHandler)]);
 		assert([volume conformsToProtocol:@protocol(FSVolumeXattrHandler)]);
 		assert([volume conformsToProtocol:@protocol(FSVolumePreallocateHandler)]);
+		assert([volume conformsToProtocol:@protocol(FSVolumeSeekRegionHandler)]);
 		assert(![volume conformsToProtocol:@protocol(FSVolumeOperations)]);
 		assert(![volume conformsToProtocol:@protocol(FSVolumeReadWriteOperations)]);
 		assert(![volume conformsToProtocol:@protocol(FSVolumeKernelOffloadedIOOperations)]);

@@ -816,6 +816,21 @@ enum ext4_result ext4_map_read(struct ext4_fs *fs, const struct ext4_inode *inod
 enum ext4_result ext4_map_read_held(
     struct ext4_inode_hold *hold, uint64_t offset, size_t length, struct ext4_mapping *mapping);
 
+enum ext4_seek_region { EXT4_SEEK_DATA, EXT4_SEEK_HOLE };
+
+/* Find a data or hole offset in a regular file's current mapping. Unwritten
+ * extents are holes; inline contents are data. A hole search ends at logical
+ * EOF. A missing data region, or a starting offset at/past EOF, returns
+ * NOT_FOUND. Failure leaves result unchanged. These metadata-only queries do
+ * not expose physical addresses, read/decrypt file contents or verify verity
+ * data. The native owner must account for its dirty/delayed-allocation cache,
+ * authorize the operation and serialize it with mutations as for reads. */
+enum ext4_result ext4_seek_region(struct ext4_fs *fs, const struct ext4_inode *inode,
+    uint64_t offset, enum ext4_seek_region region, uint64_t *result);
+/* Shares the held inode snapshot and bounded mapping cache with reads. */
+enum ext4_result ext4_seek_region_held(
+    struct ext4_inode_hold *hold, uint64_t offset, enum ext4_seek_region region, uint64_t *result);
+
 enum ext4_dir_action { EXT4_DIR_ACCEPT, EXT4_DIR_ACCEPT_STOP, EXT4_DIR_STOP };
 
 /* Stream entries using one temporary directory block. Every block's checksum,

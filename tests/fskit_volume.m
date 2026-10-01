@@ -885,6 +885,16 @@ main(int argc, const char **argv)
 					     endpoint:server.manifestURL
 						error:&ipcError];
 		assert(ipcError == nil && response[@"result"] != nil);
+		assert(CFGetTypeID((__bridge CFTypeRef)response[@"result"][@"readOnly"]) ==
+		    CFBooleanGetTypeID());
+		assert(CFGetTypeID((__bridge CFTypeRef)response[@"result"][@"keyStoreAvailable"]) ==
+		    CFBooleanGetTypeID());
+		response = [Ext4ControlClient request:@{ @"command" : @"getCapabilities" }
+					     endpoint:server.manifestURL
+						error:&ipcError];
+		assert(ipcError == nil &&
+		    CFGetTypeID((__bridge CFTypeRef)response[@"result"][@"kernelReadMapping"]) ==
+			CFBooleanGetTypeID());
 		dispatch_apply(
 		    16, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t index) {
 		      @autoreleasepool {

@@ -12,7 +12,7 @@ endif
 core_sources = files(
   'core/support.c', 'core/memory.c', 'core/mount.c', 'core/inode.c',
   'core/read.c', 'core/read_io.c', 'core/read_state.c',
-  'core/map_read.c', 'core/directory.c',
+  'core/map_read.c', 'core/seek.c', 'core/directory.c',
   'core/directory_lookup.c', 'core/inline.c', 'core/inline_create.c',
   'core/journal.c', 'core/transaction.c', 'core/journal_read.c',
   'core/recovery.c', 'core/group.c', 'core/system.c',

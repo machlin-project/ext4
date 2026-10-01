@@ -55,8 +55,9 @@
 					@"freeInodes" : @(_info.free_inodes),
 					@"mounted" : @(_mounted),
 					@"loadedKeys" : @(ext4_native_crypto_count(_crypto)),
-					@"keyStoreAvailable" : @(self.keyStoreError == nil),
-					@"readOnly" : @(!self.writable),
+					@"keyStoreAvailable" : self.keyStoreError == nil ? @YES
+											 : @NO,
+					@"readOnly" : self.writable ? @NO : @YES,
 					@"writeUnavailableReason" :
 						self.writeAvailabilityError.localizedDescription
 					    ?: NSNull.null,
@@ -74,7 +75,7 @@
 						@"getSettings", @"setSettings", @"dropReadState"
 					],
 					@"durableWrites" : @(self.writable),
-					@"kernelReadMapping" : @(!self.writable),
+					@"kernelReadMapping" : self.writable ? @NO : @YES,
 					@"aclAuthorization" : @NO,
 					@"keyManagement" : @YES,
 					@"keyStorage" : @"keychain",

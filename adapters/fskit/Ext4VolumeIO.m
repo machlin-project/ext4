@@ -80,6 +80,19 @@
 	return result;
 }
 
+- (enum ext4_result)seekItem:(Ext4Item *)item
+		      offset:(uint64_t)offset
+		      region:(enum ext4_seek_region)region
+		      result:(uint64_t *)result
+{
+	enum ext4_result status = ext4_seek_region_held(item->hold, offset, region, result);
+
+	if (!_retainReadState) {
+		ext4_drop_read_cache(item->hold);
+	}
+	return status;
+}
+
 - (void)readFile:(FSItem *)item
 	  offset:(off_t)offset
 	  length:(size_t)length

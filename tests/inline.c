@@ -100,6 +100,7 @@ reader(struct device *device)
 	size_t index;
 	size_t offset;
 	uint64_t cookie;
+	uint64_t found;
 	unsigned int seen;
 
 	device_reset(device, device->base);
@@ -110,6 +111,10 @@ reader(struct device *device)
 		inode = lookup(fs, name);
 		CHECK((inode.flags & EXT4_INODE_INLINE_DATA) && inode.blocks_512 == 0);
 		bytes_are(fs, &inode, expected, sizes[index]);
+		EXPECT(ext4_seek_region(fs, &inode, 0, EXT4_SEEK_DATA, &found), EXT4_OK);
+		CHECK(found == 0);
+		EXPECT(ext4_seek_region(fs, &inode, 0, EXT4_SEEK_HOLE, &found), EXT4_OK);
+		CHECK(found == inode.size);
 		for (offset = 0; offset <= sizes[index]; offset++) {
 			memset(observed, 0x5a, sizeof(observed));
 			EXPECT(

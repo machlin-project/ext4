@@ -119,6 +119,13 @@ Implementation and acceptance proceed through the portable core first, FSKit on
 stock macOS second, and LXNU-specific policy third. Adapter development is deferred
 until the required core format, mutation, metadata and recovery contracts pass.
 
+Sparse-region queries share the checked mapping walker and held-inode cache with
+reads. They advance by complete extent or indirect runs, treating unwritten
+reservations as holes and clipping the answer at logical EOF. Inline contents are
+a single data region. These queries inspect mapping metadata only; they never
+expose physical addresses or bypass encryption/verity data reads. Native adapters
+own dirty-page and delayed-allocation visibility before requesting a region.
+
 A resource reports its byte size and exact-read operation. A short underlying
 read is an error unless the adapter completes it before returning. Reads never
 exceed the supplied resource. A read-only mount does not repair or replay media.

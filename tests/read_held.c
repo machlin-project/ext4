@@ -193,6 +193,63 @@ check_reads(struct device *device)
 	free(expected);
 }
 
+static void
+check_seek_mutations(struct device *device)
+{
+	static const uint8_t name[] = "seek-regions";
+	struct ext4_fs *fs;
+	struct ext4_inode root;
+	struct ext4_inode inode;
+	struct ext4_inode_hold *hold;
+	struct ext4_timestamp now = { .seconds = 1700000000 };
+	struct ext4_inode_update update = { .fields = EXT4_ATTR_PERMISSIONS | EXT4_ATTR_UID |
+		    EXT4_ATTR_GID | EXT4_ATTR_ACCESS_TIME | EXT4_ATTR_MODIFY_TIME |
+		    EXT4_ATTR_CHANGE_TIME | EXT4_ATTR_XATTRS,
+		.permissions = 0600,
+		.access_time = now,
+		.modify_time = now,
+		.change_time = now };
+	uint64_t found = UINT64_MAX;
+	uint32_t bs = device->block_size;
+	uint8_t byte = 0x5a;
+	size_t completed;
+
+	device_reset(device, device->base);
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(ext4_create(fs, root.number, root.generation, name, sizeof(name) - 1U, &update, &now,
+		   &inode),
+	    EXT4_OK);
+	EXPECT(ext4_hold_inode(fs, inode.number, inode.generation, &hold), EXT4_OK);
+	update.fields &= ~(uint32_t)(EXT4_ATTR_UID | EXT4_ATTR_GID | EXT4_ATTR_ACCESS_TIME);
+	EXPECT(ext4_seek_region_held(hold, 0, EXT4_SEEK_HOLE, &found), EXT4_NOT_FOUND);
+	CHECK(found == UINT64_MAX);
+	EXPECT(
+	    ext4_truncate(fs, inode.number, inode.generation, 4U * bs, &update, &inode), EXT4_OK);
+	EXPECT(ext4_seek_region_held(hold, 0, EXT4_SEEK_HOLE, &found), EXT4_OK);
+	CHECK(found == 0);
+	EXPECT(ext4_seek_region_held(hold, 0, EXT4_SEEK_DATA, &found), EXT4_NOT_FOUND);
+	EXPECT(ext4_write(fs, inode.number, inode.generation, 2U * bs + 17U, &byte, 1, &update,
+		   &completed),
+	    EXT4_OK);
+	CHECK(completed == 1);
+	EXPECT(ext4_seek_region_held(hold, 0, EXT4_SEEK_DATA, &found), EXT4_OK);
+	CHECK(found == 2U * bs);
+	EXPECT(ext4_seek_region_held(hold, found, EXT4_SEEK_HOLE, &found), EXT4_OK);
+	CHECK(found == 3U * bs);
+	EXPECT(ext4_truncate(fs, inode.number, inode.generation, bs, &update, &inode), EXT4_OK);
+	found = UINT64_MAX;
+	EXPECT(ext4_seek_region_held(hold, 0, EXT4_SEEK_DATA, &found), EXT4_NOT_FOUND);
+	CHECK(found == UINT64_MAX);
+	EXPECT(ext4_seek_region_held(hold, 0, EXT4_SEEK_HOLE, &found), EXT4_OK);
+	CHECK(found == 0);
+	EXPECT(ext4_release_inode(hold), EXT4_OK);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	CHECK(device->live == 0);
+	puts("PASS held seeks refresh across sparse growth, writes and truncation");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -204,6 +261,7 @@ main(int argc, char **argv)
 		storage_open(&device, argv[index]);
 		check_reads(&device);
 		check_mappings(&device);
+		check_seek_mutations(&device);
 		storage_close(&device);
 		printf("PASS held read faults, refresh, EOF, revision wrap and lifetime: %s\n",
 		    argv[index]);

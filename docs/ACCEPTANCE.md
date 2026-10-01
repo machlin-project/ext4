@@ -3140,6 +3140,42 @@ present; no manual App Group cleanup is needed. Focused component evidence is in
 `artifacts/checks/fskit-control-recovery-final/`; installed evidence is in the lab's
 `artifacts/ext4-fskit/installed-clean/build19-install/`.
 
+The signed protocol-generation build also passes ordinary writes, mmap,
+concurrent I/O, namespace and xattr changes, native volume rename and read-only
+remount on 26.5.2 with both block sizes. Independent fsck passes. The set-ID and
+`diskutil renameVolume` failures remain visible in the report rather than
+preventing the independent persistence checks. Evidence is in the lab's
+`artifacts/ext4-fskit/installed-clean/build20-native-1/`.
+
+Installed extension-crash checks pass on both 16 MiB block-size profiles. After
+the normal writer has synchronized its data, the runner identifies the active
+extension by its endpoint socket and verifies its executable and owner before
+terminating it. Discovery removes the abandoned endpoint, the exact disposable
+device is forcibly detached, and a read-only remount verifies all durable data.
+Both exported images pass fsck; the persistence service remains available and
+the final endpoint lists are empty. This deliberately forced cleanup is not a
+normal-unmount result, an interrupted-commit test or hardware power-loss evidence.
+The runner tolerates idle extension processes without signalling them. Evidence
+is in the lab's `artifacts/ext4-fskit/installed-clean/build20-crash-3/`.
+
+The portable sparse-region query passes modeled extent and indirect layouts,
+unwritten reservations, partial EOF, large holes, held-cache reuse and injected
+allocation/read failures with 1/4/16/64 KiB blocks and metadata checksums on/off.
+Real inline fixtures pass in eight formats. Held-inode tests in ten image formats
+verify queries after sparse growth, writes and truncation. The signed universal
+build includes the 27 seek handler; the 26.x read-volume component suite also
+passes the corrected JSON boolean types through the actual IPC serialization.
+Evidence is in `artifacts/checks/fskit-seek21/`. Native 27 seeking, particularly
+visibility of buffered writes, remains unaccepted.
+
+A separate native diagnosis narrows the volume-name failure: public
+`DADiskRename` accepts both a short label and the 16-byte label on the same mounted
+4 KiB fixture, while `diskutil renameVolume` rejects both. Disk Arbitration reports
+the changed label, normal detach succeeds and independent fsck accepts the exported
+label. This establishes the public Disk Arbitration path, not compatibility with
+the `diskutil` command. Evidence is in the lab's
+`artifacts/ext4-fskit/installed-clean/build20-disk-arbitration-rename/resumed/`.
+
 ## Kernel build evidence
 
 `make kext` compiles every shared core source with the selected Xcode kernel

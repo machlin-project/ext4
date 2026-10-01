@@ -124,7 +124,9 @@ journal before publishing the new FSKit name. ext4 labels are at most 16 bytes.
 Native `fsetattrlist` rename, exact-limit labels, oversized rejection and persistence
 pass on both block sizes. `diskutil info` reports the new name after remount.
 The separate `diskutil renameVolume` invocation still rejects the requested name
-on stock 26.5.2; it is a remaining system-tool integration failure.
+on stock 26.5.2; it is a remaining system-tool integration failure. A direct
+public `DADiskRename` call succeeds for both short and exact-limit labels on the
+4 KiB fixture, with the result independently checked after detach.
 Attribute updates leave directory/symlink sizes and unavailable creation times
 unconsumed, as FSKit requires, while still applying other supported fields in the
 same request. Available-space reporting excludes reserved ext4 blocks.
@@ -322,13 +324,20 @@ Keep macOS 26.5 as the deployment target. A modern SDK can build one binary with
 27-only calls guarded by runtime availability; compile guards additionally keep
 those calls out when building against an older SDK. Conditional reclaim uses this
 boundary. Separate sibling volume classes implement the incompatible legacy and
-27 read/write reply signatures. Both call one serialized I/O engine. The 27
-handler supplies fresh inode attributes and sequenced free space in a successful
-write reply; it cannot publish a stale snapshot after a failed device refresh.
-Namespace and other operations retain the compatible older protocols. Native
-acceptance of this combination on macOS 27 remains required: the current host and
-guest run 26.x. Compiling with SDK 27 does not establish its runtime behavior.
+27 reply signatures. Each class advertises one complete protocol family, while
+both call the same serialized namespace, metadata and I/O engines. The 27 handler
+supplies fresh item and parent attributes and sequenced free space after mutations;
+it cannot publish a stale snapshot after a failed device refresh. Native acceptance
+of this handler family on macOS 27 remains required. Compiling with SDK 27 does
+not establish its runtime behavior.
 CI also builds against SDK 26.5, excluding the unavailable declarations.
+
+The 27 seek-region handler delegates to the portable mapping query. It skips
+whole sparse runs, treats unwritten extents as holes, clips at logical EOF and
+shares the held inode's bounded mapping cache with reads. It never exposes raw
+addresses or reads file data. The installed seek check also requires buffered
+writes and truncation to be visible; this cache contract still needs native 27
+acceptance. There is no equivalent public seek handler in the 26.5 API.
 
 Future 27-only context/cache handlers must delegate to the same volume engine,
 not duplicate the filesystem algorithms. Caller UID/GID in `FSContext` is useful
@@ -350,8 +359,8 @@ a candidate solution on 27, not evidence that either OS's behavior is fixed.
 | Resource reads | Exact aligned and unaligned reads | Mounted resource failure and removal |
 | File reads | Held state and restricted kernel mapping; mounted read/mmap/EOF checks on 26.5.2 | Native cache/reclaim stress, resource failures and removal |
 | User xattrs | Native read/list/set/remove roundtrip; macOS names omit the Linux user namespace prefix | Linux ACL/security/trusted namespaces stay hidden |
-| IPC and GUI | Signed same-user App Group RPC, live settings and normal unmount cleanup on 26.5.2 | Root-mounted/user-app coordination, crash recovery and GUI workflow acceptance |
-| Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, remount and independent fsck | Live set-ID attribute coherence, native ENOSPC acceptance, cache stress and device failures |
+| IPC and GUI | Signed same-user App Group RPC, live settings, normal cleanup and abandoned endpoint recovery after extension termination on 26.5.2 | Root-mounted/user-app coordination and GUI workflow acceptance |
+| Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded ENOSPC, post-fsync extension termination, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, cache stress and device failures |
 | Crypto and ACLs | CommonCrypto fscrypt v1/v2 reads and writes; native key import/removal and remounts on 26.5.2 | Verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
 | Maintenance | Native Disk Arbitration recovery of interrupted transactions; read-only dirty media remain unchanged; component crash cuts | Full check/repair tooling |
 

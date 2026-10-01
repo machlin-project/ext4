@@ -23,7 +23,7 @@ def main():
     parser.add_argument('--owners', choices=('on', 'off'), default='off')
     parser.add_argument('--extended', action='store_true',
                         help='Exercise native permissions, preallocation, ENOSPC and volume rename')
-    parser.add_argument('--extended-checks', nargs='+', choices=('policy', 'setid', 'pressure', 'rename'),
+    parser.add_argument('--extended-checks', nargs='+', choices=('policy', 'setid', 'pressure', 'rename', 'seek'),
                         default=None, help='Select affected groups within the extended suite')
     parser.add_argument('--guest-workdir', required=True, help='New absolute guest directory')
     parser.add_argument('--build-number', type=int, required=True)
@@ -117,7 +117,7 @@ def main():
                         assert denial['error']['code'] == errno.EBUSY
                         assert control(label + '-service-retained', 'device-service')['status'] == 'enabled'
                         result['checks'] = {}
-                        for group, timeout in (('policy', 90), ('setid', 90), ('pressure', 600)):
+                        for group, timeout in (('policy', 90), ('setid', 90), ('pressure', 600), ('seek', 90)):
                             if group in checks:
                                 check(group, root + '/checker', mount, group, timeout=timeout)
                         if 'rename' in checks:

@@ -55,7 +55,7 @@ API_AVAILABLE(macos(27.0))
 @interface Ext4ModernVolume
     : Ext4Volume <FSVolumeHandler, FSVolumeReadWriteHandler, FSVolumeOpenCloseHandler,
 	  FSVolumeXattrHandler, FSVolumeKernelOffloadedIOHandler, FSVolumeItemDeactivationHandler,
-	  FSVolumePreallocateHandler, FSVolumeRenameHandler>
+	  FSVolumePreallocateHandler, FSVolumeRenameHandler, FSVolumeSeekRegionHandler>
 @end
 #endif
 

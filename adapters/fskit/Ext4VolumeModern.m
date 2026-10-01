@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #import "Ext4VolumeInternal.h"
 #import "Ext4Support.h"
+#include <errno.h>
 
 #if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
 static NSError *
@@ -10,6 +11,44 @@ ext4_handler_error(id result, NSError *error)
 }
 
 @implementation Ext4ModernVolume
+
+- (void)seekWithinItem:(FSItem *)file
+	    fromOffset:(off_t)offset
+		region:(FSSeekRegion)region
+	       context:(FSContext *)context
+	  replyHandler:(void (^)(FSSeekRegionResult *, NSError *))reply
+{
+	@synchronized(self) {
+		Ext4Item *item = (Ext4Item *)file;
+		uint64_t found = 0;
+		FSSeekRegionResult *result = nil;
+		NSError *error;
+		enum ext4_result status = [self validateItem:item];
+
+		(void)context;
+		if (status == EXT4_OK &&
+		    (offset < 0 || (region != FSSeekRegionHole && region != FSSeekRegionData))) {
+			status = EXT4_INVALID_ARGUMENT;
+		}
+		if (status == EXT4_OK) {
+			status = [self
+			    seekItem:item
+			      offset:(uint64_t)offset
+			      region:region == FSSeekRegionHole ? EXT4_SEEK_HOLE : EXT4_SEEK_DATA
+			      result:&found];
+		}
+		if (status == EXT4_OK && found > INT64_MAX) {
+			status = EXT4_RANGE;
+		}
+		error = status == EXT4_NOT_FOUND
+		    ? [NSError errorWithDomain:NSPOSIXErrorDomain code:ENXIO userInfo:nil]
+		    : ext4_error(status);
+		if (error == nil) {
+			result = [[FSSeekRegionResult alloc] initWithReturnedOffset:(off_t)found];
+		}
+		reply(result, ext4_handler_error(result, error));
+	}
+}
 
 /* Call only inside an engine completion, while its volume monitor is held.
  * In particular, a parent or overwritten inode can have changed even when it

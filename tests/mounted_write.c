@@ -417,6 +417,44 @@ check_volume_rename(int root, int readonly)
 		      : "PASS native volume rename, exact label limit and oversized rejection");
 }
 
+static void
+check_seek_regions(int directory)
+{
+	/* Page-aligned regions keep the expected extents independent of writeback
+	 * page size on either filesystem block size. The final block has a short EOF. */
+	const size_t unit = 64U * 1024U;
+	uint8_t *data = malloc(unit);
+	int fd = openat(directory, "seek-regions", O_CREAT | O_EXCL | O_RDWR | O_NOFOLLOW, 0600);
+
+	CHECK(data != NULL && fd >= 0);
+	memset(data, 0x5a, unit);
+	CHECK(ftruncate(fd, 6U * unit + 17U) == 0);
+	CHECK(pwrite(fd, data, unit, unit) == (ssize_t)unit);
+	CHECK(pwrite(fd, data, unit, 3U * unit) == (ssize_t)unit);
+	CHECK(pwrite(fd, data, 17, 6U * unit) == 17);
+	CHECK(fsync(fd) == 0);
+	CHECK(lseek(fd, 0, SEEK_HOLE) == 0);
+	CHECK(lseek(fd, 1, SEEK_DATA) == (off_t)unit);
+	CHECK(lseek(fd, unit + 17U, SEEK_DATA) == (off_t)unit + 17);
+	CHECK(lseek(fd, unit + 17U, SEEK_HOLE) == (off_t)(2U * unit));
+	CHECK(lseek(fd, 2U * unit, SEEK_DATA) == (off_t)(3U * unit));
+	CHECK(lseek(fd, 3U * unit, SEEK_HOLE) == (off_t)(4U * unit));
+	CHECK(lseek(fd, 4U * unit, SEEK_DATA) == (off_t)(6U * unit));
+	CHECK(lseek(fd, 6U * unit, SEEK_HOLE) == (off_t)(6U * unit + 17U));
+	CHECK(lseek(fd, 6U * unit + 17U, SEEK_DATA) == -1 && errno == ENXIO);
+	CHECK(lseek(fd, 6U * unit + 17U, SEEK_HOLE) == -1 && errno == ENXIO);
+	CHECK(lseek(fd, -1, SEEK_DATA) == -1 && errno == EINVAL);
+	/* A seek must also see a buffered write that has not had an explicit fsync. */
+	CHECK(pwrite(fd, data, unit, 4U * unit) == (ssize_t)unit);
+	CHECK(lseek(fd, 4U * unit, SEEK_DATA) == (off_t)(4U * unit));
+	CHECK(ftruncate(fd, unit) == 0);
+	CHECK(lseek(fd, 0, SEEK_DATA) == -1 && errno == ENXIO);
+	CHECK(lseek(fd, 0, SEEK_HOLE) == 0);
+	CHECK(close(fd) == 0 && unlinkat(directory, "seek-regions", 0) == 0);
+	free(data);
+	puts("PASS native sparse seek, partial EOF, buffered writes and truncate invalidation");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -429,7 +467,8 @@ main(int argc, char **argv)
 	    (strcmp(argv[2], "write") == 0 || strcmp(argv[2], "verify") == 0 ||
 		strcmp(argv[2], "special") == 0 || strcmp(argv[2], "policy") == 0 ||
 		strcmp(argv[2], "setid") == 0 || strcmp(argv[2], "pressure") == 0 ||
-		strcmp(argv[2], "rename") == 0 || strcmp(argv[2], "rename-verify") == 0));
+		strcmp(argv[2], "seek") == 0 || strcmp(argv[2], "rename") == 0 ||
+		strcmp(argv[2], "rename-verify") == 0));
 	verify = strcmp(argv[2], "verify") == 0;
 	root = open(argv[1], O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
 	CHECK(root >= 0);
@@ -441,7 +480,8 @@ main(int argc, char **argv)
 		return EXIT_SUCCESS;
 	}
 	if (strcmp(argv[2], "special") == 0 || strcmp(argv[2], "policy") == 0 ||
-	    strcmp(argv[2], "setid") == 0 || strcmp(argv[2], "pressure") == 0) {
+	    strcmp(argv[2], "setid") == 0 || strcmp(argv[2], "pressure") == 0 ||
+	    strcmp(argv[2], "seek") == 0) {
 		CHECK((filesystem.f_flags & MNT_RDONLY) == 0);
 		directory = openat(root, "acceptance-write", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
 		CHECK(directory >= 0);
@@ -451,6 +491,8 @@ main(int argc, char **argv)
 			check_permissions(root, directory);
 		} else if (strcmp(argv[2], "setid") == 0) {
 			check_set_id(directory);
+		} else if (strcmp(argv[2], "seek") == 0) {
+			check_seek_regions(directory);
 		} else {
 			check_space(directory);
 		}
