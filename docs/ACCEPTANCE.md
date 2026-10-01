@@ -19,8 +19,8 @@ safe rejection of a feature is recorded separately from supporting it.
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Portable, independent and Linux checks pass with the recorded format limits; stock FSKit 1/4 KiB writes, shared mmap, concurrent writers, namespace mutations, open-unlinked lifetime, bounded ENOSPC and persistence-service failures pass; larger pressure and device-removal acceptance remain pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Portable journals and orphan recovery pass the recorded matrix; stock FSKit Disk Arbitration recovery passes both block sizes while dirty read-only media remain unchanged; physical device-loss qualification remains pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list, atomic attribute batches and mutation lifetime integration pass portable tests and targeted independent checks; bidirectional Linux attribute/ACL/security checks and direct replay of core attribute transactions pass eight profiles; the linked-truncate e2fsck defect remains explicit below; ACL enforcement and platform policy pending |
-| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Signed stock 26.5.2 reads/writes, namespace, mmap, concurrent I/O, user xattrs, recovery, bounded ENOSPC, native label changes, service-failure recovery and fscrypt v1/v2 key lifecycle pass 1/4 KiB profiles. Stock 27.0.1 also passes ordinary mutation, sparse queries and service-failure recovery on both block sizes. Live set-ID metadata and diskutil rename fail on both versions; the larger 1 KiB pressure workload timed out; device-loss stress remains unaccepted (see [FSKit](FSKIT.md)) |
-| FSKit control app | Signed app-to-mounted-extension IPC on supported macOS versions, authorization and teardown | Signed same-user App Group IPC, settings, Keychain import/removal, next-mount key snapshots and normal teardown pass on 26.5.2; independent-process crash discovery passes component checks and legacy crash discovery passes in the guest; root-mounted/user-app coordination and GUI workflow acceptance remain pending |
+| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Signed stock 26.5.2 reads/writes, namespace, mmap, concurrent I/O, user xattrs, recovery, bounded ENOSPC, native label changes, service-failure recovery and fscrypt v1/v2 key lifecycle pass 1/4 KiB profiles. Stock 27.0.1 also passes ordinary mutation, sparse queries, service-failure recovery and fscrypt v1/v2 key lifecycle on both block sizes. Live set-ID metadata and diskutil rename fail on both versions; the larger 1 KiB pressure workload stalls on 26.5.2. The modern adapter now preserves ENOSPC, but short installed capacity checks still fail prefix accounting/readback; device-loss stress remains unaccepted (see [FSKit](FSKIT.md)) |
+| FSKit control app | Signed app-to-mounted-extension IPC on supported macOS versions, authorization and teardown | Signed same-user App Group IPC, settings, Keychain import/removal, next-mount key snapshots and normal teardown pass on 26.5.2/27.0.1; crash discovery passes component and guest checks. Sudo-mounted/admin-app operation and basic GUI controls pass on 27.0.1; GUI key import/removal and cross-user or root-owned extension coordination remain unaccepted |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
 | LXNU policy | CAP_FSETID and privilege removal, xattrs, mixed-ABI races, inherited descriptions and attachment restrictions | Not implemented |
 | Compatibility and regression | Shared Linux/LXNU fixtures, native controls and identified stock/custom boots | Not run |
@@ -1880,6 +1880,18 @@ Linux runtime roundtrips for these attribute mutations remain pending.
 
 ## Attribute lifetime and first-attribute evidence
 
+Conditional removal (`EXT4_XATTR_REMOVE_IF_PRESENT`) resolves presence within the
+same transaction as the admitted inode/data update. The configured regression
+passes all 535 tests, retaining internal scenario applicability skips. New checks
+cover present and absent keys, unchanged shared blocks, empty storage, duplicate
+keys, malformed ownership and resource/write failures. Independent e2fsprogs
+inspection and journal replay accept 47 states for each of the 1 KiB and 4 KiB
+profiles. FSKit component checks cover write, truncate, owner/group changes and
+preallocation with absent, unrelated and capability attributes, preserving other
+metadata. The component comparison removes three resource reads when the
+capability is absent and six when present; this is not a native throughput claim.
+Evidence is in `artifacts/checks/fskit-xattr24/`.
+
 The working core supports attributes through new files/directories and both symlink
 representations, ordinary writes/truncate, hard links, rename replacement, held
 unlinked mutation and final release. Ten profiles pass the targeted lifetime fault
@@ -3204,6 +3216,43 @@ the changed label, normal detach succeeds and independent fsck accepts the expor
 label. This establishes the public Disk Arbitration path, not compatibility with
 the `diskutil` command. Evidence is in the lab's
 `artifacts/ext4-fskit/installed-clean/build20-disk-arbitration-rename/resumed/`.
+
+The modern handler family now has installed acceptance on stock 27.0.1. Both
+block sizes pass ordinary writes, metadata, namespace changes, shared mmap,
+concurrent I/O, open-unlinked lifetime and sparse queries, including visibility
+of buffered writes. Native volume rename, ordinary detach, read-only verification
+and independent fsck pass. Set-ID metadata coherence and `diskutil renameVolume`
+remain failed groups. A focused trace returns the correct stripped mode in a
+non-nil modern write result while native `fstat` still reports the previous mode;
+no cache workaround has been accepted. Evidence is in the lab's
+`artifacts/ext4-fskit/installed-27/build22-native-1/` and
+`artifacts/ext4-fskit/installed-27/build23-attributes-1-install/`.
+
+The same stock 27 guest passes all four service-termination/suspension cases.
+Suspension reaches the ten-second persistence deadline and termination fails
+promptly. Restoring the service does not revive an aborted writable owner.
+Recovery through a new writable mount, durable writes, ordinary detach, read-only
+verification and independent fsck pass every case. These scoped results are in
+the lab's `artifacts/ext4-fskit/installed-27/build23-barrier-1/`.
+
+Native fscrypt v1 and v2 roundtrips on 27.0.1 pass both block sizes and all 36
+applicable manifest entries, writes, shared mmap, concurrent I/O and open-file
+lifetime. Signed Keychain import/removal affects the next mount while retaining
+the current mount's key snapshot; subsequent keyless access is denied. Every
+export passes independent fsck, with final key and endpoint lists empty. FIFO and
+socket entries remain explicitly unsupported. Evidence is in the lab's
+`artifacts/ext4-fskit/installed-27/build24-encryption-{v1,v2}-1/`.
+
+The sudo-mount variant on 27.0.1 elevates only image attach/detach and verifies that
+file operations, control app and extension retain the administrator's ordinary
+UID. Both profiles pass policy checks, sparse queries, normal remount and fsck.
+Basic GUI volume discovery, settings and metadata release also pass. GUI key
+import/removal remains untested because the VM input transport could not complete
+the file-picker dialog. The canceled GUI attempt normally detaches its read-only
+copy, preserves image bytes and cleans its staged key and endpoint. This does not
+establish cross-user or root-owned extension IPC. Evidence is in the lab's
+`artifacts/ext4-fskit/installed-27/build24-root-mount-1/` and
+`artifacts/ext4-fskit/installed-27/build24-gui-1/`.
 
 ## Kernel build evidence
 

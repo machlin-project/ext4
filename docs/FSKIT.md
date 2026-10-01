@@ -61,6 +61,12 @@ The preferred native transfer size is 128 KiB, distinct from ext4's allocation
 block size. The legacy write callback preserves both the committed byte count and
 the terminal error, including a partial `ENOSPC`. The adapter must not conceal that
 error by reporting an incomplete kernel I/O as successful.
+The modern handler preserves the same terminal error. Its result/error ABI
+discards the result when an error is supplied, so it cannot publish the committed
+prefix as a byte count in that response. A short successful result previously
+turned a core `ENOSPC` into native `EIO`; the aligned capacity reproduction now
+receives `ENOSPC`. Native prefix accounting and cache coherence after that error
+remain unaccepted, as detailed below.
 
 The shared volume owns operations independently of FSKit's protocol generations.
 `Ext4LegacyVolume` conforms to the 26.x operation protocols; `Ext4ModernVolume`
@@ -127,14 +133,61 @@ but a timed-out filesystem operation leaves its devices intact for diagnosis.
 
 The original 64 MiB pressure workload passes on 26.5.2 with 4 KiB blocks,
 including ENOSPC at 53,215,232 bytes, readback, space reuse, remount and fsck.
-The 1 KiB workload exceeded its 600-second deadline after reporting 32,505,856
-bytes of progress. After termination was requested, its checker remained blocked
-in `pwrite` while the extension was idle; ordinary detach also timed out. Killing
-the owning extension released the filesystem mount, but a disposable guest restart
-was required to release the disk image. The exported interrupted image passed
-read-only fsck; that diagnostic does not accept the unfinished workload.
+The 1 KiB workload remains unaccepted. A repeat with an explicit 1,800-second
+deadline stopped making progress after 22,020,096 bytes. Before any signal or
+detach, the checker waited in `pwrite` through `lifs_vnop_write`, `cluster_write_ext`
+and a kernel mutex sleep, while the owning extension was idle and control IPC
+remained responsive. This establishes a native I/O stall, but not its cause.
+Disassembly of the guest's actual loaded kernel identifies an outstanding
+`cluster_write_direct` I/O-completion wait. The retained kernel identity matches
+the pre-signal sample; a different host KDK is not used as exact symbol evidence.
+After more than thirteen minutes without progress, the experiment was explicitly
+canceled early. Ordinary detach could not finish; terminating the exact owning
+extension and restarting the disposable guest released the image. Its exported
+interrupted state passed read-only fsck; that diagnostic does not accept the
+unfinished workload. Evidence is in the lab's
+`artifacts/ext4-fskit/installed-clean/build24-large-pressure-1/`.
 The runner's `--profiles` and `--pressure-timeout` permit focused, explicitly bounded
 reproduction. Evidence records the chosen deadline and streams progress as it arrives.
+
+The unchanged 64 MiB, 1 KiB workload advances without a stall on 27.0.1, but its
+original run failed near capacity with `EIO` instead of `ENOSPC`. Ordinary detach,
+read-only verification and independent fsck passed. A short reproduction traced
+this error conversion to the modern adapter's short-success response after core
+`ENOSPC`; that response has been corrected. The full pressure workload remains
+unaccepted. Its original evidence is in the lab's
+`artifacts/ext4-fskit/installed-27/build24-large-pressure-1/` and its adjacent
+`build24-large-pressure-1-control/` log directory.
+
+`ext4-mounted-capacity-test MOUNTPOINT cached|uncached [tail|aligned]` reuses a
+fresh copy of that full export. It requires the owned pressure fixture and at
+most 128 KiB of available headroom, allowing native metadata cleanup during
+mount. It releases the final 128 KiB, optionally rounds the start down to a native
+page boundary, and issues bounded 256 KiB writes. It checks reported bytes, file
+size, data readback, `ENOSPC` and synchronization, permitting deferred `ENOSPC`
+for cached writes. Each case requires a separate disposable copy and independent
+inspection after detach. An additional `apfs` argument fills a newly created
+APFS control volume of at most 256 MiB before running the same tail operation.
+The 128 MiB APFS aligned/uncached control passes and leaves the file at its
+pre-write size when returning `ENOSPC`.
+
+On installed 27.0.1, the corrected adapter returns `ENOSPC` for all four short
+cases (cached/uncached, aligned/tail), but the syscall reports no bytes even
+though earlier subrequests committed a prefix. Live `stat` reports growth while
+`pread` at the pre-write end returns zero. The strict checks remain failed;
+passing independent fsck does not establish native data-cache coherence. Both
+the entire 132,096-byte committed tail and its full on-disk size become visible
+after an ordinary read-only remount, without changing the image. That separates
+the observed live-cache failure from missing stored bytes; see
+`installed-27/build26-capacity-readback-1`. `diskutil verifyVolume` rejects this
+FSKit volume as unrecognized and supplies no filesystem-validation evidence.
+Both
+1 KiB and 4 KiB in-memory modern-handler checks pass partial and zero-progress
+`ENOSPC`, complete prefix readback and space reuse, with clean independent exports.
+Evidence is in the lab's `installed-27/build25-capacity-{apfs,aligned}-1` and
+`installed-27/build26-{modern-capacity,capacity-aligned,capacity-tail}-1`
+directories under `artifacts/ext4-fskit/`. DEBUG builds trace legacy callback
+entry/reply/return and modern short/error results without file contents.
 
 The mutation engine handles file/directory/symlink creation, links, unlink/rmdir,
 rename and replacement, partial writes, sparse growth, truncate, owner/mode/time
@@ -142,6 +195,14 @@ changes and user xattrs. Namespace changes advance directory verifiers. Data
 changes conservatively remove set-ID bits and Linux file capabilities in the same
 transaction because 26.x callbacks lack caller credentials. Immutable/append flags
 map to privileged Darwin system flags; `nodump` maps to the user flag.
+Capability removal is an explicit conditional xattr mutation in that transaction.
+The adapter prepares the policy without a preliminary getter or a cached claim
+that the attribute is absent. Component comparisons on both block sizes reduce
+resource reads for a small write from 12 to 9 without a capability, and from 20
+to 14 with one. Truncate and owner/group changes fall from 8 to 5 and from 20 to
+14 respectively; preallocation falls from 13 to 10 and from 28 to 22. The checks
+also preserve unrelated attributes. These are exact in-memory resource-call counts,
+not a native throughput result (`ext4/artifacts/checks/fskit-xattr24` in the workspace).
 Extent preallocation supports physical-EOF and persistent requests. Contiguous or
 all-or-nothing allocation and combined size/owner changes remain explicitly
 unsupported until the core can carry their full atomic contract.
@@ -204,7 +265,14 @@ Sockets and manifests use mode 0600. Both peers check the UID, and requests requ
 a fresh random 256-bit instance capability. Manifest reads reject symlinks,
 other owners, unsafe permissions and oversized files. Provisioned App Group
 access adds the sandbox boundary. The current contract requires app and extension
-to run as the same user; root-mounted/user-app operation is unaccepted.
+to run as the same user. On 27.0.1, mounting with `sudo hdiutil` in the administrator's
+login session leaves the extension running as that administrator. The ordinary-user
+app then passes control discovery and file operations on both block sizes, followed
+by normal detach, read-only verification and independent fsck. The runner's
+`--mount-as-root` elevates only image attachment and detachment; test I/O and control
+commands retain the ordinary UID. This does not accept a root-owned extension or
+cross-user IPC. Evidence is in the lab's
+`artifacts/ext4-fskit/installed-27/build24-root-mount-1/`.
 
 One connection carries one request and response: a four-byte unsigned big-endian
 length, then a UTF-8 JSON dictionary. Frames are limited to 64 KiB and transport
@@ -351,6 +419,21 @@ item. Adding or removing a saved key affects the next mount. Removing a saved ke
 the current adapter; live key replacement needs accepted name and data-cache invalidation.
 Signed, same-user Keychain sharing remains a separate installation requirement.
 
+Installed v1 and v2 acceptance passes 1 KiB and 4 KiB images on both 26.5.2 and
+27.0.1. On 27, all four cases verify 36 fixture entries, native encrypted writes
+and shared mmap, concurrent I/O, key import/removal with next-mount visibility,
+read-only remount and independent fsck. The generated reports are
+`lab/artifacts/ext4-fskit/installed-27/build24-encryption-{v1,v2}-1/summary.json`.
+
+A bounded GUI check on 27.0.1 also passes Refresh, active-volume geometry and service
+status, both values of the read-state retention setting and Release read metadata.
+The signed CLI independently verifies the setting changes. The raw-key file picker
+opens, but the VM input transport could not complete its selection dialog, so GUI
+key import and removal remain unaccepted; the signed CLI key lifecycle above is
+separate evidence. After canceling the dialog, normal detach leaves no endpoint,
+Refresh shows no volume, and the read-only image is unchanged. Evidence is in the
+lab's `artifacts/ext4-fskit/installed-27/build24-gui-1/`.
+
 ## OS compatibility
 
 Keep macOS 26.5 as the deployment target. A modern SDK can build one binary with
@@ -362,7 +445,8 @@ both call the same serialized namespace, metadata and I/O engines. The 27 handle
 supplies fresh item and parent attributes and sequenced free space after mutations;
 it cannot publish a stale snapshot after a failed device refresh. Native 27.0.1
 acceptance covers the ordinary mutation and persistence-service failure workloads
-above; encryption, broader cache/reclaim stress and physical device loss remain
+above, as well as the v1/v2 encryption lifecycle; broader cache/reclaim stress and
+physical device loss remain
 separate acceptance requirements.
 CI also builds against SDK 26.5, excluding the unavailable declarations.
 
@@ -401,9 +485,9 @@ Keep failed groups and interrupted-run cleanup distinct from passed groups.
 | Resource reads | Exact aligned and unaligned reads | Mounted resource failure and removal |
 | File reads | Held state and restricted kernel mapping; mounted read/mmap/EOF checks on 26.5.2 | Native cache/reclaim stress, resource failures and removal |
 | User xattrs | Native read/list/set/remove roundtrip; macOS names omit the Linux user namespace prefix | Linux ACL/security/trusted namespaces stay hidden |
-| IPC and GUI | Signed same-user App Group RPC, live settings, normal cleanup and abandoned endpoint recovery after extension termination on 26.5.2 | Root-mounted/user-app coordination and GUI workflow acceptance |
+| IPC and GUI | Signed same-user RPC and key lifecycle on 26.5.2/27.0.1; sudo-mounted/admin-app operation and basic GUI controls on 27.0.1; abandoned endpoint recovery on 26.5.2 | GUI key import/removal, cross-user or root-owned extension coordination |
 | Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded ENOSPC, extension/service termination and service timeout, recovery, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, cache stress and device removal |
-| Crypto and ACLs | CommonCrypto fscrypt v1/v2 reads and writes; native key import/removal and remounts on 26.5.2 | Verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
+| Crypto and ACLs | CommonCrypto fscrypt v1/v2 reads and writes; native key import/removal and remounts on 26.5.2 and 27.0.1 | Verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
 | Maintenance | Native Disk Arbitration recovery of interrupted transactions; read-only dirty media remain unchanged; component crash cuts | Full check/repair tooling |
 
 The public SDK documents direct writes

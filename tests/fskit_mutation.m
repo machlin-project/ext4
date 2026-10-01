@@ -111,12 +111,12 @@ name(NSString *value)
 	return [FSFileName nameWithString:value];
 }
 
-static Ext4LegacyVolume *
-open_volume_with_core(WritableImage *image, BOOL writable, struct ext4_fs **core)
+static Ext4Volume *
+open_volume_class(WritableImage *image, BOOL writable, struct ext4_fs **core, Class volumeClass)
 {
 	Ext4ResourceIO *io = [[Ext4ResourceIO alloc] initWithReader:image];
 	struct ext4_fs *fs = NULL;
-	Ext4LegacyVolume *volume;
+	Ext4Volume *volume;
 
 	assert(io != nil);
 	if (writable) {
@@ -125,16 +125,22 @@ open_volume_with_core(WritableImage *image, BOOL writable, struct ext4_fs **core
 	} else {
 		assert([io open:&fs] == EXT4_OK);
 	}
-	volume = [[Ext4LegacyVolume alloc] initWithResource:nil
-						 filesystem:fs
-					      resourceOwner:io
-						     crypto:NULL
-						   writable:writable];
+	volume = [[volumeClass alloc] initWithResource:nil
+					    filesystem:fs
+					 resourceOwner:io
+						crypto:NULL
+					      writable:writable];
 	assert(volume != nil);
 	if (core != NULL) {
 		*core = fs;
 	}
 	return volume;
+}
+
+static Ext4LegacyVolume *
+open_volume_with_core(WritableImage *image, BOOL writable, struct ext4_fs **core)
+{
+	return (Ext4LegacyVolume *)open_volume_class(image, writable, core, Ext4LegacyVolume.class);
 }
 
 static Ext4LegacyVolume *
@@ -144,7 +150,7 @@ open_volume(WritableImage *image, BOOL writable)
 }
 
 static FSItem *
-root_item(Ext4LegacyVolume *volume)
+root_item(Ext4Volume *volume)
 {
 	__block FSItem *root = nil;
 	MutationOptions *options = [MutationOptions new];
@@ -160,7 +166,7 @@ root_item(Ext4LegacyVolume *volume)
 }
 
 static FSItem *
-create_item(Ext4LegacyVolume *volume, FSItem *parent, NSString *filename, FSItemType type)
+create_item(Ext4Volume *volume, FSItem *parent, NSString *filename, FSItemType type)
 {
 	FSItemSetAttributesRequest *attributes = [FSItemSetAttributesRequest new];
 	__block FSItem *created = nil;
@@ -197,7 +203,7 @@ lookup(Ext4LegacyVolume *volume, FSItem *parent, NSString *filename)
 }
 
 static FSItemAttributes *
-attributes(Ext4LegacyVolume *volume, FSItem *item)
+attributes(Ext4Volume *volume, FSItem *item)
 {
 	__block FSItemAttributes *result = nil;
 	FSItemGetAttributesRequest *request = [FSItemGetAttributesRequest new];
@@ -239,7 +245,7 @@ check_bytes(Ext4LegacyVolume *volume, FSItem *file, NSData *expected)
 }
 
 static void
-set_size(Ext4LegacyVolume *volume, FSItem *file, uint64_t size)
+set_size(Ext4Volume *volume, FSItem *file, uint64_t size)
 {
 	FSItemSetAttributesRequest *request = [FSItemSetAttributesRequest new];
 
@@ -253,7 +259,7 @@ set_size(Ext4LegacyVolume *volume, FSItem *file, uint64_t size)
 }
 
 static void
-sync_volume(Ext4LegacyVolume *volume)
+sync_volume(Ext4Volume *volume)
 {
 	[volume synchronizeWithFlags:0
 			replyHandler:^(NSError *error) {
@@ -820,6 +826,83 @@ check_capacity(WritableImage *image)
 	     "reuse");
 }
 
+#if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
+API_AVAILABLE(macos(27.0))
+
+static void
+check_capacity_modern(WritableImage *image)
+{
+	Ext4ModernVolume *volume =
+	    (Ext4ModernVolume *)open_volume_class(image, YES, NULL, Ext4ModernVolume.class);
+	FSItem *file = create_item(volume, root_item(volume), @"capacity", FSItemTypeFile);
+	Ext4Item *item = (Ext4Item *)file;
+	NSMutableData *data = [NSMutableData dataWithLength:256 * 1024 - 1];
+	NSMutableData *readback = [NSMutableData dataWithLength:data.length];
+	__block NSError *failure;
+	__block BOOL replied;
+	uint64_t total = 0;
+	uint64_t offset;
+	size_t count;
+	size_t completed;
+
+	memset(data.mutableBytes, 0x6d, data.length);
+	do {
+		offset = total;
+		replied = NO;
+		[volume writeContents:data
+			       toFile:file
+			     atOffset:(off_t)offset
+			 replyHandler:^(FSWriteFileResult *result, NSError *error) {
+			   assert(!replied);
+			   replied = YES;
+			   failure = error;
+			   assert((result != nil) == (error == nil));
+			 }];
+		assert(replied && [volume validateItem:item] == EXT4_OK);
+		total = item->inode.size;
+		assert(total >= offset && total - offset <= data.length);
+		assert(total <= image.bytes.length);
+		if (failure == nil) {
+			assert(total - offset == data.length);
+		} else {
+			assert([failure.domain isEqualToString:NSPOSIXErrorDomain]);
+			assert(failure.code == ENOSPC && total > offset);
+		}
+	} while (failure == nil);
+	/* The modern reply cannot publish partial bytes alongside an error, but
+	 * the engine must retain exactly the committed prefix and remain usable. */
+	for (offset = 0; offset < total; offset += completed) {
+		count = (size_t)MIN(total - offset, data.length);
+		assert([volume readItem:item
+				 offset:offset
+				 buffer:readback.mutableBytes
+				 length:count
+			      completed:&completed] == EXT4_OK);
+		assert(completed == count && memcmp(readback.bytes, data.bytes, count) == 0);
+	}
+	[volume writeContents:data
+		       toFile:file
+		     atOffset:(off_t)total
+		 replyHandler:^(FSWriteFileResult *result, NSError *error) {
+		   assert(result == nil && [error.domain isEqualToString:NSPOSIXErrorDomain]);
+		   assert(error.code == ENOSPC);
+		 }];
+	assert(attributes(volume, file).size == total);
+	set_size(volume, file, 0);
+	[volume writeContents:data
+		       toFile:file
+		     atOffset:0
+		 replyHandler:^(FSWriteFileResult *result, NSError *error) {
+		   assert(result != nil && error == nil);
+		 }];
+	assert(attributes(volume, file).size == data.length);
+	sync_volume(volume);
+	[volume invalidate];
+	puts("PASS FSKit modern partial and zero-progress ENOSPC, committed prefix readback and "
+	     "space reuse");
+}
+#endif
+
 int
 main(int argc, const char *argv[])
 {
@@ -828,10 +911,26 @@ main(int argc, const char *argv[])
 		WritableImage *image = [WritableImage new];
 		NSUInteger barrier;
 
-		assert(argc == 2 || argc == 3 || (argc == 4 && strcmp(argv[2], "--capacity") == 0));
+		assert(argc == 2 || argc == 3 ||
+		    (argc == 4 &&
+			(strcmp(argv[2], "--capacity") == 0 ||
+			    strcmp(argv[2], "--modern-capacity") == 0)));
 		fixture = [NSData dataWithContentsOfFile:@(argv[1])];
 		assert(fixture != nil);
 		image.bytes = [fixture mutableCopy];
+		if (argc >= 3 && strcmp(argv[2], "--modern-capacity") == 0) {
+#if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
+			if (@available(macOS 27.0, *)) {
+				check_capacity_modern(image);
+				if (argc == 4) {
+					assert([image.bytes writeToFile:@(argv[3]) atomically:YES]);
+				}
+				return 0;
+			}
+#endif
+			fputs("Modern capacity acceptance requires macOS 27 and its SDK\n", stderr);
+			return 1;
+		}
 		if (argc >= 3 && strcmp(argv[2], "--capacity") == 0) {
 			check_capacity(image);
 			if (argc == 4) {

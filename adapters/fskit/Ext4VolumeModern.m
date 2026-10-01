@@ -614,14 +614,13 @@ ext4_handler_error(id result, NSError *error)
 #if DEBUG
 	      uint32_t previousMode =
 		  completed != 0 ? ((Ext4Item *)item)->inode.mode & ALLPERMS : 0;
+	      NSError *writeError = error;
+	      BOOL traceResult = error != nil || completed != contents.length;
 #endif
 
-	      /* Handler-style FSKit ignores a result when error is non-nil. A
-	       * committed prefix can instead be a short success if its current
-	       * metadata is still readable. An aborted owner fails the refresh. */
-	      if (completed != 0) {
-		      error = nil;
-	      }
+	      /* Handler-style FSKit requires ENOSPC on allocation failure and ignores
+	       * the result on error. Never turn a committed prefix into successful
+	       * completion of a larger kernel I/O; FSKit does not retry its suffix. */
 	      /* In particular, size, allocation and privilege removal must reach
 	       * FSKit's metadata cache in the same response as the write. Never
 	       * publish the pre-write inode when a failed device cannot refresh it. */
@@ -632,7 +631,14 @@ ext4_handler_error(id result, NSError *error)
 							   itemAttributes:attributes
 								freeSpace:[self currentFreeSpace]];
 	      }
+	      error = ext4_handler_error(result, error);
 #if DEBUG
+	      if (traceResult) {
+		      NSLog(@"Machlin ext4 modern write: offset=%lld requested=%lu completed=%lu "
+			    @"core-error=%@ result=%d reply-error=%@",
+			  (long long)offset, (unsigned long)contents.length,
+			  (unsigned long)completed, writeError, result != nil, error);
+	      }
 	      if ((previousMode & (S_ISUID | S_ISGID)) != 0) {
 		      NSLog(@"Machlin ext4 write attributes: inode=%u previous-mode=%o "
 			    @"returned-mode=%o wanted-mode=%d result=%d error=%@",
@@ -642,7 +648,7 @@ ext4_handler_error(id result, NSError *error)
 			  result != nil, error);
 	      }
 #endif
-	      reply(result, ext4_handler_error(result, error));
+	      reply(result, error);
 	    }];
 }
 

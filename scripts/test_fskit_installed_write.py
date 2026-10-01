@@ -3,11 +3,13 @@
 """Exercise installed FSKit writes, remount and independent fsck in a disposable Tart VM."""
 import argparse
 import errno
+import getpass
 import hashlib
 import json
 import plistlib
 import re
 import subprocess
+import sys
 from pathlib import Path
 from fskit_test_vm import GuestTimeout, guest_commands, image_devices
 
@@ -23,6 +25,8 @@ def main():
     parser.add_argument('--profiles', nargs='+', choices=('4k', '1k'), default=['4k', '1k'],
                         help='Select affected block sizes for a focused reproduction')
     parser.add_argument('--owners', choices=('on', 'off'), default='off')
+    parser.add_argument('--mount-as-root', action='store_true',
+                        help='Use sudo only for image attach/detach; keep file operations and control IPC unprivileged')
     parser.add_argument('--extended', action='store_true',
                         help='Exercise native permissions, preallocation, ENOSPC and volume rename')
     parser.add_argument('--extended-checks', nargs='+', choices=('policy', 'setid', 'pressure', 'rename', 'seek'),
@@ -40,6 +44,8 @@ def main():
         parser.error('--profiles must not repeat a block size')
     if args.pressure_timeout <= 0:
         parser.error('--pressure-timeout must be positive')
+    if args.mount_as_root and not sys.stdin.isatty():
+        parser.error('Run in a terminal for the no-echo VM sudo password prompt')
     checks = args.extended_checks or ('policy', 'setid', 'pressure', 'rename')
     if args.build_number < 1 or not args.guest_workdir.startswith('/') or args.guest_workdir == '/':
         parser.error('Use a positive build number and a new absolute guest directory')
@@ -54,6 +60,13 @@ def main():
     root = args.guest_workdir.rstrip('/')
     app = '/Applications/Machlin ext4.app/Contents/MacOS/Machlin ext4'
     guest = guest_commands(tart, args.vm, out)
+    password = None
+
+    def device_command(label, *command):
+        if not args.mount_as_root:
+            return guest(label, *command)
+        return guest(label, '/usr/bin/sudo', '-S', '-p', '', '--', *command,
+                     stdin=password)
 
     def control(label, *command):
         return json.loads(guest(label, app, '--control', *command))
@@ -67,6 +80,9 @@ def main():
     assert control('modules', 'modules')[0]['enabled'] is True
     assert control('service', 'device-service')['status'] == 'enabled'
     assert control('endpoints', 'list') == []
+    if args.mount_as_root:
+        password = (getpass.getpass('Guest sudo password: ') + '\n').encode()
+        assert device_command('mount-uid', '/usr/bin/id', '-u').strip() == b'0'
     guest('prepare', '/bin/sh', '-eu', '-c', 'umask 077; test ! -e "$1"; mkdir -p "$1"', 'prepare', root)
     guest('copy-checker', '/bin/cp', args.guest_share.rstrip('/') + '/' + args.checker, root + '/checker')
     guest('checker-mode', '/bin/chmod', '755', root + '/checker')
@@ -80,7 +96,8 @@ def main():
         mount = root + '/mount-' + profile
         device = None
         result = {'passed': False, 'checker_sha256': checker_hash,
-                  'pressure_timeout_seconds': args.pressure_timeout}
+                  'pressure_timeout_seconds': args.pressure_timeout,
+                  'mount_as_root': args.mount_as_root}
         results[profile] = result
 
         def check(name, *command, timeout=30):
@@ -103,7 +120,7 @@ def main():
             guest(profile + '-mount-directory', '/bin/mkdir', mount)
             for mode in ('write', 'verify'):
                 label = profile + '-' + mode
-                attachment = plistlib.loads(guest(label + '-mount', '/usr/bin/hdiutil', 'attach',
+                attachment = plistlib.loads(device_command(label + '-mount', '/usr/bin/hdiutil', 'attach',
                     '-readwrite' if mode == 'write' else '-readonly', '-owners', args.owners, '-nobrowse',
                     '-mountpoint', mount, '-plist', '-imagekey', 'diskimage-class=CRawDiskImage', image))
                 entries = [entry for entry in attachment['system-entities'] if 'dev-entry' in entry]
@@ -137,7 +154,7 @@ def main():
                         check('rename-persistence', root + '/checker', mount, 'rename-verify')
                         result['checks']['diskutil-label'] = {'passed': disk['VolumeName'] == 'Machlin writable'}
                     result['extended'] = True
-                guest(label + '-detach', '/usr/bin/hdiutil', 'detach', device)
+                device_command(label + '-detach', '/usr/bin/hdiutil', 'detach', device)
                 device = None
                 assert control(label + '-cleanup', 'list') == []
             export = out / ('written-' + profile + '.img')
@@ -162,7 +179,7 @@ def main():
             if not result['passed'] and not result.get('recovery_required'):
                 try:
                     for owned in image_devices(guest, profile + '-failure-devices', image):
-                        guest(profile + '-failure-detach', '/usr/bin/hdiutil', 'detach', owned)
+                        device_command(profile + '-failure-detach', '/usr/bin/hdiutil', 'detach', owned)
                     assert control(profile + '-failure-endpoints', 'list') == []
                 except Exception as error:
                     result['cleanup_error'] = str(error)

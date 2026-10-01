@@ -18,7 +18,24 @@
 	     atOffset:(off_t)offset
 	 replyHandler:(void (^)(size_t, NSError *))reply
 {
+#if DEBUG
+	/* Diagnose native completion stalls without logging file names or contents.
+	 * A returned callback is not evidence that the kernel completed its I/O. */
+	NSLog(@"Machlin ext4 legacy write: begin item=%p offset=%lld requested=%lu",
+	    (__bridge void *)item, (long long)offset, (unsigned long)contents.length);
+	[self writeFile:item
+		contents:contents
+		  offset:offset
+	    replyHandler:^(size_t completed, NSError *error) {
+	      NSLog(@"Machlin ext4 legacy write: reply item=%p offset=%lld completed=%lu error=%@",
+		  (__bridge void *)item, (long long)offset, (unsigned long)completed, error);
+	      reply(completed, error);
+	      NSLog(@"Machlin ext4 legacy write: returned item=%p offset=%lld",
+		  (__bridge void *)item, (long long)offset);
+	    }];
+#else
 	[self writeFile:item contents:contents offset:offset replyHandler:reply];
+#endif
 }
 
 - (void)blockmapFile:(FSItem *)file
