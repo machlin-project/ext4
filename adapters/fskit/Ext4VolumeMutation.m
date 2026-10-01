@@ -80,7 +80,8 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 	return !self.writable;
 }
 
-- (void)setVolumeName:(FSFileName *)name replyHandler:(void (^)(FSFileName *, NSError *))reply
+- (void)setVolumeName:(FSFileName *)name
+	 replyHandler:(void(NS_NOESCAPE ^)(FSFileName *, NSError *))reply
 {
 	@synchronized(self) {
 		NSData *bytes = name.data;
@@ -171,7 +172,7 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 	     parent:(FSItem *)directory
 	 attributes:(FSItemSetAttributesRequest *)attributes
 	       link:(FSFileName *)link
-	      reply:(void (^)(FSItem *, FSFileName *, NSError *))reply
+	      reply:(void(NS_NOESCAPE ^)(FSItem *, FSFileName *, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *parent = (Ext4Item *)directory;
@@ -254,7 +255,7 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 - (void)linkItem:(FSItem *)file
 	   named:(FSFileName *)name
      inDirectory:(FSItem *)directory
-    replyHandler:(void (^)(FSFileName *, NSError *))reply
+    replyHandler:(void(NS_NOESCAPE ^)(FSFileName *, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *item = (Ext4Item *)file;
@@ -283,7 +284,7 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 - (void)deleteItem:(FSItem *)file
 	     named:(FSFileName *)name
      fromDirectory:(FSItem *)directory
-      replyHandler:(void (^)(NSError *))reply
+      replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *item = (Ext4Item *)file;
@@ -321,7 +322,7 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
        toNewName:(FSFileName *)destinationName
      inDirectory:(FSItem *)destinationDirectory
 	overItem:(FSItem *)overFile
-    replyHandler:(void (^)(FSFileName *, NSError *))reply
+    replyHandler:(void(NS_NOESCAPE ^)(FSFileName *, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *item = (Ext4Item *)file;
@@ -368,7 +369,7 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 
 - (void)changeAttributes:(FSItemSetAttributesRequest *)request
 		  onItem:(FSItem *)file
-	    replyHandler:(void (^)(FSItemAttributes *, NSError *))reply
+	    replyHandler:(void(NS_NOESCAPE ^)(FSItemAttributes *, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *item = (Ext4Item *)file;
@@ -486,7 +487,7 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 		       atOffset:(off_t)offset
 			 length:(size_t)length
 			  flags:(FSPreallocateFlags)flags
-		   replyHandler:(void (^)(size_t, NSError *))reply
+		   replyHandler:(void(NS_NOESCAPE ^)(size_t, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *item = (Ext4Item *)file;

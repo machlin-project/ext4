@@ -23,11 +23,16 @@ def main():
     parser.add_argument('--owners', choices=('on', 'off'), default='off')
     parser.add_argument('--extended', action='store_true',
                         help='Exercise native permissions, preallocation, ENOSPC and volume rename')
+    parser.add_argument('--extended-checks', nargs='+', choices=('policy', 'setid', 'pressure', 'rename'),
+                        default=None, help='Select affected groups within the extended suite')
     parser.add_argument('--guest-workdir', required=True, help='New absolute guest directory')
     parser.add_argument('--build-number', type=int, required=True)
     parser.add_argument('--e2fsck', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True, help='New evidence directory')
     args = parser.parse_args()
+    if args.extended_checks is not None and not args.extended:
+        parser.error('--extended-checks requires --extended')
+    checks = args.extended_checks or ('policy', 'setid', 'pressure', 'rename')
     if args.build_number < 1 or not args.guest_workdir.startswith('/') or args.guest_workdir == '/':
         parser.error('Use a positive build number and a new absolute guest directory')
     if Path(args.checker).name != args.checker:
@@ -68,6 +73,20 @@ def main():
         device = None
         result = {'passed': False, 'checker_sha256': checker_hash}
         results[profile] = result
+
+        def check(name, *command, timeout=30):
+            # A conformance failure must not discard independent remount/fsck
+            # evidence. A timeout can still own the device and stops the run.
+            try:
+                guest(profile + '-' + name, *command, timeout=timeout)
+            except GuestTimeout:
+                raise
+            except RuntimeError as error:
+                result['checks'][name] = {'passed': False, 'error': str(error)}
+                return False
+            result['checks'][name] = {'passed': True}
+            return True
+
         try:
             guest(profile + '-copy', '/bin/cp', args.guest_share.rstrip('/') + '/' + filename, image)
             digest = hashlib.sha256((fixtures / filename).read_bytes()).hexdigest()
@@ -99,16 +118,14 @@ def main():
                         assert control(label + '-service-retained', 'device-service')['status'] == 'enabled'
                         result['checks'] = {}
                         for group, timeout in (('policy', 90), ('setid', 90), ('pressure', 600)):
-                            try:
-                                guest(label + '-' + group, root + '/checker', mount, group, timeout=timeout)
-                                result['checks'][group] = {'passed': True}
-                            except RuntimeError as error:
-                                result['checks'][group] = {'passed': False, 'error': str(error)}
-                                if 'timed out' in str(error):
-                                    raise
-                        guest(label + '-rename', '/usr/sbin/diskutil', 'renameVolume', device, 'Machlin writable')
-                        disk = plistlib.loads(guest(label + '-renamed', '/usr/sbin/diskutil', 'info', '-plist', device))
-                    assert disk['VolumeName'] == 'Machlin writable'
+                            if group in checks:
+                                check(group, root + '/checker', mount, group, timeout=timeout)
+                        if 'rename' in checks:
+                            check('diskutil-rename', '/usr/sbin/diskutil', 'renameVolume', device, 'Machlin writable')
+                            check('native-rename', root + '/checker', mount, 'rename')
+                    elif result['checks'].get('native-rename', {}).get('passed'):
+                        check('rename-persistence', root + '/checker', mount, 'rename-verify')
+                        result['checks']['diskutil-label'] = {'passed': disk['VolumeName'] == 'Machlin writable'}
                     result['extended'] = True
                 guest(label + '-detach', '/usr/bin/hdiutil', 'detach', device)
                 device = None

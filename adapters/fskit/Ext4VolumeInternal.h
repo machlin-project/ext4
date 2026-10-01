@@ -39,25 +39,25 @@
 	     parent:(FSItem *)directory
 	 attributes:(FSItemSetAttributesRequest *)attributes
 	       link:(FSFileName *)link
-	      reply:(void (^)(FSItem *, FSFileName *, NSError *))reply;
+	      reply:(void(NS_NOESCAPE ^)(FSItem *, FSFileName *, NSError *))reply;
 - (void)linkItem:(FSItem *)file
 	   named:(FSFileName *)name
      inDirectory:(FSItem *)directory
-    replyHandler:(void (^)(FSFileName *, NSError *))reply;
+    replyHandler:(void(NS_NOESCAPE ^)(FSFileName *, NSError *))reply;
 - (void)deleteItem:(FSItem *)file
 	     named:(FSFileName *)name
      fromDirectory:(FSItem *)directory
-      replyHandler:(void (^)(NSError *))reply;
+      replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply;
 - (void)moveItem:(FSItem *)file
      inDirectory:(FSItem *)sourceDirectory
 	   named:(FSFileName *)sourceName
        toNewName:(FSFileName *)destinationName
      inDirectory:(FSItem *)destinationDirectory
 	overItem:(FSItem *)overFile
-    replyHandler:(void (^)(FSFileName *, NSError *))reply;
+    replyHandler:(void(NS_NOESCAPE ^)(FSFileName *, NSError *))reply;
 - (void)changeAttributes:(FSItemSetAttributesRequest *)request
 		  onItem:(FSItem *)file
-	    replyHandler:(void (^)(FSItemAttributes *, NSError *))reply;
+	    replyHandler:(void(NS_NOESCAPE ^)(FSItemAttributes *, NSError *))reply;
 @end
 
 @interface Ext4Volume (OwnerOperations)
@@ -65,11 +65,11 @@
 	  offset:(off_t)offset
 	  length:(size_t)length
       intoBuffer:(FSMutableFileDataBuffer *)buffer
-    replyHandler:(void (^)(size_t, NSError *))reply;
+    replyHandler:(void(NS_NOESCAPE ^)(size_t, NSError *))reply;
 - (void)writeFile:(FSItem *)item
 	 contents:(NSData *)contents
 	   offset:(off_t)offset
-     replyHandler:(void (^)(size_t, NSError *))reply;
+     replyHandler:(void(NS_NOESCAPE ^)(size_t, NSError *))reply;
 - (void)startResourceMaintenance;
 - (void)releaseHold:(struct ext4_inode_hold *)hold;
 - (enum ext4_result)validateItem:(Ext4Item *)item;
@@ -90,4 +90,102 @@
 
 @interface Ext4Volume (ControlLifecycle)
 - (void)startControl;
+@end
+
+/* Engine callbacks are synchronous under the volume monitor. Version-specific
+ * protocol adapters translate their results before releasing that ownership. */
+@interface Ext4Volume (SharedCallbacks)
+- (void)createSymbolicLinkNamed:(FSFileName *)name
+		    inDirectory:(FSItem *)directory
+		     attributes:(FSItemSetAttributesRequest *)attributes
+		   linkContents:(FSFileName *)contents
+		   replyHandler:(void(NS_NOESCAPE ^)(FSItem *, FSFileName *, NSError *))reply;
+- (void)createLinkToItem:(FSItem *)item
+		   named:(FSFileName *)name
+	     inDirectory:(FSItem *)directory
+	    replyHandler:(void(NS_NOESCAPE ^)(FSFileName *, NSError *))reply;
+- (void)removeItem:(FSItem *)item
+	     named:(FSFileName *)name
+     fromDirectory:(FSItem *)directory
+      replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply;
+- (void)renameItem:(FSItem *)item
+       inDirectory:(FSItem *)sourceDirectory
+	     named:(FSFileName *)sourceName
+	 toNewName:(FSFileName *)destinationName
+       inDirectory:(FSItem *)destinationDirectory
+	  overItem:(FSItem *)overItem
+      replyHandler:(void(NS_NOESCAPE ^)(FSFileName *, NSError *))reply;
+- (void)setAttributes:(FSItemSetAttributesRequest *)request
+	       onItem:(FSItem *)item
+	 replyHandler:(void(NS_NOESCAPE ^)(FSItemAttributes *, NSError *))reply;
+- (void)createFileNamed:(FSFileName *)name
+	    inDirectory:(FSItem *)directory
+	     attributes:(FSItemSetAttributesRequest *)attributes
+		 packer:(FSExtentPacker *)packer
+	   replyHandler:(void(NS_NOESCAPE ^)(FSItem *, FSFileName *, NSError *))reply;
+- (void)createItemNamed:(FSFileName *)name
+		   type:(FSItemType)type
+	    inDirectory:(FSItem *)directory
+	     attributes:(FSItemSetAttributesRequest *)attributes
+	   replyHandler:(void(NS_NOESCAPE ^)(FSItem *, FSFileName *, NSError *))reply;
+- (void)activateWithOptions:(FSTaskOptions *)options
+	       replyHandler:(void(NS_NOESCAPE ^)(FSItem *, NSError *))reply;
+- (void)deactivateWithOptions:(FSDeactivateOptions)options
+		 replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply;
+- (void)lookupItemNamed:(FSFileName *)name
+	    inDirectory:(FSItem *)directory
+	   replyHandler:(void(NS_NOESCAPE ^)(FSItem *, FSFileName *, NSError *))reply;
+- (void)getAttributes:(FSItemGetAttributesRequest *)desiredAttributes
+	       ofItem:(FSItem *)item
+	 replyHandler:(void(NS_NOESCAPE ^)(FSItemAttributes *, NSError *))reply;
+- (void)enumerateDirectory:(FSItem *)directory
+	  startingAtCookie:(FSDirectoryCookie)cookie
+		  verifier:(FSDirectoryVerifier)verifier
+       providingAttributes:(FSItemGetAttributesRequest *)attributes
+	       usingPacker:(FSDirectoryEntryPacker *)packer
+	      replyHandler:(void(NS_NOESCAPE ^)(FSDirectoryVerifier, NSError *))reply;
+- (void)readSymbolicLink:(FSItem *)item
+	    replyHandler:(void(NS_NOESCAPE ^)(FSFileName *, NSError *))reply;
+- (void)deactivateItem:(FSItem *)file replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply;
+- (void)openItem:(FSItem *)item
+       withModes:(FSVolumeOpenModes)modes
+    replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply;
+- (void)closeItem:(FSItem *)item
+     keepingModes:(FSVolumeOpenModes)modes
+     replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply;
+- (void)lookupItemNamed:(FSFileName *)name
+	    inDirectory:(FSItem *)directory
+		 packer:(FSExtentPacker *)packer
+	   replyHandler:(void(NS_NOESCAPE ^)(FSItem *, FSFileName *, NSError *))reply;
+- (void)mapFile:(FSItem *)file
+	  offset:(off_t)offset
+	  length:(size_t)length
+	   flags:(FSBlockmapFlags)flags
+     operationID:(FSOperationID)operationID
+	  packer:(FSExtentPacker *)packer
+    replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply;
+- (void)finishIOForFile:(FSItem *)file
+		 offset:(off_t)offset
+		 length:(size_t)length
+		 status:(NSError *)status
+		  flags:(FSCompleteIOFlags)flags
+	    operationID:(FSOperationID)operationID
+	   replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply;
+- (void)getXattrNamed:(FSFileName *)name
+	       ofItem:(FSItem *)file
+	 replyHandler:(void(NS_NOESCAPE ^)(NSData *, NSError *))reply;
+- (void)listXattrsOfItem:(FSItem *)file
+	    replyHandler:(void(NS_NOESCAPE ^)(NSArray<FSFileName *> *, NSError *))reply;
+- (void)setXattrNamed:(FSFileName *)name
+	       toData:(NSData *)value
+	       onItem:(FSItem *)item
+	       policy:(FSSetXattrPolicy)policy
+	 replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply;
+- (void)setVolumeName:(FSFileName *)name
+	 replyHandler:(void(NS_NOESCAPE ^)(FSFileName *, NSError *))reply;
+- (void)preallocateSpaceForItem:(FSItem *)file
+		       atOffset:(off_t)offset
+			 length:(size_t)length
+			  flags:(FSPreallocateFlags)flags
+		   replyHandler:(void(NS_NOESCAPE ^)(size_t, NSError *))reply;
 @end

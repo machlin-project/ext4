@@ -218,7 +218,8 @@ ext4_control_live_endpoint(NSURL *url, NSDictionary *manifest)
 	}
 	socketURL = [[url URLByDeletingLastPathComponent] URLByAppendingPathComponent:name];
 	if ([manifest[@"lease"] isEqual:@1]) {
-		fd = open(url.fileSystemRepresentation, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+		fd = open(
+		    url.fileSystemRepresentation, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
 		if (fd < 0) {
 			return NO;
 		}

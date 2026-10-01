@@ -31,7 +31,8 @@ def main() -> None:
         "resource": ["Ext4ResourceIO.m"],
         "control": ["Ext4Control.m"],
         "volume": ["Ext4ResourceIO.m", "Ext4Support.m", "Ext4Control.m", "Ext4Volume.m",
-                   "Ext4VolumeIO.m", "Ext4VolumeCompatibility.m", "Ext4VolumeMutation.m", "Ext4VolumeControl.m", "Ext4Crypto.m"],
+                   "Ext4VolumeIO.m", "Ext4VolumeCompatibility.m", "Ext4VolumeModern.m",
+                   "Ext4VolumeMutation.m", "Ext4VolumeControl.m", "Ext4Crypto.m"],
         "crypto": ["Ext4Crypto.m"],
         "keystore": ["Ext4Crypto.m", "Ext4KeyStore.m", "Ext4Control.m"],
     }

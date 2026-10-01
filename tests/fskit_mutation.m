@@ -618,12 +618,19 @@ check_api_selection(NSData *fixture)
 	assert(volume != nil);
 #if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
 	if (@available(macOS 27.0, *)) {
+		assert([volume conformsToProtocol:@protocol(FSVolumeHandler)]);
 		assert([volume conformsToProtocol:@protocol(FSVolumeReadWriteHandler)]);
+		assert([volume conformsToProtocol:@protocol(FSVolumeKernelOffloadedIOHandler)]);
+		assert([volume conformsToProtocol:@protocol(FSVolumeXattrHandler)]);
+		assert([volume conformsToProtocol:@protocol(FSVolumePreallocateHandler)]);
+		assert(![volume conformsToProtocol:@protocol(FSVolumeOperations)]);
 		assert(![volume conformsToProtocol:@protocol(FSVolumeReadWriteOperations)]);
+		assert(![volume conformsToProtocol:@protocol(FSVolumeKernelOffloadedIOOperations)]);
 	} else
 #endif
 	{
 		assert([volume isKindOfClass:Ext4LegacyVolume.class]);
+		assert([volume conformsToProtocol:@protocol(FSVolumeOperations)]);
 		assert([volume conformsToProtocol:@protocol(FSVolumeReadWriteOperations)]);
 	}
 	[volume invalidate];

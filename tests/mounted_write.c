@@ -3,10 +3,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/attr.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -24,6 +26,17 @@ struct writer {
 	int fd;
 	unsigned index;
 	int error;
+};
+
+struct volume_name_change {
+	attrreference_t reference;
+	char name[64];
+};
+
+struct volume_name_result {
+	uint32_t length;
+	attrreference_t reference;
+	char name[256];
 };
 
 #define CHECK(condition)                                                                           \
@@ -351,6 +364,59 @@ check_space(int directory)
 	puts("PASS native preallocation, zero exposure, ENOSPC prefix readback and space reuse");
 }
 
+static int
+set_volume_name(int root, const char *name)
+{
+	struct attrlist request = { .bitmapcount = ATTR_BIT_MAP_COUNT,
+		.volattr = ATTR_VOL_INFO | ATTR_VOL_NAME };
+	struct volume_name_change change = { 0 };
+	size_t length = strlen(name) + 1;
+
+	CHECK(length <= sizeof(change.name));
+	change.reference.attr_dataoffset = offsetof(struct volume_name_change, name);
+	change.reference.attr_length = (uint32_t)length;
+	memcpy(change.name, name, length);
+	/* Darwin's volume-name unpacker requires space beyond the referenced bytes. */
+	return fsetattrlist(root, &request, &change, sizeof(change), 0);
+}
+
+static void
+check_volume_name(int root, const char *expected)
+{
+	struct attrlist request = { .bitmapcount = ATTR_BIT_MAP_COUNT,
+		.volattr = ATTR_VOL_INFO | ATTR_VOL_NAME };
+	struct volume_name_result result = { 0 };
+	size_t offset;
+
+	CHECK(fgetattrlist(root, &request, &result, sizeof(result), 0) == 0);
+	CHECK(result.length <= sizeof(result) && result.reference.attr_dataoffset >= 0);
+	offset = offsetof(struct volume_name_result, reference) + result.reference.attr_dataoffset;
+	CHECK(offset <= result.length && result.reference.attr_length <= result.length - offset);
+	CHECK(result.reference.attr_length == strlen(expected) + 1);
+	CHECK(memcmp((const char *)&result + offset, expected, result.reference.attr_length) == 0);
+}
+
+static void
+check_volume_rename(int root, int readonly)
+{
+	const char *name = "Machlin writable"; /* Exactly the ext4 label's 16-byte limit. */
+
+	if (readonly) {
+		check_volume_name(root, name);
+		CHECK(set_volume_name(root, "denied") == -1 && errno == EROFS);
+	} else {
+		CHECK(set_volume_name(root, "ext4") == 0);
+		check_volume_name(root, "ext4");
+		CHECK(set_volume_name(root, name) == 0);
+		check_volume_name(root, name);
+		CHECK(set_volume_name(root, "12345678901234567") == -1 &&
+		    (errno == EINVAL || errno == ENAMETOOLONG));
+		check_volume_name(root, name);
+	}
+	puts(readonly ? "PASS native volume label persistence and read-only denial"
+		      : "PASS native volume rename, exact label limit and oversized rejection");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -362,12 +428,18 @@ main(int argc, char **argv)
 	CHECK(argc == 3 &&
 	    (strcmp(argv[2], "write") == 0 || strcmp(argv[2], "verify") == 0 ||
 		strcmp(argv[2], "special") == 0 || strcmp(argv[2], "policy") == 0 ||
-		strcmp(argv[2], "setid") == 0 || strcmp(argv[2], "pressure") == 0));
+		strcmp(argv[2], "setid") == 0 || strcmp(argv[2], "pressure") == 0 ||
+		strcmp(argv[2], "rename") == 0 || strcmp(argv[2], "rename-verify") == 0));
 	verify = strcmp(argv[2], "verify") == 0;
 	root = open(argv[1], O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
 	CHECK(root >= 0);
 	CHECK(fstatfs(root, &filesystem) == 0);
 	CHECK(strcmp(filesystem.f_fstypename, "machlinext4") == 0);
+	if (strcmp(argv[2], "rename") == 0 || strcmp(argv[2], "rename-verify") == 0) {
+		check_volume_rename(root, (filesystem.f_flags & MNT_RDONLY) != 0);
+		CHECK(close(root) == 0);
+		return EXIT_SUCCESS;
+	}
 	if (strcmp(argv[2], "special") == 0 || strcmp(argv[2], "policy") == 0 ||
 	    strcmp(argv[2], "setid") == 0 || strcmp(argv[2], "pressure") == 0) {
 		CHECK((filesystem.f_flags & MNT_RDONLY) == 0);

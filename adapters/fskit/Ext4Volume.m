@@ -268,7 +268,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 		   type:(FSItemType)type
 	    inDirectory:(FSItem *)directory
 	     attributes:(FSItemSetAttributesRequest *)attributes
-	   replyHandler:(void (^)(FSItem *, FSFileName *, NSError *))reply
+	   replyHandler:(void(NS_NOESCAPE ^)(FSItem *, FSFileName *, NSError *))reply
 {
 	[self createNamed:name
 		     type:type
@@ -282,7 +282,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 		    inDirectory:(FSItem *)directory
 		     attributes:(FSItemSetAttributesRequest *)attributes
 		   linkContents:(FSFileName *)contents
-		   replyHandler:(void (^)(FSItem *, FSFileName *, NSError *))reply
+		   replyHandler:(void(NS_NOESCAPE ^)(FSItem *, FSFileName *, NSError *))reply
 {
 	[self createNamed:name
 		     type:FSItemTypeSymlink
@@ -295,7 +295,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 - (void)createLinkToItem:(FSItem *)item
 		   named:(FSFileName *)name
 	     inDirectory:(FSItem *)directory
-	    replyHandler:(void (^)(FSFileName *, NSError *))reply
+	    replyHandler:(void(NS_NOESCAPE ^)(FSFileName *, NSError *))reply
 {
 	[self linkItem:item named:name inDirectory:directory replyHandler:reply];
 }
@@ -303,7 +303,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 - (void)removeItem:(FSItem *)item
 	     named:(FSFileName *)name
      fromDirectory:(FSItem *)directory
-      replyHandler:(void (^)(NSError *))reply
+      replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply
 {
 	[self deleteItem:item named:name fromDirectory:directory replyHandler:reply];
 }
@@ -314,7 +314,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	 toNewName:(FSFileName *)destinationName
        inDirectory:(FSItem *)destinationDirectory
 	  overItem:(FSItem *)overItem
-      replyHandler:(void (^)(FSFileName *, NSError *))reply
+      replyHandler:(void(NS_NOESCAPE ^)(FSFileName *, NSError *))reply
 {
 	[self moveItem:item
 	     inDirectory:sourceDirectory
@@ -327,7 +327,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 
 - (void)setAttributes:(FSItemSetAttributesRequest *)request
 	       onItem:(FSItem *)item
-	 replyHandler:(void (^)(FSItemAttributes *, NSError *))reply
+	 replyHandler:(void(NS_NOESCAPE ^)(FSItemAttributes *, NSError *))reply
 {
 	[self changeAttributes:request onItem:item replyHandler:reply];
 }
@@ -413,7 +413,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	}
 }
 
-- (void)mountWithOptions:(FSTaskOptions *)options replyHandler:(void (^)(NSError *))reply
+- (void)mountWithOptions:(FSTaskOptions *)options replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply
 {
 #if DEBUG
 	NSLog(@"Machlin ext4 mount callback");
@@ -459,7 +459,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	}
 }
 
-- (void)unmountWithReplyHandler:(void (^)(void))reply
+- (void)unmountWithReplyHandler:(void(NS_NOESCAPE ^)(void))reply
 {
 #if DEBUG
 	NSLog(@"Machlin ext4 unmount callback");
@@ -499,7 +499,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	}
 }
 
-- (void)synchronizeWithFlags:(FSSyncFlags)flags replyHandler:(void (^)(NSError *))reply
+- (void)synchronizeWithFlags:(FSSyncFlags)flags replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply
 {
 	@synchronized(self) {
 		enum ext4_result error = !_active ? EXT4_STALE : _lifetimeError;
@@ -516,7 +516,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 }
 
 - (void)activateWithOptions:(FSTaskOptions *)options
-	       replyHandler:(void (^)(FSItem *, NSError *))reply
+	       replyHandler:(void(NS_NOESCAPE ^)(FSItem *, NSError *))reply
 {
 #if DEBUG
 	NSLog(@"Machlin ext4 activate callback");
@@ -538,7 +538,8 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	}
 }
 
-- (void)deactivateWithOptions:(FSDeactivateOptions)options replyHandler:(void (^)(NSError *))reply
+- (void)deactivateWithOptions:(FSDeactivateOptions)options
+		 replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply
 {
 	@synchronized(self) {
 		(void)options;
@@ -547,7 +548,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	}
 }
 
-- (void)reclaimItem:(FSItem *)item replyHandler:(void (^)(NSError *))reply
+- (void)reclaimItem:(FSItem *)item replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply
 {
 	@synchronized(self) {
 		if (![item isKindOfClass:Ext4Item.class]) {
@@ -589,7 +590,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 
 - (void)lookupItemNamed:(FSFileName *)name
 	    inDirectory:(FSItem *)directory
-	   replyHandler:(void (^)(FSItem *, FSFileName *, NSError *))reply
+	   replyHandler:(void(NS_NOESCAPE ^)(FSItem *, FSFileName *, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *parent = (Ext4Item *)directory;
@@ -611,7 +612,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 
 - (void)getAttributes:(FSItemGetAttributesRequest *)desiredAttributes
 	       ofItem:(FSItem *)item
-	 replyHandler:(void (^)(FSItemAttributes *, NSError *))reply
+	 replyHandler:(void(NS_NOESCAPE ^)(FSItemAttributes *, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *owned = (Ext4Item *)item;
@@ -628,7 +629,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 		  verifier:(FSDirectoryVerifier)verifier
        providingAttributes:(FSItemGetAttributesRequest *)attributes
 	       usingPacker:(FSDirectoryEntryPacker *)packer
-	      replyHandler:(void (^)(FSDirectoryVerifier, NSError *))reply
+	      replyHandler:(void(NS_NOESCAPE ^)(FSDirectoryVerifier, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *parent = (Ext4Item *)directory;
@@ -659,7 +660,8 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	}
 }
 
-- (void)readSymbolicLink:(FSItem *)item replyHandler:(void (^)(FSFileName *, NSError *))reply
+- (void)readSymbolicLink:(FSItem *)item
+	    replyHandler:(void(NS_NOESCAPE ^)(FSFileName *, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *owned = (Ext4Item *)item;

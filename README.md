@@ -41,10 +41,11 @@ I/O, namespace and user-xattr changes, open-unlinked lifetime and journal recove
 An authenticated device-cache service supplies persistence barriers; the app and
 extension retain their sandboxes. App Group control IPC and Keychain-backed
 fscrypt v1/v2 reads, writes and key lifetime pass signed native roundtrips, followed
-by independent fsck. Live set-ID metadata coherence currently fails on 26.5.2;
-native full-disk behavior, ACL authorization, device-loss stress, broader OS/hardware
-acceptance and production distribution remain unaccepted. The macOS 27 I/O reply
-path compiles but still needs native acceptance. This is not a production release.
+by independent fsck. Bounded full-disk tests and native volume-label changes pass
+on both block sizes. Live set-ID metadata coherence and `diskutil renameVolume`
+currently fail on 26.5.2; ACL authorization, device-loss stress, broader OS/hardware
+acceptance and production distribution remain unaccepted. The macOS 27 handler
+path still needs native acceptance. This is not a production release.
 
 The kernel adapter remains read-only. The arm64e kext has read-only acceptance in
 a dedicated custom-kernel VM; x86_64 has compilation evidence. Kernel encryption

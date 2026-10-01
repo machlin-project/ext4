@@ -19,8 +19,8 @@ safe rejection of a feature is recorded separately from supporting it.
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Portable, independent and Linux checks pass with the recorded format limits; stock FSKit 1/4 KiB writes, shared mmap, concurrent writers, namespace mutations and open-unlinked lifetime pass; native full-disk and failure acceptance remain pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Portable journals and orphan recovery pass the recorded matrix; stock FSKit Disk Arbitration recovery passes both block sizes while dirty read-only media remain unchanged; physical device-loss qualification remains pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list, atomic attribute batches and mutation lifetime integration pass portable tests and targeted independent checks; bidirectional Linux attribute/ACL/security checks and direct replay of core attribute transactions pass eight profiles; the linked-truncate e2fsck defect remains explicit below; ACL enforcement and platform policy pending |
-| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Signed stock 26.5.2 reads/writes, namespace, mmap, concurrent I/O, user xattrs, recovery and fscrypt v1/v2 key lifecycle pass 1/4 KiB profiles; live set-ID metadata fails and full-disk/failure stress remain unaccepted (see [FSKit](FSKIT.md)) |
-| FSKit control app | Signed app-to-mounted-extension IPC on supported macOS versions, authorization and teardown | Signed same-user App Group IPC, settings, Keychain import/removal, next-mount key snapshots and normal teardown pass on 26.5.2; root-mounted/user-app coordination, crash recovery and GUI workflow acceptance remain pending |
+| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Signed stock 26.5.2 reads/writes, namespace, mmap, concurrent I/O, user xattrs, recovery, bounded ENOSPC, native label changes and fscrypt v1/v2 key lifecycle pass 1/4 KiB profiles; live set-ID metadata and diskutil rename fail; device-loss/failure stress remains unaccepted (see [FSKit](FSKIT.md)) |
+| FSKit control app | Signed app-to-mounted-extension IPC on supported macOS versions, authorization and teardown | Signed same-user App Group IPC, settings, Keychain import/removal, next-mount key snapshots and normal teardown pass on 26.5.2; independent-process crash discovery passes component checks and legacy crash discovery passes in the guest; root-mounted/user-app coordination and GUI workflow acceptance remain pending |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
 | LXNU policy | CAP_FSETID and privilege removal, xattrs, mixed-ABI races, inherited descriptions and attachment restrictions | Not implemented |
 | Compatibility and regression | Shared Linux/LXNU fixtures, native controls and identified stock/custom boots | Not run |
@@ -3104,6 +3104,31 @@ image exports are retained in the lab's
 `artifacts/ext4-fskit/installed-clean/build17-pressure-diagnosis/`.
 The next harness leaves timed-out guest resources intact for diagnosis instead
 of beginning a competing detach, and reports progress while filling the volume.
+
+Subsequent installed pressure tests pass on independently authored 16 MiB images
+with 1 KiB and 4 KiB blocks: persistent physical-EOF preallocation, zero exposure,
+ENOSPC with exact committed-prefix readback, truncation and space reuse. Ordinary
+I/O, permissions and read-only remount verification also pass; both exported images
+pass fsck. This bounded result does not establish the original larger pressure
+case or device-loss behavior. Evidence is in the lab's
+`artifacts/ext4-fskit/installed-clean/build19-admin-3/`.
+
+Native volume rename passes through `fsetattrlist` on both block sizes, including
+the 16-byte limit, oversized-name rejection, read-only denial and remount
+persistence; both exported labels pass independent fsck. The initial native test
+packed its input buffer too tightly for Darwin's volume-name unpacker; the
+corrected test supplies the full bounded buffer. The separate `diskutil
+renameVolume` group still fails name validation and remains a reported conformance
+failure. Evidence is in the lab's
+`artifacts/ext4-fskit/installed-clean/build19-label-4/`.
+
+The protocol-generation refactor builds and signs both architectures with the
+modern SDK. The legacy read-volume suite and mutation suites for both block sizes
+pass; all six normal, recovery-required and recovered exports pass fsck. The
+factory test checks that a volume advertises only its selected protocol family.
+Evidence is in `artifacts/checks/fskit-protocol20/`. Modern namespace, attribute,
+xattr, allocation, lifecycle and I/O result construction still needs execution
+on macOS 27; this component result exercises the 26.x implementation.
 
 Control discovery now holds an advisory lock for each live endpoint. Component
 tests kill a separate server process and verify that discovery removes only its

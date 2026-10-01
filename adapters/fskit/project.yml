@@ -82,6 +82,7 @@ targets:
       - Ext4VolumeInternal.h
       - Ext4VolumeIO.m
       - Ext4VolumeCompatibility.m
+      - Ext4VolumeModern.m
       - Ext4VolumeMutation.m
       - Ext4VolumeControl.m
       - Ext4ResourceIO.m

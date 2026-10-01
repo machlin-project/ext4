@@ -62,6 +62,18 @@ block size. The legacy write callback preserves both the committed byte count an
 the terminal error, including a partial `ENOSPC`. The adapter must not conceal that
 error by reporting an incomplete kernel I/O as successful.
 
+The shared volume owns operations independently of FSKit's protocol generations.
+`Ext4LegacyVolume` conforms to the 26.x operation protocols; `Ext4ModernVolume`
+conforms to the complete 27 handler family. The factory chooses one family for
+the lifetime of a mount. No class advertises both incompatible I/O reply ABIs.
+The modern boundary returns fresh item, parent and overwritten-item attributes
+and available space within the same volume monitor as the operation. It also
+checks fallible result construction. The shared callbacks are explicitly
+synchronous; the bridge neither retains completion blocks nor duplicates disk
+algorithms. Native macOS 27 acceptance is still required; compiled handlers alone
+do not establish cache coherence. Native authorization and the existing ACL
+rejection policy remain in force on both versions.
+
 ## Writable devices and persistence
 
 The app bundles a ServiceManagement launch daemon whose operations are a health
@@ -109,6 +121,10 @@ available to adapters whose native interface can express it.
 
 Volume rename commits the primary superblock label and checksum through the
 journal before publishing the new FSKit name. ext4 labels are at most 16 bytes.
+Native `fsetattrlist` rename, exact-limit labels, oversized rejection and persistence
+pass on both block sizes. `diskutil info` reports the new name after remount.
+The separate `diskutil renameVolume` invocation still rejects the requested name
+on stock 26.5.2; it is a remaining system-tool integration failure.
 Attribute updates leave directory/symlink sizes and unavailable creation times
 unconsumed, as FSKit requires, while still applying other supported fields in the
 same request. Available-space reporting excludes reserved ext4 blocks.
@@ -174,8 +190,8 @@ optional `arguments`. Responses contain the version and instance, plus either
 The app performs RPC off its UI thread. Settings last for the current mounted
 instance. Disconnecting the app does not affect mounted I/O. Unmount/invalidation
 removes the endpoint. An already-received command still checks active volume state.
-After an extension crash, stale manifests may remain; connection failure is
-reported and a manifest alone is never evidence of a live mount.
+After an extension crash, discovery removes abandoned leased endpoints and filters
+definitively dead legacy endpoints. A manifest alone is never evidence of a live mount.
 
 This is a control plane, not a raw disk editor. Unsupported commands return
 `ENOTSUP`. Recovery, live key changes and online feature changes are not exposed over IPC.

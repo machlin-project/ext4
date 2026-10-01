@@ -14,7 +14,7 @@
 	return self.writable ? FSItemDeactivationForRemovedItems : FSItemDeactivationNever;
 }
 
-- (void)deactivateItem:(FSItem *)file replyHandler:(void (^)(NSError *))reply
+- (void)deactivateItem:(FSItem *)file replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *item = (Ext4Item *)file;
@@ -39,7 +39,7 @@
 
 - (void)openItem:(FSItem *)item
        withModes:(FSVolumeOpenModes)modes
-    replyHandler:(void (^)(NSError *))reply
+    replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply
 {
 	@synchronized(self) {
 		enum ext4_result result = [self validateItem:(Ext4Item *)item];
@@ -55,7 +55,7 @@
 
 - (void)closeItem:(FSItem *)item
      keepingModes:(FSVolumeOpenModes)modes
-     replyHandler:(void (^)(NSError *))reply
+     replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply
 {
 	(void)modes;
 	@synchronized(self) {
@@ -84,7 +84,7 @@
 	  offset:(off_t)offset
 	  length:(size_t)length
       intoBuffer:(FSMutableFileDataBuffer *)buffer
-    replyHandler:(void (^)(size_t, NSError *))reply
+    replyHandler:(void(NS_NOESCAPE ^)(size_t, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *owned = (Ext4Item *)item;
@@ -116,7 +116,7 @@
 - (void)writeFile:(FSItem *)item
 	 contents:(NSData *)contents
 	   offset:(off_t)offset
-     replyHandler:(void (^)(size_t, NSError *))reply
+     replyHandler:(void(NS_NOESCAPE ^)(size_t, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *owned = (Ext4Item *)item;
@@ -147,7 +147,7 @@
 	    inDirectory:(FSItem *)directory
 	     attributes:(FSItemSetAttributesRequest *)attributes
 		 packer:(FSExtentPacker *)packer
-	   replyHandler:(void (^)(FSItem *, FSFileName *, NSError *))reply
+	   replyHandler:(void(NS_NOESCAPE ^)(FSItem *, FSFileName *, NSError *))reply
 {
 	(void)packer;
 	[self createItemNamed:name
@@ -160,19 +160,19 @@
 - (void)lookupItemNamed:(FSFileName *)name
 	    inDirectory:(FSItem *)directory
 		 packer:(FSExtentPacker *)packer
-	   replyHandler:(void (^)(FSItem *, FSFileName *, NSError *))reply
+	   replyHandler:(void(NS_NOESCAPE ^)(FSItem *, FSFileName *, NSError *))reply
 {
 	(void)packer;
 	[self lookupItemNamed:name inDirectory:directory replyHandler:reply];
 }
 
-- (void)blockmapFile:(FSItem *)file
-	      offset:(off_t)offset
-	      length:(size_t)length
-	       flags:(FSBlockmapFlags)flags
-	 operationID:(FSOperationID)operationID
-	      packer:(FSExtentPacker *)packer
-	replyHandler:(void (^)(NSError *))reply
+- (void)mapFile:(FSItem *)file
+	  offset:(off_t)offset
+	  length:(size_t)length
+	   flags:(FSBlockmapFlags)flags
+     operationID:(FSOperationID)operationID
+	  packer:(FSExtentPacker *)packer
+    replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *item = (Ext4Item *)file;
@@ -228,13 +228,13 @@
 	}
 }
 
-- (void)completeIOForFile:(FSItem *)file
-		   offset:(off_t)offset
-		   length:(size_t)length
-		   status:(NSError *)status
-		    flags:(FSCompleteIOFlags)flags
-	      operationID:(FSOperationID)operationID
-	     replyHandler:(void (^)(NSError *))reply
+- (void)finishIOForFile:(FSItem *)file
+		 offset:(off_t)offset
+		 length:(size_t)length
+		 status:(NSError *)status
+		  flags:(FSCompleteIOFlags)flags
+	    operationID:(FSOperationID)operationID
+	   replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply
 {
 	(void)file;
 	(void)offset;
@@ -247,7 +247,7 @@
  * Linux ACL, trusted and security namespaces are never exported as user xattrs. */
 - (void)getXattrNamed:(FSFileName *)name
 	       ofItem:(FSItem *)file
-	 replyHandler:(void (^)(NSData *, NSError *))reply
+	 replyHandler:(void(NS_NOESCAPE ^)(NSData *, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *item = (Ext4Item *)file;
@@ -283,7 +283,7 @@
 }
 
 - (void)listXattrsOfItem:(FSItem *)file
-	    replyHandler:(void (^)(NSArray<FSFileName *> *, NSError *))reply
+	    replyHandler:(void(NS_NOESCAPE ^)(NSArray<FSFileName *> *, NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *item = (Ext4Item *)file;
@@ -323,7 +323,7 @@
 	       toData:(NSData *)value
 	       onItem:(FSItem *)item
 	       policy:(FSSetXattrPolicy)policy
-	 replyHandler:(void (^)(NSError *))reply
+	 replyHandler:(void(NS_NOESCAPE ^)(NSError *))reply
 {
 	@synchronized(self) {
 		Ext4Item *owned = (Ext4Item *)item;

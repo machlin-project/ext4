@@ -21,81 +21,41 @@
 	[self writeFile:item contents:contents offset:offset replyHandler:reply];
 }
 
-@end
-
-#if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
-@implementation Ext4ModernVolume
-
-- (void)readFromFile:(FSItem *)item
+- (void)blockmapFile:(FSItem *)file
 	      offset:(off_t)offset
 	      length:(size_t)length
-	  intoBuffer:(FSMutableFileDataBuffer *)buffer
-	replyHandler:(void (^)(FSReadFileResult *, NSError *))reply
+	       flags:(FSBlockmapFlags)flags
+	 operationID:(FSOperationID)operationID
+	      packer:(FSExtentPacker *)packer
+	replyHandler:(void (^)(NSError *))reply
 {
-	[self readFile:item
+	[self mapFile:file
 		  offset:offset
 		  length:length
-	      intoBuffer:buffer
-	    replyHandler:^(size_t completed, NSError *error) {
-	      FSReadFileResult *result = nil;
-
-	      /* The engine calls back under the volume monitor. Publish the same
-	       * inode snapshot that supplied these bytes, without a concurrent edit. */
-	      if (error == nil) {
-		      result = [[FSReadFileResult alloc]
-			  initWithBytesRead:completed
-			     itemAttributes:[self attributesForInode:&((Ext4Item *)item)->inode]];
-		      if (result == nil) {
-			      error = ext4_error(EXT4_IO);
-		      }
-	      }
-	      reply(result, error);
-	    }];
+		   flags:flags
+	     operationID:operationID
+		  packer:packer
+	    replyHandler:reply];
 }
 
-- (void)writeContents:(NSData *)contents
-	       toFile:(FSItem *)item
-	     atOffset:(off_t)offset
-	 replyHandler:(void (^)(FSWriteFileResult *, NSError *))reply
+- (void)completeIOForFile:(FSItem *)file
+		   offset:(off_t)offset
+		   length:(size_t)length
+		   status:(NSError *)status
+		    flags:(FSCompleteIOFlags)flags
+	      operationID:(FSOperationID)operationID
+	     replyHandler:(void (^)(NSError *))reply
 {
-	[self writeFile:item
-		contents:contents
-		  offset:offset
-	    replyHandler:^(size_t completed, NSError *error) {
-	      FSWriteFileResult *result = nil;
-	      FSFreeSpace *space;
-	      FSStatFSResult *statistics;
-
-	      /* Handler-style FSKit ignores a result when error is non-nil. A
-	       * committed prefix can instead be a short success if its current
-	       * metadata is still readable. An aborted owner fails the refresh. */
-	      if (completed != 0) {
-		      error = nil;
-	      }
-	      /* In particular, size, allocation and privilege removal must reach
-	       * FSKit's metadata cache in the same response as the write. Never
-	       * publish the pre-write inode when a failed device cannot refresh it. */
-	      if (error == nil) {
-		      error = ext4_error([self validateItem:(Ext4Item *)item]);
-	      }
-	      if (error == nil) {
-		      statistics = self.volumeStatistics;
-		      space = [FSFreeSpace new];
-		      [space populateWithBytes:statistics.availableBlocks * statistics.blockSize];
-		      result = [[FSWriteFileResult alloc]
-			  initWithBytesWritten:completed
-				itemAttributes:[self attributesForInode:&((Ext4Item *)item)->inode]
-				     freeSpace:space];
-		      if (result == nil) {
-			      error = ext4_error(EXT4_IO);
-		      }
-	      }
-	      reply(result, error);
-	    }];
+	[self finishIOForFile:file
+		       offset:offset
+		       length:length
+		       status:status
+			flags:flags
+		  operationID:operationID
+		 replyHandler:reply];
 }
 
 @end
-#endif
 
 Ext4Volume *
 ext4_volume_create(FSBlockDeviceResource *resource, struct ext4_fs *filesystem, id resourceOwner,

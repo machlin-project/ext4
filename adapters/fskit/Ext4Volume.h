@@ -4,7 +4,7 @@
 
 struct ext4_native_crypto;
 
-@interface Ext4Volume : FSVolume <FSVolumeOperations>
+@interface Ext4Volume : FSVolume <FSVolumePathConfOperations>
 /* Takes ownership of filesystem on success. ResourceOwner retains callback
  * storage through the last item and ext4_unmount. The device view is exclusive. */
 - (instancetype)initWithResource:(FSBlockDeviceResource *)resource
@@ -24,6 +24,13 @@ struct ext4_native_crypto;
 @property(nonatomic, strong) NSError *keyStoreError;
 @property(nonatomic, strong) NSError *writeAvailabilityError;
 @property(nonatomic, readonly) BOOL writable;
+@property(nonatomic, readonly) FSVolumeSupportedCapabilities *supportedVolumeCapabilities;
+@property(nonatomic, readonly) FSStatFSResult *volumeStatistics;
+@property(nonatomic, readonly) FSItemDeactivationOptions itemDeactivationPolicy;
+- (void)mountWithOptions:(FSTaskOptions *)options replyHandler:(void (^)(NSError *))reply;
+- (void)unmountWithReplyHandler:(void (^)(void))reply;
+- (void)synchronizeWithFlags:(FSSyncFlags)flags replyHandler:(void (^)(NSError *))reply;
+- (void)reclaimItem:(FSItem *)item replyHandler:(void (^)(NSError *))reply;
 - (NSError *)checkMountEligibility;
 /* Release a writable load used only for maintenance, before resource unload. */
 - (NSError *)finishUnloadedResource;
@@ -31,25 +38,24 @@ struct ext4_native_crypto;
 
 @end
 
-@interface Ext4Volume (FileIO) <FSVolumeOpenCloseOperations, FSVolumeXattrOperations,
-    FSVolumeKernelOffloadedIOOperations, FSVolumeItemDeactivation>
-@end
-
 @interface Ext4Volume (Control)
 - (NSDictionary *)controlRequest:(NSDictionary *)request;
 @end
 
-@interface Ext4Volume (Mutation) <FSVolumePreallocateOperations, FSVolumeRenameOperations>
-@end
-
-/* Read/write protocols reuse selectors with incompatible reply blocks. Sibling
- * classes keep each volume's reply ABI fixed for its entire lifetime. */
-@interface Ext4LegacyVolume : Ext4Volume <FSVolumeReadWriteOperations>
+/* Select one complete protocol family. Some selectors have incompatible reply
+ * ABIs; conformance belongs to the runtime-specific classes, never their owner. */
+@interface Ext4LegacyVolume
+    : Ext4Volume <FSVolumeOperations, FSVolumeReadWriteOperations, FSVolumeOpenCloseOperations,
+	  FSVolumeXattrOperations, FSVolumeKernelOffloadedIOOperations, FSVolumeItemDeactivation,
+	  FSVolumePreallocateOperations, FSVolumeRenameOperations>
 @end
 
 #if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
 API_AVAILABLE(macos(27.0))
-@interface Ext4ModernVolume : Ext4Volume <FSVolumeReadWriteHandler>
+@interface Ext4ModernVolume
+    : Ext4Volume <FSVolumeHandler, FSVolumeReadWriteHandler, FSVolumeOpenCloseHandler,
+	  FSVolumeXattrHandler, FSVolumeKernelOffloadedIOHandler, FSVolumeItemDeactivationHandler,
+	  FSVolumePreallocateHandler, FSVolumeRenameHandler>
 @end
 #endif
 
