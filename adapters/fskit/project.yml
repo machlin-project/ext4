@@ -126,6 +126,8 @@ targets:
       - App.swift
       - ControlCommand.swift
       - DeviceService.swift
+      - Ext4ExtensionSettings.h
+      - Ext4ExtensionSettings.m
       - Ext4DeviceBarrier.h
       - Ext4DeviceBarrier.m
       - Ext4PeerIdentity.m

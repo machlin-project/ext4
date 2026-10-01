@@ -2,3 +2,4 @@
 #import "Ext4Control.h"
 #import "Ext4KeyStore.h"
 #import "Ext4DeviceBarrier.h"
+#import "Ext4ExtensionSettings.h"

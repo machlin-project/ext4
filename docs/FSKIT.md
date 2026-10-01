@@ -654,7 +654,7 @@ Keep failed groups and interrupted-run cleanup distinct from passed groups.
 | Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded cached-write/truncate/rename stress, bounded ENOSPC, extension/service termination and timeout, forced-detach durability, recovery, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, memory-pressure stress and physical device loss |
 | Crypto and ACLs | CommonCrypto fscrypt v1/v2 reads and writes; native key import/removal and remounts on 26.5.2 and 27.0.1 | Verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
 | Maintenance | Native Disk Arbitration recovery of interrupted transactions; read-only dirty media remain unchanged; component crash cuts | Full check/repair tooling |
-| Distribution | Universal Xcode Release archive/export, Developer ID signatures, hardened runtime, timestamps, matching app/extension profiles and a notarized export accepted by Gatekeeper | Writable distribution installation and broader OS/hardware acceptance |
+| Distribution | Universal Xcode Release archive/export, Developer ID signatures, hardened runtime, timestamps, matching app/extension profiles, notarization, Gatekeeper and installed native write/remount/policy/fsck on 26.5.2/27.0.1 | Settings-button GUI acceptance and broader OS/hardware acceptance; native failures above remain open |
 
 The public SDK documents direct writes
 and a metadata buffer-cache flush, but does not establish that a barrier persists
@@ -790,9 +790,18 @@ archive, and the final app/extension profiles authorize their signed entitlement
 No credential reset, new certificate, policy change or second submission is
 needed. Organizer imported a registered copy of the source archive; attempting
 `xcodebuild -exportNotarizedApp` on the original artifact fails because it lacks
-the upload metadata. Export from the registered Ready to distribute archive
-succeeds. Retain the source archive, registered archive location and selected
-export separately; an earlier failed CLI export is not a notarization rejection.
+the upload metadata. Both Organizer and CLI export from the registered Ready to
+distribute archive succeed and pass the same signature, ticket and Gatekeeper
+checks. Locate that archive with Organizer's Show in Finder, then export into a
+fresh directory:
+
+```sh
+xcodebuild -exportNotarizedApp -archivePath /absolute/registered.xcarchive \
+  -exportPath /absolute/new-export-directory
+```
+
+Retain the source archive, registered archive location and selected export
+separately; an earlier failed CLI export is not a notarization rejection.
 See Apple's [Organizer notarization workflow](https://help.apple.com/xcode/mac/current/en.lproj/dev88332a81e.html).
 
 The dedicated 26.5.2 and 27.0.1 installations of that notarized app pass complete
@@ -814,6 +823,59 @@ prove the cause in either guest. Installation and bounded public lifecycle
 evidence live in the lab's `installed-clean/build35-distribution-install` and
 `installed-27/build35-distribution-install` trees.
 
+A separate scoped cleanup on 27.0.1 preserves every old task-owned app copy in
+a verified archive, removes the extracted copies and waits for the app's own
+background entry to disappear. Reinstalling the identical notarized bundle into
+an empty destination and approving its normal registration then starts the
+device service. Its authenticated health, root UID and full installed executable
+path are verified. No signing constraint, authorization policy, global database
+reset, kickstart or guest reboot is used. The old and new binaries satisfy their
+own designated requirements and reject each other's, but public diagnostics do
+not expose the enforced spawn requirement; a retained requirement remains an
+inference. This accepts that service recovery scenario only: the installed
+filesystem module remains off after the By App toggle attempt, so this particular
+run is not admitted to mounted distribution tests. Evidence is in
+`installed-27/build35-distribution-install/own-copy-cleanup`.
+
+A normal guest reboot preserves the healthy distribution service, but does not
+repair the By App aggregate toggle. A fresh call to the documented macOS 27
+`FSClient.openFileSystemExtensionsSettings()` API, with System Settings closed,
+opens the dedicated File System Extensions sheet. Its ordinary Machlin ext4
+toggle enables the installed module, which is independently confirmed through
+`FSClient`. An earlier navigation comparison with a preexisting modal sheet is
+inconclusive and remains separate. The normal reboot and fresh settings evidence
+is in `installed-27/build35-distribution-install/normal-reboot`. The same notarized
+app then passes ordinary native write, remount and permission checks plus
+independent fsck on both block sizes; evidence is in
+`installed-27/build35-distribution-native`. The production app/extension profiles
+also pass signed App Group control, real Keychain v1/v2 import and removal,
+next-mount key snapshots, encrypted read/write/remount and independent fsck on
+both block sizes. Evidence is in `installed-27/build35-distribution-encrypted-v1`
+and `installed-27/build35-distribution-encrypted-v2`. This does not close the
+retained capacity, set-ID and diskutil naming failures.
+
+The same scoped installation lifecycle on 26.5.2 also preserves and verifies old
+app archives, observes disappearance of the own background entry and installs
+the identical notarized bundle into an empty destination. Normal service approval
+starts the authenticated root daemon. Opening **By Category → File System
+Extensions → info** exposes the actual module toggle, which enables the installed
+extension; the category's summary names alone are not its complete installed
+module list. No reboot or signing/policy change is needed. Ordinary native write,
+permission and remount checks pass both block sizes with independent fsck.
+Evidence is in `installed-clean/build35-distribution-install/own-copy-cleanup`
+and `installed-clean/build35-distribution-native`. The real production-profile
+Keychain and control IPC v1/v2 lifecycle, encrypted write/remount and independent
+fsck also pass both block sizes; see
+`installed-clean/build35-distribution-encrypted-v1` and
+`installed-clean/build35-distribution-encrypted-v2`. All these runs finish with
+empty endpoints, detached task images and removed fixture keys.
+
+The control app's **Open extension settings** button uses that documented
+dedicated route when built with the macOS 27 SDK and run on macOS 27. Earlier
+SDKs and systems open Login Items through ServiceManagement; choose **By Category
+→ File System Extensions** and enable Machlin ext4 there. The newer call is
+guarded at both compilation and runtime boundaries, retaining the 26.5 target.
+
 The optimized Release configuration passes the ordinary native write and permission
 checks on both supported test OS versions, with 1 KiB and 4 KiB blocks. It also
 passes the four retained-descriptor/mapping removal cases on each OS, followed by
@@ -828,8 +890,10 @@ its signing step, reporting build success with an invalid resource seal. Ordinar
 unchanged-profile builds remain incremental.
 
 Install a complete new app bundle into an empty destination after all test mounts
-and extension endpoints have closed. Preserve the previous bundle outside the
-installation path for rollback. Copying with `ditto` over the existing bundle
+and extension endpoints have closed. Preserve the previous bundle in a verified
+archive for rollback; do not accumulate discoverable app bundles in test staging
+directories. Verify the staged bundle before replacement and remove the extracted
+staging copy after installation. Copying with `ditto` over the existing bundle
 merges directories: switching Debug to Release left obsolete debug and preview
 libraries in nested code, invalidating its signature. Check the installed bundle
 with strict, deep, all-architecture verification, not just the archive. Verify

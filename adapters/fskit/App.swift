@@ -2,6 +2,7 @@
 import SwiftUI
 import Darwin
 import AppKit
+import ServiceManagement
 
 func controlResult(_ request: [String: Any], endpoint: URL) throws -> [String: Any] {
     let response = try Ext4ControlClient.request(request, endpoint: endpoint)
@@ -34,6 +35,13 @@ private final class ControlModel: ObservableObject {
     @Published var status = "No mounted volumes discovered."
     @Published var busy = false
     @Published var deviceServiceStatus = "Checking…"
+
+    func openExtensionSettings() {
+        if !Ext4OpenFileSystemExtensionsSettings() {
+            SMAppService.openSystemSettingsLoginItems()
+        }
+        status = "Open File System Extensions, enable Machlin ext4, then mount the volume."
+    }
 
     func enableWriting() {
         do {
@@ -189,6 +197,7 @@ struct MachlinExt4App: App {
                 }
                 Text("Enable the extension in System Settings → General → Login Items & Extensions → File System Extensions.")
                 HStack {
+                    Button("Open extension settings…") { model.openExtensionSettings() }.disabled(model.busy)
                     Button("Enable disk writing…") { model.enableWriting() }.disabled(model.busy)
                     Text("Disk service: \(model.deviceServiceStatus)").foregroundStyle(.secondary)
                 }
