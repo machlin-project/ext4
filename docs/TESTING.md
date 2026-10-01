@@ -553,6 +553,21 @@ mode/owners/accounting and 7,680 readlink calls from four concurrent workers.
 Buffer capacities cross the inline and native path-size boundaries; each call
 must preserve the exact opaque bytes and leave the byte after its result untouched.
 
+The Darwin-only `ext4-mounted-cache-test MOUNTPOINT write` exercises an installed
+FSKit volume as an ordinary user with ownership enabled. Sixteen mutation rounds
+compare two descriptors and shared mappings after writes, msync, shrink and sparse
+growth, including zeroed partial-page tails. Sixty-four atomic replacements use
+three synchronized readers: all retain the old inode before each rename, verify
+its zero link count and exact bytes, close their descriptors, fault their old
+mappings, then check the new name's distinct data and permissions. A `verify`
+invocation after read-only remount checks complete final contents and metadata.
+Use the installed-write runner with this frozen checker and no `--extended`
+argument; it exports each image for independent fsck. Set `--checker-timeout 600`
+for this workload and retain its eight-round progress records. A deadline expiry
+is an incomplete run, not a pass inferred from the final filename or image; keep
+it separately from subsequent completed runs. This bounded lifetime check does
+not establish memory-pressure reclamation or physical power-loss behavior.
+
 Before enabling general writes, extend the matrix to platform allocation/full devices,
 create/link/unlink/rename, orphan cleanup, open-but-unlinked files, truncate versus
 mmap/pageout, failed writeback, metadata locking and forced unmount. Exercise

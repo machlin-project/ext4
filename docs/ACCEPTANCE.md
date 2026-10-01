@@ -16,7 +16,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Geometry, feature negotiation, metadata checksums | Real mke2fs images and malformed-input tests under sanitizers | Accepted for the documented format/geometry matrix, including large logical files and high physical addresses; preserve the explicitly recorded exceptions |
 | Inodes, directories, links, extents, sparse data | Independent contents and metadata comparison | Portable reader, mounted arm64e kext and stock macOS 26.5.2 read-only FSKit profiles pass |
 | Modern format variations | Explicit feature/size matrix including checksums, 64-bit fields, indexed directories and additional enabled features | Functional core queue accepted with documented feature/mode limits; see the queue and per-feature evidence below |
-| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Portable, independent and Linux checks pass with the recorded format limits; stock FSKit 1/4 KiB writes, shared mmap, concurrent writers, namespace mutations, open-unlinked lifetime, bounded ENOSPC and persistence-service failures pass; larger pressure and device-removal acceptance remain pending |
+| Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Portable, independent and Linux checks pass with the recorded format limits; stock FSKit 1/4 KiB writes, shared mmap, concurrent writers, namespace mutations, open-unlinked lifetime, bounded ENOSPC, persistence-service failures and retained-file/mapping forced image detach pass; larger pressure and physical device-loss acceptance remain pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Portable journals and orphan recovery pass the recorded matrix; stock FSKit Disk Arbitration recovery passes both block sizes while dirty read-only media remain unchanged; physical device-loss qualification remains pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list, atomic attribute batches and mutation lifetime integration pass portable tests and targeted independent checks; bidirectional Linux attribute/ACL/security checks and direct replay of core attribute transactions pass eight profiles; the linked-truncate e2fsck defect remains explicit below; ACL enforcement and platform policy pending |
 | Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Signed stock 26.5.2 reads/writes, namespace, mmap, concurrent I/O, user xattrs, recovery, bounded ENOSPC, native label changes, service-failure recovery and fscrypt v1/v2 key lifecycle pass 1/4 KiB profiles. Stock 27.0.1 also passes ordinary mutation, sparse queries, service-failure recovery and fscrypt v1/v2 key lifecycle on both block sizes. Live set-ID metadata and diskutil rename fail on both versions. Separating read-only mapping protocols from writable volumes lets the original larger 1 KiB pressure reproduction finish on 26.5.2; stronger capacity checks still fail live/remounted size consistency on both OS versions. Device-loss stress remains unaccepted (see [FSKit](FSKIT.md)) |
@@ -3393,6 +3393,92 @@ standalone repository. Native evidence is in the lab's
 VM's `build33-install`, and registration inspection in
 `installed-27/build33-registration`. The earlier signed-build integer-width
 compile failure is retained separately from the corrected successful build.
+
+## FSKit GUI encryption-key lifecycle
+
+GUI actions on stock 26.5.2 and 27.0.1 pass both synthetic fscrypt v1 and v2 fixtures with
+4 KiB blocks. Each starts with an empty saved-key list and an unmodified private
+image copy. NSOpenPanel imports the staged 64-byte key: v2 uses its empty
+descriptor field, while v1 uses the explicit public hexadecimal descriptor.
+Invalid v1 hexadecimal input shows an error and leaves the saved list empty.
+The GUI identifier agrees with the signed CLI list. Neither import nor removal
+uses a CLI substitute for the tested UI action.
+
+After normal remount, the extension reports one loaded key and native plaintext
+matches the fixture manifest. Removing that saved key through the GUI empties
+the saved list while the current mounted engine still holds its key and can read.
+A later remount reports zero loaded keys and rejects the same read with permission
+denied. Both image copies remain byte-identical; staged raw key files are removed,
+normal detach succeeds, endpoints are empty and the authenticated disk service
+remains enabled. Only synthetic fixtures and their newly imported keys are used.
+
+Evidence and screenshots are in the lab's
+`artifacts/ext4-fskit/installed-27/build33-gui-keys` and
+`installed-27/build33-gui-v1`. The v1 descriptor provenance is recorded separately
+from the file-content manifest, which does not contain that descriptor. The 26.5.2
+checks use the optimized Release configuration and are in
+`installed-clean/build34-gui-v1` and `build34-gui-v2`; they repeat actual UI actions
+and verify module/service enabled state and empty task devices at completion.
+These checks do not accept GUI behavior on every OS revision or cross-user
+control of a root-owned extension.
+
+## Optimized FSKit configuration and installation
+
+The signed Release configuration passes ordinary native mutations and permission
+checks on both stock 26.5.2 and 27.0.1, for 1 KiB and 4 KiB blocks. Each OS also
+passes all four read-only/read-write retained-descriptor/mapping removal cases.
+All twelve exported images pass nonrepairing e2fsck. Removal returns EIO for reads
+and writable-file writes; mapping children receive SIGBUS. Normal remount verifies
+the full payload, final endpoints and task devices are empty, and the authenticated
+device-cache service remains enabled. These are development-signed optimized
+builds, not distribution or notarization evidence. The known larger capacity,
+set-ID cache and diskutil rename verdicts are not rerun or reclassified.
+
+Switching configuration exposed an installation error: copying over an existing
+Debug app with `ditto` retained libraries omitted from Release and broke the nested
+signature. A clean whole-bundle replacement on 26 and exact recursive content and
+symlink equality on 27 establish the corrected installed artifacts. Strict nested
+signature and app/extension/helper version checks pass. The 26 module needed a
+normal System Settings off/on toggle after replacement. Both guests restarted
+only their registered device-barrier job and verified its new PID, root UID,
+full executable path and authenticated service health before native checks.
+The initial signature failures remain separate from the successful installations.
+
+Evidence is in the lab's `artifacts/ext4-fskit/installed-{clean,27}/build34-install`,
+`build34-native` and `build34-removal`; consolidated configuration and source
+provenance are in `artifacts/ext4-fskit/acceptance/release34-summary.json`.
+
+## Native cache and replacement lifetime
+
+The optimized installed FSKit driver passes the new cache checker on stock
+26.5.2 and 27.0.1 with both 1 KiB and 4 KiB blocks. Each of the four profiles
+completes sixteen rounds of buffered writes, shared-mapping writes, msync,
+truncate and growth. Two descriptors and a retained read mapping agree on
+complete contents and sizes, including zeroed bytes after shrinking into a page
+and growing again. Sixty-four atomic replacements per profile synchronize three
+readers holding the overwritten inode. Its zero link count and old contents
+remain valid through descriptor close and subsequent mapping access; the new name
+has its own data, size and mode. All reader threads join. Complete final bytes
+and metadata pass read-only remount verification, all four exports pass
+nonrepairing e2fsck, and final task devices and endpoints are empty.
+
+The first 4 KiB run on 27 exceeded the old 180-second checker deadline after the
+cache phase. Its checker was absent when sampled; the owning extension was idle
+and responsive, and the last published epoch was visible. Normal detach,
+read-only verification and fsck of that interrupted image passed. Those facts
+cannot establish reader/rendezvous completion, so the initial run remains failed.
+The completed runs use an explicit 600-second limit and eight-round progress
+records, retaining all sixty-four rounds and three readers. No driver code is
+changed to obtain these passes. This accepts bounded cache and lifetime behavior,
+not memory-pressure reclamation or physical power-loss qualification.
+
+Reports are in the lab's
+`artifacts/ext4-fskit/installed-{clean,27}/build34-cache-complete`; the original
+timeout and its separate persisted-data diagnostics are in
+`installed-27/build34-cache` and `build34-cache-diagnosis`. Checker build and frozen
+source evidence are under the ext4 repository's ignored
+`artifacts/checks/fskit-cache/complete-build`. CI compiles this checker for both
+architectures with the supported SDK; it does not install or run native mounts.
 
 ## Kernel build evidence
 

@@ -113,6 +113,8 @@ if host_machine.system() == 'darwin'
     override_options: ['b_sanitize=none'])
   executable('ext4-mounted-capacity-test', 'tests/mounted_capacity.c',
     override_options: ['b_sanitize=none'])
+  executable('ext4-mounted-cache-test', 'tests/mounted_cache.c', dependencies: threads,
+    override_options: ['b_sanitize=none'])
 endif
 
 if get_option('fuzzer')

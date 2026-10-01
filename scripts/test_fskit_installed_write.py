@@ -33,6 +33,8 @@ def main():
                         default=None, help='Select affected groups within the extended suite')
     parser.add_argument('--pressure-timeout', type=int, default=600,
                         help='Explicit deadline in seconds for the selected pressure workload')
+    parser.add_argument('--checker-timeout', type=int, default=180,
+                        help='Deadline in seconds for each native write/remount checker invocation')
     parser.add_argument('--guest-workdir', required=True, help='New absolute guest directory')
     parser.add_argument('--build-number', type=int, required=True)
     parser.add_argument('--e2fsck', type=Path, required=True)
@@ -42,8 +44,8 @@ def main():
         parser.error('--extended-checks requires --extended')
     if len(set(args.profiles)) != len(args.profiles):
         parser.error('--profiles must not repeat a block size')
-    if args.pressure_timeout <= 0:
-        parser.error('--pressure-timeout must be positive')
+    if args.pressure_timeout <= 0 or args.checker_timeout <= 0:
+        parser.error('Checker and pressure deadlines must be positive')
     if args.mount_as_root and not sys.stdin.isatty():
         parser.error('Run in a terminal for the no-echo VM sudo password prompt')
     checks = args.extended_checks or ('policy', 'setid', 'pressure', 'rename')
@@ -97,6 +99,7 @@ def main():
         device = None
         result = {'passed': False, 'checker_sha256': checker_hash,
                   'pressure_timeout_seconds': args.pressure_timeout,
+                  'checker_timeout_seconds': args.checker_timeout,
                   'mount_as_root': args.mount_as_root}
         results[profile] = result
 
@@ -132,7 +135,7 @@ def main():
                 endpoints = control(label + '-control', 'list')
                 assert len(endpoints) == 1
                 assert endpoints[0]['info']['readOnly'] == (mode == 'verify'), endpoints[0]['info']
-                guest(label + '-check', root + '/checker', mount, mode, timeout=180)
+                guest(label + '-check', root + '/checker', mount, mode, timeout=args.checker_timeout)
                 if args.extended:
                     if mode == 'write':
                         setup = ('/Applications/Machlin ext4.app/Contents/Helpers/'

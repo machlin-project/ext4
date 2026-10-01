@@ -323,7 +323,9 @@ contracts. `diskutil info -plist` nevertheless omits filesystem/personality name
 for this mounted volume, while reporting its label, UUID, mount point and writable
 state. A single fresh-image rename again fails before the module callback.
 Comparison with Apple's public exfat/msdos module plists does not establish a
-registration defect. `diskutil listFilesystems` lists personalities available for
+registration defect. PlugInKit's null version display does not mean the bundle
+lacks version metadata: its short version and build version are populated.
+`diskutil listFilesystems` lists personalities available for
 formatting, as its man page specifies; absence there does not prove mount or rename
 support is missing. No dummy formatter or alternative filesystem identity is used
 to change that observation.
@@ -531,6 +533,22 @@ and shared mmap, concurrent I/O, key import/removal with next-mount visibility,
 read-only remount and independent fsck. The generated reports are
 `lab/artifacts/ext4-fskit/installed-27/build24-encryption-{v1,v2}-1/summary.json`.
 
+Actual GUI key import and removal also pass on 27.0.1 for both v1 and v2 using
+the 4 KiB encrypted fixtures. The v1 descriptor is entered in the NSOpenPanel
+accessory field; invalid hexadecimal input visibly fails without saving a key.
+An empty descriptor imports v2. The GUI and CLI saved-key lists agree, while
+native remount verifies key loading and the expected plaintext hash. GUI removal
+preserves access in the current mount; the next mount has no loaded key and
+rejects the same file with permission denied. Both image hashes remain unchanged,
+staged synthetic key files are deleted, normal detach succeeds and endpoints are
+empty. These checks use GUI actions for import/removal, not CLI substitutes.
+Evidence is in `installed-27/build33-gui-keys` and `installed-27/build33-gui-v1`
+under the lab's ignored FSKit artifacts. The equivalent GUI path also passes
+on 26.5.2 with the optimized Release configuration and the
+same v1/v2 fixtures, including invalid v1 input and next-mount key removal. Its
+reports are `installed-clean/build34-gui-v1` and `build34-gui-v2`. Signed CLI key
+lifecycle on both OS versions is recorded separately.
+
 A bounded GUI check on 27.0.1 also passes Refresh, active-volume geometry and service
 status, both values of the read-state retention setting and Release read metadata.
 The signed CLI independently verifies the setting changes. The raw-key file picker
@@ -619,10 +637,10 @@ Keep failed groups and interrupted-run cleanup distinct from passed groups.
 | Area | Implemented boundary | Remaining work |
 | --- | --- | --- |
 | Resource reads | Exact aligned/unaligned reads; component revocation and native forced-detach matrix on 26.5.2/27.0.1 | Physical device loss without final sync and additional failure races |
-| File reads | Held state and restricted kernel mapping; native read/mmap/EOF checks and retained descriptor/mapping forced detach | Native cache/reclaim stress and physical device loss |
+| File reads | Held state and restricted kernel mapping; native read/mmap/EOF checks, retained descriptor/mapping forced detach and bounded mmap/rename lifetime stress on 26.5.2/27.0.1 | Memory-pressure reclamation and physical device loss |
 | User xattrs | Native read/list/set/remove roundtrip; macOS names omit the Linux user namespace prefix | Linux ACL/security/trusted namespaces stay hidden |
-| IPC and GUI | Signed same-user RPC and key lifecycle on 26.5.2/27.0.1; sudo-mounted/admin-app operation and basic GUI controls on 27.0.1; abandoned endpoint recovery on 26.5.2 | GUI key import/removal, cross-user or root-owned extension coordination |
-| Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded ENOSPC, extension/service termination and timeout, forced-detach durability, recovery, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, cache stress and physical device loss |
+| IPC and GUI | Signed same-user RPC and key lifecycle and actual GUI v1/v2 key import/removal on 26.5.2/27.0.1; sudo-mounted/admin-app operation and basic controls on 27.0.1; abandoned endpoint recovery on 26.5.2 | Cross-user or root-owned extension coordination |
+| Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded cached-write/truncate/rename stress, bounded ENOSPC, extension/service termination and timeout, forced-detach durability, recovery, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, memory-pressure stress and physical device loss |
 | Crypto and ACLs | CommonCrypto fscrypt v1/v2 reads and writes; native key import/removal and remounts on 26.5.2 and 27.0.1 | Verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
 | Maintenance | Native Disk Arbitration recovery of interrupted transactions; read-only dirty media remain unchanged; component crash cuts | Full check/repair tooling |
 
@@ -692,11 +710,31 @@ positive bundle build number to the app and its extension; increase it when
 installing a replacement build so the system can distinguish the versions.
 Configuration does not change the signing identity or profile type: a Release
 build with development profiles is still a development artifact.
+The optimized Release configuration passes the ordinary native write and permission
+checks on both supported test OS versions, with 1 KiB and 4 KiB blocks. It also
+passes the four retained-descriptor/mapping removal cases on each OS, followed by
+normal remount, independent fsck and empty endpoint/device checks. This validates
+the optimized configuration for those workloads; the larger ENOSPC, set-ID cache
+and diskutil rename failures remain unaccepted. Reports are under
+`installed-{clean,27}/build34-{native,removal}` in the lab's ignored FSKit artifacts.
 Signed builds finish by verifying the complete bundle, including nested code,
 strictly for all architectures. When switching profiles, use `--clean`: Xcode's
 incremental build has replaced an extension's embedded profile without rerunning
 its signing step, reporting build success with an invalid resource seal. Ordinary
 unchanged-profile builds remain incremental.
+
+Install a complete new app bundle into an empty destination after all test mounts
+and extension endpoints have closed. Preserve the previous bundle outside the
+installation path for rollback. Copying with `ditto` over the existing bundle
+merges directories: switching Debug to Release left obsolete debug and preview
+libraries in nested code, invalidating its signature. Check the installed bundle
+with strict, deep, all-architecture verification, not just the archive. Verify
+app, extension and helper versions and enabled module state after registration.
+On the 26.5.2 guest, replacing the app required switching its FSKit module off
+and on through System Settings; a discovery-agent refresh alone did not enable
+it. With endpoints empty, restart only the registered device-barrier job, then
+verify its new PID, root UID, full installed executable and authenticated health.
+An old running helper is not evidence that the replacement helper can launch.
 
 From the absolute Machlin lab directory:
 

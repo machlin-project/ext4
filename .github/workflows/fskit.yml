@@ -10,7 +10,9 @@ on:
       - 'include/**'
       - 'scripts/build_fskit.py'
       - 'scripts/test_fskit.py'
+      - 'scripts/test_fskit_installed_write.py'
       - 'tests/fskit_*.m'
+      - 'tests/mounted_cache.c'
       - 'tests/generate_fixtures.py'
       - 'tests/generate_fskit_owned.py'
   pull_request:
@@ -21,7 +23,9 @@ on:
       - 'include/**'
       - 'scripts/build_fskit.py'
       - 'scripts/test_fskit.py'
+      - 'scripts/test_fskit_installed_write.py'
       - 'tests/fskit_*.m'
+      - 'tests/mounted_cache.c'
       - 'tests/generate_fixtures.py'
       - 'tests/generate_fskit_owned.py'
   workflow_dispatch:
@@ -76,6 +80,13 @@ jobs:
         run: |
           python3 scripts/build_fskit.py --derived-data artifacts/fskit-ci/DerivedData \
             2>&1 | tee artifacts/fskit-ci/reports/build.log
+      - name: Compile native cache checker for both architectures
+        run: |
+          xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror \
+            -Wdeclaration-after-statement -O2 -arch arm64 -arch x86_64 \
+            tests/mounted_cache.c -o artifacts/fskit-ci/mounted-cache-checker \
+            2>&1 | tee artifacts/fskit-ci/reports/mounted-cache-build.log
+          python3 -m py_compile scripts/test_fskit_installed_write.py
       # No profiles, app installation, native mounts or real Keychain access.
       - name: Check adapter components with sanitizers
         run: |
