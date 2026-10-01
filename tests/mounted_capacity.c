@@ -55,6 +55,88 @@ prepare_control(int root, struct statfs *filesystem, uint8_t *buffer)
 	return file;
 }
 
+static int
+read_tail(int file, off_t start, off_t end, uint8_t *buffer, ssize_t *amount, int *error)
+{
+	off_t cursor;
+	size_t count;
+	size_t index;
+
+	*amount = 0;
+	*error = 0;
+	if (end < start || end - start > CapacityMaxAttempts * CapacityWriteBytes) {
+		return 0;
+	}
+	for (cursor = start; cursor < end; cursor += count) {
+		count = (size_t)(end - cursor);
+		if (count > CapacityWriteBytes) {
+			count = CapacityWriteBytes;
+		}
+		*amount = pread(file, buffer, count, cursor);
+		*error = *amount < 0 ? errno : 0;
+		if (*amount != (ssize_t)count) {
+			return 0;
+		}
+		for (index = 0; index < count; index++) {
+			if (buffer[index] != CapacityPattern) {
+				return 0;
+			}
+		}
+	}
+	return 1;
+}
+
+static off_t
+parse_offset(const char *text)
+{
+	char *end;
+	unsigned long long value;
+
+	CHECK(text[0] >= '0' && text[0] <= '9');
+	errno = 0;
+	value = strtoull(text, &end, 10);
+	CHECK(errno == 0 && *end == '\0' && value <= CapacityMaxVolumeBytes);
+	return (off_t)value;
+}
+
+/* A fresh read-only mount must agree with the size observed by the writer.
+ * Checking only the live size can silently skip a committed but hidden tail. */
+static int
+verify_remount(const char *mount, off_t start, off_t expected)
+{
+	struct statfs filesystem;
+	struct stat status;
+	uint8_t *buffer;
+	ssize_t amount;
+	int error;
+	int root;
+	int file;
+	int readback;
+	int eof;
+	int passed;
+
+	CHECK(geteuid() != 0 && expected >= start);
+	root = open(mount, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+	CHECK(root >= 0 && fstatfs(root, &filesystem) == 0);
+	CHECK(strcmp(filesystem.f_fstypename, "machlinext4") == 0);
+	CHECK((filesystem.f_flags & MNT_RDONLY) != 0);
+	file = openat(root, "acceptance-write/space-pressure", O_RDONLY | O_NOFOLLOW);
+	CHECK(file >= 0 && fstat(file, &status) == 0 && S_ISREG(status.st_mode));
+	CHECK(status.st_uid == geteuid());
+	buffer = malloc(CapacityWriteBytes);
+	CHECK(buffer != NULL);
+	readback = read_tail(file, start, status.st_size, buffer, &amount, &error);
+	eof = pread(file, buffer, 1, status.st_size) == 0;
+	passed = status.st_size == expected && readback && eof;
+	printf("{\"expected_size\":%lld,\"size\":%lld,\"read_amount\":%lld,\"read_error\":%d,"
+	       "\"readback\":%s,\"eof\":%s,\"passed\":%s}\n",
+	    (long long)expected, (long long)status.st_size, (long long)amount, error,
+	    readback ? "true" : "false", eof ? "true" : "false", passed ? "true" : "false");
+	free(buffer);
+	CHECK(close(file) == 0 && close(root) == 0);
+	return passed ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -63,10 +145,7 @@ main(int argc, char **argv)
 	uint8_t *buffer;
 	off_t start;
 	off_t reported = 0;
-	off_t cursor;
 	ssize_t amount = 0;
-	size_t index;
-	size_t count;
 	long page_size;
 	int root;
 	int file;
@@ -84,6 +163,10 @@ main(int argc, char **argv)
 	ssize_t read_amount = 0;
 
 	CHECK(argc >= 3 && argc <= 5);
+	if (strcmp(argv[2], "verify") == 0) {
+		CHECK(argc == 5);
+		return verify_remount(argv[1], parse_offset(argv[3]), parse_offset(argv[4]));
+	}
 	CHECK(strcmp(argv[2], "cached") == 0 || strcmp(argv[2], "uncached") == 0);
 	CHECK(argc < 4 || strcmp(argv[3], "tail") == 0 || strcmp(argv[3], "aligned") == 0);
 	CHECK(argc < 5 || strcmp(argv[4], "apfs") == 0);
@@ -129,22 +212,8 @@ main(int argc, char **argv)
 	    status.st_size == start + reported;
 	/* Inspect even an unreported prefix; a failed syscall need not undo earlier
 	 * kernel subrequests. Keep the strict accounting verdict separate. */
-	if (stat_error != 0 || status.st_size < start ||
-	    status.st_size - start > CapacityMaxAttempts * CapacityWriteBytes) {
-		readback = 0;
-	}
-	for (cursor = start; readback && cursor < status.st_size; cursor += count) {
-		count = (size_t)(status.st_size - cursor);
-		if (count > CapacityWriteBytes) {
-			count = CapacityWriteBytes;
-		}
-		read_amount = pread(file, buffer, count, cursor);
-		read_error = read_amount < 0 ? errno : 0;
-		readback = read_amount == (ssize_t)count;
-		for (index = 0; readback && index < count; index++) {
-			readback = buffer[index] == CapacityPattern;
-		}
-	}
+	readback = stat_error == 0 &&
+	    read_tail(file, start, status.st_size, buffer, &read_amount, &read_error);
 	close_error = close(file) == 0 ? 0 : errno;
 	passed = passed && close_error == 0;
 	/* Cached writes may report success before allocation. ENOSPC at fsync is

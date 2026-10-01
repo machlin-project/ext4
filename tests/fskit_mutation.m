@@ -735,6 +735,53 @@ check_maintenance(WritableImage *image)
 }
 
 static void
+check_failed_preallocation(NSData *fixture)
+{
+	WritableImage *image = [WritableImage new];
+	Ext4LegacyVolume *volume;
+	Ext4ResourceIO *io;
+	FSItem *file;
+	__block size_t committed = 0;
+	__block BOOL replied = NO;
+	const size_t requested = 1024 * 1024;
+	struct ext4_recovery_report report = { 0 };
+
+	image.bytes = [fixture mutableCopy];
+	volume = open_volume(image, YES);
+	file = create_item(volume, root_item(volume), @"failed-preallocation", FSItemTypeFile);
+	sync_volume(volume);
+	image.failBarrierAt = image.barriers + MutationJournalReset + 1;
+	[volume preallocateSpaceForItem:file
+			       atOffset:0
+				 length:requested
+				  flags:FSPreallocateFlagsPersist
+			   replyHandler:^(size_t allocated, NSError *error) {
+			     assert(!replied && allocated > 0 && allocated < requested);
+			     assert([error.domain isEqualToString:NSPOSIXErrorDomain] &&
+				 error.code == EIO);
+			     committed = allocated;
+			     replied = YES;
+			   }];
+	assert(replied && image.barriers == image.failBarrierAt);
+	[volume synchronizeWithFlags:0
+			replyHandler:^(NSError *error) {
+			  assert(error != nil);
+			}];
+	[volume invalidate];
+	image.failBarrierAt = 0;
+	io = [[Ext4ResourceIO alloc] initWithReader:image];
+	[io enableWritesWithBarrier:image deviceName:@"memory"];
+	assert([io recover:&report] == EXT4_OK);
+	volume = open_volume(image, NO);
+	file = lookup(volume, root_item(volume), @"failed-preallocation");
+	assert(attributes(volume, file).size == 0);
+	assert(attributes(volume, file).allocSize >= committed);
+	check_bytes(volume, file, [NSData data]);
+	[volume invalidate];
+	puts("PASS FSKit preallocation device failure preserves its error and recoverable prefix");
+}
+
+static void
 check_api_selection_mode(NSData *fixture, BOOL writable)
 {
 	WritableImage *image = [WritableImage new];
@@ -918,6 +965,37 @@ check_capacity_modern(WritableImage *image)
 	puts("PASS FSKit modern partial and zero-progress ENOSPC, committed prefix readback and "
 	     "space reuse");
 }
+
+API_AVAILABLE(macos(27.0))
+
+static void
+check_write_failure_modern(NSData *fixture)
+{
+	WritableImage *image = [WritableImage new];
+	Ext4ModernVolume *volume;
+	FSItem *file;
+	NSMutableData *data = [NSMutableData dataWithLength:1024 * 1024];
+	__block BOOL replied = NO;
+
+	image.bytes = [fixture mutableCopy];
+	volume = (Ext4ModernVolume *)open_volume_class(image, YES, NULL, Ext4ModernVolume.class);
+	file = create_item(volume, root_item(volume), @"failed-write", FSItemTypeFile);
+	sync_volume(volume);
+	/* One checkpoint completes before the next transaction loses its barrier.
+	 * A committed prefix must not turn an uncertain device outcome into success. */
+	image.failBarrierAt = image.barriers + MutationJournalReset + 1;
+	[volume writeContents:data
+		       toFile:file
+		     atOffset:0
+		 replyHandler:^(FSWriteFileResult *result, NSError *error) {
+		   assert(!replied && result == nil);
+		   assert([error.domain isEqualToString:NSPOSIXErrorDomain] && error.code == EIO);
+		   replied = YES;
+		 }];
+	assert(replied && image.barriers == image.failBarrierAt);
+	[volume invalidate];
+	puts("PASS FSKit modern device failure after a committed prefix remains an error");
+}
 #endif
 
 int
@@ -939,6 +1017,7 @@ main(int argc, const char *argv[])
 #if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
 			if (@available(macOS 27.0, *)) {
 				check_api_selection(fixture);
+				check_write_failure_modern(fixture);
 				check_capacity_modern(image);
 				if (argc == 4) {
 					assert([image.bytes writeToFile:@(argv[3]) atomically:YES]);
@@ -961,6 +1040,7 @@ main(int argc, const char *argv[])
 			return 0;
 		}
 		check_api_selection(fixture);
+		check_failed_preallocation(fixture);
 		check_security_mutations(fixture);
 		@autoreleasepool {
 			check_mutations(image);

@@ -503,7 +503,12 @@ ext4_copy_attribute_request(FSItemSetAttributesRequest *request, struct ext4_ino
 			error = ext4_fallocate(_fs, item->inode.number, item->inode.generation,
 			    start, length, EXT4_FALLOC_KEEP_SIZE, &update, &completed);
 		}
-		reply((size_t)completed, completed != 0 ? nil : ext4_error(error));
+		/* Allocation shortage can leave a usable reservation. Device, journal
+		 * and format failures must remain errors even after earlier checkpoints. */
+		if (completed != 0 && (error == EXT4_NO_SPACE || error == EXT4_QUOTA_EXCEEDED)) {
+			error = EXT4_OK;
+		}
+		reply((size_t)completed, ext4_error(error));
 	}
 }
 

@@ -19,7 +19,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Portable, independent and Linux checks pass with the recorded format limits; stock FSKit 1/4 KiB writes, shared mmap, concurrent writers, namespace mutations, open-unlinked lifetime, bounded ENOSPC and persistence-service failures pass; larger pressure and device-removal acceptance remain pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Portable journals and orphan recovery pass the recorded matrix; stock FSKit Disk Arbitration recovery passes both block sizes while dirty read-only media remain unchanged; physical device-loss qualification remains pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list, atomic attribute batches and mutation lifetime integration pass portable tests and targeted independent checks; bidirectional Linux attribute/ACL/security checks and direct replay of core attribute transactions pass eight profiles; the linked-truncate e2fsck defect remains explicit below; ACL enforcement and platform policy pending |
-| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Signed stock 26.5.2 reads/writes, namespace, mmap, concurrent I/O, user xattrs, recovery, bounded ENOSPC, native label changes, service-failure recovery and fscrypt v1/v2 key lifecycle pass 1/4 KiB profiles. Stock 27.0.1 also passes ordinary mutation, sparse queries, service-failure recovery and fscrypt v1/v2 key lifecycle on both block sizes. Live set-ID metadata and diskutil rename fail on both versions; the larger 1 KiB pressure workload stalls on 26.5.2. The modern adapter now preserves ENOSPC, but short installed capacity checks still fail prefix accounting/readback; device-loss stress remains unaccepted (see [FSKit](FSKIT.md)) |
+| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Signed stock 26.5.2 reads/writes, namespace, mmap, concurrent I/O, user xattrs, recovery, bounded ENOSPC, native label changes, service-failure recovery and fscrypt v1/v2 key lifecycle pass 1/4 KiB profiles. Stock 27.0.1 also passes ordinary mutation, sparse queries, service-failure recovery and fscrypt v1/v2 key lifecycle on both block sizes. Live set-ID metadata and diskutil rename fail on both versions. Separating read-only mapping protocols from writable volumes lets the original larger 1 KiB pressure reproduction finish on 26.5.2; stronger capacity checks still fail live/remounted size consistency on both OS versions. Device-loss stress remains unaccepted (see [FSKit](FSKIT.md)) |
 | FSKit control app | Signed app-to-mounted-extension IPC on supported macOS versions, authorization and teardown | Signed same-user App Group IPC, settings, Keychain import/removal, next-mount key snapshots and normal teardown pass on 26.5.2/27.0.1; crash discovery passes component and guest checks. Sudo-mounted/admin-app operation and basic GUI controls pass on 27.0.1; GUI key import/removal and cross-user or root-owned extension coordination remain unaccepted |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
 | LXNU policy | CAP_FSETID and privilege removal, xattrs, mixed-ABI races, inherited descriptions and attachment restrictions | Not implemented |
@@ -3253,6 +3253,39 @@ copy, preserves image bytes and cleans its staged key and endpoint. This does no
 establish cross-user or root-owned extension IPC. Evidence is in the lab's
 `artifacts/ext4-fskit/installed-27/build24-root-mount-1/` and
 `artifacts/ext4-fskit/installed-27/build24-gui-1/`.
+
+## FSKit write completion and remount consistency
+
+Writable volumes no longer advertise kernel-offloaded block mapping protocols;
+separate read-only subclasses retain that path. Factory checks exercise both
+mount modes and both protocol generations. On stock 27, ordinary writes, mmap,
+concurrency, sparse queries, native volume rename, remount and independent fsck
+still pass both block sizes. Set-ID metadata and `diskutil renameVolume` remain
+failed groups. On stock 26, the unchanged original 64 MiB/1 KiB pressure workload
+now completes without its former kernel I/O wait, passes its full check and fsck,
+and needs no recovery or forced detach.
+
+The new installed-capacity runner adds a read-only remount and independent inode
+inspection to each short full-disk case. Both stock 26 and 27 still hide a
+132,096-byte committed tail from live `stat` after ENOSPC. The old live-only check
+could pass by reading an empty range; the strengthened check correctly fails.
+Returning a short success and explicitly negotiating no cache on 27 do not fix
+the contract. Those diagnostic implementations were removed. These results are
+not full capacity acceptance despite clean fsck and complete remounted readback.
+
+Preallocation now preserves device/journal errors after a committed reservation
+prefix; only allocation or quota shortage can produce a successful partial
+reservation. The regression injects a barrier failure after one checkpoint,
+requires the caller to see EIO, rejects reuse of the aborted owner and verifies
+the committed allocation after recovery. It passes on both block sizes. Modern
+write-result tests separately preserve a fatal error after a committed data prefix,
+and retain the partial/zero-progress ENOSPC checks. Both modern exports pass fsck.
+
+Evidence is in the lab's `artifacts/ext4-fskit/installed-clean/build27-large-pressure-1`,
+`installed-clean/build27-capacity-verified-1`, `installed-27/build27-native-1`,
+`installed-27/build27-capacity-aligned-1`, `installed-27/build28-capacity-1`,
+`installed-27/build29-capacity-1` and `installed-27/build30-modern-1` directories;
+the standalone component logs are in `artifacts/checks/fskit-preallocation30`.
 
 ## Kernel build evidence
 

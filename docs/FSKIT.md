@@ -138,7 +138,7 @@ but a timed-out filesystem operation leaves its devices intact for diagnosis.
 
 The original 64 MiB pressure workload passes on 26.5.2 with 4 KiB blocks,
 including ENOSPC at 53,215,232 bytes, readback, space reuse, remount and fsck.
-The 1 KiB workload remains unaccepted. A repeat with an explicit 1,800-second
+The earlier 1 KiB workload stalled. A repeat with an explicit 1,800-second
 deadline stopped making progress after 22,020,096 bytes. Before any signal or
 detach, the checker waited in `pwrite` through `lifs_vnop_write`, `cluster_write_ext`
 and a kernel mutex sleep, while the owning extension was idle and control IPC
@@ -154,6 +154,17 @@ unfinished workload. Evidence is in the lab's
 `artifacts/ext4-fskit/installed-clean/build24-large-pressure-1/`.
 The runner's `--profiles` and `--pressure-timeout` permit focused, explicitly bounded
 reproduction. Evidence records the chosen deadline and streams progress as it arrives.
+
+With writable volumes no longer advertising kernel block mappings, the unchanged
+1 KiB workload now finishes without the stall: it reports ENOSPC after 52,953,088
+bytes, passes its sync/readback/space-reuse checks, detaches normally and passes
+remount verification and independent fsck. This accepts that original reproduction,
+not every capacity edge case or prolonged stress. The strengthened aligned check
+below still fails on 26.5.2 with and without `F_NOCACHE`: native `stat` omits a
+132,096-byte committed tail which read-only remount and independent inode inspection
+both expose. Both exports pass fsck and the read-only mounts change no image bytes.
+Evidence is in the lab's `installed-clean/build27-large-pressure-1` and
+`installed-clean/build27-capacity-verified-1` under `artifacts/ext4-fskit/`.
 
 The unchanged 64 MiB, 1 KiB workload advances without a stall on 27.0.1, but its
 original run failed near capacity with `EIO` instead of `ENOSPC`. Ordinary detach,
@@ -175,6 +186,16 @@ inspection after detach. An additional `apfs` argument fills a newly created
 APFS control volume of at most 256 MiB before running the same tail operation.
 The 128 MiB APFS aligned/uncached control passes and leaves the file at its
 pre-write size when returning `ENOSPC`.
+
+`scripts/test_fskit_installed_capacity.py` automates the ext4 cases with a new
+guest directory, an explicitly selected signed build and a fresh copy for every
+layout/cache combination. After the write check it detaches normally and invokes
+`ext4-mounted-capacity-test MOUNTPOINT verify START EXPECTED_SIZE` on a read-only
+remount. It compares the live size with both that fresh native view and independent
+`debugfs` inode inspection, verifies the stored tail and EOF, checks the read-only
+image hash, and runs nonrepairing `e2fsck`. A live-only success or clean fsck cannot
+make a size disagreement pass. Timeouts preserve the owning process/device for
+diagnosis instead of automatically detaching or restarting the VM.
 
 On installed 27.0.1, the corrected adapter returns `ENOSPC` for all four short
 cases (cached/uncached, aligned/tail), but the syscall reports no bytes even
@@ -208,6 +229,18 @@ and the separate diagnostic correction remain in
 `installed-27/build27-native-1` and `installed-27/build27-modern-1` under the lab's
 `artifacts/ext4-fskit/`. Set-ID metadata and `diskutil renameVolume` still fail.
 
+Two rejected diagnostics isolate the remaining 27 write-result behavior. Returning
+only the durable prefix as a short success still produces native `EIO` and an
+unreadable live tail in all four layout/cache combinations. Explicitly granting
+`FSKernelCacheCoherencyTypeNoCache` through the public data-cache handler produces
+the same failures in both aligned cases; the trace confirms the handler was
+invoked. Every read-only remount reads the complete committed tail, its size agrees
+with independent inode inspection, and fsck passes. These diagnostic app changes
+are not retained. Evidence and the exact experimental source diff remain in the
+lab's `installed-27/build28-capacity-1`, `installed-27/build29-capacity-1` and the
+standalone `artifacts/checks/fskit-cache29` directories. This does not establish a
+solution or a specific framework defect.
+
 The mutation engine handles file/directory/symlink creation, links, unlink/rmdir,
 rename and replacement, partial writes, sparse growth, truncate, owner/mode/time
 changes and user xattrs. Namespace changes advance directory verifiers. Data
@@ -222,7 +255,10 @@ to 14 with one. Truncate and owner/group changes fall from 8 to 5 and from 20 to
 14 respectively; preallocation falls from 13 to 10 and from 28 to 22. The checks
 also preserve unrelated attributes. These are exact in-memory resource-call counts,
 not a native throughput result (`ext4/artifacts/checks/fskit-xattr24` in the workspace).
-Extent preallocation supports physical-EOF and persistent requests. Contiguous or
+Extent preallocation supports physical-EOF and persistent requests. Allocation
+or quota exhaustion may return a successful partial reservation. Device, journal
+and format failures remain errors even if earlier allocation transactions committed;
+an aborted owner cannot be used again. Contiguous or
 all-or-nothing allocation and combined size/owner changes remain explicitly
 unsupported until the core can carry their full atomic contract.
 The shared mutation helper can create FIFO/socket inodes, and component tests
