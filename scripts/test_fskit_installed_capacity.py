@@ -25,6 +25,8 @@ def main():
     parser.add_argument('--layouts', nargs='+', choices=('aligned', 'tail', 'large'),
                         default=['aligned', 'tail', 'large'],
                         help='Large writes cross several kernel upcalls before ENOSPC')
+    parser.add_argument('--diagnose', action='store_true',
+                        help='Inspect reopen and same-size truncate without changing the verdict')
     parser.add_argument('--e2fsck', type=Path, required=True)
     parser.add_argument('--debugfs', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True, help='New evidence directory')
@@ -64,7 +66,7 @@ def main():
     assert control('service', 'device-service')['status'] == 'enabled'
     assert control('endpoints', 'list') == []
     guest('prepare', '/bin/sh', '-eu', '-c', 'umask 077; test ! -e "$1"; mkdir -p "$1"', 'prepare', root)
-    provenance = {'build_number': args.build_number}
+    provenance = {'build_number': args.build_number, 'diagnose': args.diagnose}
     for name, path in (('source.img', args.image), ('checker', args.checker)):
         data = path.read_bytes()
         digest = hashlib.sha256(data).hexdigest()
@@ -95,7 +97,8 @@ def main():
                 disk = plistlib.loads(guest(label + '-disk', '/usr/sbin/diskutil', 'info', '-plist', device))
                 assert disk['GlobalPermissionsEnabled']
                 result['before'] = control(label + '-before', 'list')
-                payload = guest(label + '-write', root + '/checker', mount, mode, layout,
+                diagnostic = ('diagnose',) if args.diagnose else ()
+                payload = guest(label + '-write', root + '/checker', mount, mode, layout, *diagnostic,
                                 required=False, timeout=90)
                 check = json.loads(payload) if payload.strip() else {'passed': False}
                 result['write'] = check

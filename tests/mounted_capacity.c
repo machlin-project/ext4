@@ -21,6 +21,23 @@ enum {
 	CapacityMaxAttempts = 4
 };
 
+struct capacity_diagnosis {
+	int reopen_error;
+	int reopened_stat_error;
+	off_t reopened_size;
+	int reopened_readback;
+	ssize_t reopened_read_amount;
+	int reopened_read_error;
+	int reopened_close_error;
+	int truncate_error;
+	int sync_error;
+	int stat_error;
+	off_t size;
+	int readback;
+	ssize_t read_amount;
+	int read_error;
+};
+
 #define CHECK(condition)                                                                           \
 	do {                                                                                       \
 		if (!(condition)) {                                                                \
@@ -88,6 +105,50 @@ read_tail(int file, off_t start, off_t end, uint8_t *buffer, ssize_t *amount, in
 	return 1;
 }
 
+/* This changes only a disposable diagnostic image. A successful reopen or
+ * same-size truncate must never replace the original acceptance verdict. */
+static void
+diagnose_visibility(int root, int uncached, off_t start, off_t expected, uint8_t *buffer,
+    struct capacity_diagnosis *diagnosis)
+{
+	struct stat status;
+	int reopened;
+
+	memset(diagnosis, 0, sizeof(*diagnosis));
+	diagnosis->reopened_size = -1;
+	diagnosis->size = -1;
+	diagnosis->reopened_stat_error = ECANCELED;
+	diagnosis->reopened_close_error = ECANCELED;
+	diagnosis->truncate_error = ECANCELED;
+	diagnosis->sync_error = ECANCELED;
+	diagnosis->stat_error = ECANCELED;
+	reopened = openat(root, "acceptance-write/space-pressure", O_RDWR | O_NOFOLLOW);
+	if (reopened < 0) {
+		diagnosis->reopen_error = errno;
+		return;
+	}
+	if (fcntl(reopened, F_NOCACHE, uncached) != 0) {
+		diagnosis->reopen_error = errno;
+	}
+	diagnosis->reopened_stat_error = fstat(reopened, &status) == 0 ? 0 : errno;
+	if (diagnosis->reopened_stat_error == 0) {
+		diagnosis->reopened_size = status.st_size;
+		diagnosis->reopened_readback = status.st_size == expected &&
+		    read_tail(reopened, start, expected, buffer, &diagnosis->reopened_read_amount,
+			&diagnosis->reopened_read_error);
+	}
+	diagnosis->truncate_error = ftruncate(reopened, expected) == 0 ? 0 : errno;
+	diagnosis->sync_error = fsync(reopened) == 0 ? 0 : errno;
+	diagnosis->stat_error = fstat(reopened, &status) == 0 ? 0 : errno;
+	if (diagnosis->stat_error == 0) {
+		diagnosis->size = status.st_size;
+		diagnosis->readback = status.st_size == expected &&
+		    read_tail(reopened, start, expected, buffer, &diagnosis->read_amount,
+			&diagnosis->read_error);
+	}
+	diagnosis->reopened_close_error = close(reopened) == 0 ? 0 : errno;
+}
+
 static off_t
 parse_offset(const char *text)
 {
@@ -144,6 +205,7 @@ main(int argc, char **argv)
 {
 	struct statfs filesystem;
 	struct stat status;
+	struct capacity_diagnosis diagnosis;
 	uint8_t *buffer;
 	off_t start;
 	off_t reported = 0;
@@ -160,6 +222,7 @@ main(int argc, char **argv)
 	int passed;
 	int aligned;
 	int control;
+	int diagnose;
 	int large;
 	size_t write_bytes;
 	size_t release_bytes;
@@ -175,12 +238,13 @@ main(int argc, char **argv)
 	CHECK(strcmp(argv[2], "cached") == 0 || strcmp(argv[2], "uncached") == 0);
 	CHECK(argc < 4 || strcmp(argv[3], "tail") == 0 || strcmp(argv[3], "aligned") == 0 ||
 	    strcmp(argv[3], "large") == 0);
-	CHECK(argc < 5 || strcmp(argv[4], "apfs") == 0);
+	CHECK(argc < 5 || strcmp(argv[4], "apfs") == 0 || strcmp(argv[4], "diagnose") == 0);
 	CHECK(geteuid() != 0);
 	uncached = strcmp(argv[2], "uncached") == 0;
 	large = argc >= 4 && strcmp(argv[3], "large") == 0;
 	aligned = large || (argc >= 4 && strcmp(argv[3], "aligned") == 0);
-	control = argc == 5;
+	control = argc == 5 && strcmp(argv[4], "apfs") == 0;
+	diagnose = argc == 5 && strcmp(argv[4], "diagnose") == 0;
 	write_bytes = large ? CapacityLargeWriteBytes : CapacityWriteBytes;
 	release_bytes = large ? CapacityLargeReleaseBytes : CapacityReleaseBytes;
 	root = open(argv[1], O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
@@ -233,15 +297,36 @@ main(int argc, char **argv)
 		passed = 1;
 	}
 	passed = passed && readback;
+	if (diagnose && stat_error == 0) {
+		diagnose_visibility(root, uncached, start, status.st_size, buffer, &diagnosis);
+	}
 	printf("{\"filesystem\":\"%s\",\"aligned\":%s,\"uncached\":%s,\"write_bytes\":%zu,"
 	       "\"start\":%lld,\"reported\":%"
-	       "lld,\"write_error\":%d,"
+	       "lld,\"write_amount\":%lld,\"write_error\":%d,"
 	       "\"sync_error\":%d,\"stat_error\":%d,\"size\":%lld,\"close_error\":%d,"
-	       "\"read_error\":%d,\"read_amount\":%lld,\"readback\":%s,\"passed\":%s}\n",
+	       "\"read_error\":%d,\"read_amount\":%lld,\"readback\":%s,\"passed\":%s",
 	    filesystem.f_fstypename, aligned ? "true" : "false", uncached ? "true" : "false",
-	    write_bytes, (long long)start, (long long)reported, write_error, sync_error, stat_error,
-	    stat_error == 0 ? (long long)status.st_size : -1LL, close_error, read_error,
-	    (long long)read_amount, readback ? "true" : "false", passed ? "true" : "false");
+	    write_bytes, (long long)start, (long long)reported, (long long)amount, write_error,
+	    sync_error, stat_error, stat_error == 0 ? (long long)status.st_size : -1LL, close_error,
+	    read_error, (long long)read_amount, readback ? "true" : "false",
+	    passed ? "true" : "false");
+	if (diagnose && stat_error == 0) {
+		printf(
+		    ",\"diagnostics\":{\"reopen_error\":%d,\"reopened_stat_error\":%d,"
+		    "\"reopened_size\":%lld,\"reopened_readback\":%s,\"reopened_read_amount\":%lld,"
+		    "\"reopened_read_error\":%d,\"reopened_close_error\":%d,\"truncate_error\":%d,"
+		    "\"sync_error\":%d,\"stat_error\":%d,\"size\":%lld,\"readback\":%s,"
+		    "\"read_amount\":%lld,\"read_error\":%d}",
+		    diagnosis.reopen_error, diagnosis.reopened_stat_error,
+		    (long long)diagnosis.reopened_size,
+		    diagnosis.reopened_readback ? "true" : "false",
+		    (long long)diagnosis.reopened_read_amount, diagnosis.reopened_read_error,
+		    diagnosis.reopened_close_error, diagnosis.truncate_error, diagnosis.sync_error,
+		    diagnosis.stat_error, (long long)diagnosis.size,
+		    diagnosis.readback ? "true" : "false", (long long)diagnosis.read_amount,
+		    diagnosis.read_error);
+	}
+	printf("}\n");
 	free(buffer);
 	CHECK(close(root) == 0);
 	return passed ? EXIT_SUCCESS : EXIT_FAILURE;

@@ -218,6 +218,37 @@ is in `installed-27/build32-capacity-large-1` and the standalone
 no filesystem-validation evidence. DEBUG builds trace callback sizes/errors
 without file contents.
 
+The runner's optional `--diagnose` flag passes an additional `diagnose` argument
+to the native checker. It records the original write, sync, stat, readback and
+close verdict before reopening the file and attempting a same-size `ftruncate`.
+These subsequent operations affect only the disposable diagnostic copy and never
+turn the original failure into a pass. JSON `write_amount` is the last native
+`pwrite` return value; `reported` accumulates positive syscall returns.
+
+On both tested OS versions and both cache modes, the failed syscall returns
+`-1/ENOSPC`, while the core has stored a 2 MiB prefix. Closing every descriptor and
+reopening does not make it readable. A successful `ftruncate` to the existing
+size, followed by synchronization, makes the entire prefix readable without
+changing the size. Remount, independent inode inspection and fsck agree. Evidence
+is in the lab's `artifacts/ext4-fskit/installed-clean/build31-native-diagnosis-2`
+and `installed-27/build31-native-diagnosis-2` directories.
+
+Read-only static analysis of the exact loaded 27 `lifs` component identifies a
+matching error path: `_lifs_vnop_write` saves the old logical file size before
+`cluster_write`, then restores both logical and UBC size on an error. Earlier
+successful module callbacks have already persisted their bytes. This explains
+the observed disagreement between stored size, native stat and live read EOF;
+the same-size truncate causes the native size state to be installed again.
+The loaded identity, original collection, generated analysis copies and function
+notes are recorded in `installed-27/build31-native-component-2`. No modified
+kernel was installed or booted. The 26 component was not disassembled.
+
+The ordinary write callback supplies only its own range, not the enclosing
+syscall's length or transaction boundary. Complete admission of that callback
+therefore cannot prevent the outer native rollback after a later callback fails.
+No supported module workaround has been established; issuing synthetic truncates
+or rolling back previously acknowledged requests is not an accepted solution.
+
 The mutation engine handles file/directory/symlink creation, links, unlink/rmdir,
 rename and replacement, complete write requests, sparse growth, truncate, owner/mode/time
 changes and user xattrs. Namespace changes advance directory verifiers. Data
@@ -517,6 +548,14 @@ data-cache coherency protocol addresses file data, not an attribute refresh.
 Apple's [FSKit cache discussion](https://developer.apple.com/forums/thread/832647)
 also distinguishes data-cache management from change notification; that statement
 alone does not diagnose this driver's set-ID discrepancy.
+The matching 27 kernel analysis adds concrete evidence: I/O completion calls
+`_update_lnode_attr_subset_locked`, which updates size, allocation, file ID and
+access/modify/change times, but not `FSItemAttributeMode`. The general attribute
+updater does handle mode. This restricted completion path is consistent with
+the fresh mode in the handler result not replacing the native cached mode;
+it is a diagnosis from the loaded binary and mounted traces, not an Apple-confirmed
+defect or a supported workaround. The analysis is recorded in the lab's
+`artifacts/ext4-fskit/installed-27/build31-native-component-2/native-write-analysis.json`.
 The failed conformance check remains required. The APFS control evidence is in
 the lab's `artifacts/ext4-fskit/installed-27/build30-setid-control-1/` and
 `installed-clean/build31-apfs-nosuid-1/attempt4` directories.

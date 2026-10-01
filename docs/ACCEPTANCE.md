@@ -3297,6 +3297,23 @@ read-only remount verifies every byte through the true EOF. Fsck passes. A bound
 not fix either large case. That diagnostic implementation was removed. Full native
 capacity acceptance remains open; failures have not become skips.
 
+Focused diagnosis now preserves the original close verdict before any diagnostic
+mutation. In all four large cases, closing and reopening the file still returns
+EOF at the stored prefix. A same-size `ftruncate` and synchronization make the
+entire 2 MiB prefix readable. Stored size remains unchanged, read-only remount
+matches independent inode inspection, and fsck passes. The original acceptance
+verdict remains failed. The JSON distinguishes the native `pwrite` return of
+`-1` from zero accumulated successful syscall bytes.
+
+Read-only analysis of the exact loaded 27 `lifs` component identifies the matching
+outer error path: after a failed `cluster_write`, `_lifs_vnop_write` restores the
+pre-write logical/UBC size despite earlier successful module callbacks. Its I/O
+completion attribute updater also omits mode, whereas the general updater handles
+it. The latter is consistent with the separate set-ID traces; neither finding is
+an Apple-confirmed defect or a supported public-API workaround. No kernel image
+was changed or booted, and the 26 implementation was not disassembled. Details
+and the callback-boundary constraint are recorded in `docs/FSKIT.md`.
+
 Set-ID metadata coherence and diskutil rename remain failed groups. On stock 26,
 ordinary writes, policy checks and native label persistence pass both block sizes
 with independent fsck. Supplying an explicit matching FSSubType does not resolve
@@ -3319,6 +3336,11 @@ standalone `artifacts/checks/fskit-request31-core/final-regression` directory. T
 incorrect host fsck executable path failed after its mounted checks and export;
 the corrected independent check passed on that same export, without rerunning
 the VM workload. The failed attempt remains recorded separately.
+Additional diagnosis is in `installed-clean/build31-native-diagnosis-1`,
+`installed-clean/build31-native-diagnosis-2`,
+`installed-27/build31-native-diagnosis-1`,
+`installed-27/build31-native-diagnosis-2` and
+`installed-27/build31-native-component-2` under the lab's ignored evidence tree.
 
 ## Kernel build evidence
 
