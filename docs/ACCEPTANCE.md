@@ -3105,6 +3105,16 @@ image exports are retained in the lab's
 The next harness leaves timed-out guest resources intact for diagnosis instead
 of beginning a competing detach, and reports progress while filling the volume.
 
+Control discovery now holds an advisory lock for each live endpoint. Component
+tests kill a separate server process and verify that discovery removes only its
+abandoned socket and manifest, retains other live instances, preserves ordinary
+files, and rejects FIFO manifests without blocking. Old, unleased crash records
+are filtered without deleting them. The signed application in the stock guest
+successfully discovers an empty endpoint list with those legacy crash files still
+present; no manual App Group cleanup is needed. Focused component evidence is in
+`artifacts/checks/fskit-control-recovery-final/`; installed evidence is in the lab's
+`artifacts/ext4-fskit/installed-clean/build19-install/`.
+
 ## Kernel build evidence
 
 `make kext` compiles every shared core source with the selected Xcode kernel

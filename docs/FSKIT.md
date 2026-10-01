@@ -128,6 +128,15 @@ checks and inode-read errors keep their existing contracts.
 
 ## Private control protocol
 
+Each new endpoint retains an exclusive advisory lock on its private manifest for
+the server's lifetime. Discovery can remove an unlocked stale manifest and its
+matching owned socket after a process crash or reboot, without relying on reused
+PIDs. It never removes a live lease or substitutes ordinary files for sockets.
+Dead endpoints from older builds are filtered after a definitive connection
+failure; their files remain intact. Other connection failures still surface to
+the caller. Standalone tests kill a separate server process and verify discovery
+continues to return the other live volumes.
+
 Both the app and extension declare `group.org.machlin.ext4`. The App Group must
 be registered and included in both provisioning profiles. The transport resolves
 the container through FileManager; there is no guessed container path, additional

@@ -18,6 +18,8 @@ FOUNDATION_EXPORT NSDictionary *ext4_control_error(int code, NSString *message);
 @end
 
 @interface Ext4ControlClient : NSObject
+/* Returns live candidates. Reaps only unlocked, owned instance leases after a
+ * crash; missing legacy listeners are ignored without deleting their files. */
 + (NSArray<NSURL *> *)endpointsInDirectory:(NSURL *)directory
     NS_SWIFT_NAME(endpoints(inDirectory:));
 + (nullable NSDictionary *)request:(NSDictionary *)request

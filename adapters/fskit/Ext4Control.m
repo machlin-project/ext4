@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <stdlib.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -21,6 +22,7 @@ static const int64_t ext4_control_timeout_ms = 2000;
 	NSDictionary * (^_handler)(NSDictionary *);
 	NSURL *_socketURL;
 	NSURL *_manifestURL;
+	int _manifestFD;
 	NSString *_token;
 	NSString *_instance;
 	uid_t _uid;
@@ -162,7 +164,7 @@ ext4_control_prepare(int fd)
 static NSDictionary *
 ext4_control_manifest(NSURL *url)
 {
-	int fd = open(url.fileSystemRepresentation, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+	int fd = open(url.fileSystemRepresentation, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
 	struct stat status;
 	NSMutableData *data;
 	ssize_t count;
@@ -192,6 +194,72 @@ ext4_control_manifest(NSURL *url)
 	return value;
 }
 
+/* A held advisory lock marks an instance's lifetime without trusting a PID,
+ * which can be reused after a crash or reboot. Never remove a live lease. */
+static BOOL
+ext4_control_live_endpoint(NSURL *url, NSDictionary *manifest)
+{
+	NSString *name = manifest[@"socket"];
+	NSURL *socketURL;
+	struct sockaddr_un address;
+	struct stat opened;
+	struct stat current;
+	int fd;
+	int saved;
+	BOOL live = YES;
+
+	if (![name isKindOfClass:NSString.class] || name.length != 17 || ![name hasPrefix:@"s"] ||
+	    [[name substringFromIndex:1] rangeOfCharacterFromSet:
+		    [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF"]
+			.invertedSet]
+		    .location != NSNotFound ||
+	    ![url.lastPathComponent isEqualToString:[name stringByAppendingString:@".json"]]) {
+		return NO;
+	}
+	socketURL = [[url URLByDeletingLastPathComponent] URLByAppendingPathComponent:name];
+	if ([manifest[@"lease"] isEqual:@1]) {
+		fd = open(url.fileSystemRepresentation, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+		if (fd < 0) {
+			return NO;
+		}
+		if (fstat(fd, &opened) == 0 && S_ISREG(opened.st_mode) &&
+		    opened.st_uid == geteuid() && (opened.st_mode & 077) == 0 &&
+		    flock(fd, LOCK_EX | LOCK_NB) == 0) {
+			live = NO;
+			/* Only this exact owned manifest and its corresponding socket are
+			 * eligible. A replaced inode or a non-socket is never deleted. */
+			if (lstat(url.fileSystemRepresentation, &current) == 0 &&
+			    current.st_dev == opened.st_dev && current.st_ino == opened.st_ino) {
+				if (lstat(socketURL.fileSystemRepresentation, &current) == 0 &&
+				    S_ISSOCK(current.st_mode) && current.st_uid == geteuid() &&
+				    (current.st_mode & 077) == 0) {
+					(void)unlink(socketURL.fileSystemRepresentation);
+				}
+				(void)unlink(url.fileSystemRepresentation);
+			}
+		}
+		close(fd);
+		return live;
+	}
+	/* Older modules did not hold a lease. Filter definitively dead sockets,
+	 * preserving their manifests rather than guessing ownership for deletion.
+	 * Other failures remain visible to the authenticated request path. */
+	if (!ext4_control_address(socketURL, &address)) {
+		return NO;
+	}
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0) {
+		return YES;
+	}
+	if (ext4_control_prepare(fd) &&
+	    connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+		saved = errno;
+		live = saved != ECONNREFUSED && saved != ENOENT;
+	}
+	close(fd);
+	return live;
+}
+
 @implementation Ext4ControlServer
 
 - (instancetype)initWithDirectory:(NSURL *)directory
@@ -214,6 +282,7 @@ ext4_control_manifest(NSURL *url)
 	if (self == nil) {
 		return nil;
 	}
+	_manifestFD = -1;
 	/* Production supplies FileManager's App Group URL, never a guessed path. */
 	if (directory == nil || lstat(directory.fileSystemRepresentation, &status) < 0 ||
 	    !S_ISDIR(status.st_mode) || status.st_uid != geteuid() ||
@@ -246,6 +315,7 @@ ext4_control_manifest(NSURL *url)
 	}
 	manifest = [NSJSONSerialization dataWithJSONObject:@{
 		@"version" : @(ext4_control_version),
+		@"lease" : @1,
 		@"instance" : _instance,
 		@"volume" : volumeID,
 		@"socket" : name,
@@ -259,11 +329,14 @@ ext4_control_manifest(NSURL *url)
 		goto failed;
 	}
 	created = YES;
+	if (flock(manifestFD, LOCK_EX | LOCK_NB) < 0) {
+		goto failed;
+	}
 	if (write(manifestFD, manifest.bytes, manifest.length) != (ssize_t)manifest.length) {
 		errno = EIO;
 		goto failed;
 	}
-	close(manifestFD);
+	_manifestFD = manifestFD;
 	manifestFD = -1;
 	_handler = [handler copy];
 	[self listenOnDescriptor:fd];
@@ -367,6 +440,10 @@ failed:
 			unlink(_socketURL.fileSystemRepresentation);
 			unlink(_manifestURL.fileSystemRepresentation);
 		}
+		if (_manifestFD >= 0) {
+			close(_manifestFD);
+			_manifestFD = -1;
+		}
 	}
 }
 
@@ -393,9 +470,12 @@ failed:
 			       options:NSDirectoryEnumerationSkipsHiddenFiles
 				 error:NULL];
 	for (NSURL *entry in entries) {
+		NSDictionary *manifest;
+
 		if ([entry.lastPathComponent hasPrefix:@"s"] &&
 		    [entry.pathExtension isEqualToString:@"json"] &&
-		    ext4_control_manifest(entry) != nil) {
+		    (manifest = ext4_control_manifest(entry)) != nil &&
+		    ext4_control_live_endpoint(entry, manifest)) {
 			[endpoints addObject:entry];
 		}
 	}

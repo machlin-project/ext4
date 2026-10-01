@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -104,6 +105,91 @@ malformed(NSURL *endpoint, uint32_t size, const char *body)
 	close(fd);
 }
 
+static void
+crashed_instance(NSString *executable, NSURL *directory, NSUInteger liveCount)
+{
+	NSTask *child = [NSTask new];
+	NSPipe *output = [NSPipe pipe];
+	NSData *ready;
+	NSString *path;
+	NSURL *endpoint;
+	NSDictionary *manifest;
+	NSURL *socketURL;
+	NSError *error = nil;
+
+	child.executableURL = [NSURL fileURLWithPath:executable];
+	child.arguments = @[ @"--crash-server", directory.path ];
+	child.standardOutput = output;
+	assert([child launchAndReturnError:&error]);
+	ready = output.fileHandleForReading.availableData;
+	path = [[[NSString alloc] initWithData:ready encoding:NSUTF8StringEncoding]
+	    stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];
+	assert([path hasPrefix:directory.path] && [path hasSuffix:@".json"]);
+	endpoint = [NSURL fileURLWithPath:path];
+	manifest = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfURL:endpoint]
+						   options:0
+						     error:NULL];
+	socketURL = [directory URLByAppendingPathComponent:manifest[@"socket"]];
+	assert([Ext4ControlClient endpointsInDirectory:directory].count == liveCount + 1);
+	assert(kill(child.processIdentifier, SIGKILL) == 0);
+	[child waitUntilExit];
+	assert(child.terminationReason == NSTaskTerminationReasonUncaughtSignal);
+	assert(access(endpoint.fileSystemRepresentation, F_OK) == 0);
+	assert(access(socketURL.fileSystemRepresentation, F_OK) == 0);
+	assert([Ext4ControlClient endpointsInDirectory:directory].count == liveCount);
+	assert(access(endpoint.fileSystemRepresentation, F_OK) < 0 && errno == ENOENT);
+	assert(access(socketURL.fileSystemRepresentation, F_OK) < 0 && errno == ENOENT);
+}
+
+static void
+stale_candidates(NSURL *directory, NSUInteger liveCount)
+{
+	NSString *name = @"s0123456789abcdef";
+	NSURL *endpoint =
+	    [directory URLByAppendingPathComponent:[name stringByAppendingString:@".json"]];
+	NSURL *socketURL = [directory URLByAppendingPathComponent:name];
+	NSMutableDictionary *manifest = [@{
+		@"socket" : name,
+		@"version" : @1,
+		@"instance" : @"legacy-instance",
+		@"token" : @"synthetic-test-capability"
+	} mutableCopy];
+	struct sockaddr_un address = { 0 };
+	NSData *bytes;
+	int fd;
+
+	address.sun_family = AF_UNIX;
+	address.sun_len = sizeof(address);
+	strlcpy(address.sun_path, socketURL.fileSystemRepresentation, sizeof(address.sun_path));
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	assert(fd >= 0 && bind(fd, (struct sockaddr *)&address, sizeof(address)) == 0);
+	assert(close(fd) == 0);
+	bytes = [NSJSONSerialization dataWithJSONObject:manifest options:0 error:NULL];
+	assert([bytes writeToURL:endpoint atomically:YES]);
+	assert(chmod(endpoint.fileSystemRepresentation, 0600) == 0);
+	/* An old-format crash cannot hide live volumes or trigger speculative deletion. */
+	assert([Ext4ControlClient endpointsInDirectory:directory].count == liveCount);
+	assert(access(endpoint.fileSystemRepresentation, F_OK) == 0);
+	assert(access(socketURL.fileSystemRepresentation, F_OK) == 0);
+	assert(unlink(socketURL.fileSystemRepresentation) == 0);
+	manifest[@"lease"] = @1;
+	bytes = [NSJSONSerialization dataWithJSONObject:manifest options:0 error:NULL];
+	assert([bytes writeToURL:endpoint atomically:YES]);
+	assert(chmod(endpoint.fileSystemRepresentation, 0600) == 0);
+	assert([[@"keep this file" dataUsingEncoding:NSUTF8StringEncoding] writeToURL:socketURL
+									   atomically:YES]);
+	/* Only socket nodes are eligible for removal; ordinary content stays intact. */
+	assert([Ext4ControlClient endpointsInDirectory:directory].count == liveCount);
+	assert([[NSData dataWithContentsOfURL:socketURL]
+	    isEqualToData:[@"keep this file" dataUsingEncoding:NSUTF8StringEncoding]]);
+	assert(access(endpoint.fileSystemRepresentation, F_OK) < 0 && errno == ENOENT);
+	assert(unlink(socketURL.fileSystemRepresentation) == 0);
+	/* Reject a FIFO before a blocking read can hide every other endpoint. */
+	assert(mkfifo(endpoint.fileSystemRepresentation, 0600) == 0);
+	assert([Ext4ControlClient endpointsInDirectory:directory].count == liveCount);
+	assert(unlink(endpoint.fileSystemRepresentation) == 0);
+}
+
 int
 main(int argc, const char **argv)
 {
@@ -125,6 +211,24 @@ main(int argc, const char **argv)
 		NSString *longName;
 		NSURL *longDirectory;
 
+		if (argc == 3 && strcmp(argv[1], "--crash-server") == 0) {
+			first = [[Ext4ControlServer alloc]
+			    initWithDirectory:[NSURL fileURLWithPath:@(argv[2]) isDirectory:YES]
+				     volumeID:@"crash-test"
+				      handler:^NSDictionary *(NSDictionary *value) {
+					(void)value;
+					return @{@"result" : @{}};
+				      }
+					error:&error];
+			assert(first != nil && error == nil);
+			printf("%s\n", first.manifestURL.fileSystemRepresentation);
+			fflush(stdout);
+			/* Keep the owning object live until the parent kills this process. */
+			while (first != nil) {
+				pause();
+			}
+			return 0;
+		}
 		if (argc == 3 && strcmp(argv[1], "--client") == 0) {
 			response = request([NSURL fileURLWithPath:@(argv[2])], @"ping");
 			assert([response[@"result"][@"reply"] isEqual:@"pong"]);
@@ -154,6 +258,8 @@ main(int argc, const char **argv)
 				error:&error];
 		assert(second != nil && ![first.manifestURL isEqual:second.manifestURL]);
 		assert([Ext4ControlClient endpointsInDirectory:directory].count == 2);
+		crashed_instance(@(argv[0]), directory, 2);
+		stale_candidates(directory, 2);
 		endpoint = first.manifestURL;
 		assert(lstat(endpoint.fileSystemRepresentation, &status) == 0 &&
 		    (status.st_mode & 0777) == 0600);
