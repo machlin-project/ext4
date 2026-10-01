@@ -143,13 +143,13 @@
 		}
 		if (error == EXT4_OK) {
 			[self writeUpdateForItem:owned update:&update change:&change];
-			error = ext4_write_partial(_fs, owned->inode.number,
+			error = ext4_write_request(_fs, owned->inode.number,
 			    owned->inode.generation, (uint64_t)offset, contents.bytes,
 			    contents.length, &update, &completed);
 		}
-		/* Preserve both the committed prefix and the terminal error. Legacy FSKit
-		 * explicitly accepts this pair; hiding ENOSPC makes an incomplete kernel
-		 * I/O look successful. The modern result adapter has its own reply ABI. */
+		/* FSKit cannot reconcile a committed prefix with a failed request in its
+		 * data and attribute caches. Admission must precede any publication; a
+		 * resource refusal therefore leaves the entire request unchanged. */
 		reply(completed, ext4_error(error));
 	}
 }

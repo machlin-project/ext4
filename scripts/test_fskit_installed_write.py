@@ -148,6 +148,7 @@ def main():
                             if group in checks:
                                 check(group, root + '/checker', mount, group, timeout=timeout)
                         if 'rename' in checks:
+                            check('diskutil-rename-short', '/usr/sbin/diskutil', 'renameVolume', device, 'ext4')
                             check('diskutil-rename', '/usr/sbin/diskutil', 'renameVolume', device, 'Machlin writable')
                             check('native-rename', root + '/checker', mount, 'rename')
                     elif result['checks'].get('native-rename', {}).get('passed'):

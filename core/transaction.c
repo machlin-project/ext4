@@ -9,6 +9,12 @@ enum ext4_snapshot_contents {
 	EXT4_SNAPSHOT_REPLACE,
 };
 
+enum ext4_transaction_kind {
+	EXT4_TRANSACTION_ORDINARY,
+	EXT4_TRANSACTION_REQUEST,
+	EXT4_TRANSACTION_RECOVERY,
+};
+
 static uint32_t
 ext4_transaction_slot_count(uint32_t credits)
 {
@@ -91,20 +97,29 @@ ext4_transaction_index(struct ext4_transaction *transaction, uint32_t entry)
 }
 
 static enum ext4_result
-ext4_transaction_create(struct ext4_journal *journal, uint32_t credits, bool recovery,
-    uint32_t sequence, struct ext4_transaction **result)
+ext4_transaction_create(struct ext4_journal *journal, uint32_t credits,
+    enum ext4_transaction_kind kind, uint32_t sequence, struct ext4_transaction **result)
 {
 	struct ext4_transaction *transaction;
 	uint32_t capacity;
+	uint32_t maximum;
+	bool recovery = kind == EXT4_TRANSACTION_RECOVERY;
 	enum ext4_result error;
 
 	if (result == NULL) {
 		return EXT4_INVALID_ARGUMENT;
 	}
 	*result = NULL;
-	if (journal == NULL || journal->transaction_active || credits == 0 ||
-	    credits >
-		(recovery ? ext4_journal_recovery_credits(journal) : EXT4_TRANSACTION_MAX_BLOCKS)) {
+	if (journal == NULL || journal->transaction_active || credits == 0) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	maximum = EXT4_TRANSACTION_MAX_BLOCKS;
+	if (kind == EXT4_TRANSACTION_REQUEST) {
+		maximum = ext4_journal_request_credits(journal);
+	} else if (recovery) {
+		maximum = ext4_journal_recovery_credits(journal);
+	}
+	if (credits > maximum) {
 		return EXT4_INVALID_ARGUMENT;
 	}
 	/* A log this instance did not commit needs recovery first. */
@@ -141,14 +156,22 @@ enum ext4_result
 ext4_transaction_begin(
     struct ext4_journal *journal, uint32_t credits, struct ext4_transaction **result)
 {
-	return ext4_transaction_create(journal, credits, false, 0, result);
+	return ext4_transaction_create(journal, credits, EXT4_TRANSACTION_ORDINARY, 0, result);
+}
+
+enum ext4_result
+ext4_transaction_begin_request(
+    struct ext4_journal *journal, uint32_t credits, struct ext4_transaction **result)
+{
+	return ext4_transaction_create(journal, credits, EXT4_TRANSACTION_REQUEST, 0, result);
 }
 
 enum ext4_result
 ext4_transaction_begin_recovery(struct ext4_journal *journal, uint32_t sequence, uint32_t credits,
     struct ext4_transaction **result)
 {
-	return ext4_transaction_create(journal, credits, true, sequence, result);
+	return ext4_transaction_create(
+	    journal, credits, EXT4_TRANSACTION_RECOVERY, sequence, result);
 }
 
 static enum ext4_result
@@ -458,12 +481,27 @@ uint32_t
 ext4_journal_recovery_credits(const struct ext4_journal *journal)
 {
 	uint32_t credits = (journal->last - journal->first - 2U) / 2U;
-	uint32_t memory = EXT4_RECOVERY_TRANSACTION_BYTES / journal->fs->info.block_size;
+	uint32_t memory = EXT4_TRANSACTION_SNAPSHOT_BYTES / journal->fs->info.block_size;
 
 	if (credits > memory) {
 		credits = memory;
 	}
 	return credits < EXT4_TRANSACTION_MAX_BLOCKS ? ext4_journal_credits(journal) : credits;
+}
+
+uint32_t
+ext4_journal_request_credits(const struct ext4_journal *journal)
+{
+	uint32_t memory = EXT4_TRANSACTION_SNAPSHOT_BYTES / journal->fs->info.block_size;
+	uint32_t credits = journal->direct ? memory : (journal->last - journal->first - 2U) / 2U;
+
+	if (credits > memory) {
+		credits = memory;
+	}
+	if (journal->fs->quota_active) {
+		credits = credits > EXT4_QUOTA_CREDITS ? credits - EXT4_QUOTA_CREDITS : 1U;
+	}
+	return credits;
 }
 
 void

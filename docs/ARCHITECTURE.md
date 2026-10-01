@@ -455,6 +455,19 @@ mapping-node snapshots consume credits alongside data. Credit exhaustion and
 allocation failure cancel the private transaction before any resource writes.
 `ext4_write` reports the full length on success and zero on error.
 
+`ext4_write_request` supplies the same all-or-refuse admission for larger native
+I/O requests. It uses the shared write edit and commit path, increasing private
+snapshot credits only after a canceled preparation proves that the smaller budget
+was insufficient. Its bound is the journal ring's conservative log capacity and
+32 MiB of snapshot buffers, including metadata and the quota reserve. Ordinary
+operations retain their 256-block limit. ENOSPC or EDQUOT cannot publish a request
+prefix or overwrite existing file bytes. Requests whose data, metadata or EOF-gap
+zeroing exceed the bound return RANGE without committing any part. Device errors
+retain the existing uncertain-commit and poisoned-owner rules. This API is for an
+adapter request, not a promise that a userspace syscall split into several native
+requests is atomic. Other callers can retain `ext4_write_partial` and its explicit
+completed-prefix contract.
+
 One atomic edit owns its allocation workspace and physical/logical target guard.
 Block staging and inode metadata finalization operate on that private state;
 admission, growth preparation and commit remain at the operation boundary.

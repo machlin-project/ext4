@@ -1203,7 +1203,7 @@ ext4_write_attributes(struct ext4_write_edit *edit, struct ext4_inode *inode,
 static enum ext4_result
 ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t offset,
     const void *buffer, size_t length, const struct ext4_inode_update *update, size_t *completed,
-    struct ext4_growth *growth)
+    struct ext4_growth *growth, uint32_t request_credits)
 {
 	struct ext4_fscrypt_key key;
 	struct ext4_write_edit edit;
@@ -1242,14 +1242,16 @@ ext4_write_atomic(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint
 				   : length / fs->info.block_size +
 		(within + length % fs->info.block_size + fs->info.block_size - 1) /
 		    fs->info.block_size;
-	if (range.blocks >= EXT4_TRANSACTION_MAX_BLOCKS) {
+	if (request_credits == 0 && range.blocks >= EXT4_TRANSACTION_MAX_BLOCKS) {
 		return EXT4_RANGE;
 	}
-	credits = ext4_journal_credits(fs->journal);
+	credits = request_credits != 0 ? request_credits : ext4_journal_credits(fs->journal);
 	if (credits == 0 || range.blocks >= credits) {
 		return EXT4_RANGE;
 	}
-	error = ext4_transaction_begin(fs->journal, credits, &transaction);
+	error = request_credits != 0
+	    ? ext4_transaction_begin_request(fs->journal, credits, &transaction)
+	    : ext4_transaction_begin(fs->journal, credits, &transaction);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -1378,7 +1380,57 @@ ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t of
     const void *buffer, size_t length, const struct ext4_inode_update *update, size_t *completed)
 {
 	return ext4_write_atomic(
-	    fs, number, generation, offset, buffer, length, update, completed, NULL);
+	    fs, number, generation, offset, buffer, length, update, completed, NULL, 0);
+}
+
+enum ext4_result
+ext4_write_request(struct ext4_fs *fs, uint32_t number, uint32_t generation, uint64_t offset,
+    const void *buffer, size_t length, const struct ext4_inode_update *update, size_t *completed)
+{
+	struct ext4_growth growth = { 0 };
+	uint64_t blocks;
+	uint32_t credits;
+	uint32_t maximum;
+	size_t within;
+	enum ext4_result error;
+
+	if (completed == NULL) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	*completed = 0;
+	error = ext4_write_validate(fs, offset, buffer, length, update);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (length == 0) {
+		return ext4_write(
+		    fs, number, generation, offset, buffer, length, update, completed);
+	}
+	within = (size_t)(offset % fs->info.block_size);
+	blocks = length / fs->info.block_size +
+	    (within + length % fs->info.block_size + fs->info.block_size - 1U) /
+		fs->info.block_size;
+	maximum = ext4_journal_request_credits(fs->journal);
+	if (blocks >= maximum) {
+		return EXT4_RANGE;
+	}
+	credits = ext4_journal_credits(fs->journal);
+	if (blocks >= credits / 2U) {
+		credits = blocks + credits > maximum ? maximum : (uint32_t)blocks + credits;
+	}
+	for (;;) {
+		error = ext4_write_atomic(fs, number, generation, offset, buffer, length, update,
+		    completed, &growth, credits);
+		if (error != EXT4_RANGE || !growth.capacity_failed || fs->aborted) {
+			return error;
+		}
+		if (credits == maximum) {
+			return error;
+		}
+		/* Only a canceled private preparation may retry. No request prefix is
+		 * committed to make room for a later part of this operation. */
+		credits = credits > maximum / 2U ? maximum : credits * 2U;
+	}
 }
 
 enum ext4_result
@@ -1425,7 +1477,7 @@ ext4_write_partial(struct ext4_fs *fs, uint32_t number, uint32_t generation, uin
 			chunk = length - *completed;
 		}
 		error = ext4_write_atomic(fs, number, generation, offset + *completed,
-		    (const uint8_t *)buffer + *completed, chunk, &remaining, &written, &growth);
+		    (const uint8_t *)buffer + *completed, chunk, &remaining, &written, &growth, 0);
 		if (error == EXT4_OK) {
 			*completed += written;
 			growth.deferred_count = 0;

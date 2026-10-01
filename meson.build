@@ -62,7 +62,7 @@ foreach name, source : {
   'journal-transfer': 'journal_transfer',
   'external-journal': 'external_journal', 'unjournaled': 'unjournaled',
   'fast-commit': 'fast_commit', 'fast-commit-recovery': 'fast_commit_recovery',
-  'write': 'write', 'write-partial': 'write_partial', 'write-growth': 'write_growth',
+  'write': 'write', 'write-partial': 'write_partial', 'write-request': 'write_request', 'write-growth': 'write_growth',
   'file-range': 'file_range', 'large-file': 'large_file', 'large-volume': 'large_volume', 'inode-flags': 'inode_flags',
   'namespace': 'namespace', 'removal': 'removal', 'sustained': 'sustained', 'mmp': 'mmp',
   'deferred': 'deferred',

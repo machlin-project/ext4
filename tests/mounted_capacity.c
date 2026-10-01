@@ -14,6 +14,8 @@
 enum {
 	CapacityWriteBytes = 256 * 1024,
 	CapacityReleaseBytes = 128 * 1024,
+	CapacityLargeWriteBytes = 4 * 1024 * 1024,
+	CapacityLargeReleaseBytes = 2 * 1024 * 1024 + CapacityReleaseBytes,
 	CapacityMaxVolumeBytes = 256 * 1024 * 1024,
 	CapacityPattern = 0x6d,
 	CapacityMaxAttempts = 4
@@ -64,7 +66,7 @@ read_tail(int file, off_t start, off_t end, uint8_t *buffer, ssize_t *amount, in
 
 	*amount = 0;
 	*error = 0;
-	if (end < start || end - start > CapacityMaxAttempts * CapacityWriteBytes) {
+	if (end < start || end - start > CapacityMaxAttempts * CapacityLargeWriteBytes) {
 		return 0;
 	}
 	for (cursor = start; cursor < end; cursor += count) {
@@ -158,6 +160,9 @@ main(int argc, char **argv)
 	int passed;
 	int aligned;
 	int control;
+	int large;
+	size_t write_bytes;
+	size_t release_bytes;
 	int readback = 1;
 	int read_error = 0;
 	ssize_t read_amount = 0;
@@ -168,12 +173,16 @@ main(int argc, char **argv)
 		return verify_remount(argv[1], parse_offset(argv[3]), parse_offset(argv[4]));
 	}
 	CHECK(strcmp(argv[2], "cached") == 0 || strcmp(argv[2], "uncached") == 0);
-	CHECK(argc < 4 || strcmp(argv[3], "tail") == 0 || strcmp(argv[3], "aligned") == 0);
+	CHECK(argc < 4 || strcmp(argv[3], "tail") == 0 || strcmp(argv[3], "aligned") == 0 ||
+	    strcmp(argv[3], "large") == 0);
 	CHECK(argc < 5 || strcmp(argv[4], "apfs") == 0);
 	CHECK(geteuid() != 0);
 	uncached = strcmp(argv[2], "uncached") == 0;
-	aligned = argc >= 4 && strcmp(argv[3], "aligned") == 0;
+	large = argc >= 4 && strcmp(argv[3], "large") == 0;
+	aligned = large || (argc >= 4 && strcmp(argv[3], "aligned") == 0);
 	control = argc == 5;
+	write_bytes = large ? CapacityLargeWriteBytes : CapacityWriteBytes;
+	release_bytes = large ? CapacityLargeReleaseBytes : CapacityReleaseBytes;
 	root = open(argv[1], O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
 	CHECK(root >= 0 && fstatfs(root, &filesystem) == 0);
 	CHECK(strcmp(filesystem.f_fstypename, control ? "apfs" : "machlinext4") == 0);
@@ -182,14 +191,14 @@ main(int argc, char **argv)
 	 * mounting. Bound the remaining headroom instead of assuming exact zero. */
 	CHECK(filesystem.f_bsize != 0);
 	CHECK(control || filesystem.f_bavail <= CapacityReleaseBytes / filesystem.f_bsize);
-	buffer = malloc(CapacityWriteBytes);
+	buffer = malloc(write_bytes);
 	CHECK(buffer != NULL);
-	memset(buffer, CapacityPattern, CapacityWriteBytes);
+	memset(buffer, CapacityPattern, write_bytes);
 	file = control ? prepare_control(root, &filesystem, buffer)
 		       : openat(root, "acceptance-write/space-pressure", O_RDWR | O_NOFOLLOW);
 	CHECK(file >= 0 && fstat(file, &status) == 0 && S_ISREG(status.st_mode));
-	CHECK(status.st_uid == geteuid() && status.st_size >= CapacityWriteBytes);
-	start = status.st_size - CapacityReleaseBytes;
+	CHECK(status.st_uid == geteuid() && status.st_size >= (off_t)write_bytes);
+	start = status.st_size - (off_t)release_bytes;
 	page_size = sysconf(_SC_PAGESIZE);
 	CHECK(page_size > 0);
 	if (aligned) {
@@ -198,12 +207,12 @@ main(int argc, char **argv)
 	CHECK(ftruncate(file, start) == 0 && fsync(file) == 0);
 	CHECK(fcntl(file, F_NOCACHE, uncached) == 0);
 	for (attempt = 0; attempt < CapacityMaxAttempts; attempt++) {
-		amount = pwrite(file, buffer, CapacityWriteBytes, start + reported);
+		amount = pwrite(file, buffer, write_bytes, start + reported);
 		write_error = amount < 0 ? errno : 0;
 		if (amount <= 0) {
 			break;
 		}
-		CHECK(amount <= CapacityWriteBytes);
+		CHECK(amount <= (ssize_t)write_bytes);
 		reported += amount;
 	}
 	sync_error = fsync(file) == 0 ? 0 : errno;
@@ -224,12 +233,13 @@ main(int argc, char **argv)
 		passed = 1;
 	}
 	passed = passed && readback;
-	printf("{\"filesystem\":\"%s\",\"aligned\":%s,\"uncached\":%s,\"start\":%lld,\"reported\":%"
+	printf("{\"filesystem\":\"%s\",\"aligned\":%s,\"uncached\":%s,\"write_bytes\":%zu,"
+	       "\"start\":%lld,\"reported\":%"
 	       "lld,\"write_error\":%d,"
 	       "\"sync_error\":%d,\"stat_error\":%d,\"size\":%lld,\"close_error\":%d,"
 	       "\"read_error\":%d,\"read_amount\":%lld,\"readback\":%s,\"passed\":%s}\n",
 	    filesystem.f_fstypename, aligned ? "true" : "false", uncached ? "true" : "false",
-	    (long long)start, (long long)reported, write_error, sync_error, stat_error,
+	    write_bytes, (long long)start, (long long)reported, write_error, sync_error, stat_error,
 	    stat_error == 0 ? (long long)status.st_size : -1LL, close_error, read_error,
 	    (long long)read_amount, readback ? "true" : "false", passed ? "true" : "false");
 	free(buffer);

@@ -1671,7 +1671,7 @@ uint32_t
 ext4_journal_checkpoint_limit(const struct ext4_journal *journal)
 {
 	uint32_t ring = journal->last - journal->first;
-	uint32_t memory = EXT4_RECOVERY_TRANSACTION_BYTES / journal->fs->info.block_size;
+	uint32_t memory = EXT4_TRANSACTION_SNAPSHOT_BYTES / journal->fs->info.block_size;
 
 	return ring < memory ? ring : memory;
 }

@@ -33,9 +33,9 @@
 /* Extra snapshots an ordinary transaction may use for quota files at commit:
  * each of three quota types can touch a few IDs and grow its tree. */
 #define EXT4_QUOTA_CREDITS 48U
-/* Recovery conversions may snapshot more blocks, bounded by the ordinary ring
- * and this budget for private snapshot buffers. */
-#define EXT4_RECOVERY_TRANSACTION_BYTES (32U * 1024U * 1024U)
+/* Recovery conversions and complete adapter requests may snapshot more blocks,
+ * bounded by the journal ring and this budget for private snapshot buffers. */
+#define EXT4_TRANSACTION_SNAPSHOT_BYTES (32U * 1024U * 1024U)
 #define EXT4_RECOVERY_MAX_RECORDS (1U << 20)
 
 struct ext4_be16 {
@@ -186,6 +186,11 @@ void ext4_journal_close(struct ext4_journal *journal);
 enum ext4_result ext4_journal_finish(struct ext4_journal *journal);
 enum ext4_result ext4_transaction_begin(
     struct ext4_journal *journal, uint32_t credits, struct ext4_transaction **result);
+/* A complete external write request may use the bounded capacity of the ring,
+ * rather than the smaller budget used by restartable filesystem operations. */
+enum ext4_result ext4_transaction_begin_request(
+    struct ext4_journal *journal, uint32_t credits, struct ext4_transaction **result);
+uint32_t ext4_journal_request_credits(const struct ext4_journal *journal);
 /* The ordinary committed prefix must already be checkpointed and flushed.
  * Keep its on-disk recovery authority until commit publishes this sequence. */
 enum ext4_result ext4_transaction_begin_recovery(struct ext4_journal *journal, uint32_t sequence,

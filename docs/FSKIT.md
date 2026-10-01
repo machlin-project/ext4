@@ -28,6 +28,7 @@ therefore not sufficient evidence for `diskutil` discovery and mounting.
 The FSKit short name and reported file-system type are `machlinext4`. Do not add
 an underscore: Disk Arbitration appends `_fskit` internally and strips that suffix
 at the first underscore, truncating the former `machlin_ext4` name to `machlin`.
+The ext4 personality explicitly declares subtype zero, matching `FSStatFSResult`.
 Fixture acceptance uses `hdiutil attach -readonly -owners on -mountpoint ...` to
 exercise Disk Arbitration discovery and mounting together. `diskutil info` must
 report the actual mount point and enabled ownership; VFS must omit `noowners`.
@@ -58,15 +59,22 @@ stale on-disk padding. These mappings require an immutable read-only block
 resource. Writable volumes use normal FSKit cached I/O instead of exporting maps.
 
 The preferred native transfer size is 128 KiB, distinct from ext4's allocation
-block size. The legacy write callback preserves both the committed byte count and
-the terminal error, including a partial `ENOSPC`. The adapter must not conceal that
-error by reporting an incomplete kernel I/O as successful.
-The modern handler preserves the same terminal error. Its result/error ABI
-discards the result when an error is supplied, so it cannot publish the committed
-prefix as a byte count in that response. A short successful result previously
-turned a core `ENOSPC` into native `EIO`; the aligned capacity reproduction now
-receives `ENOSPC`. Native prefix accounting and cache coherence after that error
-remain unaccepted, as detailed below.
+block size. Each write callback now uses `ext4_write_request`: it prepares all
+data, allocation changes, inode attributes and quota updates before committing
+the request. ENOSPC or EDQUOT therefore cannot leave an unreported request prefix.
+This matters on both API generations: native FSKit did not reconcile partial
+bytes returned with an error, and a successful short reply produced EIO instead.
+The modern result/error ABI explicitly discards results on error.
+
+Request preparation may use the journal ring's bounded capacity, up to 32 MiB of
+private snapshots, while ordinary core operations keep their smaller transaction
+budget. Oversized requests, including excessive written-preallocation gap zeroing,
+return a range error before publishing data. This is an explicit limit, not an
+automatic partial-write fallback. On the tested 27 system a 4 MiB user write reaches
+the adapter as 1 MiB callbacks. Separate callbacks retain their separate commit
+boundaries; the capacity test includes a large write that reaches ENOSPC after
+earlier callbacks have succeeded. Device errors still poison the writable owner
+and require recovery; they never become successful short replies.
 
 The shared volume owns operations independently of FSKit's protocol generations.
 `Ext4LegacyVolume` conforms to the 26.x operation protocols; `Ext4ModernVolume`
@@ -155,94 +163,63 @@ unfinished workload. Evidence is in the lab's
 The runner's `--profiles` and `--pressure-timeout` permit focused, explicitly bounded
 reproduction. Evidence records the chosen deadline and streams progress as it arrives.
 
-With writable volumes no longer advertising kernel block mappings, the unchanged
-1 KiB workload now finishes without the stall: it reports ENOSPC after 52,953,088
-bytes, passes its sync/readback/space-reuse checks, detaches normally and passes
-remount verification and independent fsck. This accepts that original reproduction,
-not every capacity edge case or prolonged stress. The strengthened aligned check
-below still fails on 26.5.2 with and without `F_NOCACHE`: native `stat` omits a
-132,096-byte committed tail which read-only remount and independent inode inspection
-both expose. Both exports pass fsck and the read-only mounts change no image bytes.
-Evidence is in the lab's `installed-clean/build27-large-pressure-1` and
-`installed-clean/build27-capacity-verified-1` under `artifacts/ext4-fskit/`.
+Writable volumes no longer advertise kernel block mappings. The unchanged
+64 MiB/1 KiB pressure workload now finishes on 26.5.2 without its former stall,
+passes sync/readback/space reuse, detaches normally, and passes remount and
+independent fsck. This accepts that reproduction, not all capacity edge cases.
+Its evidence is in the lab's `installed-clean/build27-large-pressure-1` under
+`artifacts/ext4-fskit/`.
 
-The unchanged 64 MiB, 1 KiB workload advances without a stall on 27.0.1, but its
-original run failed near capacity with `EIO` instead of `ENOSPC`. Ordinary detach,
-read-only verification and independent fsck passed. A short reproduction traced
-this error conversion to the modern adapter's short-success response after core
-`ENOSPC`; that response has been corrected. The full pressure workload remains
-unaccepted. Its original evidence is in the lab's
-`artifacts/ext4-fskit/installed-27/build24-large-pressure-1/` and its adjacent
-`build24-large-pressure-1-control/` log directory.
+`ext4-mounted-capacity-test MOUNTPOINT cached|uncached [tail|aligned|large]`
+reuses a fresh copy of the owned full export. The short layouts release the final
+128 KiB and issue 256 KiB writes, optionally aligning the start to a native page.
+The large layout releases 2 MiB plus 128 KiB and issues 4 MiB writes, deliberately
+crossing several native I/O requests. Each case checks reported bytes, live size,
+readback, ENOSPC and synchronization. Cached writes may instead report a deferred
+ENOSPC at synchronization. An additional `apfs` argument prepares a disposable
+APFS control volume of at most 256 MiB before the same operation.
 
-`ext4-mounted-capacity-test MOUNTPOINT cached|uncached [tail|aligned]` reuses a
-fresh copy of that full export. It requires the owned pressure fixture and at
-most 128 KiB of available headroom, allowing native metadata cleanup during
-mount. It releases the final 128 KiB, optionally rounds the start down to a native
-page boundary, and issues bounded 256 KiB writes. It checks reported bytes, file
-size, data readback, `ENOSPC` and synchronization, permitting deferred `ENOSPC`
-for cached writes. Each case requires a separate disposable copy and independent
-inspection after detach. An additional `apfs` argument fills a newly created
-APFS control volume of at most 256 MiB before running the same tail operation.
-The 128 MiB APFS aligned/uncached control passes and leaves the file at its
-pre-write size when returning `ENOSPC`.
+`scripts/test_fskit_installed_capacity.py` uses a new guest directory, an explicitly
+selected signed build and a fresh copy per layout/cache combination. It detaches
+normally and invokes `ext4-mounted-capacity-test MOUNTPOINT verify START EXPECTED_SIZE`
+on a read-only remount. It compares live size with that fresh native view and
+independent `debugfs` inode inspection, reads the entire stored tail and EOF,
+checks the read-only image hash, and runs nonrepairing `e2fsck`. The JSON
+`read_amount` is the last `pread` count; `readback` covers the entire checked range.
+Timeouts preserve the owning process/device for diagnosis. Neither clean fsck
+nor a live check over an empty range can accept hidden committed bytes.
 
-`scripts/test_fskit_installed_capacity.py` automates the ext4 cases with a new
-guest directory, an explicitly selected signed build and a fresh copy for every
-layout/cache combination. After the write check it detaches normally and invokes
-`ext4-mounted-capacity-test MOUNTPOINT verify START EXPECTED_SIZE` on a read-only
-remount. It compares the live size with both that fresh native view and independent
-`debugfs` inode inspection, verifies the stored tail and EOF, checks the read-only
-image hash, and runs nonrepairing `e2fsck`. A live-only success or clean fsck cannot
-make a size disagreement pass. Timeouts preserve the owning process/device for
-diagnosis instead of automatically detaching or restarting the VM.
+Complete callback admission now fixes the original 256 KiB cases on both 26.5.2
+and 27.0.1: aligned/tail, cached/uncached all return ENOSPC without changing the
+file's size or data. Live, remounted and independently inspected sizes agree;
+all exports pass fsck, and read-only mounts preserve every image byte.
 
-On installed 27.0.1, the corrected adapter returns `ENOSPC` for all four short
-cases (cached/uncached, aligned/tail), but the syscall reports no bytes even
-though earlier subrequests committed a prefix. Live `stat` reports growth while
-`pread` at the pre-write end returns zero. The strict checks remain failed;
-passing independent fsck does not establish native data-cache coherence. Both
-the entire 132,096-byte committed tail and its full on-disk size become visible
-after an ordinary read-only remount, without changing the image. That separates
-the observed live-cache failure from missing stored bytes; see
-`installed-27/build26-capacity-readback-1`. `diskutil verifyVolume` rejects this
-FSKit volume as unrecognized and supplies no filesystem-validation evidence.
-Both
-1 KiB and 4 KiB in-memory modern-handler checks pass partial and zero-progress
-`ENOSPC`, complete prefix readback and space reuse, with clean independent exports.
-Evidence is in the lab's `installed-27/build25-capacity-{apfs,aligned}-1` and
-`installed-27/build26-{modern-capacity,capacity-aligned,capacity-tail}-1`
-directories under `artifacts/ext4-fskit/`. DEBUG builds trace legacy callback
-entry/reply/return and modern short/error results without file contents.
+The larger case still fails on both systems. Two complete 1 MiB callbacks commit
+before a later callback refuses allocation without changing the file. Native
+`pwrite` reports zero bytes and ENOSPC; `stat` includes the 2 MiB prefix, but live
+`pread` at its beginning returns EOF. An ordinary read-only remount reads all
+2 MiB correctly, with matching independent inode size and clean fsck. Complete
+callback admission cannot make a syscall spanning several callbacks atomic.
+The failed large cases remain required; native capacity acceptance is incomplete.
+Evidence is in `installed-clean/build31-capacity-1` and
+`installed-27/build31-capacity-2` under the lab's `artifacts/ext4-fskit/`.
 
-Separating read-only mapping protocols from writable volumes changes the native
-27 write path: the aligned 256 KiB request now reaches one core callback instead
-of separate 128 KiB callbacks. Ordinary mutation, mmap, concurrent I/O, sparse
-queries, native label changes, remount and independent fsck still pass on both
-block sizes. Factory checks cover both protocol families and both mount modes.
-The short capacity checker reports success because native `stat` retains the
-pre-write size, making its tail-read loop empty. Independent inode inspection
-still finds a 132,096-byte committed tail absent from that live size. This is a
-failed consistency contract, not full capacity acceptance. The original summaries
-and the separate diagnostic correction remain in
-`installed-27/build27-capacity-aligned-1`; ordinary and component evidence is in
-`installed-27/build27-native-1` and `installed-27/build27-modern-1` under the lab's
-`artifacts/ext4-fskit/`. Set-ID metadata and `diskutil renameVolume` still fail.
-
-Two rejected diagnostics isolate the remaining 27 write-result behavior. Returning
-only the durable prefix as a short success still produces native `EIO` and an
-unreadable live tail in all four layout/cache combinations. Explicitly granting
-`FSKernelCacheCoherencyTypeNoCache` through the public data-cache handler produces
-the same failures in both aligned cases; the trace confirms the handler was
-invoked. Every read-only remount reads the complete committed tail, its size agrees
-with independent inode inspection, and fsck passes. These diagnostic app changes
-are not retained. Evidence and the exact experimental source diff remain in the
-lab's `installed-27/build28-capacity-1`, `installed-27/build29-capacity-1` and the
-standalone `artifacts/checks/fskit-cache29` directories. This does not establish a
-solution or a specific framework defect.
+Earlier diagnostics returned an allocation-limited prefix as short success or
+combined that response with explicit `FSKernelCacheCoherencyTypeNoCache` on 27.
+They produced native EIO and failed live readback; those changes were removed.
+A further NoCache diagnostic combined with complete callback admission also fails
+both large cases, with cache-open invocation confirmed. It was removed; evidence
+is in `installed-27/build32-capacity-large-1` and the standalone
+`artifacts/checks/fskit-request-cache32` directory. The earlier evidence remains in
+`installed-27/build28-capacity-1`,
+`installed-27/build29-capacity-1` and the standalone
+`artifacts/checks/fskit-cache29`. They do not establish a supported workaround.
+`diskutil verifyVolume` rejects this FSKit volume as unrecognized and supplies
+no filesystem-validation evidence. DEBUG builds trace callback sizes/errors
+without file contents.
 
 The mutation engine handles file/directory/symlink creation, links, unlink/rmdir,
-rename and replacement, partial writes, sparse growth, truncate, owner/mode/time
+rename and replacement, complete write requests, sparse growth, truncate, owner/mode/time
 changes and user xattrs. Namespace changes advance directory verifiers. Data
 changes conservatively remove set-ID bits and Linux file capabilities in the same
 transaction because 26.x callbacks lack caller credentials. Immutable/append flags
@@ -527,6 +504,18 @@ on 27 confirms that a non-nil `FSWriteFileResult` returns mode `0740` without an
 error, but live/reopened `fstat` retains `06740`. The framework's requested
 attribute mask omits mode. This localizes the observed discrepancy to publication
 through the native metadata cache; it does not establish a supported workaround.
+An ordinary-user APFS control on the same 27 guest clears both bits: mode `06740`
+becomes `0740` after a one-byte `pwrite` and `fsync`, including after reopen.
+Thus the expectation is independently reproduced on macOS. The SDK documents
+that result objects cache all populated attributes, including ones not requested;
+the adapter already supplies a fresh mode and change time in that result.
+There is no public metadata-invalidation operation in the selected SDK. Its
+data-cache coherency protocol addresses file data, not an attribute refresh.
+Apple's [FSKit cache discussion](https://developer.apple.com/forums/thread/832647)
+also distinguishes data-cache management from change notification; that statement
+alone does not diagnose this driver's set-ID discrepancy.
+The failed conformance check remains required. The APFS control evidence is in
+the lab's `artifacts/ext4-fskit/installed-27/build30-setid-control-1/`.
 
 Generated evidence lives in the lab's ignored `artifacts/ext4-fskit/` tree:
 `installed-27/build22-native-1`, `installed-27/build23-attributes-1-install`,

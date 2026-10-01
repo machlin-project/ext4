@@ -773,6 +773,25 @@ enforcement(struct device *device, const char *exports, const char *source)
 	EXPECT(write_blocks(fs, &limited, 0, WRITE_BLOCKS, false, &completed), EXT4_QUOTA_EXCEEDED);
 	CHECK(!fs->aborted && completed == 0 && limited.size == 0);
 	expect_usage(fs, 0, EXISTING_OWNER, start.space, 2);
+	{
+		struct ext4_inode_update request_update = data_update(&limited);
+		const size_t length = 1024U * 1024U;
+		uint8_t *data = malloc(length);
+		uint8_t *before = malloc(device->size);
+		uint32_t writes = device->writes;
+
+		CHECK(data != NULL && before != NULL);
+		memset(data, 'q', length);
+		memcpy(before, device->cache, device->size);
+		EXPECT(ext4_write_request(fs, limited.number, limited.generation, 0, data, length,
+			   &request_update, &completed),
+		    EXT4_QUOTA_EXCEEDED);
+		CHECK(completed == 0 && !fs->aborted && device->writes == writes);
+		CHECK(memcmp(before, device->cache, device->size) == 0);
+		expect_usage(fs, 0, EXISTING_OWNER, start.space, 2);
+		free(before);
+		free(data);
+	}
 	/* A partial write keeps the prefix that fits the hard limit. */
 	EXPECT(write_blocks(fs, &limited, 0, WRITE_BLOCKS, true, &completed), EXT4_QUOTA_EXCEEDED);
 	CHECK(completed == HARD_BLOCKS * block && limited.size == completed);

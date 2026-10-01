@@ -523,6 +523,7 @@ test('inode-and-file-write', programs['write'], args: write_images, timeout: 300
 # Deferred group commit: visibility, atomic multi-operation commits and capacity commits.
 test('deferred-commit', programs['deferred'], args: write_images, timeout: 900, suite: 'core')
 test('file-write-partial', programs['write-partial'], args: write_images, timeout: 300, suite: 'core')
+test('file-write-request', programs['write-request'], args: write_images, timeout: 300, suite: 'core')
 foreach name : write_names
   test('file-range-' + name, programs['file-range'], args: paths['fixtures'] / name,
     timeout: 300, suite: 'core')
@@ -537,6 +538,8 @@ test('file-growth-preallocation', programs['write-growth'], args: write_images,
   timeout: 300, suite: 'core')
 foreach profile : ['4k', '1k']
   test('file-write-partial-faults-' + profile, programs['write-partial'],
+    args: ['--faults', paths['fixtures'] / ('ext4-' + profile + '.img')], timeout: 600, suite: 'core')
+  test('file-write-request-faults-' + profile, programs['write-request'],
     args: ['--faults', paths['fixtures'] / ('ext4-' + profile + '.img')], timeout: 600, suite: 'core')
 endforeach
 growth_fault_profiles = ['4k']

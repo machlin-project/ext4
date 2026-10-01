@@ -53,6 +53,8 @@
                 <true/>
                 <key>FSName</key>
                 <string>Machlin ext4</string>
+                <key>FSSubType</key>
+                <integer>0</integer>
             </dict>
         </dict>
         <key>FSRequiresSecurityScopedPathURLResources</key>

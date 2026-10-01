@@ -848,7 +848,6 @@ check_capacity(WritableImage *image)
 	uint64_t total = 0;
 	uint64_t offset;
 	size_t count;
-	BOOL partialError = NO;
 
 	memset(data.mutableBytes, 0x6d, data.length);
 	do {
@@ -866,12 +865,12 @@ check_capacity(WritableImage *image)
 		assert(total <= image.bytes.length);
 		if (failure != nil) {
 			assert(failure.code == ENOSPC);
-			partialError = completed != 0;
+			assert(completed == 0);
 		} else {
 			assert(completed == data.length);
 		}
 	} while (failure == nil);
-	assert(partialError && attributes(volume, file).size == total);
+	assert(total != 0 && attributes(volume, file).size == total);
 	assert([volume validateItem:item] == EXT4_OK);
 	for (offset = 0; offset < total; offset += completed) {
 		count = (size_t)MIN(total - offset, data.length);
@@ -886,8 +885,7 @@ check_capacity(WritableImage *image)
 	write_bytes(volume, file, data, 0);
 	sync_volume(volume);
 	[volume invalidate];
-	puts("PASS FSKit partial ENOSPC reports its durable prefix and error, readback and space "
-	     "reuse");
+	puts("PASS FSKit ENOSPC leaves the refused request unchanged, readback and space reuse");
 }
 
 #if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
@@ -930,11 +928,11 @@ check_capacity_modern(WritableImage *image)
 			assert(total - offset == data.length);
 		} else {
 			assert([failure.domain isEqualToString:NSPOSIXErrorDomain]);
-			assert(failure.code == ENOSPC && total > offset);
+			assert(failure.code == ENOSPC && total == offset);
 		}
 	} while (failure == nil);
-	/* The modern reply cannot publish partial bytes alongside an error, but
-	 * the engine must retain exactly the committed prefix and remain usable. */
+	/* An error has no result attributes or byte count. The file must contain
+	 * exactly the successful earlier requests and remain usable. */
 	for (offset = 0; offset < total; offset += completed) {
 		count = (size_t)MIN(total - offset, data.length);
 		assert([volume readItem:item
@@ -962,8 +960,7 @@ check_capacity_modern(WritableImage *image)
 	assert(attributes(volume, file).size == data.length);
 	sync_volume(volume);
 	[volume invalidate];
-	puts("PASS FSKit modern partial and zero-progress ENOSPC, committed prefix readback and "
-	     "space reuse");
+	puts("PASS FSKit modern ENOSPC admission, earlier request readback and space reuse");
 }
 
 API_AVAILABLE(macos(27.0))
@@ -981,9 +978,9 @@ check_write_failure_modern(NSData *fixture)
 	volume = (Ext4ModernVolume *)open_volume_class(image, YES, NULL, Ext4ModernVolume.class);
 	file = create_item(volume, root_item(volume), @"failed-write", FSItemTypeFile);
 	sync_volume(volume);
-	/* One checkpoint completes before the next transaction loses its barrier.
-	 * A committed prefix must not turn an uncertain device outcome into success. */
-	image.failBarrierAt = image.barriers + MutationJournalReset + 1;
+	/* Losing the commit barrier makes the whole request uncertain. A partial
+	 * on-device outcome must never be reported as a successful short write. */
+	image.failBarrierAt = image.barriers + MutationJournalCommit;
 	[volume writeContents:data
 		       toFile:file
 		     atOffset:0
@@ -994,7 +991,7 @@ check_write_failure_modern(NSData *fixture)
 		 }];
 	assert(replied && image.barriers == image.failBarrierAt);
 	[volume invalidate];
-	puts("PASS FSKit modern device failure after a committed prefix remains an error");
+	puts("PASS FSKit modern device failure during a complete request remains an error");
 }
 #endif
 

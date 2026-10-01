@@ -49,9 +49,11 @@ mmap, concurrent I/O, sparse-region queries, fscrypt v1/v2 key lifecycle and
 persistence-service failure recovery.
 Live set-ID metadata coherence and `diskutil renameVolume` fail on both OS versions.
 Separating kernel block mappings from writable volumes lets the original larger
-1 KiB pressure scenario finish on 26.5.2 without its former stall. Stronger capacity
-checks still find a committed tail hidden by the live file size on both OS versions;
-read-only remount and independent inode inspection expose the discrepancy.
+1 KiB pressure scenario finish on 26.5.2 without its former stall. Complete callback
+admission fixes the short ENOSPC consistency cases on both OS versions. A larger
+write spanning several native requests still leaves a committed prefix unreadable
+through the live mount; read-only remount reads it correctly, and independent
+inode inspection and fsck agree. This remaining native contract is unaccepted.
 ACL authorization, device-loss stress, broader OS/hardware
 acceptance and production distribution remain unaccepted.
 This is not a production release.

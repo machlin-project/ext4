@@ -119,9 +119,10 @@ write_pattern(struct ext4_fs *fs, const struct ext4_inode *inode, unsigned int f
 	for (index = 0; index < file_size(file); index++) {
 		bytes[index] = pattern(file, index);
 	}
-	EXPECT(ext4_write_partial(fs, inode->number, inode->generation, 0, bytes, file_size(file),
+	EXPECT(ext4_write_request(fs, inode->number, inode->generation, 0, bytes, file_size(file),
 		   &update, &completed),
 	    EXT4_OK);
+	CHECK(completed == file_size(file));
 	free(bytes);
 }
 

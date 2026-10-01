@@ -22,8 +22,9 @@ def main():
     parser.add_argument('--checker', type=Path, required=True)
     parser.add_argument('--build-number', type=int, required=True)
     parser.add_argument('--guest-workdir', required=True, help='New absolute guest directory')
-    parser.add_argument('--layouts', nargs='+', choices=('aligned', 'tail'),
-                        default=['aligned', 'tail'])
+    parser.add_argument('--layouts', nargs='+', choices=('aligned', 'tail', 'large'),
+                        default=['aligned', 'tail', 'large'],
+                        help='Large writes cross several kernel upcalls before ENOSPC')
     parser.add_argument('--e2fsck', type=Path, required=True)
     parser.add_argument('--debugfs', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True, help='New evidence directory')

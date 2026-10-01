@@ -3257,35 +3257,58 @@ establish cross-user or root-owned extension IPC. Evidence is in the lab's
 ## FSKit write completion and remount consistency
 
 Writable volumes no longer advertise kernel-offloaded block mapping protocols;
-separate read-only subclasses retain that path. Factory checks exercise both
-mount modes and both protocol generations. On stock 27, ordinary writes, mmap,
-concurrency, sparse queries, native volume rename, remount and independent fsck
-still pass both block sizes. Set-ID metadata and `diskutil renameVolume` remain
-failed groups. On stock 26, the unchanged original 64 MiB/1 KiB pressure workload
-now completes without its former kernel I/O wait, passes its full check and fsck,
-and needs no recovery or forced detach.
+separate read-only subclasses retain that path. Factory checks cover both mount
+modes and both protocol generations. The original 64 MiB/1 KiB pressure workload
+on stock 26 now finishes without its former kernel I/O wait, needs no recovery or
+forced detach, and passes remount and fsck. Ordinary writes, mmap, concurrency,
+native volume rename and persistence also pass; these results do not close all
+capacity or platform metadata contracts.
 
-The new installed-capacity runner adds a read-only remount and independent inode
-inspection to each short full-disk case. Both stock 26 and 27 still hide a
-132,096-byte committed tail from live `stat` after ENOSPC. The old live-only check
-could pass by reading an empty range; the strengthened check correctly fails.
-Returning a short success and explicitly negotiating no cache on 27 do not fix
-the contract. Those diagnostic implementations were removed. These results are
-not full capacity acceptance despite clean fsck and complete remounted readback.
+`ext4_write_request` admits the data, mapping and inode changes for one complete
+adapter request before commit. Allocation or quota shortage leaves zero completed
+bytes and no committed request prefix. The journal and 32 MiB snapshot bound
+remain explicit; ordinary core operations keep their existing limits. Tests cover
+large unaligned growth and overwrite, invalid/stale/oversized requests, unchanged
+bytes and counters on ENOSPC/EDQUOT, smaller retries, encryption, sampled resource
+failures, and sampled interrupted transactions with recovery. Six growth/overwrite
+exports from extent and indirect fixtures pass independent fsck; both quota
+fixtures pass direct enforcement checks, including whole-request refusal.
 
-Preallocation now preserves device/journal errors after a committed reservation
-prefix; only allocation or quota shortage can produce a successful partial
-reservation. The regression injects a barrier failure after one checkpoint,
-requires the caller to see EIO, rejects reuse of the aborted owner and verifies
-the committed allocation after recovery. It passes on both block sizes. Modern
-write-result tests separately preserve a fatal error after a committed data prefix,
-and retain the partial/zero-progress ENOSPC checks. Both modern exports pass fsck.
+Legacy and modern FSKit component capacity tests pass both block sizes: refused
+requests do not change file size, earlier successful requests remain readable,
+and released space is reusable. Modern tests inject a failed commit barrier and
+require nil result plus EIO. Preallocation separately preserves fatal errors after
+a committed reservation prefix. Component exports pass independent fsck.
 
-Evidence is in the lab's `artifacts/ext4-fskit/installed-clean/build27-large-pressure-1`,
-`installed-clean/build27-capacity-verified-1`, `installed-27/build27-native-1`,
-`installed-27/build27-capacity-aligned-1`, `installed-27/build28-capacity-1`,
-`installed-27/build29-capacity-1` and `installed-27/build30-modern-1` directories;
-the standalone component logs are in `artifacts/checks/fskit-preallocation30`.
+Installed 26.5.2 and 27.0.1 now pass all four original short ENOSPC cases each:
+256 KiB requests, aligned/tail, cached/uncached. The live size remains unchanged
+on refusal and agrees with read-only remount and independent inode inspection.
+All eight exported images pass fsck and remain byte-identical through read-only
+remount. This fixes the previously hidden 132,096-byte tail.
+
+The expanded 4 MiB syscall still fails both cache modes on both OS versions.
+FSKit sends separate 1 MiB callbacks: two succeed, then allocation is refused.
+The syscall reports no bytes and ENOSPC, although live stat and independent inode
+size include the 2 MiB prefix. Live pread returns EOF at its beginning; a normal
+read-only remount verifies every byte through the true EOF. Fsck passes. A bounded
+27 diagnostic granting NoCache, with invocation confirmed by DEBUG tracing, does
+not fix either large case. That diagnostic implementation was removed. Full native
+capacity acceptance remains open; failures have not become skips.
+
+Set-ID metadata coherence and diskutil rename remain failed groups. On stock 26,
+ordinary writes, policy checks and native label persistence pass both block sizes
+with independent fsck. Supplying an explicit matching FSSubType does not resolve
+the diskutil failure. No test repairs security metadata to claim a pass.
+
+Core and component evidence is in the standalone `artifacts/checks/fskit-request31`
+and `artifacts/checks/fskit-request31-core` directories. Installed evidence is in
+the lab's `artifacts/ext4-fskit/installed-clean/build31-capacity-1`,
+`installed-clean/build31-native-1`, `installed-clean/build31-native-4k-1`,
+`installed-27/build31-capacity-2`, `installed-27/build32-capacity-large-1` and
+`installed-27/build32-modern-capacity-1` directories. The 4 KiB native runner's
+incorrect host fsck executable path failed after its mounted checks and export;
+the corrected independent check passed on that same export, without rerunning
+the VM workload. The failed attempt remains recorded separately.
 
 ## Kernel build evidence
 

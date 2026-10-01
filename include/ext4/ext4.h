@@ -480,6 +480,17 @@ void ext4_quota_exempt(struct ext4_fs *fs, bool exempt);
 enum ext4_result ext4_write(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint64_t offset, const void *buffer, size_t length, const struct ext4_inode_update *update,
     size_t *completed);
+/* Admit a complete write request before publishing any data or inode change.
+ * Unlike write_partial, allocation or quota failure cannot leave a committed
+ * request prefix. Private snapshots may use the journal ring's bounded capacity,
+ * capped at 32 MiB including metadata, instead of the ordinary transaction bound.
+ * Requests beyond that bound return RANGE without committing request data or
+ * inode changes. A device failure may still have an uncertain commit and poisons
+ * the owner; recovery resolves it.
+ * The attribute, serialization and immutable-input contract is the same as write. */
+enum ext4_result ext4_write_request(struct ext4_fs *fs, uint32_t number, uint32_t generation,
+    uint64_t offset, const void *buffer, size_t length, const struct ext4_inode_update *update,
+    size_t *completed);
 /* Write a large request in bounded transactions under one exclusive owner.
  * The buffer and admitted update stay immutable for the complete call. OK means
  * all bytes were written; an error retains the number of bytes from successfully

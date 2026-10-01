@@ -532,10 +532,8 @@ ext4_handler_error(id result, NSError *error)
 	      BOOL traceResult = error != nil || completed != contents.length;
 #endif
 
-	      /* Handler-style FSKit requires ENOSPC on allocation failure and ignores
-	       * the result on error. Never turn a committed prefix into successful
-	       * completion of a larger kernel I/O; FSKit does not retry its suffix. */
-	      /* In particular, size, allocation and privilege removal must reach
+	      /* The engine admits complete requests because FSKit ignores the result
+	       * on error. Size, allocation and privilege removal must reach
 	       * FSKit's metadata cache in the same response as the write. Never
 	       * publish the pre-write inode when a failed device cannot refresh it. */
 	      attributes = [self refreshedAttributesForItem:item error:&error];

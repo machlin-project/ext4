@@ -397,6 +397,8 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 			ext4_get_info(_fs, &_info);
 		}
 		statistics.blockSize = _info.block_size;
+		/* Match the ext4 personality in the extension's Info.plist. */
+		statistics.fileSystemSubType = 0;
 		/* Resource geometry describes accounting, not the preferred transfer.
 		 * Amortize the userspace crossing over multiple filesystem blocks. */
 		statistics.ioSize = MAX(_info.block_size, Ext4PreferredIOSize);
