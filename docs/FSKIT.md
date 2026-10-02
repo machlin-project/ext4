@@ -783,13 +783,14 @@ can create an unmountable volume for maintenance. A forced load can also retain 
 physical resource without a volume when its primary superblock cannot be read;
 ordinary loading still rejects it. The resource-only native lifecycle requires
 separate acceptance and does not invent filesystem geometry.
-Read-only inspection of the exact macOS 27.0.1 FSKit connector shows that its
-load-reply path accepts a nil volume with no reply error when container status is
-`blocked` or `ready`. This supports the maintenance admission model, but does
-not prove the daemon's formatting sequence or behavior on macOS 26.5. Native
-acceptance remains required for both systems; no private FSKit call is used by
-the driver. Analysis is retained in the lab's ignored
-`artifacts/ext4-fskit/native-issues/fskit-userspace-27/maintenance-load-contract2/`.
+Read-only inspection of the exact macOS 26.5.2 and 27.0.1 FSKit connectors shows
+matching load-reply guards: a nil volume with no reply error is accepted when
+container status is `blocked` or `ready`. This supports the maintenance admission
+model, but does not prove the daemon's formatting sequence. Native acceptance
+remains required for both systems; no private FSKit call is used by the driver.
+Analysis is retained in the lab's ignored
+`artifacts/ext4-fskit/native-issues/fskit-userspace-26/maintenance-load-contract1/`
+and `artifacts/ext4-fskit/native-issues/fskit-userspace-27/maintenance-load-contract2/`.
 
 Cancellation shuts down the connection, terminates the owned child and escalates
 after five seconds. The child is reaped before the resource is released. Frames
