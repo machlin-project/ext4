@@ -51,9 +51,11 @@ def receive(connection, length, deadline):
     return result
 
 
-def run_case(helper, image, mode, output, fault=None):
+def run_case(helper, image, mode, output, fault=None, arguments=(), writable=None):
+    if writable is None:
+        writable = mode != 'verify'
     before = digest(image)
-    descriptor = os.open(image, (os.O_RDONLY if mode == 'verify' else os.O_RDWR) | os.O_NOFOLLOW)
+    descriptor = os.open(image, (os.O_RDWR if writable else os.O_RDONLY) | os.O_NOFOLLOW)
     parent, child = socket.socketpair()
     parent.settimeout(5)
     opened = 0
@@ -61,7 +63,7 @@ def run_case(helper, image, mode, output, fault=None):
     deadline = time.monotonic() + CASE_SECONDS
     stdout = (output / 'stdout.log').open('wb')
     stderr = (output / 'stderr.log').open('wb')
-    process = subprocess.Popen([str(helper), mode], stdin=child, stdout=stdout, stderr=stderr,
+    process = subprocess.Popen([str(helper), mode, *arguments], stdin=child, stdout=stdout, stderr=stderr,
                                close_fds=True, env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
     child.close()
     size = os.fstat(descriptor).st_size
@@ -80,20 +82,20 @@ def run_case(helper, image, mode, output, fault=None):
             error = 0
             if operation == OPEN:
                 assert offset == length == 0
-                if flags == WRITABLE and mode == 'verify':
+                if flags == WRITABLE and not writable:
                     error = errno.EROFS
                 else:
                     opened += 1
                     counts['open'] += 1
                     response_offset, response_length = size, SECTOR_SIZE
-                    response_flags = WRITABLE if mode != 'verify' else 0
+                    response_flags = WRITABLE if writable else 0
             elif operation in (READ, WRITE):
                 assert opened > 0 and 0 < length <= MAX_TRANSFER
                 assert offset <= size and length <= size - offset
                 if operation == WRITE:
                     incoming = receive(parent, length, deadline)
                     assert incoming is not None and len(incoming) == length
-                    assert mode != 'verify', 'Read-only check attempted a write'
+                    assert writable, 'Maintenance attempted a read-only resource write'
                     if fault == 'write-error':
                         error = errno.EIO
                         fault_sent = True
@@ -109,7 +111,7 @@ def run_case(helper, image, mode, output, fault=None):
                         assert len(payload) == length
                         counts['read'] += 1
             elif operation == FLUSH:
-                assert opened > 0 and mode != 'verify'
+                assert opened > 0 and writable
                 assert offset == length == 0
                 if fault == 'flush-error':
                     error = errno.EIO
@@ -148,11 +150,15 @@ def run_case(helper, image, mode, output, fault=None):
         stdout.close()
         stderr.close()
     after = digest(image)
-    result = {'mode': mode, 'exit_code': code, 'fault': fault, 'fault_sent': fault_sent,
+    result = {'mode': mode, 'arguments': list(arguments), 'writable': writable,
+              'exit_code': code, 'fault': fault, 'fault_sent': fault_sent,
+              'remaining_open_channels': opened,
               'counts': counts, 'before_sha256': before, 'after_sha256': after}
     (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
-    if mode == 'verify':
+    if not writable:
         assert before == after, result
+    if code == 0:
+        assert opened == 0, result
     if fault:
         assert fault_sent and code != 0, result
     return result

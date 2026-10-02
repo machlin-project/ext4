@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-3-Clause
-"""Build the separate e2fsck resource helper without linking it into the core."""
+"""Build separate e2fsprogs resource tools without linking them into the core."""
 
 import argparse
 import json
@@ -106,11 +106,50 @@ def main():
     libraries = [build / "lib" / name for name in
                  ("libsupport.a", "libext2fs.a", "libcom_err.a", "libblkid.a", "libuuid.a", "libe2p.a")]
     archive = build / "libe2fsck-resource.a"
-    run(["xcrun", "libtool", "-static", "-o", str(archive),
-         *[str(build / "e2fsck" / name) for name in objects], *map(str, libraries)], ROOT, environment)
-    run([clang, *flags, "-o", str(build / "ext4-check-resource"),
-         str(build / "main.o"), str(build / "io.o"), str(build / "Ext4CheckWire.o"),
-         str(archive), "-lpthread"], ROOT, environment)
+    formatter_makefile = (build / 'misc/Makefile').read_text().replace('\\\n', ' ')
+    formatter_match = re.search(r'^MKE2FS_OBJS\s*=\s*(.+)$', formatter_makefile, re.MULTILINE)
+    if formatter_match is None:
+        raise RuntimeError('The upstream formatter object list is missing')
+    formatter_objects = formatter_match[1].split()
+    if 'mke2fs.o' not in formatter_objects or any(
+            not re.fullmatch(r'[a-z0-9_]+\.o', item) for item in formatter_objects):
+        raise RuntimeError('Unsupported upstream formatter object list')
+    formatter_flags = environment['CFLAGS'] + (
+        ' -Dmain=ext4_mke2fs_main -Dprogram_name=ext4_format_program_name'
+        ' -Ddump_mmp_msg=ext4_format_dump_mmp_msg'
+        ' -Dunix_io_manager=ext4_maintenance_io_manager'
+        ' -Dext2fs_get_device_size2=ext4_maintenance_device_size')
+    entry_flags = formatter_flags + (
+        ' -Dcheck_plausibility=ext4_format_resource_plausible'
+        ' -Dcheck_mount=ext4_format_resource_check_mount'
+        ' -Dext2fs_get_device_sectsize=ext4_maintenance_sector_size'
+        ' -Dext2fs_get_device_phys_sectsize=ext4_format_physical_sector_size'
+        ' -Dprofile_init=ext4_format_profile_init')
+    formatter_configuration = {'common': formatter_flags, 'entry': entry_flags}
+    formatter_configuration_file = build / 'misc/object-flags.json'
+    if not formatter_configuration_file.exists() or json.loads(
+            formatter_configuration_file.read_text()) != formatter_configuration:
+        for name in formatter_objects:
+            (build / 'misc' / name).unlink(missing_ok=True)
+    # Only the entry object's pathname admission calls are replaced. util.o
+    # retains its normal definitions; media I/O uses the inherited capability.
+    run(['make', '-j4', 'CFLAGS=' + formatter_flags,
+         *[name for name in formatter_objects if name != 'mke2fs.o']],
+        build / 'misc', environment)
+    run(['make', 'CFLAGS=' + entry_flags, 'mke2fs.o'], build / 'misc', environment)
+    formatter_configuration_file.write_text(json.dumps(formatter_configuration, indent=2) + '\n')
+    run([clang, *flags, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+         '-Wdeclaration-after-statement', *includes, '-c',
+         str(ROOT / 'tools/maintenance/format.c'), '-o', str(build / 'format.o')], ROOT, environment)
+    # The legacy library filename is retained for Xcode's existing target. Both
+    # upstream tools remain inside this one separately executed GPL program.
+    run(['xcrun', 'libtool', '-static', '-o', str(archive),
+         *[str(build / 'e2fsck' / name) for name in objects], str(build / 'format.o'),
+         *[str(build / 'misc' / name) for name in formatter_objects],
+         *map(str, libraries)], ROOT, environment)
+    run([clang, *flags, '-o', str(build / 'ext4-check-resource'),
+         str(build / 'main.o'), str(build / 'io.o'), str(build / 'Ext4CheckWire.o'),
+         str(archive), '-lpthread'], ROOT, environment)
     # The distributed source package includes upstream's complete license text.
     (build / "e2fsprogs-NOTICE").write_bytes((source / "NOTICE").read_bytes())
 

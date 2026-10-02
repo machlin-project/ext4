@@ -8,6 +8,7 @@
 #define CHECK_OPERATIONAL_ERROR 8
 
 int ext4_e2fsck_main(int argc, char **argv);
+int ext4_format_main(int argc, char **argv);
 int ext4_maintenance_io_error(void);
 
 int
@@ -19,6 +20,9 @@ main(int argc, char **argv)
 	char *arguments[] = { "Machlin ext4 check", "-f", NULL, "-E", "nodiscard,readahead_kb=0",
 		EXT4_CHECK_RESOURCE_NAME, NULL };
 
+	if (argc == 5 && strcmp(argv[1], "format") == 0) {
+		return ext4_format_main(argc - 1, argv + 1);
+	}
 	if (argc != 2 || getsockopt(STDIN_FILENO, SOL_SOCKET, SO_TYPE, &socketType, &size) != 0 ||
 	    socketType != SOCK_STREAM) {
 		fputs("The checker requires an inherited resource connection and one mode.\n",

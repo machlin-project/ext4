@@ -16,10 +16,12 @@ on:
       - 'scripts/test_fskit.py'
       - 'scripts/test_fskit_installed_write.py'
       - 'scripts/test_fskit_installed_check.py'
+      - 'scripts/test_fskit_installed_format.py'
       - 'scripts/test_fskit_installed_package.py'
       - 'tests/fskit_*.m'
       - 'tests/fskit_*.c'
       - 'tests/fskit_check_resource.py'
+      - 'tests/fskit_format_resource.py'
       - 'tests/run_fskit_check.py'
       - 'tools/maintenance/**'
       - 'tests/mounted_cache.c'
@@ -39,10 +41,12 @@ on:
       - 'scripts/test_fskit.py'
       - 'scripts/test_fskit_installed_write.py'
       - 'scripts/test_fskit_installed_check.py'
+      - 'scripts/test_fskit_installed_format.py'
       - 'scripts/test_fskit_installed_package.py'
       - 'tests/fskit_*.m'
       - 'tests/fskit_*.c'
       - 'tests/fskit_check_resource.py'
+      - 'tests/fskit_format_resource.py'
       - 'tests/run_fskit_check.py'
       - 'tools/maintenance/**'
       - 'tests/mounted_cache.c'
@@ -116,7 +120,7 @@ jobs:
             -Wdeclaration-after-statement -O2 -arch arm64 -arch x86_64 \
             tests/mounted_cache.c -o artifacts/fskit-ci/mounted-cache-checker \
             2>&1 | tee artifacts/fskit-ci/reports/mounted-cache-build.log
-          python3 -m py_compile scripts/test_fskit_installed_write.py scripts/test_fskit_installed_check.py scripts/test_fskit_installed_package.py scripts/package_fskit.py
+          python3 -m py_compile scripts/test_fskit_installed_write.py scripts/test_fskit_installed_check.py scripts/test_fskit_installed_format.py scripts/test_fskit_installed_package.py scripts/package_fskit.py
       # No profiles, app installation, native mounts or real Keychain access.
       - name: Check adapter components with sanitizers
         run: |
@@ -157,6 +161,13 @@ jobs:
             --debugfs "$(command -v debugfs)" --e2fsck "$(command -v e2fsck)" \
             --output artifacts/fskit-ci/checks \
             2>&1 | tee artifacts/fskit-ci/reports/checks.log
+      - name: Check resource-only format and fault handling
+        run: |
+          python3 tests/fskit_format_resource.py \
+            --helper artifacts/fskit-ci/DerivedData/Build/Products/Debug/Ext4CheckResource \
+            --debugfs "$(command -v debugfs)" --e2fsck "$(command -v e2fsck)" \
+            --output artifacts/fskit-ci/formats \
+            2>&1 | tee artifacts/fskit-ci/reports/formats.log
       - name: Preserve build and test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -170,3 +181,5 @@ jobs:
             artifacts/fskit-ci/fixtures/tool-versions.txt
             artifacts/fskit-ci/checks/**/*.log
             artifacts/fskit-ci/checks/**/*.json
+            artifacts/fskit-ci/formats/**/*.log
+            artifacts/fskit-ci/formats/**/*.json

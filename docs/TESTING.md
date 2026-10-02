@@ -645,3 +645,35 @@ Prepared builds and test execution run on Luna; VM preparation belongs to Sol.
 The main agent writes tests, investigates failures and reviews evidence. Workers
 preserve complete command output in ignored artifacts and never repair a failing
 fixture or skip a case to manufacture a passing report.
+
+## Resource formatting and native newfs
+
+`tests/fskit_format_resource.py` runs the isolated helper against new 64MiB blank
+files. It checks 1/2/4 KiB formats with independent `e2fsck` and `debugfs`, including
+the exact UUID, UTF-8 label, geometry and supported feature set. Invalid block
+sizes, oversized labels and invalid UUIDs must fail before I/O. Read-only media
+must remain unchanged; transport, write and final flush faults must fail.
+`tests/run_fskit_check.py` additionally covers the shared parent supervisor and
+format admission under ASan/UBSan: retained items, read-only owners, old UUID
+invalidation, write/flush failure and cancellation during a resource write.
+
+From the lab directory:
+
+```sh
+python3 ../ext4/tests/fskit_format_resource.py \
+  --helper ../ext4/artifacts/fskit/DerivedData/Build/Products/Debug/Ext4CheckResource \
+  --debugfs /path/to/debugfs --e2fsck /path/to/e2fsck \
+  --output ../ext4/artifacts/checks/fskit-format-resource
+```
+
+The CI job runs both suites without installing or mounting the driver.
+`scripts/test_fskit_installed_format.py` separately exercises the public
+`newfs_fskit` client against only new, proven task-owned raw VM devices. It checks
+read-only and invalid-option refusal without mutation, native formatting of
+blank media, independent fsck, writable mounting, refusal to format a mounted
+volume, persisted file contents and a byte-preserving read-only remount. It
+requires an existing all-zero 64MiB source image and its exact shared guest copy,
+a signed installed driver, ordinary guest identity and a no-echo administrator
+password prompt. A timeout preserves task devices for diagnosis. Each OS version
+requires its own native run; source compilation and sanitizer passes do not
+establish this lifecycle.

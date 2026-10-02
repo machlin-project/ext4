@@ -14,11 +14,11 @@ from build_fskit_check import ROOT, UPSTREAM_COMMIT
 PREFIX = 'Machlin-ext4-check-source/'
 OWNED = ('tools/maintenance/main.c', 'tools/maintenance/io.c',
          'adapters/fskit/Ext4CheckProtocol.h', 'adapters/fskit/Ext4CheckWire.c',
-         'scripts/build_fskit_check.py', 'LICENSE')
-README = b'''Machlin ext4 separate filesystem checker: corresponding source
+         'scripts/build_fskit_check.py', 'tools/maintenance/format.c', 'LICENSE')
+README = b'''Machlin ext4 separate filesystem maintenance tool: corresponding source
 
 The portable ext4 engine and FSKit extension do not link this checker.
-The separate executable combines e2fsprogs with the resource I/O bridge.
+The separate executable combines e2fsck and mke2fs with the resource I/O bridge.
 Upstream licenses are in vendor/e2fsprogs-maintenance/NOTICE and source files.
 The Machlin resource bridge uses the BSD license in LICENSE.
 
@@ -28,7 +28,9 @@ Build arm64 (use x86_64 for the other architecture):
   python3 scripts/build_fskit_check.py --source-release \\
     --source vendor/e2fsprogs-maintenance --arch arm64 --output build
 
-The result is build/arm64/ext4-check-resource. It requires an inherited stream
+The result is build/arm64/ext4-check-resource. Its verify/repair/preen modes run
+e2fsck; its format mode accepts a block size, volume label and UUID for mke2fs.
+It requires an inherited stream
 socket on stdin implementing Ext4CheckProtocol.h; it does not open a device path.
 The SDK and minimum target are selected by the included build script.
 Normal product builds use the pinned Git release; --source-release explicitly

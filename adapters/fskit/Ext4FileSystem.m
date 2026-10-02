@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
-#import "Ext4FileSystem.h"
+#import "Ext4FileSystemInternal.h"
 #import "Ext4Volume.h"
 #import "Ext4VolumeInternal.h"
 #import "Ext4ResourceIO.h"
@@ -24,119 +24,7 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 	return [*owner open:fs];
 }
 
-@implementation Ext4FileSystem {
-	Ext4Volume *_volume;
-	BOOL _recoveredOnLoad;
-}
-
-- (NSProgress *)startCheckWithTask:(FSTask *)task
-			   options:(FSTaskOptions *)options
-			     error:(NSError **)error
-{
-	Ext4Volume *volume;
-	NSProgress *progress;
-	Ext4CheckTask *check;
-	dispatch_group_t work;
-	NSURL *executable;
-	BOOL automaticRecovery;
-	BOOL quick = [options.taskOptions containsObject:@"-q"];
-	BOOL force = [options.taskOptions containsObject:@"-f"];
-	BOOL verify = [options.taskOptions containsObject:@"-n"];
-	BOOL repair = [options.taskOptions containsObject:@"-y"];
-	BOOL preen = [options.taskOptions containsObject:@"-p"];
-	Ext4CheckMode mode = repair ? Ext4CheckRepair : (preen ? Ext4CheckPreen : Ext4CheckVerify);
-
-	@synchronized(self) {
-		volume = _volume;
-		automaticRecovery = _recoveredOnLoad && volume.writable;
-	}
-	for (NSString *option in options.taskOptions) {
-		if (![@[ @"-q", @"-n", @"-p", @"-y", @"-f" ] containsObject:option] ||
-		    (verify && (repair || preen)) || (repair && preen)) {
-			if (error != NULL) {
-				*error = ext4_error(EXT4_INVALID_ARGUMENT);
-			}
-			return nil;
-		}
-		if (![option isEqualToString:@"-q"] && ![option isEqualToString:@"-n"]) {
-			quick = NO;
-		}
-		if (![option isEqualToString:@"-p"] && ![option isEqualToString:@"-y"]) {
-			automaticRecovery = NO;
-		}
-	}
-	if (volume == nil) {
-		if (error != NULL) {
-			*error = [NSError errorWithDomain:NSPOSIXErrorDomain
-						     code:ENXIO
-						 userInfo:nil];
-		}
-		return nil;
-	}
-	progress = [NSProgress progressWithTotalUnitCount:1];
-	/* Keep Disk Arbitration's ordinary quick/recovery path small. Explicit
-	 * forced checks always run the separate full checker. */
-	if (!force && (quick || automaticRecovery)) {
-		progress.cancellable = NO;
-		dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-		  NSError *checkError = [volume checkMountEligibility];
-
-		  progress.completedUnitCount = 1;
-		  [task didCompleteWithError:checkError];
-		});
-		return progress;
-	}
-	executable = [NSBundle.mainBundle.bundleURL
-	    URLByAppendingPathComponent:@"Contents/Helpers/Ext4CheckResource"];
-	check = [volume beginCheck:mode executable:executable error:error];
-	if (check == nil) {
-		return nil;
-	}
-	work = dispatch_group_create();
-	dispatch_group_enter(work);
-	progress.cancellable = YES;
-	progress.localizedDescription =
-	    mode == Ext4CheckVerify ? @"Checking ext4" : @"Repairing ext4";
-	progress.cancellationHandler = ^{
-	  [check cancel];
-	};
-	task.cancellationHandler = ^NSError * {
-	  [check cancel];
-	  if (dispatch_group_wait(work, dispatch_time(DISPATCH_TIME_NOW, 45 * NSEC_PER_SEC)) != 0) {
-		  return [NSError errorWithDomain:NSPOSIXErrorDomain code:ETIMEDOUT userInfo:nil];
-	  }
-	  return nil;
-	};
-	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-	  NSError *checkError;
-
-	  checkError = [volume finishCheck:check error:[check runWithTask:task]];
-	  @synchronized(self) {
-		  if (self->_volume == volume) {
-			  self.containerStatus = checkError == nil
-			      ? FSContainerStatus.ready
-			      : [FSContainerStatus blockedWithStatus:checkError];
-		  }
-	  }
-	  progress.completedUnitCount = 1;
-	  progress.cancellationHandler = nil;
-	  [task didCompleteWithError:checkError];
-	  dispatch_group_leave(work);
-	});
-	return progress;
-}
-
-- (NSProgress *)startFormatWithTask:(FSTask *)task
-			    options:(FSTaskOptions *)options
-			      error:(NSError **)error
-{
-	(void)task;
-	(void)options;
-	if (error != NULL) {
-		*error = ext4_error(EXT4_UNSUPPORTED);
-	}
-	return nil;
-}
+@implementation Ext4FileSystem
 
 - (void)probeResource:(FSResource *)resource
 	 replyHandler:(void (^)(FSProbeResult *, NSError *))reply
@@ -191,10 +79,12 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 	NSError *writeError = nil;
 	BOOL writable = NO;
 	BOOL inspectable = NO;
+	BOOL maintenanceOnly = NO;
+	BOOL force = [options.taskOptions containsObject:@"-f"];
 	enum ext4_result error;
 
 	@synchronized(self) {
-		if (_volume != nil) {
+		if (_resourceOwner != nil || _maintenanceTask != nil) {
 			loadError = [NSError errorWithDomain:NSPOSIXErrorDomain
 							code:EBUSY
 						    userInfo:nil];
@@ -224,16 +114,21 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 							  error:&keyError];
 				}
 			}
+			maintenanceOnly = force && owner != nil && !inspectable &&
+			    (error == EXT4_NOT_EXT4 || error == EXT4_CORRUPT ||
+				error == EXT4_RECOVERY_REQUIRED || error == EXT4_UNSUPPORTED);
 #if DEBUG
-			NSLog(@"Machlin ext4 load build %@: readonly=%d resourceWritable=%d "
-			      @"result=%d",
+			NSLog(
+			    @"Machlin ext4 load build %@: readonly=%d force=%d resourceWritable=%d "
+			    @"result=%d maintenanceOnly=%d",
 			    [NSBundle bundleForClass:self.class].infoDictionary[@"CFBundleVersion"],
-			    [options.taskOptions containsObject:@"--rdonly"],
+			    [options.taskOptions containsObject:@"--rdonly"], force,
 			    [resource isKindOfClass:FSBlockDeviceResource.class] &&
 				[(FSBlockDeviceResource *)resource isWritable],
-			    error);
+			    error, maintenanceOnly);
 #endif
-			if (inspectable && ![options.taskOptions containsObject:@"--rdonly"] &&
+			if ((inspectable || maintenanceOnly) &&
+			    ![options.taskOptions containsObject:@"--rdonly"] &&
 			    [(FSBlockDeviceResource *)resource isWritable]) {
 				FSBlockDeviceResource *device = (FSBlockDeviceResource *)resource;
 				Ext4DeviceBarrier *barrier =
@@ -253,7 +148,7 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 					/* The writable FSKit resource is exclusively owned during
 					 * load. Recovery is a separate capability, never a
 					 * read-only side effect. */
-					if (error == EXT4_RECOVERY_REQUIRED) {
+					if (!maintenanceOnly && error == EXT4_RECOVERY_REQUIRED) {
 						error = [owner recover:&report];
 						_recoveredOnLoad = error == EXT4_OK;
 					}
@@ -287,11 +182,16 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 			}
 			volume.keyStoreError = keyError;
 			volume.writeAvailabilityError = writeError;
-			loadError = volume != nil ? nil : ext4_error(error);
+			/* Force admits a physical resource for offline maintenance without
+			 * claiming that unreadable filesystem metadata describes a volume.
+			 * The blocked state prevents activation until maintenance succeeds. */
+			loadError = volume != nil || maintenanceOnly ? nil : ext4_error(error);
 			_volume = volume;
-			self.containerStatus = loadError == nil
+			_resourceOwner = loadError == nil ? owner : nil;
+			_resourceWriteError = loadError == nil ? writeError : nil;
+			self.containerStatus = volume != nil
 			    ? FSContainerStatus.ready
-			    : [FSContainerStatus blockedWithStatus:loadError];
+			    : [FSContainerStatus blockedWithStatus:ext4_error(error)];
 		}
 	}
 	reply(volume, loadError);
@@ -306,6 +206,10 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 	(void)resource;
 	(void)options;
 	@synchronized(self) {
+		if (_maintenanceTask != nil) {
+			reply(ext4_error(EXT4_BUSY));
+			return;
+		}
 		error = [_volume finishUnloadedResource];
 		if (error.code == EBUSY) {
 			reply(error);
@@ -313,6 +217,8 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 		}
 		[_volume invalidate];
 		_volume = nil;
+		_resourceOwner = nil;
+		_resourceWriteError = nil;
 		_recoveredOnLoad = NO;
 		self.containerStatus = [FSContainerStatus
 		    notReadyWithStatus:[NSError errorWithDomain:NSPOSIXErrorDomain

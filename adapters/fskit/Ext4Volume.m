@@ -198,7 +198,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	if (!_active) {
 		return EXT4_STALE;
 	}
-	if (_check != nil) {
+	if (_maintenance != nil) {
 		return EXT4_BUSY;
 	}
 	/* Do not serve retained core state or release an orphan through a revoked
@@ -514,7 +514,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	NSLog(@"Machlin ext4 unmount callback");
 #endif
 	@synchronized(self) {
-		[_check cancel];
+		[_maintenance cancel];
 		if (self.writable && !_writeClosed && [self ownerError] == EXT4_OK) {
 			_lifetimeError = ext4_sync(_fs);
 			if (_lifetimeError == EXT4_OK) {
@@ -536,7 +536,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 - (NSError *)finishUnloadedResource
 {
 	@synchronized(self) {
-		if (_check != nil) {
+		if (_maintenance != nil) {
 			return ext4_error(EXT4_BUSY);
 		}
 		(void)[self ownerError];
@@ -757,7 +757,7 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 - (void)invalidate
 {
 	@synchronized(self) {
-		[_check cancel];
+		[_maintenance cancel];
 		[self stopReadStateMaintenance];
 		if (_mmpTimer != nil) {
 			dispatch_source_cancel(_mmpTimer);

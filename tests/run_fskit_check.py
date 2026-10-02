@@ -15,7 +15,8 @@ ROOT_INODE = 2
 DAMAGED_ROOT_LINKS = 1000
 SOURCES = ('Ext4ResourceIO.m', 'Ext4Support.m', 'Ext4Control.m', 'Ext4Volume.m',
            'Ext4VolumeIO.m', 'Ext4VolumeReadState.m', 'Ext4VolumeCheck.m',
-           'Ext4CheckTask.m', 'Ext4CheckWire.c', 'Ext4VolumeCompatibility.m',
+           'Ext4ResourceTask.m', 'Ext4CheckTask.m', 'Ext4FormatTask.m',
+           'Ext4CheckWire.c', 'Ext4VolumeCompatibility.m',
            'Ext4VolumeModern.m', 'Ext4VolumeMutation.m', 'Ext4VolumeControl.m', 'Ext4Crypto.m')
 
 
@@ -82,18 +83,22 @@ def main():
         before = digest(fixture)
         damaged = output / 'damaged.img'
         repaired = output / 'repaired.img'
+        formatted = output / 'formatted.img'
         shutil.copyfile(fixture, damaged)
         for index, command in enumerate(('set_super_value free_inodes_count 0',
                                          f'set_inode_field <{ROOT_INODE}> links_count {DAMAGED_ROOT_LINKS}')):
             run([str(debugfs), '-w', '-R', command, str(damaged)],
                 output / f'damage-{index}')
-        run([str(binary), str(helper), str(peer), str(fixture), str(damaged), str(repaired)],
+        run([str(binary), str(helper), str(peer), str(fixture), str(damaged), str(repaired),
+             str(formatted)],
             output / 'component')
         run([str(e2fsck), '-fn', str(repaired)],
             output / 'independent-fsck')
+        run([str(e2fsck), '-fn', str(formatted)], output / 'independent-format-fsck')
         assert before == digest(fixture), 'Original clean fixture changed'
         profiles.append({'profile': name, 'fixture_sha256': before, 'fixture_unchanged': True,
-                         'repaired_sha256': digest(repaired), 'passed': True})
+                         'repaired_sha256': digest(repaired),
+                         'formatted_sha256': digest(formatted), 'passed': True})
     (args.output / 'summary.json').write_text(json.dumps(
         {'helper_sha256': digest(helper), 'profiles': profiles, 'passed': True}, indent=2) + '\n')
     print('Full check component profiles passed for 1K and 4K')

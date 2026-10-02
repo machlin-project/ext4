@@ -728,7 +728,7 @@ remain pending.
 | IPC and GUI | Signed same-user RPC and key lifecycle and actual GUI v1/v2 key import/removal on 26.5.2/27.0.1; sudo-mounted/admin-app operation and basic controls on 27.0.1; abandoned endpoint recovery on 26.5.2 | Cross-user or root-owned extension coordination |
 | Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded cached-write/truncate/rename stress, bounded ENOSPC, extension/service termination and timeout, forced-detach durability, recovery, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, memory-pressure stress and physical device loss |
 | Crypto and ACLs | CommonCrypto fscrypt v1/v2 reads and writes; native key import/removal and remounts on 26.5.2 and 27.0.1 | Verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
-| Maintenance | Native Disk Arbitration recovery; separate full checker with component fault/cancellation acceptance and signed 26.5.2/27.0.1 checks/repairs on 1/4 KiB media, correct plain-client exit status, independent fsck and repaired remount reads | Optional system checker progress display loses the failed-task exit status on 27; native cancellation, damaged primary-superblock admission and formatting |
+| Maintenance | Native Disk Arbitration recovery; accepted separate checker on 26.5.2/27.0.1 with plain-client exit status, independent fsck and repaired remount reads; resource formatter and shared supervisor pass component checks | Optional system checker progress display loses the failed-task exit status on 27; native cancellation, damaged primary-superblock admission, formatting and native checker regression after the supervisor refactor |
 | Distribution | Universal Xcode Release archive/export, Developer ID signatures, hardened runtime, timestamps, matching app/extension profiles, notarization, Gatekeeper, installed native write/remount/policy/fsck and actual settings-button GUI on 26.5.2/27.0.1 | Automatic module enable continuity fails after the tested update on 27; broader OS/hardware acceptance and native failures above remain open |
 
 The public SDK documents direct writes
@@ -768,8 +768,8 @@ and authenticated persistence barriers used by the filesystem.
 
 `-f -n` performs a full read-only scan; `-f -y` requests repair and `-f -p` requests
 automatic safe repairs. Conflicting modes are rejected. Ordinary quick checks and
-automatic journal recovery retain their existing path. Formatting remains
-unsupported. Public `/sbin/fsck_fskit -t machlinext4` is the native check entry
+automatic journal recovery retain their existing path. Public
+`/sbin/fsck_fskit -t machlinext4` is the native check entry
 point; `diskutil verifyVolume` still has the catalog limitation described above.
 
 Checking requires an unmounted volume with no retained items. A writable owner
@@ -779,12 +779,52 @@ engine only after a successful check. Failed or canceled work leaves the volume
 unmountable until another explicit check succeeds or the resource is unloaded.
 Verification requires a read-only resource, so it cannot accidentally replay a
 journal or publish an MMP change. A validated superblock with an unreadable root
-can create a maintenance-only owner; an invalid primary superblock is still
-rejected rather than given invented geometry.
+can create an unmountable volume for maintenance. A forced load can also retain a
+physical resource without a volume when its primary superblock cannot be read;
+ordinary loading still rejects it. The resource-only native lifecycle requires
+separate acceptance and does not invent filesystem geometry.
+Read-only inspection of the exact macOS 27.0.1 FSKit connector shows that its
+load-reply path accepts a nil volume with no reply error when container status is
+`blocked` or `ready`. This supports the maintenance admission model, but does
+not prove the daemon's formatting sequence or behavior on macOS 26.5. Native
+acceptance remains required for both systems; no private FSKit call is used by
+the driver. Analysis is retained in the lab's ignored
+`artifacts/ext4-fskit/native-issues/fskit-userspace-27/maintenance-load-contract2/`.
 
 Cancellation shuts down the connection, terminates the owned child and escalates
 after five seconds. The child is reaped before the resource is released. Frames
 have absolute thirty-second deadlines, and inactivity has a five-minute limit.
+
+## Resource-only formatting
+
+The same separate maintenance executable includes `mke2fs`. The module advertises
+`FSFormatOptionSyntax` for `/sbin/newfs_fskit -t machlinext4`. The adapter parses `-b` with
+1024, 2048 or 4096 and `-L` with at most sixteen UTF-8 bytes. Defaults are a 4096-byte
+block and an empty label. The parent generates a new UUID. The helper fixes the
+feature set, loads the pinned embedded profile without host configuration files,
+and accepts no device path, external journal, population directory or arbitrary
+upstream options. Invalid arguments are rejected before media I/O.
+
+Check and format share `Ext4ResourceTask` for subprocess ownership, bounded frames,
+resource access, failure retention, cancellation and reaping. Formatting requires
+an unmounted writable resource and no retained items. The old engine releases its
+journal, MMP owner, caches and timers before the child may write. Completion
+invalidates the old volume instead of restoring its UUID or encryption keys. A
+final authenticated persistence barrier and a read-only core reopen validate the
+new filesystem and UUID before reporting success.
+
+File-backed resource tests pass all three block sizes, label/UUID/features and
+independent fsck. Sanitizer component tests pass 1/4 KiB format ownership,
+read-only and retained-item refusal, UUID replacement, write/flush faults and
+child cancellation. Native blank-media formatting, mounted refusal and remount
+acceptance are pending; a signed development build alone does not close these
+gates.
+The universal Developer ID release archive and export pass strict signature
+verification, including all nested executables. The test guest rejects the new
+app as unnotarized. Upload has not occurred: the single CLI upload attempt reports
+`No Accounts`, and UI automation cannot acquire the host Xcode window. This is a
+notarization blocker, not a native formatter test result. The earlier notarized
+check-only release remains the accepted baseline.
 Malformed messages, abandoned channels and read/write/barrier failures cannot
 produce a clean verdict, even if the child exits with status zero. Checker output
 is forwarded through `FSTask` with bounded line buffering.
@@ -792,14 +832,17 @@ is forwarded through `FSTask` with bounded line buffering.
 The helper inherits the extension's sandbox; it has no device entitlement or
 privileged repair service. Unsigned universal compilation and 1/4 KiB component
 checks pass, including cancellation, hostile protocol peers, resource faults,
-repair and independent `e2fsck` verification. The signed FSKit process also launches
-the helper on 26.5.2 and 27.0.1: native 1/4 KiB repairs pass independent fsck and read-only
+repair and independent `e2fsck` verification. The previously accepted check-only
+release launches the helper on 26.5.2 and 27.0.1: native 1/4 KiB repairs pass independent fsck and read-only
 remount verification. Plain `fsck_fskit -t machlinext4 -f -n DEVICE` also returns
 POSIX EIO for damaged media and zero for clean media. Its optional `--progress`
 display logs the same failed task but incorrectly returns zero. Use the plain
 native client for checks and repairs; the progress-client failure stays recorded
 as a separate system integration limitation. Native cancellation remains required;
 see [the native evidence](ACCEPTANCE.md#full-fskit-checker-component-evidence).
+Those installed runs precede the shared-supervisor refactor. Repeat the plain
+native check/repair matrix with the formatted-resource release before accepting
+the new integration.
 
 The build pins the official e2fsprogs release and preserves its complete license
 notice. Archives and exports include a corresponding-source package beside the

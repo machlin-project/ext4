@@ -3,8 +3,10 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface Ext4FileSystem
-    : FSUnaryFileSystem <FSUnaryFileSystemOperations, FSManageableResourceMaintenanceOperations>
+@interface Ext4FileSystem : FSUnaryFileSystem <FSUnaryFileSystemOperations>
+@end
+
+@interface Ext4FileSystem (Maintenance) <FSManageableResourceMaintenanceOperations>
 @end
 
 NS_ASSUME_NONNULL_END

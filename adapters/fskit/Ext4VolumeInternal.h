@@ -3,6 +3,7 @@
 #import "Ext4Control.h"
 #import "Ext4ResourceIO.h"
 #import "Ext4CheckTask.h"
+#import "Ext4FormatTask.h"
 #include "Ext4Crypto.h"
 
 @interface Ext4Item : FSItem {
@@ -20,7 +21,7 @@
 	struct ext4_info _info;
 	FSBlockDeviceResource *_resource;
 	Ext4ResourceIO *_resourceOwner;
-	Ext4CheckTask *_check;
+	Ext4ResourceTask *_maintenance;
 	enum ext4_result _openError;
 	BOOL _active;
 	BOOL _mounted;
@@ -38,11 +39,18 @@
 
 @end
 
-@interface Ext4Volume (Checks)
+@interface Ext4Volume (Maintenance)
 - (Ext4CheckTask *)beginCheck:(Ext4CheckMode)mode
 		   executable:(NSURL *)executable
 			error:(NSError **)error;
 - (NSError *)finishCheck:(Ext4CheckTask *)check error:(NSError *)error;
+- (Ext4FormatTask *)beginFormatWithBlockSize:(NSUInteger)blockSize
+					name:(NSString *)name
+					uuid:(NSUUID *)uuid
+				  executable:(NSURL *)executable
+				       error:(NSError **)error;
+- (NSError *)beginResourceMaintenance:(Ext4ResourceTask *)task writable:(BOOL)writable;
+- (NSError *)finishFormat:(Ext4FormatTask *)format error:(NSError *)error;
 @end
 
 /* Namespace and metadata implementation, shared by the versioned FSKit entry points. */

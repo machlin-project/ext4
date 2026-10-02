@@ -19,6 +19,7 @@ enum { CheckSectorSize = 512, CheckWaitSeconds = 15 };
 @property NSUInteger flushes;
 @property dispatch_semaphore_t entered;
 @property dispatch_semaphore_t resume;
+@property BOOL gateWrites;
 @end
 
 @implementation CheckImage
@@ -45,7 +46,7 @@ enum { CheckSectorSize = 512, CheckWaitSeconds = 15 };
 {
 	assert(offset >= 0 && (uint64_t)offset <= self.bytes.length);
 	assert(length <= self.bytes.length - (uint64_t)offset);
-	if (self.entered != nil) {
+	if (self.entered != nil && !self.gateWrites) {
 		dispatch_semaphore_signal(self.entered);
 		assert(dispatch_semaphore_wait(self.resume,
 			   dispatch_time(DISPATCH_TIME_NOW, CheckWaitSeconds * NSEC_PER_SEC)) == 0);
@@ -66,6 +67,12 @@ enum { CheckSectorSize = 512, CheckWaitSeconds = 15 };
 {
 	assert(offset >= 0 && (uint64_t)offset <= self.bytes.length);
 	assert(length <= self.bytes.length - (uint64_t)offset);
+	if (self.entered != nil && self.gateWrites) {
+		dispatch_semaphore_signal(self.entered);
+		assert(dispatch_semaphore_wait(self.resume,
+			   dispatch_time(DISPATCH_TIME_NOW, CheckWaitSeconds * NSEC_PER_SEC)) == 0);
+		self.entered = nil;
+	}
 	if (self.failWrite) {
 		*error = [NSError errorWithDomain:NSPOSIXErrorDomain code:EIO userInfo:nil];
 		return 0;
@@ -129,10 +136,17 @@ main(int argc, char **argv)
 		NSURL *peer;
 		NSData *clean;
 		NSData *damaged;
+		NSData *before;
+		NSString *embeddedNull = [[NSString alloc] initWithBytes:"a\0b"
+								  length:3
+								encoding:NSUTF8StringEncoding];
 		CheckImage *image = [CheckImage new];
 		CheckLog *log = [CheckLog new];
 		Ext4ResourceIO *resource;
 		Ext4CheckTask *check;
+		Ext4FormatTask *format;
+		NSUUID *formatUUID = NSUUID.UUID;
+		NSUInteger formatBlockSize;
 		Ext4Volume *volume;
 		struct ext4_fs *filesystem = NULL;
 		struct ext4_info info;
@@ -143,7 +157,7 @@ main(int argc, char **argv)
 		Ext4CheckMode mode;
 		int expected;
 
-		assert(argc == 6);
+		assert(argc == 7);
 		helper = [NSURL fileURLWithPath:@(argv[1])];
 		peer = [NSURL fileURLWithPath:@(argv[2])];
 		clean = [NSData dataWithContentsOfFile:@(argv[3])];
@@ -233,9 +247,120 @@ main(int argc, char **argv)
 		resource = check_resource(image, NO);
 		assert([check_task(resource, Ext4CheckVerify, helper) runWithTask:(FSTask *)log] ==
 		    nil);
+
+		/* Formatting replaces the old identity only after exclusive admission.
+		 * Its resource remains valid after the previous volume is invalidated. */
+		assert([resource inspect:&info] == EXT4_OK);
+		formatBlockSize = info.block_size;
+		assert([[Ext4FormatTask alloc] initWithResource:resource
+						      blockSize:8192
+							   name:@""
+							   uuid:formatUUID
+						     executable:helper] == nil);
+		assert([[Ext4FormatTask alloc] initWithResource:resource
+						      blockSize:formatBlockSize
+							   name:@"abcdefghijklmnopq"
+							   uuid:formatUUID
+						     executable:helper] == nil);
+		assert([[Ext4FormatTask alloc] initWithResource:resource
+						      blockSize:formatBlockSize
+							   name:embeddedNull
+							   uuid:formatUUID
+						     executable:helper] == nil);
+		assert([resource open:&filesystem] == EXT4_OK);
+		volume = ext4_volume_create(nil, filesystem, resource, NULL, NO);
+		assert([volume beginFormatWithBlockSize:formatBlockSize
+						   name:@""
+						   uuid:formatUUID
+					     executable:helper
+						  error:&error] == nil);
+		assert(error.code == EROFS);
+		[volume invalidate];
+		image.bytes = [clean mutableCopy];
+		resource = check_resource(image, YES);
+		assert([resource openWritable:&filesystem] == EXT4_OK);
+		volume = ext4_volume_create(nil, filesystem, resource, NULL, YES);
+		assert(volume != nil);
+		@autoreleasepool {
+			[volume activateWithOptions:nil
+				       replyHandler:^(FSItem *item, NSError *failure) {
+					 assert(item != nil && failure == nil);
+					 root = item;
+				       }];
+			assert([volume beginFormatWithBlockSize:formatBlockSize
+							   name:@""
+							   uuid:formatUUID
+						     executable:helper
+							  error:&error] == nil);
+			assert(error.code == EBUSY);
+			[volume reclaimItem:root
+			       replyHandler:^(NSError *failure) {
+				 assert(failure == nil);
+			       }];
+			root = nil;
+		}
+
+		format = [volume beginFormatWithBlockSize:formatBlockSize
+						     name:@"Formatted"
+						     uuid:formatUUID
+					       executable:helper
+						    error:&error];
+		assert(format != nil && error == nil);
+		assert([volume checkMountEligibility].code == EBUSY);
+		assert([volume finishUnloadedResource].code == EBUSY);
+		assert([format runWithTask:(FSTask *)log] == nil);
+		assert([volume finishFormat:format error:nil] == nil);
+		assert([volume checkMountEligibility].code == ESTALE);
+		assert([resource synchronize] == EXT4_OK);
+		assert([resource open:&filesystem] == EXT4_OK);
+		ext4_get_info(filesystem, &info);
+		assert([formatUUID isEqual:[[NSUUID alloc] initWithUUIDBytes:info.uuid]]);
+		assert(info.block_size == formatBlockSize &&
+		    memcmp(info.volume_name, "Formatted", sizeof("Formatted")) == 0);
+		ext4_unmount(filesystem);
+		assert([image.bytes writeToFile:@(argv[6]) atomically:YES]);
+
+		image.bytes = [NSMutableData dataWithLength:clean.length];
+		before = [image.bytes copy];
+		image.failWrite = YES;
+		format = [[Ext4FormatTask alloc] initWithResource:resource
+							blockSize:formatBlockSize
+							     name:@""
+							     uuid:formatUUID
+						       executable:helper];
+		assert([format runWithTask:(FSTask *)log].code == EIO);
+		assert([image.bytes isEqualToData:before]);
+		image.failWrite = NO;
+		image.failFlush = YES;
+		format = [[Ext4FormatTask alloc] initWithResource:resource
+							blockSize:formatBlockSize
+							     name:@""
+							     uuid:formatUUID
+						       executable:helper];
+		assert([format runWithTask:(FSTask *)log].code == EIO);
+		image.failFlush = NO;
+		image.bytes = [NSMutableData dataWithLength:clean.length];
+		image.gateWrites = YES;
+		image.entered = dispatch_semaphore_create(0);
+		image.resume = dispatch_semaphore_create(0);
+		format = [[Ext4FormatTask alloc] initWithResource:resource
+							blockSize:formatBlockSize
+							     name:@""
+							     uuid:formatUUID
+						       executable:helper];
+		dispatch_group_async(work, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+		  cancelError = [format runWithTask:(FSTask *)log];
+		});
+		assert(dispatch_semaphore_wait(image.entered,
+			   dispatch_time(DISPATCH_TIME_NOW, CheckWaitSeconds * NSEC_PER_SEC)) == 0);
+		[format cancel];
+		dispatch_semaphore_signal(image.resume);
+		assert(dispatch_group_wait(work,
+			   dispatch_time(DISPATCH_TIME_NOW, CheckWaitSeconds * NSEC_PER_SEC)) == 0);
+		assert(cancelError.code == ECANCELED);
 		assert(log.messages.count != 0);
 		puts("FSKit check ownership, resource failures, dishonest peers, cancellation and "
-		     "repair passed");
+		     "repair/format passed");
 	}
 	return 0;
 }

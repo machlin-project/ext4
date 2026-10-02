@@ -109,6 +109,8 @@ targets:
       - Ext4Extension.swift
       - Ext4FileSystem.m
       - Ext4FileSystem.h
+      - Ext4FileSystemInternal.h
+      - Ext4FileSystemMaintenance.m
       - Ext4Volume.m
       - Ext4Volume.h
       - Ext4VolumeInternal.h
@@ -123,6 +125,10 @@ targets:
       - Ext4ResourceIO.h
       - Ext4CheckTask.h
       - Ext4CheckTask.m
+      - Ext4ResourceTask.h
+      - Ext4ResourceTask.m
+      - Ext4FormatTask.h
+      - Ext4FormatTask.m
       - Ext4CheckProtocol.h
       - Ext4CheckWire.c
       - path: e2fsprogs-NOTICE

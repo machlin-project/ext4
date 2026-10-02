@@ -18,6 +18,11 @@
             <key>shortOptions</key>
             <string>fnpqy</string>
         </dict>
+        <key>FSFormatOptionSyntax</key>
+        <dict>
+            <key>shortOptions</key>
+            <string>b:L:</string>
+        </dict>
         <key>FSMediaTypes</key>
         <dict>
             <key>0FC63DAF-8483-4772-8E79-3D69D8477DE4</key>

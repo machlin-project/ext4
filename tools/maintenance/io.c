@@ -12,6 +12,7 @@
 
 struct check_channel {
 	uint64_t bytes;
+	uint32_t sector;
 	int writable;
 	struct struct_io_stats stats;
 };
@@ -132,6 +133,7 @@ check_open(const char *name, int flags, io_channel *channel)
 		return error;
 	}
 	state->bytes = ext4_check_decode64(response.offset);
+	state->sector = sector;
 	state->writable = (flags & IO_FLAG_RW) != 0;
 	state->stats.num_fields = 2;
 	opened->magic = EXT2_ET_MAGIC_IO_CHANNEL;
@@ -295,6 +297,33 @@ ext4_maintenance_device_size(const char *name, int blockSize, blk64_t *blocks)
 	*blocks = state->bytes / (unsigned)blockSize;
 	closed = check_close(channel);
 	return closed;
+}
+
+/* A resource capability has no native device path to query. The OPEN response
+ * carries its logical sector size; unknown physical geometry remains unknown. */
+errcode_t
+ext4_maintenance_sector_size(const char *name, int *size)
+{
+	struct check_channel *state;
+	io_channel channel;
+	errcode_t error;
+	errcode_t closed;
+
+	if (size == NULL) {
+		return EINVAL;
+	}
+	error = check_open(name, 0, &channel);
+	if (error != 0) {
+		return error;
+	}
+	state = channel->private_data;
+	if (state->sector > INT_MAX) {
+		error = EPROTO;
+	} else {
+		*size = (int)state->sector;
+	}
+	closed = check_close(channel);
+	return error != 0 ? error : closed;
 }
 
 static struct struct_io_manager check_manager = {
