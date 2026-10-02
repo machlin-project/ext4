@@ -728,7 +728,7 @@ remain pending.
 | IPC and GUI | Signed same-user RPC and key lifecycle and actual GUI v1/v2 key import/removal on 26.5.2/27.0.1; sudo-mounted/admin-app operation and basic controls on 27.0.1; abandoned endpoint recovery on 26.5.2 | Cross-user or root-owned extension coordination |
 | Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded cached-write/truncate/rename stress, bounded ENOSPC, extension/service termination and timeout, forced-detach durability, recovery, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, memory-pressure stress and physical device loss |
 | Crypto and ACLs | CommonCrypto fscrypt v1/v2 reads and writes; native key import/removal and remounts on 26.5.2 and 27.0.1 | Verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
-| Maintenance | Native Disk Arbitration recovery; accepted separate checker on 26.5.2/27.0.1 with plain-client exit status, independent fsck and repaired remount reads; resource formatter and shared supervisor pass component checks | Optional system checker progress display loses the failed-task exit status on 27; native cancellation, damaged primary-superblock admission, formatting and native checker regression after the supervisor refactor |
+| Maintenance | Native Disk Arbitration recovery; accepted separate checker on 26.5.2/27.0.1 with plain-client exit status, independent fsck and repaired remount reads; shared supervisor and checksum-damaged primary repair pass installed 27.0.1 on both block sizes; resource formatter passes component checks | Optional system checker progress display loses the failed-task exit status on 27; native cancellation, formatting, and matching checker/primary repair regression on 26.5.2 |
 | Distribution | Universal Xcode Release archive/export, Developer ID signatures, hardened runtime, timestamps, matching app/extension profiles, notarization, Gatekeeper, installed native write/remount/policy/fsck and actual settings-button GUI on 26.5.2/27.0.1 | Automatic module enable continuity fails after the tested update on 27; broader OS/hardware acceptance and native failures above remain open |
 
 The public SDK documents direct writes
@@ -781,7 +781,9 @@ Verification requires a read-only resource, so it cannot accidentally replay a
 journal or publish an MMP change. A validated superblock with an unreadable root
 can create an unmountable volume for maintenance. When a forced load cannot
 inspect a primary superblock, it creates a temporary unary volume with a random
-session identity and no filesystem geometry, statistics, engine or keys.
+session identity and no filesystem geometry, accounting values, engine or keys.
+Its required statistics result uses the resource's sector size as a unit with
+zero block and file counts; it does not infer ext4 geometry or available space.
 Activation and mounting fail; successful maintenance retires that identity.
 The next load reads the actual superblock and resolves keys for its filesystem UUID.
 Ordinary loading still rejects unrecognized media.
@@ -790,9 +792,13 @@ The native 27.0.1 formatter rejects a unary load reply of `(nil, nil)` with
 `EPROTONOSUPPORT`, before dispatching a format task. Its logs confirm maintenance
 protocol conformance. Earlier static inspection covered the common load-reply
 guards but omitted the unary-specific callback that rejects this reply before
-those guards. That inspection does not establish nil-volume admission. Native
-acceptance of temporary maintenance volumes remains required for both supported
-systems; no private FSKit call is used by the driver.
+those guards. That inspection does not establish nil-volume admission. The
+replacement temporary volume reaches the native formatter on 27.0.1. Forced
+checking and repair of checksum-damaged primary superblocks also pass on 1/4 KiB
+media, with unchanged read-only images, independent fsck and exact mounted canary
+contents. These runs are in the lab's `installed-27/build40-check-primary2`.
+Matching acceptance on 26.5.2 remains required; no private FSKit call is used by
+the driver.
 Analysis is retained in the lab's ignored
 `artifacts/ext4-fskit/native-issues/fskit-userspace-26/maintenance-load-contract1/`
 and `artifacts/ext4-fskit/native-issues/fskit-userspace-27/maintenance-load-contract2/`.
@@ -819,6 +825,15 @@ invalidates the old volume instead of restoring its UUID or encryption keys. A
 final authenticated persistence barrier and a read-only core reopen validate the
 new filesystem and UUID before reporting success.
 
+Admission refusals return noncancellable progress and complete one task with the
+appropriate error, without starting a child or changing resource ownership.
+The native 27.0.1 `newfs_fskit` client traps in `dispatch_group_leave` when the
+initial format callback rejects invalid options synchronously. Its crash report
+records an unbalanced group leave in the FSKit/NSXPC reply path; no extension
+crash was observed. Asynchronous task completion uses the public API's ordinary
+error path. Native EINVAL and unchanged-media checks must pass before accepting
+this change; a crash is not a successful refusal.
+
 File-backed resource tests pass all three block sizes, label/UUID/features and
 independent fsck. Sanitizer component tests pass 1/4 KiB format ownership,
 read-only and retained-item refusal, UUID replacement, write/flush faults and
@@ -828,10 +843,17 @@ resource-only check/repair/format, errors from the final parent barrier and
 validation read, and both progress and task cancellation with one completion.
 Independent fsck accepts the formatted exports. Updated sanitizer components use
 the same temporary unary-volume factory as forced loads. They verify absent
-geometry/statistics, activation refusal, retirement after successful check/repair/
+geometry/accounting, activation refusal, retirement after successful check/repair/
 format, exclusive admission and unload, final parent faults and cancellation on
 1/4 KiB media. All six independent fsck checks pass, with unchanged fixtures.
 Reports are in `artifacts/checks/fskit-maintenance-helper/unary-components40/results`.
+The asynchronous-refusal components also pass both block sizes: invalid check and
+format options, missing/read-only owners and busy admission each complete once
+with the original error and no media I/O. Refusing another task preserves the
+running task's ownership. Required maintenance statistics have zero counts and
+a valid unit, including after a retained identity releases its resource. All six
+independent checks pass with no sanitizer diagnostics in
+`artifacts/checks/fskit-maintenance-helper/refusal-components41/results3`.
 These tests inject the resource boundary after acquisition and do not exercise
 daemon loading. The native harness now requires EINVAL for invalid format options;
 an unrelated nonzero exit cannot pass those cases.
@@ -841,10 +863,12 @@ ticket checks, strict nested signatures and Gatekeeper after normal Xcode login.
 It is installed on 27.0.1 with the authenticated persistence service enabled.
 Its first native blank-media format fails during the nil-volume load described
 above; repeating the request with a block device instead of a raw device returns
-the same error and leaves the image unchanged. The new temporary-volume fix has
-component evidence only. Native blank-media formatting, mounted refusal and
-remount acceptance remain pending. Distribution approval is separate from these
-functional gates; the earlier native check-only acceptance remains the baseline.
+the same error and leaves the image unchanged. The replacement temporary-volume
+release passes read-only refusal and reaches the formatter, then exposes the
+client trap on invalid options. That failed run and crash diagnosis remain in the
+lab's `installed-27/build40-format1` and `build40-format-diagnosis1` artifacts.
+Native blank-media formatting, mounted refusal and remount acceptance remain
+pending. Distribution approval is separate from these functional gates.
 Malformed messages, abandoned channels and read/write/barrier failures cannot
 produce a clean verdict, even if the child exits with status zero. Checker output
 is forwarded through `FSTask` with bounded line buffering.
@@ -860,9 +884,17 @@ display logs the same failed task but incorrectly returns zero. Use the plain
 native client for checks and repairs; the progress-client failure stays recorded
 as a separate system integration limitation. Native cancellation remains required;
 see [the native evidence](ACCEPTANCE.md#full-fskit-checker-component-evidence).
-Those installed runs precede the shared-supervisor refactor. Repeat the plain
-native check/repair matrix with the formatted-resource release before accepting
-the new integration.
+The shared-supervisor release repeats the plain native 1/4 KiB check/repair matrix
+on 27.0.1, including correct clean/damaged client status, unchanged verification,
+independent fsck and repaired read-only remounts. Evidence is in the lab's
+`installed-27/build40-check1`. Its matching 26.5.2 regression remains required.
+
+`scripts/generate_fskit_primary_check.py` builds bounded 1/4 KiB images with backup
+superblocks and a file canary, then changes only the primary checksum through
+named C disk fields. Independent e2fsprogs must detect that damage, repair a copy,
+pass final fsck and preserve the file before native acceptance uses the fixtures.
+The installed checker runner's `--canary-file` and `--canary-name` options require
+exact file contents after the repaired image mounts through FSKit.
 
 The build pins the official e2fsprogs release and preserves its complete license
 notice. Archives and exports include a corresponding-source package beside the

@@ -453,10 +453,23 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 		FSStatFSResult *statistics;
 		enum ext4_result error = [self ownerError];
 
-		if (_maintenanceOnly) {
-			return nil;
-		}
 		statistics = [[FSStatFSResult alloc] initWithFileSystemTypeName:@"machlinext4"];
+		if (_maintenanceOnly) {
+			/* Use a positive resource unit and zero counts, never guessed ext4
+			 * geometry. A retained invalidated identity keeps the framework's
+			 * default unit after releasing its resource. Activation is blocked. */
+			if (_resourceOwner != nil) {
+				statistics.blockSize = (NSInteger)_resourceOwner.blockSize;
+			}
+			statistics.ioSize = statistics.blockSize;
+			statistics.totalBlocks = 0;
+			statistics.freeBlocks = 0;
+			statistics.availableBlocks = 0;
+			statistics.usedBlocks = 0;
+			statistics.totalFiles = 0;
+			statistics.freeFiles = 0;
+			return statistics;
+		}
 		if (_fs != NULL) {
 			ext4_get_info(_fs, &_info);
 		}

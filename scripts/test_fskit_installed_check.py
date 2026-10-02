@@ -27,6 +27,9 @@ def main():
     parser.add_argument('--guest-share', required=True)
     parser.add_argument('--guest-workdir', required=True)
     parser.add_argument('--build-number', type=int, required=True)
+    parser.add_argument('--canary-file', type=Path,
+                        help='Require exact mounted contents of the matching canary')
+    parser.add_argument('--canary-name', help='Single filename at the repaired volume root')
     parser.add_argument('--profiles', nargs='+', choices=('1k', '4k'), default=['1k', '4k'])
     parser.add_argument('--sudo', action='store_true', help='Authorize fsck as the VM administrator')
     parser.add_argument('--diagnose-client-exit', action='store_true',
@@ -42,6 +45,11 @@ def main():
         parser.error('Profiles must not repeat')
     if args.sudo and not sys.stdin.isatty():
         parser.error('Use a terminal for the no-echo VM password prompt')
+    if bool(args.canary_file) != bool(args.canary_name):
+        parser.error('Supply both --canary-file and --canary-name')
+    if args.canary_name and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', args.canary_name):
+        parser.error('The canary must be a single ordinary filename')
+    canary = args.canary_file.read_bytes() if args.canary_file else None
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     fixtures = args.fixtures.resolve()
@@ -169,6 +177,10 @@ def main():
             assert len(mounted) == 1 and mounted[0]['mount-point'] == mount
             assert mounted[0].get('volume-kind') == 'machlinext4'
             guest(profile + '-root-read', '/bin/ls', '-a', mount)
+            if canary is not None:
+                assert guest(profile + '-canary-read', '/bin/cat',
+                             mount + '/' + args.canary_name) == canary
+                result['mounted_canary_exact'] = True
             detach(profile + '-detach-mount', damaged)
             current_image = None
             assert guest(profile + '-final-hash', '/usr/bin/shasum', '-a', '256', damaged).decode().split()[0] == repaired_hash

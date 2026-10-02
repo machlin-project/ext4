@@ -3579,8 +3579,10 @@ Reports live in the ext4 repository's
 `artifacts/checks/fskit-maintenance-helper/{component2,parent-component1,source-release1}`
 and `adapter-regression-summary.json`; signed build evidence is under
 `artifacts/checks/fskit-check-distribution/`. The GitHub adapter job now includes
-full checker ownership and repair components. Native cancellation,
-invalid-primary-superblock repair and formatting remain unaccepted.
+full checker ownership and repair components. The shared-supervisor checker and
+checksum-damaged primary-superblock repair now pass installed 27.0.1 acceptance
+on both block sizes, as recorded below. Matching 26.5.2 regression, native
+cancellation and formatting remain unaccepted.
 
 Focused reverse diagnostics on the exact stock 27.0.1 DiskManagement image show
 that its filesystem catalog scans `.fs` bundles in the system and local filesystem
@@ -3732,10 +3734,30 @@ the unary-specific load callback. Forced maintenance now creates a temporary
 unmountable volume with a session UUID and no filesystem geometry or keys.
 Successful repair or format retires that identity before another load may create
 a volume from the actual superblock. Sanitized 1/4 KiB components verify no
-statistics or item publication, activation refusal, identity retirement, option
+filesystem accounting or item publication, activation refusal, identity retirement, option
 refusals before I/O, exclusive task ownership and unload refusal, parent barrier/
 validation faults and cancellation. Six independent fsck checks pass; original
 fixtures are unchanged. Reports are in
 `artifacts/checks/fskit-maintenance-helper/unary-components40/results` in this
-repository. These are component results; native formatting, damaged-primary
-repair and cancellation still require qualification on both supported systems.
+repository. These component checks do not qualify native formatting or cancellation.
+
+The installed temporary-volume release repeats ordinary checking and repair on
+stock 27.0.1, with correct clean/damaged task and plain-client status, unchanged
+read-only images, independent fsck and repaired read-only remounts. The native
+primary-checksum cases also pass 1/4 KiB repair and exact mounted canary readback.
+The fixtures have valid backup superblocks; an independent checker detects the
+damaged primary, repairs a copy and preserves the canary before native testing.
+Reports are in the lab's `artifacts/ext4-fskit/installed-27/build40-check1` and
+`build40-check-primary2`. Their fixture qualification is in
+`artifacts/ext4-fskit/acceptance/primary-superblock40-fixtures3`.
+Matching 26.5.2 regression remains required.
+
+Native formatting passes read-only refusal and enters the extension's format
+method, then the invalid-block case crashes `newfs_fskit` with SIGTRAP rather
+than returning EINVAL. The crash records an unbalanced `dispatch_group_leave`
+in the client's FSKit/NSXPC reply path. No matching extension or daemon crash was
+observed. The failed run and diagnosis remain in the lab's
+`installed-27/build40-format1` and `build40-format-diagnosis1` directories. The
+adapter now reports admission errors through one asynchronous task completion,
+without child execution or media I/O. Native option refusal, actual formatting,
+mounted refusal, remount and independent checks remain required for that change.

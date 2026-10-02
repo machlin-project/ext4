@@ -14,6 +14,22 @@ ext4_maintenance_executable(void)
 	    URLByAppendingPathComponent:@"Contents/Helpers/Ext4CheckResource"];
 }
 
+static NSProgress *
+ext4_maintenance_refusal(FSTask *task, NSError *error)
+{
+	NSProgress *progress = [NSProgress progressWithTotalUnitCount:1];
+
+	/* Report one completed task without starting a child or acquiring resource
+	 * ownership. The native formatter traps in its initial-error callback;
+	 * task completion uses the public API's ordinary asynchronous error path. */
+	progress.cancellable = NO;
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+	  progress.completedUnitCount = 1;
+	  [task didCompleteWithError:error];
+	});
+	return progress;
+}
+
 @implementation Ext4FileSystem (Maintenance)
 
 - (NSProgress *)runMaintenance:(Ext4ResourceTask *)operation
@@ -100,13 +116,13 @@ ext4_maintenance_executable(void)
 	BOOL preen = [options.taskOptions containsObject:@"-p"];
 	Ext4CheckMode mode = repair ? Ext4CheckRepair : (preen ? Ext4CheckPreen : Ext4CheckVerify);
 
+	if (error != NULL) {
+		*error = nil;
+	}
 	for (NSString *option in options.taskOptions) {
 		if (![@[ @"-q", @"-n", @"-p", @"-y", @"-f" ] containsObject:option] ||
 		    (verify && (repair || preen)) || (repair && preen)) {
-			if (error != NULL) {
-				*error = ext4_error(EXT4_INVALID_ARGUMENT);
-			}
-			return nil;
+			return ext4_maintenance_refusal(task, ext4_error(EXT4_INVALID_ARGUMENT));
 		}
 		if (![option isEqualToString:@"-q"] && ![option isEqualToString:@"-n"]) {
 			quick = NO;
@@ -157,10 +173,7 @@ ext4_maintenance_executable(void)
 			}
 		}
 		if (failure != nil) {
-			if (error != NULL) {
-				*error = failure;
-			}
-			return nil;
+			return ext4_maintenance_refusal(task, failure);
 		}
 		_maintenanceTask = check;
 		return [self
@@ -201,6 +214,9 @@ ext4_maintenance_executable(void)
 	NSUUID *uuid = NSUUID.UUID;
 	NSError *failure = nil;
 
+	if (error != NULL) {
+		*error = nil;
+	}
 	for (index = 0; index < arguments.count; index++) {
 		option = arguments[index];
 		if ([option isEqualToString:@"-b"] || [option isEqualToString:@"-L"]) {
@@ -257,10 +273,7 @@ ext4_maintenance_executable(void)
 			}
 		}
 		if (failure != nil) {
-			if (error != NULL) {
-				*error = failure;
-			}
-			return nil;
+			return ext4_maintenance_refusal(task, failure);
 		}
 		_maintenanceTask = format;
 		return [self

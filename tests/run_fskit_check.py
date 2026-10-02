@@ -122,10 +122,11 @@ def main():
                          'supervised_sha256': digest(supervised),
                          'filesystem_entry_points': {
                              'option_refusals_without_io': True,
+                             'asynchronous_refusal_with_one_completion': True,
                              'exclusive_admission_and_unload': True,
                              'resource_only_check_repair_format': True,
                              'temporary_unary_identity_without_geometry': True,
-                             'maintenance_activation_and_statistics_refused': True,
+                             'maintenance_activation_refused_and_accounting_empty': True,
                              'temporary_identity_released_after_success': True,
                              'final_barrier_and_validation_read_faults': True,
                              'progress_and_task_cancellation': True}, 'passed': True})

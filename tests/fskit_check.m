@@ -187,12 +187,20 @@ ext4_peer_requirement(NSString *identifier)
 - (void)installComponentResource:(Ext4ResourceIO *)resource
 {
 	@synchronized(self) {
+		FSStatFSResult *statistics;
+
 		assert(_resourceOwner == nil && _maintenanceTask == nil && _volume == nil);
 		_resourceOwner = resource;
 		_volume = ext4_volume_create_for_check(
 		    nil, NULL, resource, NULL, resource.writable, EXT4_CORRUPT);
 		assert(_volume != nil && _volume.maintenanceOnly);
-		assert(_volume.volumeStatistics == nil && _volume.maximumFileSize == 0);
+		statistics = _volume.volumeStatistics;
+		assert(statistics != nil && statistics.blockSize == (NSInteger)resource.blockSize);
+		assert(statistics.ioSize == statistics.blockSize);
+		assert(statistics.totalBlocks == 0 && statistics.totalFiles == 0);
+		assert(statistics.freeBlocks == 0 && statistics.availableBlocks == 0);
+		assert(statistics.usedBlocks == 0 && statistics.freeFiles == 0);
+		assert(_volume.maximumFileSize == 0);
 		assert(!_volume.supportedVolumeCapabilities.supportsPersistentObjectIDs);
 		assert([_volume checkMountEligibility].code == EIO);
 		[_volume activateWithOptions:nil
@@ -294,6 +302,14 @@ check_completed(CheckCompletion *task, NSProgress *progress, NSInteger error)
 	assert(progress.completedUnitCount == progress.totalUnitCount);
 }
 
+static void
+check_refusal(CheckCompletion *task, NSProgress *progress, NSError *failure, NSInteger error)
+{
+	assert(progress != nil && !progress.cancellable && failure == nil);
+	check_completed(task, progress, error);
+	assert(task.cancellationHandler == nil);
+}
+
 static NSError *
 check_unload(Ext4FileSystem *filesystem)
 {
@@ -323,9 +339,11 @@ check_filesystem_maintenance(
 	CheckImage *image = [CheckImage new];
 	Ext4ResourceIO *resource;
 	CheckFileSystem *filesystem;
+	Ext4Volume *temporary;
 	CheckCompletion *task;
 	CheckCompletion *other;
 	NSProgress *progress;
+	NSProgress *refusal;
 	NSError *failure = nil;
 	NSArray *invalid = @[
 		@[ @"-b" ], @[ @"-b", @"8192" ], @[ @"-L" ], @[ @"--unknown" ],
@@ -335,6 +353,8 @@ check_filesystem_maintenance(
 	NSArray *arguments = @[
 		[NSString stringWithFormat:@"-b%lu", (unsigned long)blockSize], @"-Lfilesystem-test"
 	];
+	NSArray *invalidCheck =
+	    @[ @[ @"--unknown" ], @[ @"-n", @"-y" ], @[ @"-n", @"-p" ], @[ @"-y", @"-p" ] ];
 	struct ext4_fs *engine = NULL;
 	struct ext4_info info;
 	NSUInteger index;
@@ -349,31 +369,49 @@ check_filesystem_maintenance(
 	image.bytes = [NSMutableData dataWithLength:clean.length];
 	filesystem = [CheckFileSystem new];
 	task = check_completion();
-	assert([filesystem startFormatWithTask:(FSTask *)task
-				       options:check_options(arguments)
-					 error:&failure] == nil);
-	assert(failure.code == ENXIO && task.completionCount == 0);
+	refusal = [filesystem startFormatWithTask:(FSTask *)task
+					  options:check_options(arguments)
+					    error:&failure];
+	check_refusal(task, refusal, failure, ENXIO);
 	[filesystem installComponentResource:check_resource(image, NO)];
-	assert([filesystem startFormatWithTask:(FSTask *)task
-				       options:check_options(arguments)
-					 error:&failure] == nil);
-	assert(failure.code == EROFS && image.writes == 0 && image.flushes == 0);
+	temporary = filesystem.componentVolume;
+	task = check_completion();
+	refusal = [filesystem startFormatWithTask:(FSTask *)task
+					  options:check_options(arguments)
+					    error:&failure];
+	check_refusal(task, refusal, failure, EROFS);
+	assert(image.writes == 0 && image.flushes == 0);
 	assert(check_unload(filesystem) == nil);
+	/* FSKit may retain a retired identity after its resource is released. */
+	assert(temporary.volumeStatistics.blockSize > 0);
+	assert(temporary.volumeStatistics.totalBlocks == 0);
 
 	resource = check_resource(image, YES);
 	[filesystem installComponentResource:resource];
 	filesystem.image = image;
 	for (index = 0; index < invalid.count; index++) {
-		assert([filesystem startFormatWithTask:(FSTask *)task
-					       options:check_options(invalid[index])
-						 error:&failure] == nil);
-		assert(failure.code == EINVAL && !filesystem.componentMaintenanceActive);
-		assert(task.completionCount == 0 && image.writes == 0 && image.flushes == 0);
+		task = check_completion();
+		refusal = [filesystem startFormatWithTask:(FSTask *)task
+						  options:check_options(invalid[index])
+						    error:&failure];
+		check_refusal(task, refusal, failure, EINVAL);
+		assert(!filesystem.componentMaintenanceActive);
+		assert(image.writes == 0 && image.flushes == 0);
+	}
+	for (index = 0; index < invalidCheck.count; index++) {
+		task = check_completion();
+		refusal = [filesystem startCheckWithTask:(FSTask *)task
+						 options:check_options(invalidCheck[index])
+						   error:&failure];
+		check_refusal(task, refusal, failure, EINVAL);
+		assert(!filesystem.componentMaintenanceActive);
+		assert(image.writes == 0 && image.flushes == 0);
 	}
 	image.entered = dispatch_semaphore_create(0);
 	image.resume = dispatch_semaphore_create(0);
 	image.gateWrites = YES;
 	failure = nil;
+	task = check_completion();
 	progress = [filesystem startFormatWithTask:(FSTask *)task
 					   options:check_options(arguments)
 					     error:&failure];
@@ -381,14 +419,16 @@ check_filesystem_maintenance(
 	assert(dispatch_semaphore_wait(image.entered,
 		   dispatch_time(DISPATCH_TIME_NOW, CheckWaitSeconds * NSEC_PER_SEC)) == 0);
 	other = check_completion();
-	assert([filesystem startFormatWithTask:(FSTask *)other
-				       options:check_options(arguments)
-					 error:&failure] == nil);
-	assert(failure.code == EBUSY && other.completionCount == 0);
-	assert([filesystem startCheckWithTask:(FSTask *)other
-				      options:check_options(@[ @"-f", @"-n" ])
-					error:&failure] == nil);
-	assert(failure.code == EBUSY && other.completionCount == 0);
+	refusal = [filesystem startFormatWithTask:(FSTask *)other
+					  options:check_options(arguments)
+					    error:&failure];
+	check_refusal(other, refusal, failure, EBUSY);
+	assert(filesystem.componentMaintenanceActive);
+	other = check_completion();
+	refusal = [filesystem startCheckWithTask:(FSTask *)other
+					 options:check_options(@[ @"-f", @"-n" ])
+					   error:&failure];
+	check_refusal(other, refusal, failure, EBUSY);
 	assert(check_unload(filesystem).code == EBUSY && filesystem.componentMaintenanceActive);
 	dispatch_semaphore_signal(image.resume);
 	check_completed(task, progress, 0);
