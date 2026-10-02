@@ -12,9 +12,11 @@ on:
       - 'scripts/build_fskit_check.py'
       - 'scripts/combine_fskit_check.py'
       - 'scripts/package_fskit_check.py'
+      - 'scripts/package_fskit.py'
       - 'scripts/test_fskit.py'
       - 'scripts/test_fskit_installed_write.py'
       - 'scripts/test_fskit_installed_check.py'
+      - 'scripts/test_fskit_installed_package.py'
       - 'tests/fskit_*.m'
       - 'tests/fskit_*.c'
       - 'tests/fskit_check_resource.py'
@@ -33,9 +35,11 @@ on:
       - 'scripts/build_fskit_check.py'
       - 'scripts/combine_fskit_check.py'
       - 'scripts/package_fskit_check.py'
+      - 'scripts/package_fskit.py'
       - 'scripts/test_fskit.py'
       - 'scripts/test_fskit_installed_write.py'
       - 'scripts/test_fskit_installed_check.py'
+      - 'scripts/test_fskit_installed_package.py'
       - 'tests/fskit_*.m'
       - 'tests/fskit_*.c'
       - 'tests/fskit_check_resource.py'
@@ -96,13 +100,23 @@ jobs:
         run: |
           python3 scripts/build_fskit.py --derived-data artifacts/fskit-ci/DerivedData \
             2>&1 | tee artifacts/fskit-ci/reports/build.log
+      - name: Build isolated installer payload
+        run: |
+          python3 scripts/package_fskit_check.py \
+            --output artifacts/fskit-ci/package/Machlin-ext4-check-source.tar.gz \
+            2>&1 | tee artifacts/fskit-ci/reports/package-source.log
+          python3 scripts/package_fskit.py --allow-unsigned \
+            --app 'artifacts/fskit-ci/DerivedData/Build/Products/Debug/Machlin ext4.app' \
+            --source-package artifacts/fskit-ci/package/Machlin-ext4-check-source.tar.gz \
+            --output artifacts/fskit-ci/package/Machlin-ext4.pkg \
+            2>&1 | tee artifacts/fskit-ci/reports/package.log
       - name: Compile native cache checker for both architectures
         run: |
           xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror \
             -Wdeclaration-after-statement -O2 -arch arm64 -arch x86_64 \
             tests/mounted_cache.c -o artifacts/fskit-ci/mounted-cache-checker \
             2>&1 | tee artifacts/fskit-ci/reports/mounted-cache-build.log
-          python3 -m py_compile scripts/test_fskit_installed_write.py scripts/test_fskit_installed_check.py
+          python3 -m py_compile scripts/test_fskit_installed_write.py scripts/test_fskit_installed_check.py scripts/test_fskit_installed_package.py scripts/package_fskit.py
       # No profiles, app installation, native mounts or real Keychain access.
       - name: Check adapter components with sanitizers
         run: |

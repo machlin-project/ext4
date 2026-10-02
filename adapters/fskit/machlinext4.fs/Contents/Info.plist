@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>org.machlin.ext4.filesystem-catalog</string>
+    <key>CFBundleName</key>
+    <string>machlinext4</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>FSPersonalities</key>
+    <dict>
+        <key>ext4</key>
+        <dict>
+            <key>FSName</key>
+            <string>Machlin ext4</string>
+            <key>FSSubType</key>
+            <integer>0</integer>
+            <key>FSfileObjectsAreCaseSensitive</key>
+            <true/>
+        </dict>
+    </dict>
+</dict>
+</plist>

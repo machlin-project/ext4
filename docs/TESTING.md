@@ -631,6 +631,14 @@ independently damaged 1/4 KiB images. It requires byte-preserving verification,
 failure for damaged media, successful repair, independent fsck and a read-only
 remount through the installed extension. An optional `--sudo` authorizes native
 administrative checking using the existing no-echo guest password mechanism.
+The harness checks the reported task result as well as the process exit code.
+It uses the plain native client by default. `--progress` separately exercises the
+optional system display, which currently loses the task's failure exit status on
+27.0.1. The different completion diagnostics in both modes are checked explicitly.
+`--diagnose-client-exit` permits later repair/remount diagnostics when the system
+client reports a task failure but returns the wrong exit code. It keeps the
+affected profile and overall run failed; `driver_tasks_passed` records the
+separate resource-bound checker results.
 Timeouts retain the task device for diagnosis; they do not start another checker.
 
 Prepared builds and test execution run on Luna; VM preparation belongs to Sol.

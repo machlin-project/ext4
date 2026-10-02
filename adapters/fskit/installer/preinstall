@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-3-Clause
+set -eu
+
+# Replacing a running extension must not split a mounted volume's code and
+# resource ownership. The system mount listing supplies the native type name.
+mounted=$(/sbin/mount)
+printf '%s\n' "$mounted" | while IFS= read -r entry; do
+    case "$entry" in
+        *' (machlinext4,'*|*' (machlinext4)'*)
+            echo 'Unmount all Machlin ext4 volumes before installing the driver.' >&2
+            exit 1
+            ;;
+    esac
+done

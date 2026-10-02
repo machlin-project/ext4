@@ -29,6 +29,10 @@ def main():
     parser.add_argument('--build-number', type=int, required=True)
     parser.add_argument('--profiles', nargs='+', choices=('1k', '4k'), default=['1k', '4k'])
     parser.add_argument('--sudo', action='store_true', help='Authorize fsck as the VM administrator')
+    parser.add_argument('--diagnose-client-exit', action='store_true',
+                        help='Continue after a reported task error with an incorrect CLI status; keep the run failed')
+    parser.add_argument('--progress', action='store_true',
+                        help='Exercise the optional native progress display, including its completion-status contract')
     parser.add_argument('--e2fsck', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
@@ -56,8 +60,19 @@ def main():
         assert len(matches) == 1, f'Expected one invocation for {label}'
         return json.loads(matches[0].read_text())['exit_code']
 
+    def task_report(label):
+        logs = {}
+        for channel in ('stdout', 'stderr'):
+            matches = list(output.glob('*-' + label + '.' + channel + '.log'))
+            assert len(matches) == 1, f'Expected one {channel} for {label}'
+            logs[channel] = matches[0].read_text(errors='replace')
+        assert all(f'Pass {number}:' in logs['stdout'] for number in range(1, 6)), 'Full checker passes were not observed'
+        return any(line.startswith(('Completed with error:',
+                                    'fsck_fskit: Operation ended with error:'))
+                   for text in logs.values() for line in text.splitlines())
+
     def check(label, device, repair=False):
-        command = ['/sbin/fsck_fskit', '--progress', '-t', 'machlinext4', '-f',
+        command = ['/sbin/fsck_fskit', *(['--progress'] if args.progress else []), '-t', 'machlinext4', '-f',
                    '-y' if repair else '-n', device]
         if args.sudo:
             command = ['/usr/bin/sudo', '-S', '-p', '', '--', *command]
@@ -91,7 +106,8 @@ def main():
           'umask 077; test ! -e "$1"; mkdir -p "$1"', 'prepare', root)
 
     for profile in args.profiles:
-        result = {'passed': False, 'administrative_check': args.sudo}
+        result = {'passed': False, 'administrative_check': args.sudo,
+                  'progress_display': args.progress}
         results[profile] = result
         clean_name = f'ext4-check-clean-{profile}.img'
         damaged_name = f'ext4-check-damaged-{profile}.img'
@@ -108,9 +124,15 @@ def main():
             for name, image, expected_hash in (('clean', clean, clean_hash), ('damaged', damaged, damaged_hash)):
                 current_image = image
                 device = attach(profile + '-' + name + '-attach-readonly', image, True)
-                code = check(profile + '-' + name + '-verify', device)
-                assert (code == 0) == (name == 'clean'), f'{name} verification returned {code}'
+                label = profile + '-' + name + '-verify'
+                code = check(label, device)
+                task_failed = task_report(label)
+                assert task_failed == (name == 'damaged'), f'{name} verification has an unexpected FSKit task result'
                 result[name + '_verify_exit'] = code
+                result[name + '_task_failed'] = task_failed
+                if (code == 0) != (name == 'clean'):
+                    result['client_exit_failure'] = f'{name} verification returned {code}'
+                    assert args.diagnose_client_exit, result['client_exit_failure']
                 detach(profile + '-' + name + '-detach-readonly', image)
                 current_image = None
                 assert guest(profile + '-' + name + '-unchanged', '/usr/bin/shasum', '-a', '256', image).decode().split()[0] == expected_hash
@@ -118,7 +140,7 @@ def main():
             current_image = damaged
             device = attach(profile + '-attach-repair', damaged, False)
             code = check(profile + '-repair', device, True)
-            assert code == 0, f'Repair returned {code}'
+            assert code == 0 and not task_report(profile + '-repair'), f'Repair failed or returned {code}'
             result['repair_exit'] = code
             detach(profile + '-detach-repair', damaged)
             current_image = None
@@ -134,6 +156,7 @@ def main():
             current_image = damaged
             device = attach(profile + '-attach-repaired-readonly', damaged, True)
             assert check(profile + '-verify-repaired', device) == 0
+            assert not task_report(profile + '-verify-repaired'), 'Repaired media failed verification'
             detach(profile + '-detach-repaired-readonly', damaged)
             current_image = None
             mount = root + '/mount-' + profile
@@ -150,7 +173,8 @@ def main():
             current_image = None
             assert guest(profile + '-final-hash', '/usr/bin/shasum', '-a', '256', damaged).decode().split()[0] == repaired_hash
             assert digest(fixtures / clean_name) == clean_hash and digest(fixtures / damaged_name) == damaged_hash
-            result.update(passed=True, fsck_exit=0, clean_sha256=clean_hash,
+            result.update(passed='client_exit_failure' not in result, driver_tasks_passed=True,
+                          fsck_exit=0, clean_sha256=clean_hash,
                           damaged_sha256=damaged_hash, repaired_sha256=repaired_hash)
         except GuestTimeout as error:
             result.update(error=str(error), recovery_required=True,
@@ -165,7 +189,7 @@ def main():
                     result['cleanup_error'] = str(error)
             (output / 'summary.json').write_text(json.dumps(results, indent=2) + '\n')
             print(json.dumps({profile: result}), flush=True)
-        if not result['passed']:
+        if not result['passed'] and not (args.diagnose_client_exit and result.get('driver_tasks_passed')):
             break
     return 0 if len(results) == len(args.profiles) and all(r['passed'] for r in results.values()) else 1
 

@@ -666,6 +666,58 @@ Generated evidence lives in the lab's ignored `artifacts/ext4-fskit/` tree:
 `installed-27/build23-barrier-1` and `installed-clean/build21-large-pressure-1`.
 Keep failed groups and interrupted-run cleanup distinct from passed groups.
 
+## Installation with the filesystem catalog
+
+DiskManagement maintains a filesystem catalog separately from FSKit extension
+discovery. The package installs `machlinext4.fs` under `/Library/Filesystems` with
+the same type and personalities as the extension. This bundle contains metadata
+only; FSKit continues to own probing, resource loading and native filesystem
+operations. It declares no formatter or alternate filesystem identity.
+
+On stock 26.5.2 and 27.0.1, the same-type catalog makes actual short and sixteen-byte
+`diskutil renameVolume` commands succeed on 1/4 KiB media. Native label changes,
+oversized-name rejection, read-only remount label persistence and independent fsck
+also pass. The original failed catalog-free runs remain recorded. Evidence is in
+the lab's `artifacts/ext4-fskit/installed-{clean,27}/build38-package-rename-1`, using the
+production catalog installed by the actual package.
+
+`scripts/package_fskit.py` packages an exported app, the catalog and the complete
+checker source. It retains the app's nested signatures and tickets, fixes bundle
+locations and sets readable root-owned installation metadata. A preinstall script
+refuses replacement while any `machlinext4` volume is mounted. For distribution,
+use a Developer ID Installer identity and notarize the resulting package separately:
+
+```sh
+python3 ../ext4/scripts/package_fskit.py \
+  --app '/path/to/export/Machlin ext4.app' \
+  --source-package '/path/to/export/Machlin-ext4-check-source.tar.gz' \
+  --sign 'Developer ID Installer: PERSONAL IDENTITY (TEAM)' \
+  --output ../ext4/artifacts/fskit/Machlin-ext4.pkg
+```
+
+The native installer harness is `scripts/test_fskit_installed_package.py`. It
+checks mounted refusal before any app/catalog replacement, byte-preserving image
+detach, unmounted installation, executable hashes, signatures, Gatekeeper, catalog
+identity/permissions, corresponding source and retained module/service enablement.
+An update additionally uses `--previous-build-number` and `--expected-app` to
+compare the installed replacement against its exported executable bytes.
+`--allow-unsigned` in the package builder and `--allow-untrusted` in the VM harness
+are explicit isolated-test options; they do not establish distribution acceptance.
+The unsigned outer package passes native installation on 27.0.1 with the unchanged
+signed/notarized app: mounted replacement is refused, the read-only image remains
+unchanged, and unmounted installation preserves executable bytes, nested signatures,
+Gatekeeper acceptance and module/service enablement. The catalog has the matching
+identity, root ownership and readable permissions; the complete checker source
+matches its export. PackageKit writes preinstall diagnostics to `install.log`,
+so the harness captures only the bytes appended by each invocation. Evidence is
+in the lab's `artifacts/ext4-fskit/installed-27/build38-package-2`.
+The actual 26.5.2 update installs the same app, catalog and source correctly, but
+FSKit discovery initially omits the registered new extension. One normal reboot
+restores enablement without a manual module toggle. This remains a failed update
+continuity gate, with installation and recovery recorded separately in
+`installed-clean/build38-package-{1,recovery}`. Outer-package signing/notarization
+remain pending.
+
 ## Completion requirements
 
 | Area | Implemented boundary | Remaining work |
@@ -676,7 +728,7 @@ Keep failed groups and interrupted-run cleanup distinct from passed groups.
 | IPC and GUI | Signed same-user RPC and key lifecycle and actual GUI v1/v2 key import/removal on 26.5.2/27.0.1; sudo-mounted/admin-app operation and basic controls on 27.0.1; abandoned endpoint recovery on 26.5.2 | Cross-user or root-owned extension coordination |
 | Writes | Approved authenticated device service, native 1/4 KiB writes, shared mmap, concurrent writers, bounded cached-write/truncate/rename stress, bounded ENOSPC, extension/service termination and timeout, forced-detach durability, recovery, remount and independent fsck | Live set-ID attribute coherence, larger pressure case, memory-pressure stress and physical device loss |
 | Crypto and ACLs | CommonCrypto fscrypt v1/v2 reads and writes; native key import/removal and remounts on 26.5.2 and 27.0.1 | Verity trust and ACL authorization; ACL-bearing items currently fail with ENOTSUP |
-| Maintenance | Native Disk Arbitration recovery of interrupted transactions; separate full consistency checker and repair helper with component fault/cancellation acceptance | Signed helper execution inside FSKit, native check/repair and damaged primary-superblock admission |
+| Maintenance | Native Disk Arbitration recovery; separate full checker with component fault/cancellation acceptance and signed 26.5.2/27.0.1 checks/repairs on 1/4 KiB media, correct plain-client exit status, independent fsck and repaired remount reads | Optional system checker progress display loses the failed-task exit status on 27; native cancellation, damaged primary-superblock admission and formatting |
 | Distribution | Universal Xcode Release archive/export, Developer ID signatures, hardened runtime, timestamps, matching app/extension profiles, notarization, Gatekeeper, installed native write/remount/policy/fsck and actual settings-button GUI on 26.5.2/27.0.1 | Automatic module enable continuity fails after the tested update on 27; broader OS/hardware acceptance and native failures above remain open |
 
 The public SDK documents direct writes
@@ -740,9 +792,14 @@ is forwarded through `FSTask` with bounded line buffering.
 The helper inherits the extension's sandbox; it has no device entitlement or
 privileged repair service. Unsigned universal compilation and 1/4 KiB component
 checks pass, including cancellation, hostile protocol peers, resource faults,
-repair and independent `e2fsck` verification. These checks do not establish that
-the signed FSKit process is allowed to launch and use the helper; native sandbox
-and maintenance acceptance remain required.
+repair and independent `e2fsck` verification. The signed FSKit process also launches
+the helper on 26.5.2 and 27.0.1: native 1/4 KiB repairs pass independent fsck and read-only
+remount verification. Plain `fsck_fskit -t machlinext4 -f -n DEVICE` also returns
+POSIX EIO for damaged media and zero for clean media. Its optional `--progress`
+display logs the same failed task but incorrectly returns zero. Use the plain
+native client for checks and repairs; the progress-client failure stays recorded
+as a separate system integration limitation. Native cancellation remains required;
+see [the native evidence](ACCEPTANCE.md#full-fskit-checker-component-evidence).
 
 The build pins the official e2fsprogs release and preserves its complete license
 notice. Archives and exports include a corresponding-source package beside the

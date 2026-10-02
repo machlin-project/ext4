@@ -19,7 +19,7 @@ safe rejection of a feature is recorded separately from supporting it.
 | Create/write/truncate, allocation, rename, unlink | Linux roundtrips, full disks, partial I/O and open-file lifetime | Portable, independent and Linux checks pass with the recorded format limits; stock FSKit 1/4 KiB writes, shared mmap, concurrent writers, namespace mutations, open-unlinked lifetime, bounded ENOSPC, persistence-service failures and retained-file/mapping forced image detach pass; larger pressure and physical device-loss acceptance remain pending |
 | Journal and recovery | Interrupted transactions, ordering faults, device errors, Linux replay and e2fsck | Portable journals and orphan recovery pass the recorded matrix; stock FSKit Disk Arbitration recovery passes both block sizes while dirty read-only media remain unchanged; physical device-loss qualification remains pending |
 | Xattrs, permissions and ACLs | Preserve and mutate metadata across macOS/Linux roundtrips | Selective owner/mode/timestamp updates pass portable and Linux checks; raw xattr get/list, atomic attribute batches and mutation lifetime integration pass portable tests and targeted independent checks; bidirectional Linux attribute/ACL/security checks and direct replay of core attribute transactions pass eight profiles; the linked-truncate e2fsck defect remains explicit below; ACL enforcement and platform policy pending |
-| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Signed stock 26.5.2 reads/writes, namespace, mmap, concurrent I/O, user xattrs, recovery, bounded ENOSPC, native label changes, service-failure recovery and fscrypt v1/v2 key lifecycle pass 1/4 KiB profiles. Stock 27.0.1 also passes ordinary mutation, sparse queries, service-failure recovery and fscrypt v1/v2 key lifecycle on both block sizes. Live set-ID metadata and diskutil rename fail on both versions. Separating read-only mapping protocols from writable volumes lets the original larger 1 KiB pressure reproduction finish on 26.5.2; stronger capacity checks still fail live/remounted size consistency on both OS versions. Device-loss stress remains unaccepted (see [FSKit](FSKIT.md)) |
+| Stock macOS FSKit | Actual mount, ordinary application I/O, concurrency, mmap and unmount on an Apple kernel | Signed stock 26.5.2 reads/writes, namespace, mmap, concurrent I/O, user xattrs, recovery, bounded ENOSPC, native label changes, service-failure recovery and fscrypt v1/v2 key lifecycle pass 1/4 KiB profiles. Stock 27.0.1 also passes ordinary mutation, sparse queries, service-failure recovery and fscrypt v1/v2 key lifecycle on both block sizes, full native checking/repair and diskutil rename through the installed catalog. Full checking/repair and catalog-backed diskutil rename also pass both block sizes on 26.5.2. Live set-ID metadata still fails on both versions. Separating read-only mapping protocols from writable volumes lets the original larger 1 KiB pressure reproduction finish on 26.5.2; stronger capacity checks still fail live/remounted size consistency on both OS versions. Device-loss stress remains unaccepted (see [FSKit](FSKIT.md)) |
 | FSKit control app | Signed app-to-mounted-extension IPC on supported macOS versions, authorization and teardown | Signed same-user App Group IPC, settings, Keychain import/removal, next-mount key snapshots, actual GUI v1/v2 key import/removal and normal teardown pass on 26.5.2/27.0.1; crash discovery passes component and guest checks. Sudo-mounted/admin-app operation and basic GUI controls pass on 27.0.1; cross-user or root-owned extension coordination remains unaccepted |
 | Kernel adapter | Actual loaded kext, vnode/UBC behavior, fault/truncate/writeback and resource balance | Loaded arm64e read-only profile passes; writable paths and full resource accounting pending; x86_64 compilation only |
 | LXNU policy | CAP_FSETID and privilege removal, xattrs, mixed-ABI races, inherited descriptions and attachment restrictions | Not implemented |
@@ -3559,7 +3559,8 @@ inherited-sandbox entitlements. Notarization accepts this application; the outer
 app and setup helper have validated tickets, and Gatekeeper accepts the export.
 The complete corresponding-source package rebuilds
 the arm64 helper from an extracted tree without a Git database. These establish
-compilation, source packaging and signing, not native sandbox execution.
+compilation, source packaging and signing. Native execution is recorded separately
+below.
 
 Independent file-backed protocol tests pass on 1/4 KiB fixtures: clean read-only
 checks preserve every byte, deliberately damaged media fail verification, repair
@@ -3578,8 +3579,8 @@ Reports live in the ext4 repository's
 `artifacts/checks/fskit-maintenance-helper/{component2,parent-component1,source-release1}`
 and `adapter-regression-summary.json`; signed build evidence is under
 `artifacts/checks/fskit-check-distribution/`. The GitHub adapter job now includes
-full checker ownership and repair components. Native maintenance, invalid-primary-
-superblock repair and formatting remain unaccepted.
+full checker ownership and repair components. Native cancellation,
+invalid-primary-superblock repair and formatting remain unaccepted.
 
 Focused reverse diagnostics on the exact stock 27.0.1 DiskManagement image show
 that its filesystem catalog scans `.fs` bundles in the system and local filesystem
@@ -3588,18 +3589,83 @@ directories. A diagnostic-only private catalog query in its own process has no
 narrow the `diskutil` integration failure. A temporary metadata-only `.fs` bundle
 with the same filesystem identity makes the exact catalog query find `machlinext4`
 and accept short and sixteen-byte names. No formatter or different identity is
-declared. The fixture is removed after the diagnostic; actual `diskutil` behavior
-has not yet been accepted. The diagnostic never enters production code. Its image/probe identities
+declared. That fixture is removed after the diagnostic. A subsequent temporary
+catalog with the correct public case-sensitivity key passes actual short and
+sixteen-byte `diskutil renameVolume` commands on 1/4 KiB media. Native rename,
+oversized-name rejection, read-only remount label persistence and independent fsck
+pass too, with unchanged source fixtures and empty final endpoints. This fixture
+is also removed after the run. The actual package subsequently installs the
+production catalog and passes the same native rename, persistence and independent
+fsck checks on both block sizes and both stock test OS versions;
+the successful native report is `installed-27/build38-catalog-rename-1` under the
+lab's `artifacts/ext4-fskit`. The diagnostic never enters production code. Image/probe identities
 and raw results are in the lab's
 `artifacts/ext4-fskit/native-issues/fskit-userspace-27/`.
+
+The native installer harness passes on 27.0.1. Its mounted-volume refusal preserves
+the app and catalog state, and the read-only image stays byte-identical after
+detach. Unmounted installation preserves all five signed executable hashes,
+strict nested signatures, Gatekeeper acceptance and module/service enablement.
+The installed catalog matches the extension's personalities and has readable
+root-owned permissions; the complete checker source matches its exported archive.
+The outer package is explicitly unsigned for this isolated test, so this is not
+outer-package distribution acceptance. Evidence is in
+`installed-27/build38-package-2` and `build38-package-rename-1` under the lab's
+`artifacts/ext4-fskit`.
+
+On 26.5.2, the actual update from the prior signed app installs the new executable
+bytes, signatures, catalog and complete source correctly. The final FSKit module
+query nevertheless returns no module, so the update-continuity test fails. An
+ordinary main-app launch does not repair discovery; one normal reboot restores
+the enabled module and authenticated service without a manual toggle. Subsequent
+production-catalog rename checks pass on 1/4 KiB media, including independent fsck
+and unchanged source fixtures. The original failed update remains separate from
+that recovered-session acceptance. Reports are in the lab's
+`artifacts/ext4-fskit/installed-clean/build38-package-{1,recovery,rename-1}`.
 
 The signed checker build installs on stock 27.0.1 with matching executable hashes
 and valid signatures. PlugInKit registers the extension, but the first FSKit client
 query and Settings sheet omit it. One normal VM reboot makes the unchanged module
 appear enabled, with the authenticated device service enabled and no endpoints.
-This is a controlled session recovery, not successful seamless update continuity
-or native checker execution. Original discovery failures remain in
+This is a controlled session recovery, not successful seamless update continuity.
+Original discovery failures remain in
 `installed-27/build38-check-install` under the lab's `artifacts/ext4-fskit`.
+
+The unchanged signed helper subsequently runs inside the actual FSKit sandbox on
+27.0.1. Forced read-only checks run all five checker passes on clean and damaged
+1/4 KiB media without changing either image. The damaged checks report status four
+and complete their FSKit task with POSIX EIO, as required. Native repairs complete
+successfully, independent `e2fsck -fn` accepts both exported images, and subsequent
+read-only checks and mounted root reads succeed without changing the repaired
+bytes. All test devices detach and control endpoints are empty afterward.
+
+With `--progress`, the system `fsck_fskit` command exits zero after logging the failed
+task. A separate guest command exits thirty-seven through the same Tart transport,
+which rules out loss of the exit code by that transport. The optional progress
+client remains failed. The strict first run retains this failure. An explicit
+diagnostic continuation completes repair and both block sizes while keeping each
+profile and the overall run failed for the client exit status. An intermediate
+diagnostic run also retains a harness parsing failure: it searched stderr while
+the system client printed its task error to stdout. The corrected parser checks
+both channels; no driver rebuild or verdict relaxation obtains the repair results.
+Evidence is in the lab's
+`artifacts/ext4-fskit/installed-27/build38-check-{1,2-diagnose,3-diagnose}`.
+
+The plain native client fixes the exit-status distinction without a driver change:
+clean checks return zero, damaged checks return POSIX EIO, and both 1/4 KiB profiles
+pass the full strict read-only/repair/independent-fsck/remount sequence. Its native
+error diagnostic differs from the progress display; both forms are checked by
+the harness. The initial focused no-progress run retains that parsing failure,
+and the corrected full run passes without diagnostic continuation or a weakened
+verdict. Evidence is in the lab's
+`artifacts/ext4-fskit/installed-27/build38-check-{noprogress-1,plain-1}`.
+
+The same strict plain-client sequence also passes both block sizes on 26.5.2 using
+the unchanged signed helper after the recorded session recovery. Clean checks
+return zero, damaged checks return POSIX EIO, repairs pass independent fsck, and
+repaired read-only mounts remain byte-preserving. Final endpoints and task devices
+are empty. Evidence is in the lab's
+`artifacts/ext4-fskit/installed-clean/build38-check-plain-1`.
 
 ## Kernel build evidence
 

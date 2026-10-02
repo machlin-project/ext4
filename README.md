@@ -47,7 +47,11 @@ Bounded full-disk tests and native volume-label changes pass
 on both block sizes on 26.5.2. Stock 27.0.1 also passes ordinary writes, metadata, namespace,
 mmap, concurrent I/O, sparse-region queries, fscrypt v1/v2 key lifecycle and
 persistence-service failure recovery.
-Live set-ID metadata coherence and `diskutil renameVolume` fail on both OS versions.
+Live set-ID metadata coherence remains failed on both OS versions. A companion
+filesystem catalog fixes `diskutil renameVolume` on 27.0.1 for both block sizes;
+native package installation passes on that version and the installed catalog
+passes on both test OS versions. Updating 26.5 to the checker build requires one
+normal reboot for discovery. Outer-package signing/notarization remain pending.
 Separating kernel block mappings from writable volumes lets the original larger
 1 KiB pressure scenario finish on 26.5.2 without its former stall. Complete callback
 admission fixes the short ENOSPC consistency cases on both OS versions. A larger
@@ -63,7 +67,11 @@ reenable. ACL authorization, physical device-loss stress and broader OS/hardware
 acceptance remain unaccepted.
 Full consistency checking and repair now use a separate resource-bound helper;
 unsigned universal builds and fault/cancellation component checks pass. Signed
-native maintenance acceptance and formatting remain pending.
+native 1/4 KiB checks detect damaged media and repairs pass independent fsck and
+read-only remount verification on 26.5.2 and 27.0.1. Native `fsck_fskit` checks correctly
+return failure for damaged media without `--progress`; that optional display
+incorrectly makes the system client return zero after task failure.
+Native cancellation and formatting remain pending.
 This is not a production release.
 
 The kernel adapter remains read-only. The arm64e kext has read-only acceptance in
