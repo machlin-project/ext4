@@ -779,15 +779,20 @@ engine only after a successful check. Failed or canceled work leaves the volume
 unmountable until another explicit check succeeds or the resource is unloaded.
 Verification requires a read-only resource, so it cannot accidentally replay a
 journal or publish an MMP change. A validated superblock with an unreadable root
-can create an unmountable volume for maintenance. A forced load can also retain a
-physical resource without a volume when its primary superblock cannot be read;
-ordinary loading still rejects it. The resource-only native lifecycle requires
-separate acceptance and does not invent filesystem geometry.
-Read-only inspection of the exact macOS 26.5.2 and 27.0.1 FSKit connectors shows
-matching load-reply guards: a nil volume with no reply error is accepted when
-container status is `blocked` or `ready`. This supports the maintenance admission
-model, but does not prove the daemon's formatting sequence. Native acceptance
-remains required for both systems; no private FSKit call is used by the driver.
+can create an unmountable volume for maintenance. When a forced load cannot
+inspect a primary superblock, it creates a temporary unary volume with a random
+session identity and no filesystem geometry, statistics, engine or keys.
+Activation and mounting fail; successful maintenance retires that identity.
+The next load reads the actual superblock and resolves keys for its filesystem UUID.
+Ordinary loading still rejects unrecognized media.
+
+The native 27.0.1 formatter rejects a unary load reply of `(nil, nil)` with
+`EPROTONOSUPPORT`, before dispatching a format task. Its logs confirm maintenance
+protocol conformance. Earlier static inspection covered the common load-reply
+guards but omitted the unary-specific callback that rejects this reply before
+those guards. That inspection does not establish nil-volume admission. Native
+acceptance of temporary maintenance volumes remains required for both supported
+systems; no private FSKit call is used by the driver.
 Analysis is retained in the lab's ignored
 `artifacts/ext4-fskit/native-issues/fskit-userspace-26/maintenance-load-contract1/`
 and `artifacts/ext4-fskit/native-issues/fskit-userspace-27/maintenance-load-contract2/`.
@@ -821,16 +826,25 @@ child cancellation. The filesystem entry points also pass option refusals before
 I/O, exclusive check/format admission, unload refusal while maintenance runs,
 resource-only check/repair/format, errors from the final parent barrier and
 validation read, and both progress and task cancellation with one completion.
-Independent fsck accepts the formatted exports. These tests inject the resource
-boundary after load; they do not exercise daemon loading or native blank-media
-formatting. Native blank-media formatting, mounted refusal and remount acceptance
-remain pending; a signed development build alone does not close these gates.
-The universal Developer ID release archive and export pass strict signature
-verification, including all nested executables. The test guest rejects the new
-app as unnotarized. Upload has not occurred: the single CLI upload attempt reports
-`No Accounts`, and UI automation cannot acquire the host Xcode window. This is a
-notarization blocker, not a native formatter test result. The earlier notarized
-check-only release remains the accepted baseline.
+Independent fsck accepts the formatted exports. Updated sanitizer components use
+the same temporary unary-volume factory as forced loads. They verify absent
+geometry/statistics, activation refusal, retirement after successful check/repair/
+format, exclusive admission and unload, final parent faults and cancellation on
+1/4 KiB media. All six independent fsck checks pass, with unchanged fixtures.
+Reports are in `artifacts/checks/fskit-maintenance-helper/unary-components40/results`.
+These tests inject the resource boundary after acquisition and do not exercise
+daemon loading. The native harness now requires EINVAL for invalid format options;
+an unrelated nonzero exit cannot pass those cases.
+
+The universal Developer ID formatter archive/export passes notarization, stapled
+ticket checks, strict nested signatures and Gatekeeper after normal Xcode login.
+It is installed on 27.0.1 with the authenticated persistence service enabled.
+Its first native blank-media format fails during the nil-volume load described
+above; repeating the request with a block device instead of a raw device returns
+the same error and leaves the image unchanged. The new temporary-volume fix has
+component evidence only. Native blank-media formatting, mounted refusal and
+remount acceptance remain pending. Distribution approval is separate from these
+functional gates; the earlier native check-only acceptance remains the baseline.
 Malformed messages, abandoned channels and read/write/barrier failures cannot
 produce a clean verdict, even if the child exits with status zero. Checker output
 is forwarded through `FSTask` with bounded line buffering.

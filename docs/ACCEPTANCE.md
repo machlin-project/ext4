@@ -3713,3 +3713,29 @@ The reader suite independently checks block mappings by reading returned device
 offsets through the raw POSIX resource and comparing file contents, including
 unaligned offsets, holes and the last file block. These checks do not substitute
 for actual page-in and buffer strategy execution in XNU.
+
+## FSKit blank-media maintenance admission
+
+The universal formatter archive passes Developer ID notarization, stapled tickets,
+strict nested signatures and Gatekeeper. Normal installation on stock 27.0.1
+matches the approved bundle and enables its authenticated persistence service.
+The original native formatter run fails with POSIX EPROTONOSUPPORT before starting
+formatting. The exact extension logs show maintenance-protocol conformance and a
+unary `(nil, nil)` load reply being converted to that error. A focused block-device
+request reproduces the raw-device result without changing the blank image. Both
+runs leave no test devices or control endpoints. Evidence is in the lab's
+`artifacts/ext4-fskit/installed-27/build39-format1` and
+`artifacts/ext4-fskit/installed-27/build39-format-block-path1`.
+
+The common state-guard analysis previously described in [FSKit](FSKIT.md) missed
+the unary-specific load callback. Forced maintenance now creates a temporary
+unmountable volume with a session UUID and no filesystem geometry or keys.
+Successful repair or format retires that identity before another load may create
+a volume from the actual superblock. Sanitized 1/4 KiB components verify no
+statistics or item publication, activation refusal, identity retirement, option
+refusals before I/O, exclusive task ownership and unload refusal, parent barrier/
+validation faults and cancellation. Six independent fsck checks pass; original
+fixtures are unchanged. Reports are in
+`artifacts/checks/fskit-maintenance-helper/unary-components40/results` in this
+repository. These are component results; native formatting, damaged-primary
+repair and cancellation still require qualification on both supported systems.

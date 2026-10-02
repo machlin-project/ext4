@@ -146,8 +146,8 @@ ext4_maintenance_executable(void)
 		} else if (mode == Ext4CheckVerify && _resourceOwner.writable) {
 			failure = ext4_error(EXT4_BUSY);
 		} else {
-			/* A forced maintenance load may retain a damaged resource without
-			 * publishing a fabricated volume or on-disk geometry. */
+			/* Successful maintenance retires its temporary volume. Further
+			 * explicit tasks may use the retained exclusive resource directly. */
 			check =
 			    [[Ext4CheckTask alloc] initWithResource:_resourceOwner
 							       mode:mode
@@ -169,7 +169,12 @@ ext4_maintenance_executable(void)
 		       description:mode == Ext4CheckVerify ? @"Checking ext4" : @"Repairing ext4"
 			completion:^NSError *(NSError *checkError) {
 			  if (volume != nil) {
-				  return [volume finishCheck:check error:checkError];
+				  checkError = [volume finishCheck:check error:checkError];
+				  if (!volume.maintenanceOnly || checkError != nil) {
+					  return checkError;
+				  }
+				  self->_volume = nil;
+				  self->_recoveredOnLoad = NO;
 			  }
 			  return checkError
 			      ?: [self

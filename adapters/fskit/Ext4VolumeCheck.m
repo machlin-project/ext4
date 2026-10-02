@@ -129,6 +129,13 @@
 			 * engine. Another explicit check may retry the same exclusive view. */
 			return error;
 		}
+		if (_maintenanceOnly) {
+			/* There is no original filesystem UUID or geometry to reopen.
+			 * The parent validates the repaired resource, then the next native
+			 * load creates a volume from its actual superblock and keys. */
+			[self invalidate];
+			return nil;
+		}
 		result = self.writable ? [_resourceOwner openWritable:&filesystem]
 				       : [_resourceOwner open:&filesystem];
 		if (result == EXT4_OK) {

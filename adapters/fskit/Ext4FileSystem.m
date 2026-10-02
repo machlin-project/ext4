@@ -176,20 +176,27 @@ ext4_open_resource(FSResource *resource, Ext4ResourceIO **owner, struct ext4_fs 
 				if (volume == nil) {
 					error = EXT4_NO_MEMORY;
 				}
+			} else if (maintenanceOnly) {
+				volume =
+				    ext4_volume_create_for_check((FSBlockDeviceResource *)resource,
+					NULL, owner, NULL, owner.writable, error);
+				if (volume == nil) {
+					error = EXT4_NO_MEMORY;
+				}
 			}
 			if (volume == nil) {
 				ext4_native_crypto_destroy(crypto);
 			}
 			volume.keyStoreError = keyError;
 			volume.writeAvailabilityError = writeError;
-			/* Force admits a physical resource for offline maintenance without
-			 * claiming that unreadable filesystem metadata describes a volume.
-			 * The blocked state prevents activation until maintenance succeeds. */
-			loadError = volume != nil || maintenanceOnly ? nil : ext4_error(error);
+			/* A unary load cannot reply (nil, nil). Force creates a temporary
+			 * maintenance volume, with no core or filesystem geometry. Its
+			 * blocked state and owner error prevent mounting or item access. */
+			loadError = volume != nil ? nil : ext4_error(error);
 			_volume = volume;
 			_resourceOwner = loadError == nil ? owner : nil;
 			_resourceWriteError = loadError == nil ? writeError : nil;
-			self.containerStatus = volume != nil
+			self.containerStatus = volume != nil && !maintenanceOnly
 			    ? FSContainerStatus.ready
 			    : [FSContainerStatus blockedWithStatus:ext4_error(error)];
 		}

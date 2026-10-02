@@ -24,7 +24,9 @@ struct ext4_native_crypto;
 			  crypto:(struct ext4_native_crypto *)crypto
 			writable:(BOOL)writable;
 /* A valid superblock with an unreadable root can be checked before activation.
- * This owner publishes no items and cannot mount until a full check succeeds. */
+ * A NULL info creates a temporary maintenance identity without disk geometry.
+ * This owner publishes no items. Temporary identities require unloading and
+ * probing again after maintenance; they can never become mounted volumes. */
 - (instancetype)initForCheckingResource:(FSBlockDeviceResource *)resource
 				   info:(const struct ext4_info *)info
 			  resourceOwner:(Ext4ResourceIO *)resourceOwner
@@ -34,6 +36,7 @@ struct ext4_native_crypto;
 @property(nonatomic, strong) NSError *keyStoreError;
 @property(nonatomic, strong) NSError *writeAvailabilityError;
 @property(nonatomic, readonly) BOOL writable;
+@property(nonatomic, readonly) BOOL maintenanceOnly;
 @property(nonatomic, readonly) FSVolumeSupportedCapabilities *supportedVolumeCapabilities;
 @property(nonatomic, readonly) FSStatFSResult *volumeStatistics;
 @property(nonatomic, readonly) FSItemDeactivationOptions itemDeactivationPolicy;

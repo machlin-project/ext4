@@ -3,6 +3,7 @@
 """Format only disposable VM images, then mount, write and independently check them."""
 
 import argparse
+import errno
 import getpass
 import hashlib
 import json
@@ -137,7 +138,8 @@ def main():
             guest(profile + '-copy-blank', '/bin/cp', args.guest_blank_image, image)
             device = attach(profile + '-attach-readonly', image, True)
             attached = True
-            assert native_format(profile + '-readonly-refusal', device) != 0
+            refusal = native_format(profile + '-readonly-refusal', device)
+            assert refusal in (errno.EACCES, errno.EROFS), f'Read-only refusal returned {refusal}'
             detach(profile + '-detach-readonly', image)
             attached = False
             assert guest(profile + '-readonly-unchanged', '/usr/bin/shasum', '-a', '256',
@@ -147,7 +149,8 @@ def main():
             attached = True
             for name, options in (('invalid-block', ('-b', '8192')),
                                   ('long-label', ('-L', 'abcdefghijklmnopq'))):
-                assert native_format(profile + '-' + name, device, *options) != 0
+                refusal = native_format(profile + '-' + name, device, *options)
+                assert refusal == errno.EINVAL, f'{name}: expected EINVAL, received {refusal}'
                 assert guest(profile + '-' + name + '-unchanged', '/usr/bin/shasum', '-a', '256',
                              image).decode().split()[0] == blank_hash
             assert native_format(profile + '-format', device, '-b', str(BLOCK_SIZES[profile]),

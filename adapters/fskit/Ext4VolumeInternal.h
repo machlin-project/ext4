@@ -24,6 +24,7 @@
 	Ext4ResourceTask *_maintenance;
 	enum ext4_result _openError;
 	BOOL _active;
+	BOOL _maintenanceOnly;
 	BOOL _mounted;
 	BOOL _writeClosed;
 	BOOL _retainReadState;

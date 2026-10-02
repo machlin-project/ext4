@@ -147,14 +147,22 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 	FSVolumeIdentifier *identifier;
 	FSFileName *name;
 
-	uuid = [[NSUUID alloc] initWithUUIDBytes:info->uuid];
+	/* Unary FSKit loads require a volume object even for blank/damaged media.
+	 * This identity belongs to the maintenance session, not to a filesystem.
+	 * Do not invent a superblock or retain this UUID after repair/formatting. */
+	uuid = info != NULL ? [[NSUUID alloc] initWithUUIDBytes:info->uuid] : NSUUID.UUID;
 	identifier = [[FSVolumeIdentifier alloc] initWithUUID:uuid];
-	name = [FSFileName nameWithBytes:info->volume_name
-				  length:strnlen(info->volume_name, EXT4_VOLUME_NAME_SIZE)];
+	name = info != NULL
+	    ? [FSFileName nameWithBytes:info->volume_name
+				 length:strnlen(info->volume_name, EXT4_VOLUME_NAME_SIZE)]
+	    : [FSFileName nameWithString:@""];
 	self = [super initWithVolumeID:identifier volumeName:name];
 	if (self != nil) {
 		_crypto = crypto;
-		_info = *info;
+		if (info != NULL) {
+			_info = *info;
+		}
+		_maintenanceOnly = info == NULL;
 		_resource = resource;
 		_resourceOwner = resourceOwner;
 		_openError = error;
@@ -164,6 +172,11 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 		_items = [NSMapTable strongToWeakObjectsMapTable];
 	}
 	return self;
+}
+
+- (BOOL)maintenanceOnly
+{
+	return _maintenanceOnly;
 }
 
 - (void)dealloc
@@ -419,6 +432,9 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 {
 	FSVolumeSupportedCapabilities *capabilities = [[FSVolumeSupportedCapabilities alloc] init];
 
+	if (_maintenanceOnly) {
+		return capabilities;
+	}
 	capabilities.supportsPersistentObjectIDs = YES;
 	capabilities.supportsSymbolicLinks = YES;
 	capabilities.supportsHardLinks = YES;
@@ -434,10 +450,13 @@ ext4_pack_directory_entry(void *context, const struct ext4_dir_entry *entry, uin
 - (FSStatFSResult *)volumeStatistics
 {
 	@synchronized(self) {
-		FSStatFSResult *statistics =
-		    [[FSStatFSResult alloc] initWithFileSystemTypeName:@"machlinext4"];
+		FSStatFSResult *statistics;
 		enum ext4_result error = [self ownerError];
 
+		if (_maintenanceOnly) {
+			return nil;
+		}
+		statistics = [[FSStatFSResult alloc] initWithFileSystemTypeName:@"machlinext4"];
 		if (_fs != NULL) {
 			ext4_get_info(_fs, &_info);
 		}

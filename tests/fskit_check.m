@@ -174,10 +174,12 @@ ext4_peer_requirement(NSString *identifier)
 @end
 
 /* Inject the adapter's resource boundary after load, without manufacturing an
- * FSKit device proxy or claiming that these components cover daemon loading. */
+ * FSKit device proxy. Exercise the same temporary unary-volume factory used by
+ * forced loads; actual daemon admission still requires the native suite. */
 @interface Ext4FileSystem (ComponentTesting)
 - (void)installComponentResource:(Ext4ResourceIO *)resource;
 - (BOOL)componentMaintenanceActive;
+- (Ext4Volume *)componentVolume;
 @end
 
 @implementation Ext4FileSystem (ComponentTesting)
@@ -187,6 +189,16 @@ ext4_peer_requirement(NSString *identifier)
 	@synchronized(self) {
 		assert(_resourceOwner == nil && _maintenanceTask == nil && _volume == nil);
 		_resourceOwner = resource;
+		_volume = ext4_volume_create_for_check(
+		    nil, NULL, resource, NULL, resource.writable, EXT4_CORRUPT);
+		assert(_volume != nil && _volume.maintenanceOnly);
+		assert(_volume.volumeStatistics == nil && _volume.maximumFileSize == 0);
+		assert(!_volume.supportedVolumeCapabilities.supportsPersistentObjectIDs);
+		assert([_volume checkMountEligibility].code == EIO);
+		[_volume activateWithOptions:nil
+				replyHandler:^(FSItem *item, NSError *failure) {
+				  assert(item == nil && failure.code == EIO);
+				}];
 		self.containerStatus =
 		    [FSContainerStatus blockedWithStatus:[NSError errorWithDomain:NSPOSIXErrorDomain
 									     code:EIO
@@ -198,6 +210,13 @@ ext4_peer_requirement(NSString *identifier)
 {
 	@synchronized(self) {
 		return _maintenanceTask != nil;
+	}
+}
+
+- (Ext4Volume *)componentVolume
+{
+	@synchronized(self) {
+		return _volume;
 	}
 }
 
@@ -375,6 +394,7 @@ check_filesystem_maintenance(
 	check_completed(task, progress, 0);
 	assert(filesystem.containerStatus.state == FSContainerStateReady);
 	assert(!filesystem.componentMaintenanceActive && filesystem.validations == 1);
+	assert(filesystem.componentVolume == nil);
 	assert([resource open:&engine] == EXT4_OK);
 	ext4_get_info(engine, &info);
 	assert(info.block_size == blockSize && strcmp(info.volume_name, "filesystem-test") == 0);
@@ -382,8 +402,8 @@ check_filesystem_maintenance(
 	assert([image.bytes writeToFile:export atomically:YES]);
 	assert(check_unload(filesystem) == nil);
 
-	/* The same resource-only instance can verify and repair without a volume.
-	 * Neither a successful child nor its final validation fabricates one. */
+	/* Successful maintenance releases the temporary unary identity. Validation
+	 * cannot turn that identity into a mountable filesystem or reuse its UUID. */
 	writes = image.writes;
 	flushes = image.flushes;
 	[filesystem installComponentResource:check_resource(image, NO)];
@@ -395,6 +415,7 @@ check_filesystem_maintenance(
 	assert(progress != nil && failure == nil);
 	check_completed(task, progress, 0);
 	assert(image.writes == writes && image.flushes == flushes);
+	assert(filesystem.componentVolume == nil);
 	assert(check_unload(filesystem) == nil);
 	image.bytes = [damaged mutableCopy];
 	[filesystem installComponentResource:check_resource(image, YES)];
@@ -405,6 +426,7 @@ check_filesystem_maintenance(
 	assert(progress != nil);
 	check_completed(task, progress, 0);
 	assert(filesystem.containerStatus.state == FSContainerStateReady);
+	assert(filesystem.componentVolume == nil);
 	assert(check_unload(filesystem) == nil);
 
 	for (fault = 0; fault < 2; fault++) {
