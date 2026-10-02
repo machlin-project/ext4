@@ -655,7 +655,16 @@ sizes, oversized labels and invalid UUIDs must fail before I/O. Read-only media
 must remain unchanged; transport, write and final flush faults must fail.
 `tests/run_fskit_check.py` additionally covers the shared parent supervisor and
 format admission under ASan/UBSan: retained items, read-only owners, old UUID
-invalidation, write/flush failure and cancellation during a resource write.
+invalidation, write/flush failure and cancellation during a resource write. It
+also calls the actual filesystem check/format entry points, covering option
+refusal before I/O, competing maintenance and unload, resource-only operations,
+final parent barrier/read failures, and progress/task cancellation through the
+final task completion. Independent fsck checks repaired and formatted exports.
+The runner builds an unsigned test bundle with its own helper copy so production
+helper lookup is exercised without installing the driver. Keychain and privileged
+service calls abort in this suite. The resource boundary is injected after load;
+native daemon admission remains a separate acceptance gate. `--helper` selects an
+existing unsigned helper when the Debug products contain a signed executable.
 
 From the lab directory:
 

@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #import "../adapters/fskit/Ext4VolumeInternal.h"
+#import "../adapters/fskit/Ext4FileSystemInternal.h"
+#import "../adapters/fskit/Ext4DeviceBarrier.h"
+#import <Security/Security.h>
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
@@ -105,6 +108,122 @@ enum { CheckSectorSize = 512, CheckWaitSeconds = 15 };
 
 @end
 
+/* The filesystem entry points are linked, but these host-only components must
+ * never access a Keychain or connect to the privileged device service. */
+OSStatus
+SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result)
+{
+	(void)query;
+	(void)result;
+	assert(NO);
+	return errSecUnimplemented;
+}
+
+OSStatus
+SecItemAdd(CFDictionaryRef query, CFTypeRef *result)
+{
+	(void)query;
+	(void)result;
+	assert(NO);
+	return errSecUnimplemented;
+}
+
+OSStatus
+SecItemDelete(CFDictionaryRef query)
+{
+	(void)query;
+	assert(NO);
+	return errSecUnimplemented;
+}
+
+NSString *
+ext4_peer_requirement(NSString *identifier)
+{
+	(void)identifier;
+	assert(NO);
+	return nil;
+}
+
+@interface CheckOptions : NSObject
+@property(nonatomic, copy) NSArray<NSString *> *taskOptions;
+@end
+
+@implementation CheckOptions
+@end
+
+@interface CheckCompletion : CheckLog
+@property(nonatomic, copy) NSError * (^cancellationHandler)(void);
+@property dispatch_semaphore_t completed;
+@property NSError *failure;
+@property NSUInteger completionCount;
+@end
+
+@implementation CheckCompletion
+
+- (void)didCompleteWithError:(NSError *)error
+{
+	@synchronized(self) {
+		self.failure = error;
+		self.completionCount++;
+		/* Match the public task's completion-time handler release. */
+		self.cancellationHandler = nil;
+	}
+	dispatch_semaphore_signal(self.completed);
+}
+
+@end
+
+/* Inject the adapter's resource boundary after load, without manufacturing an
+ * FSKit device proxy or claiming that these components cover daemon loading. */
+@interface Ext4FileSystem (ComponentTesting)
+- (void)installComponentResource:(Ext4ResourceIO *)resource;
+- (BOOL)componentMaintenanceActive;
+@end
+
+@implementation Ext4FileSystem (ComponentTesting)
+
+- (void)installComponentResource:(Ext4ResourceIO *)resource
+{
+	@synchronized(self) {
+		assert(_resourceOwner == nil && _maintenanceTask == nil && _volume == nil);
+		_resourceOwner = resource;
+		self.containerStatus =
+		    [FSContainerStatus blockedWithStatus:[NSError errorWithDomain:NSPOSIXErrorDomain
+									     code:EIO
+									 userInfo:nil]];
+	}
+}
+
+- (BOOL)componentMaintenanceActive
+{
+	@synchronized(self) {
+		return _maintenanceTask != nil;
+	}
+}
+
+@end
+
+@interface CheckFileSystem : Ext4FileSystem
+@property CheckImage *image;
+@property BOOL failFinalBarrier;
+@property BOOL failValidationRead;
+@property NSUInteger validations;
+@end
+
+@implementation CheckFileSystem
+
+- (NSError *)validateResourceAfterMaintenanceWriting:(BOOL)writing uuid:(NSUUID *)uuid
+{
+	self.validations++;
+	/* Inject only after the child has completed successfully. This separates
+	 * final parent validation from an error reported inside the helper. */
+	self.image.failFlush = self.failFinalBarrier;
+	self.image.failRead = self.failValidationRead;
+	return [super validateResourceAfterMaintenanceWriting:writing uuid:uuid];
+}
+
+@end
+
 static Ext4ResourceIO *
 check_resource(CheckImage *image, BOOL writable)
 {
@@ -126,6 +245,218 @@ check_task(Ext4ResourceIO *resource, Ext4CheckMode mode, NSURL *executable)
 
 	assert(task != nil);
 	return task;
+}
+
+static CheckCompletion *
+check_completion(void)
+{
+	CheckCompletion *task = [CheckCompletion new];
+
+	task.messages = [NSMutableArray array];
+	task.completed = dispatch_semaphore_create(0);
+	return task;
+}
+
+static FSTaskOptions *
+check_options(NSArray<NSString *> *arguments)
+{
+	CheckOptions *options = [CheckOptions new];
+
+	options.taskOptions = arguments;
+	return (FSTaskOptions *)options;
+}
+
+static void
+check_completed(CheckCompletion *task, NSProgress *progress, NSInteger error)
+{
+	assert(dispatch_semaphore_wait(task.completed,
+		   dispatch_time(DISPATCH_TIME_NOW, CheckWaitSeconds * NSEC_PER_SEC)) == 0);
+	assert(task.completionCount == 1 && task.failure.code == error);
+	assert(progress.completedUnitCount == progress.totalUnitCount);
+}
+
+static NSError *
+check_unload(Ext4FileSystem *filesystem)
+{
+	FSResource *transport = [[FSGenericURLResource alloc]
+	    initWithURL:[NSURL URLWithString:@"machlin-component://maintenance"]];
+	dispatch_semaphore_t completed = dispatch_semaphore_create(0);
+	__block NSError *failure;
+
+	/* The public method requires transport arguments even though this adapter
+	 * releases the separately retained resource boundary, not this URL. */
+	assert(transport != nil);
+	[filesystem unloadResource:transport
+			   options:check_options(@[])
+		      replyHandler:^(NSError *error) {
+			failure = error;
+			dispatch_semaphore_signal(completed);
+		      }];
+	assert(dispatch_semaphore_wait(completed,
+		   dispatch_time(DISPATCH_TIME_NOW, CheckWaitSeconds * NSEC_PER_SEC)) == 0);
+	return failure;
+}
+
+static void
+check_filesystem_maintenance(
+    NSData *clean, NSData *damaged, NSUInteger blockSize, NSString *export, NSString *embeddedNull)
+{
+	CheckImage *image = [CheckImage new];
+	Ext4ResourceIO *resource;
+	CheckFileSystem *filesystem;
+	CheckCompletion *task;
+	CheckCompletion *other;
+	NSProgress *progress;
+	NSError *failure = nil;
+	NSArray *invalid = @[
+		@[ @"-b" ], @[ @"-b", @"8192" ], @[ @"-L" ], @[ @"--unknown" ],
+		@[ @"-b1024", @"-b4096" ], @[ @"-Lone", @"-Ltwo" ], @[ @"-Labcdefghijklmnopq" ],
+		@[ @"-L", embeddedNull ]
+	];
+	NSArray *arguments = @[
+		[NSString stringWithFormat:@"-b%lu", (unsigned long)blockSize], @"-Lfilesystem-test"
+	];
+	struct ext4_fs *engine = NULL;
+	struct ext4_info info;
+	NSUInteger index;
+	NSUInteger fault;
+	NSUInteger writes;
+	NSUInteger flushes;
+	__block NSError *cancelError;
+	dispatch_group_t cancellation;
+	NSError * (^cancel)(void);
+	dispatch_block_t cancelProgress;
+
+	image.bytes = [NSMutableData dataWithLength:clean.length];
+	filesystem = [CheckFileSystem new];
+	task = check_completion();
+	assert([filesystem startFormatWithTask:(FSTask *)task
+				       options:check_options(arguments)
+					 error:&failure] == nil);
+	assert(failure.code == ENXIO && task.completionCount == 0);
+	[filesystem installComponentResource:check_resource(image, NO)];
+	assert([filesystem startFormatWithTask:(FSTask *)task
+				       options:check_options(arguments)
+					 error:&failure] == nil);
+	assert(failure.code == EROFS && image.writes == 0 && image.flushes == 0);
+	assert(check_unload(filesystem) == nil);
+
+	resource = check_resource(image, YES);
+	[filesystem installComponentResource:resource];
+	filesystem.image = image;
+	for (index = 0; index < invalid.count; index++) {
+		assert([filesystem startFormatWithTask:(FSTask *)task
+					       options:check_options(invalid[index])
+						 error:&failure] == nil);
+		assert(failure.code == EINVAL && !filesystem.componentMaintenanceActive);
+		assert(task.completionCount == 0 && image.writes == 0 && image.flushes == 0);
+	}
+	image.entered = dispatch_semaphore_create(0);
+	image.resume = dispatch_semaphore_create(0);
+	image.gateWrites = YES;
+	failure = nil;
+	progress = [filesystem startFormatWithTask:(FSTask *)task
+					   options:check_options(arguments)
+					     error:&failure];
+	assert(progress != nil && failure == nil);
+	assert(dispatch_semaphore_wait(image.entered,
+		   dispatch_time(DISPATCH_TIME_NOW, CheckWaitSeconds * NSEC_PER_SEC)) == 0);
+	other = check_completion();
+	assert([filesystem startFormatWithTask:(FSTask *)other
+				       options:check_options(arguments)
+					 error:&failure] == nil);
+	assert(failure.code == EBUSY && other.completionCount == 0);
+	assert([filesystem startCheckWithTask:(FSTask *)other
+				      options:check_options(@[ @"-f", @"-n" ])
+					error:&failure] == nil);
+	assert(failure.code == EBUSY && other.completionCount == 0);
+	assert(check_unload(filesystem).code == EBUSY && filesystem.componentMaintenanceActive);
+	dispatch_semaphore_signal(image.resume);
+	check_completed(task, progress, 0);
+	assert(filesystem.containerStatus.state == FSContainerStateReady);
+	assert(!filesystem.componentMaintenanceActive && filesystem.validations == 1);
+	assert([resource open:&engine] == EXT4_OK);
+	ext4_get_info(engine, &info);
+	assert(info.block_size == blockSize && strcmp(info.volume_name, "filesystem-test") == 0);
+	ext4_unmount(engine);
+	assert([image.bytes writeToFile:export atomically:YES]);
+	assert(check_unload(filesystem) == nil);
+
+	/* The same resource-only instance can verify and repair without a volume.
+	 * Neither a successful child nor its final validation fabricates one. */
+	writes = image.writes;
+	flushes = image.flushes;
+	[filesystem installComponentResource:check_resource(image, NO)];
+	task = check_completion();
+	failure = nil;
+	progress = [filesystem startCheckWithTask:(FSTask *)task
+					  options:check_options(@[ @"-f", @"-n" ])
+					    error:&failure];
+	assert(progress != nil && failure == nil);
+	check_completed(task, progress, 0);
+	assert(image.writes == writes && image.flushes == flushes);
+	assert(check_unload(filesystem) == nil);
+	image.bytes = [damaged mutableCopy];
+	[filesystem installComponentResource:check_resource(image, YES)];
+	task = check_completion();
+	progress = [filesystem startCheckWithTask:(FSTask *)task
+					  options:check_options(@[ @"-f", @"-y" ])
+					    error:&failure];
+	assert(progress != nil);
+	check_completed(task, progress, 0);
+	assert(filesystem.containerStatus.state == FSContainerStateReady);
+	assert(check_unload(filesystem) == nil);
+
+	for (fault = 0; fault < 2; fault++) {
+		image.bytes = [NSMutableData dataWithLength:clean.length];
+		filesystem.failFinalBarrier = fault == 0;
+		filesystem.failValidationRead = fault == 1;
+		[filesystem installComponentResource:check_resource(image, YES)];
+		task = check_completion();
+		failure = nil;
+		progress = [filesystem startFormatWithTask:(FSTask *)task
+						   options:check_options(nil)
+						     error:&failure];
+		assert(progress != nil && failure == nil);
+		check_completed(task, progress, EIO);
+		assert(filesystem.containerStatus.state == FSContainerStateBlocked);
+		assert(!filesystem.componentMaintenanceActive);
+		image.failRead = NO;
+		image.failFlush = NO;
+		assert(check_unload(filesystem) == nil);
+	}
+
+	filesystem.failFinalBarrier = NO;
+	filesystem.failValidationRead = NO;
+	image.bytes = [NSMutableData dataWithLength:clean.length];
+	image.entered = dispatch_semaphore_create(0);
+	image.resume = dispatch_semaphore_create(0);
+	[filesystem installComponentResource:check_resource(image, YES)];
+	task = check_completion();
+	progress = [filesystem startFormatWithTask:(FSTask *)task
+					   options:check_options(arguments)
+					     error:&failure];
+	assert(progress != nil);
+	assert(dispatch_semaphore_wait(image.entered,
+		   dispatch_time(DISPATCH_TIME_NOW, CheckWaitSeconds * NSEC_PER_SEC)) == 0);
+	cancel = task.cancellationHandler;
+	cancelProgress = progress.cancellationHandler;
+	assert(cancel != nil);
+	assert(cancelProgress != nil);
+	/* Cancel through progress before releasing the gated I/O. The task
+	 * handler then exercises idempotent cancellation and waits for reaping. */
+	cancelProgress();
+	cancellation = dispatch_group_create();
+	dispatch_group_async(cancellation, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+	  cancelError = cancel();
+	});
+	dispatch_semaphore_signal(image.resume);
+	assert(dispatch_group_wait(cancellation,
+		   dispatch_time(DISPATCH_TIME_NOW, CheckWaitSeconds * NSEC_PER_SEC)) == 0);
+	check_completed(task, progress, ECANCELED);
+	assert(cancelError == nil && !filesystem.componentMaintenanceActive);
+	assert(filesystem.containerStatus.state == FSContainerStateBlocked);
+	assert(check_unload(filesystem) == nil);
 }
 
 int
@@ -157,7 +488,7 @@ main(int argc, char **argv)
 		Ext4CheckMode mode;
 		int expected;
 
-		assert(argc == 7);
+		assert(argc == 8);
 		helper = [NSURL fileURLWithPath:@(argv[1])];
 		peer = [NSURL fileURLWithPath:@(argv[2])];
 		clean = [NSData dataWithContentsOfFile:@(argv[3])];
@@ -359,6 +690,8 @@ main(int argc, char **argv)
 			   dispatch_time(DISPATCH_TIME_NOW, CheckWaitSeconds * NSEC_PER_SEC)) == 0);
 		assert(cancelError.code == ECANCELED);
 		assert(log.messages.count != 0);
+		check_filesystem_maintenance(
+		    clean, damaged, formatBlockSize, @(argv[7]), embeddedNull);
 		puts("FSKit check ownership, resource failures, dishonest peers, cancellation and "
 		     "repair/format passed");
 	}

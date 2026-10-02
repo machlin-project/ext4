@@ -816,9 +816,14 @@ new filesystem and UUID before reporting success.
 File-backed resource tests pass all three block sizes, label/UUID/features and
 independent fsck. Sanitizer component tests pass 1/4 KiB format ownership,
 read-only and retained-item refusal, UUID replacement, write/flush faults and
-child cancellation. Native blank-media formatting, mounted refusal and remount
-acceptance are pending; a signed development build alone does not close these
-gates.
+child cancellation. The filesystem entry points also pass option refusals before
+I/O, exclusive check/format admission, unload refusal while maintenance runs,
+resource-only check/repair/format, errors from the final parent barrier and
+validation read, and both progress and task cancellation with one completion.
+Independent fsck accepts the formatted exports. These tests inject the resource
+boundary after load; they do not exercise daemon loading or native blank-media
+formatting. Native blank-media formatting, mounted refusal and remount acceptance
+remain pending; a signed development build alone does not close these gates.
 The universal Developer ID release archive and export pass strict signature
 verification, including all nested executables. The test guest rejects the new
 app as unnotarized. Upload has not occurred: the single CLI upload attempt reports
