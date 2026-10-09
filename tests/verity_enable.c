@@ -100,6 +100,8 @@ static uint32_t cipher_calls;
 static uint32_t fail_cipher;
 static bool cipher_failed;
 
+static struct ext4_inode_update creation(void);
+
 static enum ext4_result
 adapter_verify(void *context, const uint8_t *message, size_t message_size,
     const uint8_t *signature, size_t signature_size)
@@ -195,7 +197,7 @@ static enum ext4_result
 test_parent(struct ext4_fs *fs, struct ext4_inode *parent)
 {
 	struct ext4_inode root = { 0 };
-	struct ext4_inode_update update = { 0 };
+	struct ext4_inode_update update = creation();
 	struct ext4_encryption_policy policy = { 0 };
 	enum ext4_result error = ext4_get_inode(fs, EXT4_ROOT_INODE, &root);
 
@@ -207,7 +209,6 @@ test_parent(struct ext4_fs *fs, struct ext4_inode *parent)
 	if (error != EXT4_NOT_FOUND) {
 		return error;
 	}
-	update.fields = EXT4_ATTR_PERMISSIONS;
 	update.permissions = 0700;
 	error = ext4_mkdir(fs, root.number, root.generation, (const uint8_t *)"encrypted", 9,
 	    &update, &verity_time, parent);
