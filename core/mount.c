@@ -235,6 +235,18 @@ ext4_super_validate(struct ext4_fs *fs, const struct ext4_super_disk *super, boo
 	return ext4_group_reserved(fs, 0, &primary);
 }
 
+/* Unsupported compatible or read-only-compatible features may be inspected,
+ * but no writer may touch their media, including acquisition of the MMP block. */
+enum ext4_result
+ext4_writable_features(const struct ext4_fs *fs)
+{
+	if ((fs->info.feature_compat & ~EXT4_WRITABLE_COMPAT) ||
+	    (fs->info.feature_ro_compat & ~EXT4_WRITABLE_RO_COMPAT)) {
+		return EXT4_UNSUPPORTED;
+	}
+	return EXT4_OK;
+}
+
 enum ext4_result
 ext4_load(const struct ext4_environment *environment, bool recovery, struct ext4_fs **result)
 {

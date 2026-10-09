@@ -97,6 +97,9 @@ ext4_mount_writable_with_options(const struct ext4_environment *environment,
 	    fs->inodes_per_group % EXT4_BITS_PER_BYTE != 0) {
 		error = EXT4_CORRUPT;
 	} else {
+		error = ext4_writable_features(fs);
+	}
+	if (error == EXT4_OK) {
 		/* Multi-mount protection precedes every other write. */
 		error = ext4_mmp_start(fs, writer, false);
 	}

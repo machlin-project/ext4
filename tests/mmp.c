@@ -335,12 +335,61 @@ contention(struct host *host, const uint8_t *image, uint32_t interval)
 }
 
 static void
+feature_refusals(struct host *host, const uint8_t *image, bool recovery)
+{
+	static const uint32_t features[] = { EXT4_FEATURE_RO_READONLY,
+		EXT4_FEATURE_RO_SHARED_BLOCKS, 0x80000000U, 0x80000000U };
+	struct ext4_super_disk *super;
+	struct ext4_le32 *field;
+	struct ext4_recovery_report report;
+	struct ext4_fs *fs;
+	uint8_t *before = malloc(host->device->size);
+	size_t index;
+
+	CHECK(before != NULL);
+	for (index = 0; index < sizeof(features) / sizeof(features[0]); index++) {
+		host_reset(host, image);
+		super = (struct ext4_super_disk *)(host->device->cache + EXT4_SUPER_OFFSET);
+		/* The final case uses the compatible feature field. */
+		field = index == 3U ? &super->feature_compat : &super->feature_ro_compat;
+		ext4_encode32(field, ext4_le32(field) | features[index]);
+		if (host->checksum) {
+			ext4_encode32(&super->checksum,
+			    ext4_crc32c(UINT32_MAX, super,
+				offsetof(struct ext4_super_disk, checksum)));
+		}
+		memcpy(before, host->device->cache, host->device->size);
+		memcpy(host->device->stable, before, host->device->size);
+		if (recovery) {
+			EXPECT(ext4_recover(&host->device->environment, &host->writer, &report),
+			    EXT4_UNSUPPORTED);
+			CHECK(report.transactions == 0);
+		} else {
+			/* Unsupported writable features are not read-only mount errors. */
+			EXPECT(ext4_mount(&host->device->environment, &fs), EXT4_OK);
+			ext4_unmount(fs);
+			EXPECT(ext4_mount_writable(&host->device->environment, &host->writer, &fs),
+			    EXT4_UNSUPPORTED);
+			CHECK(fs == NULL);
+		}
+		CHECK(host->device->writes == 0 && host->device->events == 0 &&
+		    host->history_count == 0 && host->sleeps == 0 && host->device->live == 0);
+		CHECK(memcmp(before, host->device->cache, host->device->size) == 0);
+		CHECK(memcmp(before, host->device->stable, host->device->size) == 0);
+	}
+	free(before);
+	host_reset(host, image);
+	puts("PASS unsupported features refuse MMP mount/recovery without changing media");
+}
+
+static void
 refusals(struct host *host, const uint8_t *image)
 {
 	struct ext4_write_environment writer = host->writer;
 	struct ext4_mmp_disk *mmp;
 	struct ext4_fs *fs;
 
+	feature_refusals(host, image, false);
 	host_reset(host, image);
 	writer.mmp = NULL;
 	EXPECT(ext4_mount_writable(&host->device->environment, &writer, &fs), EXT4_UNSUPPORTED);
@@ -396,6 +445,7 @@ recovery(struct host *host, const uint8_t *image, const char *exports, const cha
 	device_reset(host->device, host->device->stable);
 	memcpy(host->device->base, host->device->cache, host->device->size);
 	storage_export(host->device, exports, source, "mmp-pending-");
+	feature_refusals(host, host->device->base, true);
 
 	writer.mmp = NULL;
 	EXPECT(ext4_recover(&host->device->environment, &writer, &report), EXT4_UNSUPPORTED);

@@ -750,6 +750,11 @@ Volumes with the MMP incompatibility are admitted by read-only mounts without
 reading the MMP block, as Linux does. Writable mounts and offline recovery require
 the owner's `ext4_mmp_environment`: interruptible sleeps, unpredictable values, wall
 time and host/device names. Without it they return unsupported before any write.
+Writable feature admission precedes acquisition: unsupported compatible or
+read-only-compatible bits, including READONLY and SHARED_BLOCKS, cannot cause
+even an MMP write or flush. The same preflight protects actual offline recovery;
+clean no-op recovery remains read-only. Supported owners still acquire MMP before
+journal or filesystem mutation.
 Mount validation bounds the MMP block and update interval, substitutes the usual
 five-second default for zero, and adds the block to the protected metadata ranges.
 

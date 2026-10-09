@@ -724,7 +724,10 @@ ext4_recover_with_journal(const struct ext4_environment *environment,
 		return error;
 	}
 	/* Hold the checker sequence, as e2fsck does, throughout offline recovery. */
-	error = ext4_mmp_start(fs, writer, true);
+	error = ext4_writable_features(fs);
+	if (error == EXT4_OK) {
+		error = ext4_mmp_start(fs, writer, true);
+	}
 	if (error == EXT4_OK) {
 		error = ext4_journal_load_external(fs, writer, external, &journal);
 	}

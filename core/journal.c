@@ -542,8 +542,7 @@ ext4_journal_load_external(struct ext4_fs *fs, const struct ext4_write_environme
 		return EXT4_INVALID_ARGUMENT;
 	}
 	if (!(fs->info.feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL) ||
-	    (fs->info.feature_compat & ~EXT4_WRITABLE_COMPAT) ||
-	    (fs->info.feature_ro_compat & ~EXT4_WRITABLE_RO_COMPAT)) {
+	    ext4_writable_features(fs) != EXT4_OK) {
 		return EXT4_UNSUPPORTED;
 	}
 	if (external == NULL) {
@@ -666,8 +665,7 @@ ext4_journal_open_direct(
 	    fs->journal_device != 0) {
 		return EXT4_INVALID_ARGUMENT;
 	}
-	if ((fs->info.feature_compat & ~EXT4_WRITABLE_COMPAT) ||
-	    (fs->info.feature_ro_compat & ~EXT4_WRITABLE_RO_COMPAT)) {
+	if (ext4_writable_features(fs) != EXT4_OK) {
 		return EXT4_UNSUPPORTED;
 	}
 	journal = fs->environment.allocate(fs->environment.context, sizeof(*journal));

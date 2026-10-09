@@ -284,6 +284,7 @@ enum ext4_result ext4_block_allocated(struct ext4_fs *fs, uint64_t block);
 
 enum ext4_result ext4_load(
     const struct ext4_environment *environment, bool recovery, struct ext4_fs **result);
+enum ext4_result ext4_writable_features(const struct ext4_fs *fs);
 
 /* Keep wire decoding visible to the compiler in metadata scans. Byte accesses
  * preserve the unaligned and host-endianness contract without libc or intrinsics. */
