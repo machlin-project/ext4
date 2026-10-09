@@ -21,7 +21,7 @@ ext4_directory_request_hash(struct ext4_fs *fs, struct ext4_directory_request *r
 	const struct ext4_casefold *fold;
 	const uint8_t *name;
 	size_t length;
-	struct ext4_name_hash result;
+	struct ext4_name_hash result = { 0 };
 	bool combined = ext4_directory_has_hashes(request->directory->flags);
 	enum ext4_result error;
 
@@ -177,7 +177,7 @@ ext4_directory_request_match(struct ext4_fs *fs, struct ext4_directory_request *
 {
 	struct ext4_fscrypt_key key;
 	uint8_t plain[EXT4_NAME_MAX];
-	size_t plain_length;
+	size_t plain_length = 0;
 	enum ext4_result error;
 
 	*match = false;

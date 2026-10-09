@@ -601,7 +601,7 @@ ext4_directory_change_format(struct ext4_allocation *allocation, struct ext4_ino
 	struct ext4_map_run run;
 	struct ext4_dx_root_prefix_disk *root;
 	struct ext4_dir_header_disk *entry;
-	void *buffer;
+	void *buffer = NULL;
 	uint32_t logical;
 	uint32_t blocks;
 	uint32_t usable = ext4_directory_usable(fs);
