@@ -1247,7 +1247,7 @@ enum ext4_result
 ext4_orphan_link(struct ext4_allocation *allocation, uint32_t number, struct ext4_inode_disk *disk)
 {
 	struct ext4_fs *fs = allocation->fs;
-	bool added;
+	bool added = false;
 	enum ext4_result error;
 
 	error = ext4_allocation_super(allocation);
@@ -1403,7 +1403,7 @@ ext4_orphan_finish_inode(struct ext4_fs *fs, uint32_t number, uint32_t generatio
 	bool completed = false;
 	bool validate = true;
 	bool file_owned = false;
-	uint32_t position;
+	uint32_t position = 0;
 	enum ext4_result error;
 
 	if (fs->orphan_file != NULL) {
