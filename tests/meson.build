@@ -86,7 +86,7 @@ if paths['fast_commit_fixtures'] != ''
 endif
 
 if paths['mmp_fixtures'] != ''
-  foreach profile : ['4k', '1k', 'no-checksum', 'slow']
+  foreach profile : ['4k', '1k', 'no-checksum', 'slow', 'quota']
     test('mmp-' + profile, programs['mmp'],
       args: [paths['mmp_fixtures'] / ('mmp-' + profile + '.img')], timeout: 300, suite: 'format')
   endforeach

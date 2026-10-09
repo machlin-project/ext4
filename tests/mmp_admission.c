@@ -20,6 +20,9 @@
 #define MODEL_MMP 10U
 #define UNKNOWN_FEATURE 0x80000000U
 
+enum cleanup_fault { CLEANUP_OK, CLEANUP_ALLOCATE, CLEANUP_READ, CLEANUP_FOREIGN_SEQUENCE,
+	CLEANUP_FOREIGN_NODE, CLEANUP_WRITE, CLEANUP_FLUSH, ACQUIRE_FLUSH };
+
 struct model {
 	struct ext4_environment environment;
 	struct ext4_write_environment writer;
@@ -33,13 +36,21 @@ struct model {
 	uint32_t sleeps;
 	uint32_t live;
 	int64_t clock;
+	bool cleanup_test;
+	bool admission_failed;
+	enum cleanup_fault fault;
 };
 
 static void *
 model_allocate(void *context, size_t size)
 {
 	struct model *model = context;
-	void *buffer = malloc(size);
+	void *buffer;
+
+	if (model->admission_failed && model->fault == CLEANUP_ALLOCATE) {
+		return NULL;
+	}
+	buffer = malloc(size);
 
 	CHECK(buffer != NULL);
 	model->live++;
@@ -63,6 +74,36 @@ model_read(void *context, uint64_t offset, void *buffer, size_t length)
 	struct model *model = context;
 
 	CHECK(offset <= model->size && length <= model->size - offset);
+	if (model->cleanup_test && model->writes == 2U) {
+		if (!model->admission_failed && offset != (uint64_t)MODEL_MMP * model->block_size) {
+			model->admission_failed = true;
+			return EXT4_RANGE;
+		}
+		if (model->admission_failed && offset == (uint64_t)MODEL_MMP * model->block_size) {
+			struct ext4_mmp_disk *mmp = (struct ext4_mmp_disk *)(model->image + offset);
+			struct ext4_super_disk *super =
+			    (struct ext4_super_disk *)(model->image + EXT4_SUPER_OFFSET);
+
+			if (model->fault == CLEANUP_READ) {
+				return EXT4_IO;
+			}
+			if (model->fault == CLEANUP_FOREIGN_SEQUENCE) {
+				ext4_encode32(&mmp->sequence, 0xabcdefU);
+			} else if (model->fault == CLEANUP_FOREIGN_NODE) {
+				mmp->node_name[0] ^= 1U;
+			}
+			if (model->fault == CLEANUP_FOREIGN_SEQUENCE ||
+			    model->fault == CLEANUP_FOREIGN_NODE) {
+				if (ext4_le32(&super->feature_ro_compat) & EXT4_FEATURE_RO_METADATA_CSUM) {
+					uint32_t seed = ext4_crc32c(UINT32_MAX, super->uuid, sizeof(super->uuid));
+
+					ext4_encode32(&mmp->checksum, ext4_crc32c(seed, mmp,
+					    offsetof(struct ext4_mmp_disk, checksum)));
+				}
+				memcpy(model->stable + offset, mmp, sizeof(*mmp));
+			}
+		}
+	}
 	memcpy(buffer, model->image + offset, length);
 	return EXT4_OK;
 }
@@ -75,6 +116,9 @@ model_write(void *context, uint64_t offset, const void *buffer, size_t length)
 	CHECK(offset <= model->size && length <= model->size - offset);
 	CHECK(offset == (uint64_t)MODEL_MMP * model->block_size);
 	model->writes++;
+	if (model->cleanup_test && model->writes == 3U && model->fault == CLEANUP_WRITE) {
+		return EXT4_IO;
+	}
 	memcpy(model->image + offset, buffer, length);
 	return EXT4_OK;
 }
@@ -85,6 +129,11 @@ model_flush(void *context)
 	struct model *model = context;
 
 	model->flushes++;
+	if (model->cleanup_test &&
+	    ((model->flushes == 3U && model->fault == CLEANUP_FLUSH) ||
+		(model->flushes == 2U && model->fault == ACQUIRE_FLUSH))) {
+		return EXT4_IO;
+	}
 	memcpy(model->stable, model->image, model->size);
 	return EXT4_OK;
 }
@@ -264,6 +313,47 @@ check_refusal(uint32_t block_size, bool checksum, uint32_t feature, bool compati
 	model_close(&model);
 }
 
+static void
+check_cleanup(uint32_t block_size, bool checksum, enum cleanup_fault fault)
+{
+	struct model model;
+	struct ext4_fs *fs = NULL;
+	struct ext4_mmp_disk *mmp;
+	struct ext4_mmp_disk *stable;
+	uint8_t *before;
+	size_t offset = (size_t)MODEL_MMP * block_size;
+	bool attempted = fault == CLEANUP_OK || fault == CLEANUP_WRITE || fault == CLEANUP_FLUSH;
+
+	model_open(&model, block_size, checksum, true);
+	model.cleanup_test = true;
+	model.fault = fault;
+	before = malloc(model.size);
+	CHECK(before != NULL);
+	memcpy(before, model.image, model.size);
+	CHECK(ext4_mount_writable(&model.environment, &model.writer, &fs) ==
+	    (fault == ACQUIRE_FLUSH ? EXT4_IO : EXT4_RANGE));
+	CHECK(fs == NULL && model.live == 0);
+	CHECK(model.writes == (attempted ? 3U : 2U));
+	CHECK(model.flushes == (fault == CLEANUP_OK || fault == CLEANUP_FLUSH ? 3U : 2U));
+	mmp = (struct ext4_mmp_disk *)(model.image + offset);
+	stable = (struct ext4_mmp_disk *)(model.stable + offset);
+	CHECK(ext4_le32(&mmp->sequence) ==
+	    (fault == CLEANUP_OK || fault == CLEANUP_FLUSH ? EXT4_MMP_SEQ_CLEAN :
+		fault == CLEANUP_FOREIGN_SEQUENCE ? 0xabcdefU : 0x123457U));
+	CHECK(ext4_le32(&stable->sequence) ==
+	    (fault == CLEANUP_OK ? EXT4_MMP_SEQ_CLEAN :
+		fault == CLEANUP_FOREIGN_SEQUENCE ? 0xabcdefU :
+		fault == ACQUIRE_FLUSH ? 0x123456U : 0x123457U));
+	CHECK(memcmp(before, model.image, offset) == 0);
+	CHECK(memcmp(before + offset + block_size, model.image + offset + block_size,
+		model.size - offset - block_size) == 0);
+	CHECK(memcmp(before, model.stable, offset) == 0);
+	CHECK(memcmp(before + offset + block_size, model.stable + offset + block_size,
+		model.size - offset - block_size) == 0);
+	free(before);
+	model_close(&model);
+}
+
 int
 main(void)
 {
@@ -274,10 +364,14 @@ main(void)
 	uint32_t block_size;
 	unsigned int checksum;
 	unsigned int mode;
+	enum cleanup_fault fault;
 	size_t index;
 
 	for (block_size = 1024U; block_size <= 4096U; block_size *= 4U) {
 		for (checksum = 0; checksum < 2U; checksum++) {
+			for (fault = CLEANUP_OK; fault <= ACQUIRE_FLUSH; fault++) {
+				check_cleanup(block_size, checksum != 0, fault);
+			}
 			/* Prove that the model admits the actual two-write MMP protocol. */
 			model_open(&model, block_size, checksum != 0, false);
 			CHECK(ext4_mount(&model.environment, &fs) == EXT4_OK);

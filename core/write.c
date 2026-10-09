@@ -131,6 +131,9 @@ ext4_mount_writable_with_options(const struct ext4_environment *environment,
 		fs->journal->ordered_data = (options->flags & EXT4_WRITE_ORDERED_DATA) != 0;
 	}
 	if (error != EXT4_OK) {
+		/* Admission owns no public mount. Release only our confirmed MMP
+		 * claim; failed best-effort cleanup cannot replace the original error. */
+		(void)ext4_mmp_stop(fs);
 		ext4_unmount(fs);
 		return error;
 	}

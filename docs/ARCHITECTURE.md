@@ -783,6 +783,12 @@ read-only-compatible bits, including READONLY and SHARED_BLOCKS, cannot cause
 even an MMP write or flush. The same preflight protects actual offline recovery;
 clean no-op recovery remains read-only. Supported owners still acquire MMP before
 journal or filesystem mutation.
+A writable admission failure after acquisition attempts to release its own MMP
+claim before freeing the unpublished mount. Cleanup verifies both sequence and
+node identity and preserves the original admission error. Allocation, read, write
+or flush failure can leave ownership uncertain; best-effort cleanup does not
+guarantee a clean marker. Failed or unconfirmed acquisition never gains a cleanup
+write. Ordinary unmount retains its explicit-release/crash semantics.
 Mount validation bounds the MMP block and update interval, substitutes the usual
 five-second default for zero, and adds the block to the protected metadata ranges.
 

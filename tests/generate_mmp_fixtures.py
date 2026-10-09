@@ -17,6 +17,7 @@ PROFILES = (
     dict(name="1k", block_size=1024, interval=5),
     dict(name="no-checksum", block_size=1024, interval=7, exclude={"metadata_csum"}),
     dict(name="slow", block_size=4096, interval=40),
+    dict(name="quota", block_size=4096, interval=5, include={"quota"}),
 )
 
 
@@ -42,7 +43,8 @@ def main():
         tree.mkdir()
         (tree / "existing").write_bytes(b"multi-mount protected contents\n" * 40)
         (tree / "directory").mkdir()
-        features = (EXPECTED_FEATURES - profile.get("exclude", set())) | {"mmp"}
+        features = ((EXPECTED_FEATURES - profile.get("exclude", set())) | {"mmp"}
+                    | profile.get("include", set()))
         row = dict(profile=profile["name"], image=str(image), block_size=block,
                    interval=profile["interval"], commands=[], passed=False)
         reports.append(row)

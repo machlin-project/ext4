@@ -382,6 +382,123 @@ feature_refusals(struct host *host, const uint8_t *image, bool recovery)
 	puts("PASS unsupported features refuse MMP mount/recovery without changing media");
 }
 
+#define ADMISSION_ALLOCATIONS 512U
+
+struct admission_allocation {
+	void *buffer;
+	uint32_t number;
+};
+
+struct admission_probe {
+	struct device *device;
+	struct admission_allocation *allocations;
+	size_t count;
+};
+
+static void *
+admission_allocate(void *context, size_t size)
+{
+	struct admission_probe *probe = context;
+	void *buffer = device_allocate(probe->device, size);
+
+	if (buffer != NULL) {
+		CHECK(probe->count < ADMISSION_ALLOCATIONS);
+		probe->allocations[probe->count++] =
+		    (struct admission_allocation){ buffer, probe->device->allocations };
+	}
+	return buffer;
+}
+
+static void
+admission_release(void *context, void *buffer, size_t size)
+{
+	struct admission_probe *probe = context;
+
+	device_release(probe->device, buffer, size);
+}
+
+static enum ext4_result
+admission_read(void *context, uint64_t offset, void *buffer, size_t size)
+{
+	struct admission_probe *probe = context;
+
+	return device_read(probe->device, offset, buffer, size);
+}
+
+static uint32_t
+admission_number(const struct admission_probe *probe, const void *buffer)
+{
+	uint32_t number = 0;
+	size_t index;
+
+	CHECK(buffer != NULL);
+	for (index = 0; index < probe->count; index++) {
+		if (probe->allocations[index].buffer == buffer) {
+			number = probe->allocations[index].number;
+		}
+	}
+	CHECK(number != 0);
+	return number;
+}
+
+static void
+admission_failures(struct host *host, const uint8_t *image)
+{
+	struct admission_probe probe = { .device = host->device };
+	struct ext4_environment environment = { &probe, host->device->size, admission_read,
+		admission_allocate, admission_release };
+	struct ext4_write_options options = { 0 };
+	struct ext4_fs *fs = NULL;
+	uint32_t failures[3];
+	size_t count = 2;
+	size_t index;
+	size_t after = host->mmp_offset + host->device->block_size;
+
+	probe.allocations = calloc(ADMISSION_ALLOCATIONS, sizeof(*probe.allocations));
+	CHECK(probe.allocations != NULL);
+	host_reset(host, image);
+	EXPECT(ext4_mount_writable(&environment, &host->writer, &fs), EXT4_OK);
+	failures[0] = admission_number(&probe, fs->journal);
+	failures[1] = admission_number(&probe, fs->system_ranges);
+	if (fs->info.feature_ro_compat & EXT4_FEATURE_RO_QUOTA) {
+		failures[count++] = admission_number(&probe, fs->inode_table_runs);
+	}
+	EXPECT(ext4_mmp_release(fs), EXT4_OK);
+	ext4_unmount(fs);
+	CHECK(host->device->live == 0);
+	free(probe.allocations);
+	/* Fault the actual journal, system-index and quota-index allocations,
+	 * then each options limit. No filesystem mutation is admitted. */
+	for (index = 0; index < count + 2U; index++) {
+		host_reset(host, image);
+		fs = NULL;
+		memset(&options, 0, sizeof(options));
+		if (index < count) {
+			host->device->fail_allocation = failures[index];
+		} else if (index == count) {
+			options.commit_blocks = UINT32_MAX;
+		} else {
+			options.checkpoint_blocks = UINT32_MAX;
+		}
+		EXPECT(ext4_mount_writable_with_options(&host->device->environment,
+			   &host->writer, NULL, &options, &fs),
+		    index < count ? EXT4_NO_MEMORY : EXT4_RANGE);
+		CHECK(fs == NULL && host->device->live == 0);
+		CHECK(host->history_count == 3 && host->history[2] == EXT4_MMP_SEQ_CLEAN);
+		CHECK(host->device->writes == 3 && host->device->events == 6);
+		CHECK(on_disk_sequence(host) == EXT4_MMP_SEQ_CLEAN);
+		CHECK(ext4_le32(&disk_mmp(host, host->device->stable)->sequence) ==
+		    EXT4_MMP_SEQ_CLEAN);
+		CHECK(memcmp(image, host->device->cache, host->mmp_offset) == 0);
+		CHECK(memcmp(image + after, host->device->cache + after,
+			host->device->size - after) == 0);
+		CHECK(memcmp(image, host->device->stable, host->mmp_offset) == 0);
+		CHECK(memcmp(image + after, host->device->stable + after,
+			host->device->size - after) == 0);
+	}
+	puts("PASS failed writable admission releases its own MMP claim");
+}
+
 static void
 refusals(struct host *host, const uint8_t *image)
 {
@@ -539,6 +656,7 @@ main(int argc, char **argv)
 	wrap(&host, image);
 	contention(&host, image, interval);
 	refusals(&host, image);
+	admission_failures(&host, image);
 	recovery(&host, image, exports, argv[1]);
 	free(image);
 	storage_close(&device);
