@@ -337,6 +337,14 @@ enum ext4_result ext4_map_block(
  * required; completed reports the prefix read before any error. */
 enum ext4_result ext4_read_mapped(struct ext4_fs *fs, const struct ext4_inode *inode,
     uint64_t offset, void *buffer, size_t length, bool require_data, size_t *completed);
+struct ext4_map_reader;
+/* Internal mapped plaintext, including past EOF, without verity recursion. An
+ * encrypted regular file is decrypted at its file-relative logical block index.
+ * Holes/unwritten mappings are zeros unless require_data demands stored metadata.
+ * The caller owns and closes reader; completed reports only successful bytes. */
+enum ext4_result ext4_read_plaintext(struct ext4_fs *fs, const struct ext4_inode *inode,
+    struct ext4_map_reader *reader, uint64_t offset, void *buffer, size_t length,
+    bool require_data, size_t *completed);
 /* End of the last extent in an extent-mapped inode, in filesystem blocks. */
 enum ext4_result ext4_extent_last_end(
     struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t *end);

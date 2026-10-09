@@ -24,7 +24,7 @@ ext4_read_mapped(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t of
 static enum ext4_result
 ext4_read_encrypted(struct ext4_fs *fs, const struct ext4_inode *inode,
     struct ext4_map_reader *reader, uint64_t offset, uint8_t *output, size_t length,
-    size_t *completed)
+    bool require_data, size_t *completed)
 {
 	struct ext4_fscrypt_key key;
 	uint8_t *blocks = NULL;
@@ -57,6 +57,10 @@ ext4_read_encrypted(struct ext4_fs *fs, const struct ext4_inode *inode,
 			break;
 		}
 		if (physical == 0) {
+			if (require_data) {
+				error = EXT4_CORRUPT;
+				break;
+			}
 			ext4_zero(output + *completed, chunk);
 		} else {
 			error = ext4_device_read(
@@ -75,6 +79,30 @@ ext4_read_encrypted(struct ext4_fs *fs, const struct ext4_inode *inode,
 	}
 	fs->environment.release(fs->environment.context, blocks, 2U * fs->info.block_size);
 	return error;
+}
+
+/* Internal contents view: unlike ext4_read(), this neither clips at EOF nor
+ * verifies verity. Metadata stored beyond EOF uses the same file-relative IVs
+ * as ordinary contents, but must not turn absent mappings into plaintext zeros. */
+enum ext4_result
+ext4_read_plaintext(struct ext4_fs *fs, const struct ext4_inode *inode,
+    struct ext4_map_reader *reader, uint64_t offset, void *buffer, size_t length,
+    bool require_data, size_t *completed)
+{
+	*completed = 0;
+	if (length > UINT64_MAX - offset) {
+		return EXT4_RANGE;
+	}
+	if (inode->flags & EXT4_INODE_ENCRYPT) {
+		if ((inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_REGULAR ||
+		    (inode->flags & EXT4_INODE_INLINE_DATA)) {
+			return EXT4_CORRUPT;
+		}
+		return ext4_read_encrypted(
+		    fs, inode, reader, offset, buffer, length, require_data, completed);
+	}
+	return ext4_map_reader_read(
+	    fs, inode, reader, offset, buffer, length, require_data, completed);
 }
 
 /* Decrypt an encrypted symlink's target: a little-endian 16-bit ciphertext length,
@@ -173,7 +201,9 @@ ext4_read_with_mapping(struct ext4_fs *fs, const struct ext4_inode *inode,
 		/* The tree of an encrypted verity file covers plaintext and is ciphertext. */
 		if (inode->flags & EXT4_INODE_VERITY) {
 			error = ext4_fscrypt_key(fs, inode, &key);
-			return error == EXT4_OK ? EXT4_UNSUPPORTED : error;
+			return error == EXT4_OK
+			    ? ext4_verity_read(fs, inode, offset, buffer, length, completed)
+			    : error;
 		}
 		if (inode->flags & EXT4_INODE_INLINE_DATA) {
 			return EXT4_CORRUPT;
@@ -184,7 +214,8 @@ ext4_read_with_mapping(struct ext4_fs *fs, const struct ext4_inode *inode,
 		if (length > inode->size - offset) {
 			length = (size_t)(inode->size - offset);
 		}
-		return ext4_read_encrypted(fs, inode, reader, offset, buffer, length, completed);
+		return ext4_read_plaintext(
+		    fs, inode, reader, offset, buffer, length, false, completed);
 	}
 	if (inode->flags & EXT4_INODE_VERITY) {
 		return ext4_verity_read(fs, inode, offset, buffer, length, completed);

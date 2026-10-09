@@ -72,6 +72,18 @@ foreach name, source : {
   programs += {name: executable('ext4-' + name + '-test', 'tests/' + source + '.c',
     include_directories: internal_headers, dependencies: posix_dependency)}
 endforeach
+# Optional acceleration only for the large-block encrypted-verity unit fixture.
+# Small blocks retain the independent in-tree reference cipher.
+encrypted_verity_dependencies = [posix_dependency]
+encrypted_verity_arguments = []
+test_openssl = dependency('openssl', required: false)
+if test_openssl.found()
+  encrypted_verity_dependencies += test_openssl
+  encrypted_verity_arguments += '-DEXT4_TEST_OPENSSL'
+endif
+programs += {'encrypted-verity': executable('ext4-encrypted-verity-test',
+  'tests/encrypted_verity.c', include_directories: internal_headers,
+  dependencies: encrypted_verity_dependencies, c_args: encrypted_verity_arguments)}
 # Test the scalar SHA fallback even when the host enables hardware SHA rounds.
 programs += {'hash-portable': executable('ext4-hash-portable-test',
   ['tests/hash.c', 'core/sha.c'], include_directories: internal_headers,

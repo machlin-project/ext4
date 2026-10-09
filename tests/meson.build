@@ -15,7 +15,7 @@ foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures', 'geometry_fixtures',
   'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
   'directory_index_64k_fixture', 'large_file_fixtures', 'large_volume_fixtures', 'external_journal_fixtures',
-  'fast_commit_fixtures', 'mmp_fixtures', 'verity_fixtures', 'casefold_vectors',
+  'fast_commit_fixtures', 'mmp_fixtures', 'verity_fixtures', 'encrypted_verity_fixtures', 'casefold_vectors',
   'casefold_fixtures', 'quota_fixtures', 'format_fixtures', 'unjournaled_fixtures']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
@@ -131,6 +131,20 @@ if paths['quota_fixtures'] != ''
       test('quota-enforce-' + profile, programs['quota'], args: ['--enforce', image],
         timeout: 300, suite: 'format')
     endif
+  endforeach
+endif
+
+if paths['encrypted_verity_fixtures'] != ''
+  foreach block : ['1024', '4096', '16384', '65536']
+    foreach kind : ['empty', 'tiny', 'tail', 'aligned', 'sparse']
+      profile = block + '-' + kind
+      test('encrypted-verity-' + profile, programs['encrypted-verity'],
+        args: paths['encrypted_verity_fixtures'] / profile, timeout: 300, suite: 'core')
+    endforeach
+  endforeach
+  foreach profile : ['v1-sha512', 'v2-signed', 'boundary']
+    test('encrypted-verity-' + profile, programs['encrypted-verity'],
+      args: paths['encrypted_verity_fixtures'] / profile, timeout: 300, suite: 'core')
   endforeach
 endif
 

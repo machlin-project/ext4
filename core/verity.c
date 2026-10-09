@@ -71,9 +71,13 @@ static enum ext4_result
 ext4_verity_read_exact(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t offset,
     void *buffer, size_t length)
 {
+	struct ext4_map_reader reader = { 0 };
 	size_t completed;
+	enum ext4_result error;
 
-	return ext4_read_mapped(fs, inode, offset, buffer, length, true, &completed);
+	error = ext4_read_plaintext(fs, inode, &reader, offset, buffer, length, true, &completed);
+	ext4_map_reader_close(fs, &reader);
+	return error == EXT4_OK && completed != length ? EXT4_CORRUPT : error;
 }
 
 enum ext4_result
@@ -348,7 +352,7 @@ ext4_verity_verify(struct ext4_fs *fs, const struct ext4_inode *inode,
 	/* The cache is valid again only after this path reaches the root. */
 	reader->cached_index = UINT64_MAX;
 	for (level = 0; level < verity->levels; level++) {
-		error = ext4_map_reader_read(fs, inode, &reader->tree_map,
+		error = ext4_read_plaintext(fs, inode, &reader->tree_map,
 		    verity->tree_offset +
 			(verity->level_start[level] + hash_index) * verity->block_size,
 		    reader->hashes, verity->block_size, true, &completed);
@@ -411,7 +415,7 @@ ext4_verity_read(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_t of
 		within = (size_t)(offset + *completed - start);
 		valid = inode->size - start < verity.block_size ? (size_t)(inode->size - start)
 								: verity.block_size;
-		error = ext4_map_reader_read(
+		error = ext4_read_plaintext(
 		    fs, inode, &reader.data_map, start, reader.data, valid, false, &read);
 		if (error != EXT4_OK) {
 			goto out;
@@ -460,10 +464,6 @@ ext4_measure_verity(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t
 	}
 	if (!(inode->flags & EXT4_INODE_VERITY)) {
 		return EXT4_NOT_FOUND;
-	}
-	/* The descriptor of an encrypted file is ciphertext. */
-	if (inode->flags & EXT4_INODE_ENCRYPT) {
-		return EXT4_ENCRYPTED;
 	}
 	error = ext4_verity_open(fs, inode, &verity);
 	if (error == EXT4_OK) {

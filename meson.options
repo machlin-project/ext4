@@ -78,6 +78,9 @@ option('mmp_fixtures', type: 'string', value: '',
 option('verity_fixtures', type: 'string', value: '',
   description: 'Path to independently authored fs-verity images and manifests')
 
+option('encrypted_verity_fixtures', type: 'string', value: '',
+  description: 'Path to independent encrypted-verity file-fork unit fixtures')
+
 option('casefold_vectors', type: 'string', value: '',
   description: 'Path to e2fsprogs utf8-12.1 casefold and hash vectors')
 
