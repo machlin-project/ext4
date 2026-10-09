@@ -1223,7 +1223,7 @@ jobs:
             --output artifacts/quota-independent 2>&1 | tee artifacts/checks/quota-independent.log
           find artifacts/quota-exports artifacts/quota-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
-      - name: Check native encrypted-casefold kernel capability
+      - name: Verify native encrypted-casefold linear roundtrip
         if: matrix.suite == 'format'
         run: |
           set -euo pipefail
@@ -1237,6 +1237,7 @@ jobs:
             ImageVersion="${ImageVersion:-unknown}" \
             python3 tests/run_casefold_capability.py \
             --probe "$PWD/artifacts/native-casefold-probe/probe" \
+            --core-test "$PWD/.build/ext4-encrypt-test" \
             --tools-root "$PWD/vendor/e2fsprogs/build" \
             --output "$PWD/artifacts/native-casefold-capability" \
             2>&1 | tee artifacts/checks/native-casefold-capability.log
@@ -1259,6 +1260,9 @@ jobs:
             artifacts/**/*.xml
             artifacts/casefold-independent/*.img
             artifacts/native-casefold-capability/*/capability.img
+            artifacts/native-casefold-capability/*/core/combined-capability.img
+            artifacts/native-casefold-capability/*/core/combined.manifest
+            artifacts/native-casefold-capability/*/core/combined.nokey
             artifacts/fixtures/features.txt
             artifacts/fixtures/tool-versions.txt
             .build/meson-logs/meson-log.txt

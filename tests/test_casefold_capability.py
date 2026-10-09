@@ -15,11 +15,13 @@ import run_casefold_capability as capability
 
 
 class Lifecycle(unittest.TestCase):
-    def exercise(self, failure=None):
+    def exercise(self, failure=None, roundtrip=False):
         with tempfile.TemporaryDirectory(prefix='casefold-capability-unit-') as temporary:
             root = Path(temporary)
             probe = root / 'probe'
             probe.write_bytes(b'unexecuted probe placeholder')
+            core = root / 'core'
+            core.write_bytes(b'unexecuted core placeholder')
             output = root / 'output'
             commands = []
             owner = None
@@ -92,6 +94,24 @@ class Lifecycle(unittest.TestCase):
                     elif failure == 'readonly-change' and argv[1] == 'nokey':
                         owner.write_bytes(b'wrongly changed media')
                     text = 'mocked probe only'
+                elif name == str(core):
+                    self.assertFalse(mounted)
+                    self.assertFalse(attached)
+                    image, exports = Path(argv[-2]), Path(argv[-1])
+                    (exports / ('combined-' + image.name)).write_bytes(image.read_bytes())
+                    if failure == 'core-input-change':
+                        image.write_bytes(b'changed protected original')
+                elif name == sys.executable:
+                    if Path(argv[1]).name == 'check_encrypted_casefold_native.py':
+                        self.assertFalse(mounted)
+                        self.assertFalse(attached)
+                        code = 1 if failure == 'raw' else 0
+                    elif Path(argv[1]).name == 'verify_casefold_roundtrip_linux.py':
+                        self.assertTrue(mounted)
+                        self.assertTrue(attached)
+                        code = 1 if failure == 'native' else 0
+                    else:
+                        self.fail(f'unexpected Python command: {argv}')
                 elif name == 'fake-e2fsck':
                     self.assertFalse(attached)
                     self.assertFalse(mounted)
@@ -111,6 +131,8 @@ class Lifecycle(unittest.TestCase):
             arguments = ['run_casefold_capability.py', '--probe', str(probe),
                          '--tools-root', str(root), '--output', str(output),
                          '--outer-namespace', 'mnt:[outer]']
+            if roundtrip:
+                arguments.extend(('--core-test', str(core)))
             with patch.object(sys, 'argv', arguments), \
                     patch.object(capability.os, 'geteuid', return_value=0), \
                     patch.object(capability.os, 'readlink', return_value='mnt:[inner]'), \
@@ -146,6 +168,22 @@ class Lifecycle(unittest.TestCase):
                         'multiple', 'foreign-mount'):
             with self.subTest(failure=failure):
                 result, report, commands = self.exercise(failure)
+                self.assertEqual(result, 1)
+                self.assertFalse(report['passed'])
+                self.assertIn('failure', report)
+
+    def test_roundtrip_runs_detached_core_and_raw_checks(self):
+        result, report, commands = self.exercise(roundtrip=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(report['kind'], 'native-linear-core-roundtrip')
+        self.assertEqual(sum(item[0] == 'mount' for item in commands), 10)
+        self.assertEqual(sum('--detach' in item for item in commands), 10)
+        self.assertEqual(sum('--casefold-native' in item for item in commands), 2)
+
+    def test_roundtrip_failures_are_not_capability_passes(self):
+        for failure in ('core-input-change', 'raw', 'native'):
+            with self.subTest(failure=failure):
+                result, report, commands = self.exercise(failure, roundtrip=True)
                 self.assertEqual(result, 1)
                 self.assertFalse(report['passed'])
                 self.assertIn('failure', report)

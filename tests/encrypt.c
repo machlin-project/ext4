@@ -1674,6 +1674,7 @@ restore:
 }
 
 #include "crypto_failures.h"
+#include "encrypted_casefold_native.h"
 
 int
 main(int argc, char **argv)
@@ -1684,6 +1685,7 @@ main(int argc, char **argv)
 	bool synthetic = false;
 	bool key = false;
 	bool write = false;
+	bool native = false;
 	uint8_t version = FSCRYPT_V2;
 	int argument;
 
@@ -1694,6 +1696,8 @@ main(int argc, char **argv)
 			key = true;
 		} else if (strcmp(argv[argument], "--write") == 0) {
 			write = true;
+		} else if (strcmp(argv[argument], "--casefold-native") == 0) {
+			native = true;
 		} else if (strcmp(argv[argument], "--write-v1") == 0) {
 			write = true;
 			version = FSCRYPT_V1;
@@ -1706,14 +1710,19 @@ main(int argc, char **argv)
 			break;
 		}
 	}
-	if (image == NULL || (key + synthetic + write) > 1) {
+	if (image == NULL || (key + synthetic + write + native) > 1 || (native && exports == NULL)) {
 		fprintf(stderr,
-		    "usage: %s [--synthetic | --key | --write | --write-v1] IMAGE "
+		    "usage: %s [--synthetic | --key | --write | --write-v1 | --casefold-native] IMAGE "
 		    "[EXPORT_DIRECTORY]\n",
 		    argv[0]);
 		return 2;
 	}
 	storage_open(&device, image);
+	if (native) {
+		native_roundtrip(&device, exports, image);
+		storage_close(&device);
+		return 0;
+	}
 	if (write) {
 		keyed_casefold_boundary(&device, version);
 		keyed_write(&device, exports, image, version);

@@ -29,6 +29,7 @@ def main():
     parser.add_argument('--probe', type=Path, required=True)
     parser.add_argument('--tools-root', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--core-test', type=Path, help='also verify the bounded linear core roundtrip')
     parser.add_argument('--outer-namespace', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if os.geteuid() != 0:
@@ -45,6 +46,7 @@ def main():
     if namespace == args.outer_namespace:
         parser.error('private mount namespace was not established')
     probe = args.probe.resolve(strict=True)
+    core_test = args.core_test.resolve(strict=True) if args.core_test is not None else None
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     output.chmod(0o755)
@@ -54,6 +56,8 @@ def main():
               'runner_image': os.environ.get('ImageVersion'),
               'probe_sha256': digest(probe), 'namespace': namespace,
               'profiles': []}
+    if core_test is not None:
+        report.update(kind='native-linear-core-roundtrip', core_sha256=digest(core_test))
     report_path = output / 'report.json'
 
     def save():
@@ -62,7 +66,7 @@ def main():
 
     def run(row, command, timeout=120):
         command = [str(value) for value in command]
-        done = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        done = subprocess.run(command, capture_output=True, text=True, timeout=timeout, umask=0o022)
         row.setdefault('commands', []).append({'command': command,
                     'status': done.returncode, 'stdout': done.stdout, 'stderr': done.stderr})
         save()
@@ -112,6 +116,30 @@ def main():
             for kind, handler in previous:
                 signal.signal(kind, handler)
 
+    def mounted_probe(row, image, mountpoint, command, readonly):
+        before = digest(image)
+        try:
+            attach = ['losetup', '--find', '--show']
+            if readonly:
+                attach.append('--read-only')
+            loop = run(row, [*attach, image])
+            if not loop.startswith('/dev/loop') or '\n' in loop:
+                raise RuntimeError('Invalid newly allocated loop identity')
+            backing = run(row, ['losetup', '--noheadings', '--output', 'BACK-FILE', loop])
+            if Path(backing).resolve(strict=True) != image.resolve(strict=True):
+                raise RuntimeError('Loop backing identity mismatch')
+            options = 'ro,noload,nodev,nosuid,noexec' if readonly else 'rw,nodev,nosuid,noexec'
+            run(row, ['mount', '-t', 'ext4', '-o', options, loop, mountpoint])
+            actual = run(row, ['findmnt', '--noheadings', '--output', 'SOURCE',
+                               '--mountpoint', mountpoint])
+            if actual != loop:
+                raise RuntimeError('Mounted source identity mismatch')
+            run(row, command)
+        finally:
+            cleanup(row, image, mountpoint)
+        if readonly and digest(image) != before:
+            raise RuntimeError('Read-only native verification changed media')
+
     save()
     try:
         config = Path('/boot') / ('config-' + os.uname().release)
@@ -137,41 +165,43 @@ def main():
                       '-U', UUID, '-E', encoding + ',lazy_itable_init=0,nodiscard',
                       image, 32 * 1024 * 1024 // block_size])
             image.chmod(0o644)
-            loop = None
-            try:
-                for phase in ('create', 'nokey', 'keyed'):
-                    readonly = phase != 'create'
-                    before = digest(image)
-                    command = ['losetup', '--find', '--show']
-                    if readonly:
-                        command.append('--read-only')
-                    loop = run(row, [*command, image])
-                    if not loop.startswith('/dev/loop') or '\n' in loop:
-                        raise RuntimeError('Invalid newly allocated loop identity')
-                    backing = run(row, ['losetup', '--noheadings', '--output', 'BACK-FILE', loop])
-                    if Path(backing).resolve(strict=True) != image.resolve(strict=True):
-                        raise RuntimeError('Loop backing identity mismatch')
-                    options = 'ro,noload,nodev,nosuid,noexec' if readonly else 'rw,nodev,nosuid,noexec'
-                    run(row, ['mount', '-t', 'ext4', '-o', options, loop, mountpoint])
-                    actual = run(row, ['findmnt', '--noheadings', '--output', 'SOURCE',
-                                       '--mountpoint', mountpoint])
-                    if actual != loop:
-                        raise RuntimeError('Mounted source identity mismatch')
-                    run(row, [probe, phase, mountpoint])
-                    run(row, ['umount', mountpoint])
-                    run(row, ['losetup', '--detach', loop])
-                    loop = None
-                    if readonly and digest(image) != before:
-                        raise RuntimeError('Read-only native verification changed media')
-                run(row, [tools['e2fsck'], '-fn', image])
-                row.update(passed=True, image_sha256=digest(image))
-            finally:
-                cleanup(row, image, mountpoint)
+            for phase in ('create', 'nokey', 'keyed'):
+                mounted_probe(row, image, mountpoint, [probe, phase, mountpoint], phase != 'create')
+            run(row, [tools['e2fsck'], '-fn', image])
+            row['image_sha256'] = digest(image)
+            if core_test is not None:
+                scripts = Path(__file__).resolve().parent
+                exports = profile / 'core'
+                exports.mkdir()
+                exports.chmod(0o755)
+                run(row, [core_test, '--casefold-native', image, exports])
+                if digest(image) != row['image_sha256']:
+                    raise RuntimeError('Core test changed protected Linux-authored input')
+                changed = exports / ('combined-' + image.name)
+                if changed.stat().st_size != image.stat().st_size:
+                    raise RuntimeError('Core export changed the bounded volume size')
+                changed.chmod(0o644)
+                run(row, [sys.executable, scripts / 'check_encrypted_casefold_native.py',
+                          '--original', image, '--exports', exports, '--tools-root', args.tools_root.resolve(),
+                          '--output', profile / 'independent'])
+                for keyed in (False, True):
+                    command = [sys.executable, scripts / 'verify_casefold_roundtrip_linux.py',
+                               '--mount', mountpoint, '--exports', exports, '--report',
+                               profile / ('linux-keyed.json' if keyed else 'linux-nokey.json')]
+                    if keyed:
+                        command.append('--keyed')
+                    mounted_probe(row, changed, mountpoint, command, True)
+                run(row, [tools['e2fsck'], '-fn', changed])
+                row['core_image_sha256'] = digest(changed)
+            row['passed'] = True
             save()
         if digest(probe) != report['probe_sha256']:
             raise RuntimeError('Probe binary changed during execution')
+        if core_test is not None and digest(core_test) != report['core_sha256']:
+            raise RuntimeError('Core binary changed during execution')
         report['passed'] = True
-        print('PASS native encrypted-casefold capability: 2 images, 8 policies; core untested')
+        print('PASS native encrypted-casefold linear core roundtrip: 2 images' if core_test is not None else
+              'PASS native encrypted-casefold capability: 2 images, 8 policies; core untested')
         return 0
     except (OSError, RuntimeError, subprocess.SubprocessError, KeyboardInterrupt) as error:
         report['failure'] = str(error)

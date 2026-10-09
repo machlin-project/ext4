@@ -3868,7 +3868,40 @@ persistent machine. The mocked lifecycle tests exercise control flow only.
 At preparation, the C probe compiled with strict warnings and ASan/UBSan; its usage
 refusal and the four mocked lifecycle tests passed. No native mount was executed
 locally. Even a successful hosted capability result establishes only a usable
-Linux reference: the core does not participate. Linux-authored/core-mutated/Linux
+Linux reference: the core does not participate in that standalone mode. Linux-authored/core-mutated/Linux
 verified combined trees, independent ciphertext and stored SipHash comparison,
 indexed growth, deeper trees, crash durability, 64 KiB native operation and FSKit's
 optional SipHash provider remain separate open gates.
+
+### Bounded combined linear roundtrip
+
+The optional `--core-test` stage imports the actual Linux-authored capability
+images directly. It never synthesizes feature bits, resets their trees, or edits
+the protected input. A fixed four-parent model creates files, rejects folded
+duplicates, exchanges Unicode aliases, renames across directory nonces, creates
+hardlinks, refuses cross-padding policy changes, and removes temporary files by
+their no-key names. After sync and a cold read-only verification, exports retain
+ten names referring to eight files, plus model and full no-key manifests.
+
+An independent image checker requires the fixed mutation sequence rather than
+trusting arbitrary manifest expectations. It checks original inode/context
+preservation, inherited policy, unique nonces, exact ciphertext and both stored
+SipHash words using OpenSSL EVP, independently decrypts contents with XTS, and
+compares complete no-key envelopes. It preserves filesystem identity and Unicode
+strictness, rejects malformed bounded directory records, and runs nonrepairing
+e2fsck on original and exported media. Its decoder tests use frozen independent
+filename vectors; they do not constitute an image run.
+
+Finally, fresh read-only Linux mounts verify exact keyed and no-key inventories,
+Unicode aliases, inode and hardlink identities, policies/nonces, permissions and
+contents. The filesystem implements those operations through its own syscalls;
+the probe has no mount or reboot code. The wrapper performs core and raw-oracle
+work only while images are detached and requires unchanged original and read-only
+image hashes. A prerequisite or oracle failure fails the overall stage visibly.
+
+This new roundtrip remains unaccepted until its actual hosted image run passes.
+It covers only 1 KiB relaxed/4 KiB strict, PAD4/PAD32, both Linux policy-setting
+orders and linear regular-file namespaces. Indexed growth/collisions, long no-key
+names, inherited subdirectories, core-created policy transitions on independently
+retained images, injected commit failures, crash recovery and 64 KiB native
+operation remain separate acceptance gates.

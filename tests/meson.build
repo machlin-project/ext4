@@ -811,6 +811,9 @@ test('fscrypt-visitor-key-lifetime', programs['fscrypt-lifetime'], suite: 'core'
 test('encrypted-casefold-mutation-admission', programs['directory-guard'], suite: 'core')
 
 if paths['encrypted_casefold_fixtures'] != ''
+  test('encrypted-casefold-native-oracle', find_program('python3'),
+    args: [files('test_casefold_native_oracle.py'), paths['encrypted_casefold_fixtures']],
+    timeout: 120, suite: 'core')
   foreach profile : ['ascii-1', 'ascii-15', 'ascii-16', 'ascii-17', 'ascii-28', 'ascii-31',
     'ascii-32', 'ascii-144', 'ascii-148', 'ascii-149', 'ascii-150', 'ascii-252', 'ascii-253',
     'ascii-254', 'ascii-255', 'sharp-s', 'canonical-accent', 'sigma', 'dotted-i', 'ligature',
