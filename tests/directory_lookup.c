@@ -34,6 +34,7 @@ enum lookup_damage {
 	LOOKUP_RESERVED,
 	LOOKUP_INFO_LENGTH,
 	LOOKUP_VERSION,
+	LOOKUP_SIPHASH_PARENT,
 	LOOKUP_LEVEL,
 	LOOKUP_FLAGS,
 	LOOKUP_ROOT_COUNT,
@@ -380,8 +381,12 @@ lookup_damage(struct device *device, struct ext4_fs *fs)
 			root->info_length++;
 			break;
 		case LOOKUP_VERSION:
-			root->hash_version = EXT4_HASH_TEA_UNSIGNED + 1U;
+			root->hash_version = EXT4_HASH_SIPHASH + 1U;
 			expected = EXT4_UNSUPPORTED;
+			break;
+		case LOOKUP_SIPHASH_PARENT:
+			/* SipHash is known, but requires the encrypted casefold layout. */
+			root->hash_version = EXT4_HASH_SIPHASH;
 			break;
 		case LOOKUP_LEVEL:
 			root->indirect_levels = ext4_index_max_levels(fs) + 1U;
