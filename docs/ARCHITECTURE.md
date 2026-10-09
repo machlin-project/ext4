@@ -1315,7 +1315,12 @@ and stop, or stop before accepting an entry when its output buffer is full.
 Cookies retain accepted progress across a later error. The existing single-entry
 API uses the same parser. No directory buffers survive the call; writable owners
 hold serialization through the visitor and refresh snapshots after a mutation.
-Read-only inode queries inside the visitor are permitted.
+Read-only inode queries inside the visitor are permitted. Such queries can evict
+an encrypted directory's borrowed key from the bounded key cache, so iteration
+reacquires it before each name decryption. Cache hits allocate nothing. If a key
+must be derived again and that operation fails, iteration returns the error with
+its previously accepted cookie progress; it does not change the remaining names
+to the no-key presentation within that call.
 
 File reads and native mapping queries return contiguous physical ranges or hole
 ranges. Extent runs stop at extent and ancestor-index boundaries; legacy runs

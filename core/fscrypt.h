@@ -96,7 +96,8 @@ enum ext4_result ext4_fscrypt_policy(
 enum ext4_result ext4_fscrypt_derive(struct ext4_fs *fs, const struct ext4_fscrypt_policy *policy,
     uint32_t type, struct ext4_fscrypt_key *key);
 /* A committed inode's key from the mount's cache or the adapter; ENCRYPTED without the
- * adapter's master key. The mount owns the handle. */
+ * adapter's master key. The mount owns the borrowed handle; another encrypted
+ * inode query can evict it. Reacquire after callbacks that permit such queries. */
 enum ext4_result ext4_fscrypt_key(
     struct ext4_fs *fs, const struct ext4_inode *inode, struct ext4_fscrypt_key *key);
 /* Release every cached key. */

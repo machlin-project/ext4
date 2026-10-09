@@ -775,3 +775,5 @@ if paths['unjournaled_fixtures'] != ''
 endif
 
 test('orphan-slot-index', programs['orphan-index'], suite: 'core')
+
+test('fscrypt-visitor-key-lifetime', programs['fscrypt-lifetime'], suite: 'core')

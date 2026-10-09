@@ -67,7 +67,7 @@ foreach name, source : {
   'namespace': 'namespace', 'removal': 'removal', 'sustained': 'sustained', 'mmp': 'mmp',
   'deferred': 'deferred',
   'verity': 'verity', 'verity-enable': 'verity_enable', 'encrypt': 'encrypt', 'casefold': 'casefold', 'casefold-fs': 'casefold_fs', 'quota': 'quota',
-  'rename': 'rename', 'orphan': 'orphan', 'orphan-index': 'orphan_index',
+  'rename': 'rename', 'orphan': 'orphan', 'orphan-index': 'orphan_index', 'fscrypt-lifetime': 'fscrypt_lifetime',
 }
   programs += {name: executable('ext4-' + name + '-test', 'tests/' + source + '.c',
     include_directories: internal_headers, dependencies: posix_dependency)}

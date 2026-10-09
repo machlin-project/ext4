@@ -325,9 +325,13 @@ ext4_directory_visit(struct ext4_fs *fs, const struct ext4_inode *directory, uin
 					    ext4_directory_hash(version, fs->directory_hash_seed,
 						decoded.name, decoded.name_length, &hash);
 				} else if (!nokey) {
-					error = ext4_fscrypt_name_decrypt(fs, &key, decoded.name,
-					    decoded.name_length, EXT4_NAME_MAX, plain,
-					    &plain_length);
+					/* Read-only visitor queries may evict a borrowed cached key. */
+					error = ext4_fscrypt_key(fs, directory, &key);
+					if (error == EXT4_OK) {
+						error = ext4_fscrypt_name_decrypt(fs, &key, decoded.name,
+						    decoded.name_length, EXT4_NAME_MAX, plain,
+						    &plain_length);
+					}
 				}
 				if (error != EXT4_OK) {
 					goto out;
