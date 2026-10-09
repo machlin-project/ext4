@@ -151,6 +151,8 @@ casefold_transition_cuts(struct device *device, uint32_t number, uint32_t genera
 	EXPECT(ext4_set_inode_flags(fs, number, generation, EXT4_INODE_CASEFOLD,
 	    enable ? EXT4_INODE_CASEFOLD : 0, &encrypt_time, &directory), EXT4_OK);
 	events = device->events - events;
+	/* Keep cleanup outside the measured mutation cuts and save a mountable endpoint. */
+	EXPECT(ext4_sync(fs), EXT4_OK);
 	ext4_unmount(fs);
 	CHECK(events != 0 && keyring->handles == 0);
 	memcpy(after, device->stable, device->size);
