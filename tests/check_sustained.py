@@ -219,7 +219,8 @@ def check_attributes(image, item, where, values, encrypted, output, tools, run):
         dump.unlink()
 
 
-def check_export(image, manifest, directory, output, tools, run):
+def check_export(image, manifest, directory, output, tools, run,
+                 require_encrypted_verity=False):
     root, objects, xattrs, features = parse_manifest(manifest)
     encrypted = features["encrypted"]
     run([tools["e2fsck"], "-fn", image])
@@ -294,6 +295,8 @@ def check_export(image, manifest, directory, output, tools, run):
                          tools, run)
     if counts["verity"] != len(features["verity"]):
         raise RuntimeError("A verity file was not verified")
+    if require_encrypted_verity and counts["encrypted_verity"] == 0:
+        raise RuntimeError("Required encrypted verity coverage is empty for this export")
     return dict(objects=len(objects), directories=len(expected_children),
                 xattrs=sum(len(values) for values in xattrs.values()), **counts)
 
@@ -304,6 +307,8 @@ def main():
     parser.add_argument("--exports", type=Path, required=True, action="append",
                         help="directory holding one exported image and its manifest")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--require-encrypted-verity", action="store_true",
+                        help="require a decrypted and verified verity inode in every export")
     args = parser.parse_args()
     tools = resolve_tools(args.tools_root)
     args.output.mkdir(parents=True, exist_ok=False)
@@ -331,7 +336,8 @@ def main():
 
         work = args.output / directory.name
         work.mkdir()
-        row.update(check_export(image, directory / "manifest.txt", directory, work, tools, run))
+        row.update(check_export(image, directory / "manifest.txt", directory, work, tools, run,
+                                args.require_encrypted_verity))
         if hashlib.sha256(image.read_bytes()).hexdigest() != before:
             raise RuntimeError("Independent verification changed the exported image")
         row["passed"] = True

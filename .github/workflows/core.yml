@@ -1112,6 +1112,24 @@ jobs:
             --output artifacts/sustained-independent 2>&1 | tee artifacts/checks/sustained-independent.log
           find artifacts/sustained-exports artifacts/sustained-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' ! -name 'manifest.txt' -delete
+      - name: Require independently verified encrypted verity exports
+        if: matrix.suite == 'sustained'
+        run: |
+          exports=()
+          for profile in 1k 4k; do
+            directory="artifacts/sustained-encrypted-verity-exports/$profile"
+            mkdir -p "$directory"
+            .build/ext4-sustained-test "artifacts/fixtures/ext4-$profile.img" 1 50 \
+              --no-ballast --encrypt --verity --retain-encrypted-verity --export "$directory" \
+              2>&1 | tee "artifacts/checks/sustained-encrypted-verity-export-$profile.log"
+            exports+=(--exports "$directory")
+          done
+          python3 tests/check_sustained.py --tools-root vendor/e2fsprogs/build "${exports[@]}" \
+            --require-encrypted-verity --output artifacts/sustained-encrypted-verity-independent \
+            2>&1 | tee artifacts/checks/sustained-encrypted-verity-independent.log
+          find artifacts/sustained-encrypted-verity-exports \
+            artifacts/sustained-encrypted-verity-independent -type f \
+            ! -name '*.json' ! -name '*.log' ! -name '*.xml' ! -name 'manifest.txt' -delete
       - name: Independently verify multi-mount protection
         if: matrix.suite == 'format'
         run: |

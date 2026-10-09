@@ -19,7 +19,9 @@
  * A casefolded directory, inherited by its subdirectories, matches names without
  * regard to case and preserves their spelling. --unjournaled writes a volume without
  * a journal under EXT4_WRITE_UNJOURNALED, whose power cuts leave volumes for e2fsck,
- * so its operations run without the power-cut repetition. */
+ * so its operations run without the power-cut repetition. --retain-encrypted-verity
+ * adds a deterministic file after the sequence for dedicated encrypted+verity
+ * exports; the final remount verifies its contents and digest before export. */
 
 #define SUSTAINED_SECONDS 1700002000
 #define SUSTAINED_UID 71000U
@@ -58,6 +60,8 @@
 #define VERITY_DIGEST_LIMIT 64U
 #define VERITY_SALT_BYTES 16U
 #define VERITY_MERKLE_SMALL 1024U
+#define RETAINED_VERITY_BYTES (64U * 1024U + 37U)
+#define RETAINED_VERITY_NAME "retained+encrypted-verity"
 #define CASE_DIFFERENCE ('a' - 'A')
 
 /* Ballast files are regular files whose bytes derive from their seed. They fill
@@ -2005,6 +2009,69 @@ setup_root(struct state *state)
 	}
 }
 
+/* An explicit export profile retains a nonempty encrypted verity file after the
+ * random sequence. The '+' cannot occur in a generated name. No planner randomness
+ * is consumed and existing sequences are unchanged; insufficient model/image capacity
+ * fails rather than silently skipping the independent encrypted-data oracle. */
+static void
+retain_encrypted_verity(struct state *state)
+{
+	struct plan plan = { 0 };
+	struct object *object;
+	uint32_t directory;
+	uint32_t entry;
+	uint64_t offset;
+
+	CHECK(state->encrypt && state->verity && state->extents);
+	CHECK(free_object(state) != NO_INDEX && free_entry(state) != NO_INDEX);
+	for (directory = 0; directory < OBJECT_LIMIT; directory++) {
+		object = &state->objects[directory];
+		if (object->kind == KIND_DIRECTORY && object->anchor && object->encrypted) {
+			break;
+		}
+	}
+	CHECK(directory < OBJECT_LIMIT);
+	install_crypto(state);
+	plan.operation = OP_CREATE;
+	plan.directory = directory;
+	plan.permissions = 0640;
+	plan.name_length = strlen(RETAINED_VERITY_NAME);
+	memcpy(plan.name, RETAINED_VERITY_NAME, plan.name_length);
+	CHECK(find_entry(state, directory, plan.name, plan.name_length) == NO_INDEX);
+	EXPECT(execute_create(state, &plan, true), EXT4_OK);
+	entry = find_entry(state, directory, plan.name, plan.name_length);
+	CHECK(entry != NO_INDEX);
+	plan.object = state->entries[entry].object;
+	object = &state->objects[plan.object];
+	CHECK(object->encrypted && RETAINED_VERITY_BYTES <= FILE_LIMIT);
+	plan.operation = OP_WRITE;
+	for (offset = 0; offset < RETAINED_VERITY_BYTES; offset += plan.length) {
+		plan.offset = offset;
+		plan.length = RETAINED_VERITY_BYTES - offset;
+		if (plan.length > WRITE_LIMIT) {
+			plan.length = WRITE_LIMIT;
+		}
+		plan.seed = UINT64_C(0x6578706f72747631) + offset;
+		EXPECT(execute_write(state, &plan, true), EXT4_OK);
+		/* Derive the expected bytes again, independently of the submitted buffer. */
+		fill_pattern(object->data + offset, plan.seed, plan.length);
+	}
+	/* SHA-512 and 1 KiB Merkle blocks require multiple tree levels and partial
+	 * filesystem-block metadata writes on the dedicated 4 KiB export. */
+	plan.operation = OP_VERITY;
+	plan.key = EXT4_VERITY_HASH_SHA512;
+	plan.flags = VERITY_MERKLE_SMALL;
+	plan.length = VERITY_SALT_BYTES;
+	plan.seed = UINT64_C(0x7665726974797631);
+	EXPECT(execute_verity(state, &plan, true), EXT4_OK);
+	CHECK(object->verity && object->size == RETAINED_VERITY_BYTES &&
+	    object->verity_algorithm == EXT4_VERITY_HASH_SHA512 &&
+	    object->verity_block_size == VERITY_MERKLE_SMALL &&
+	    object->salt_size == VERITY_SALT_BYTES);
+	/* The expected salt must not depend on a buffer handed to the core either. */
+	fill_pattern(object->salt, plan.seed, VERITY_SALT_BYTES);
+}
+
 struct nokey_export {
 	FILE *stream;
 	uint32_t directory;
@@ -2223,6 +2290,7 @@ main(int argc, char **argv)
 	uint32_t performed = 0;
 	uint32_t attempts = 0;
 	uint32_t index;
+	bool retain_verity = false;
 	int argument;
 	char *end;
 	enum ext4_result error;
@@ -2232,7 +2300,8 @@ main(int argc, char **argv)
 		    "usage: %s IMAGE SEED OPERATIONS [--objects N] [--entries N] "
 		    "[--directories N] [--commit-blocks N] [--checkpoint-blocks N] "
 		    "[--data journal|ordered] [--encrypt] [--verity] [--casefold] "
-		    "[--no-ballast] [--unjournaled] [--export DIRECTORY]\n",
+		    "[--no-ballast] [--unjournaled] [--retain-encrypted-verity] "
+		    "[--export DIRECTORY]\n",
 		    argv[0]);
 		return 2;
 	}
@@ -2268,6 +2337,11 @@ main(int argc, char **argv)
 			argument--;
 			continue;
 		}
+		if (strcmp(argv[argument], "--retain-encrypted-verity") == 0) {
+			retain_verity = true;
+			argument--;
+			continue;
+		}
 		CHECK(argument + 1 < argc);
 		if (strcmp(argv[argument], "--objects") == 0) {
 			state.object_limit = parse_number(argv[argument + 1]);
@@ -2293,6 +2367,7 @@ main(int argc, char **argv)
 	}
 	CHECK(state.object_limit <= OBJECT_LIMIT && state.entry_limit <= ENTRY_LIMIT);
 	CHECK(!state.unjournaled || (state.commit_blocks == 0 && state.checkpoint_blocks == 0));
+	CHECK(!retain_verity || (state.encrypt && state.verity && export_directory != NULL));
 	storage_open(&state.device, argv[1]);
 	state.random = seed;
 	state.pre = malloc(state.device.size);
@@ -2333,6 +2408,9 @@ main(int argc, char **argv)
 		if (performed % REMOUNT_INTERVAL == 0) {
 			remount(&state);
 		}
+	}
+	if (retain_verity) {
+		retain_encrypted_verity(&state);
 	}
 	remount(&state);
 	verify(&state);

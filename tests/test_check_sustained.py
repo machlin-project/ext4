@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 
-from check_sustained import check_verity, sustained_contents_key
+from check_sustained import check_export, check_verity, sustained_contents_key
 
 
 def hkdf(info, size):
@@ -29,6 +29,31 @@ def rejects(action):
     raise AssertionError("Corrupt encrypted verity input was accepted")
 
 
+def check_required_coverage(directory):
+    """A mocked empty export tests the opt-in guard, not filesystem acceptance."""
+    manifest = directory / "empty-manifest.txt"
+    manifest.write_text("root sustained\n")
+    tools = {name: name for name in ("debugfs", "dumpe2fs", "e2fsck")}
+
+    def run(command):
+        if command[0] == "dumpe2fs":
+            return "Block size: 4096\n"
+        return ""
+
+    def verify(required):
+        return check_export(directory / "unused.img", manifest, directory, directory,
+                            tools, run, require_encrypted_verity=required)
+
+    assert verify(False)["encrypted_verity"] == 0
+    try:
+        verify(True)
+    except RuntimeError as error:
+        assert str(error) == "Required encrypted verity coverage is empty for this export"
+    else:
+        raise AssertionError("Required encrypted verity coverage was silently skipped")
+    print("PASS per-export encrypted verity coverage guard (mocked empty export)")
+
+
 def main():
     fixtures = Path(sys.argv[1])
     context = bytes((2, 1, 4, 3, 0, 0, 0, 0)) + hkdf(b"fscrypt\0\x01", 16) + bytes(range(16))
@@ -41,6 +66,7 @@ def main():
     rejects(lambda: sustained_contents_key(context[:-1]))
     count = 0
     with tempfile.TemporaryDirectory(prefix="ext4-sustained-oracle-") as temporary:
+        check_required_coverage(Path(temporary))
         image = Path(temporary) / "fork.img"
         for name in (fixtures / "manifest").read_text().splitlines():
             fields, digest = (fixtures / f"{name}.meta").read_text().splitlines()
