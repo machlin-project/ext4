@@ -49,20 +49,25 @@ def main():
                    interval=profile["interval"], commands=[], passed=False)
         reports.append(row)
 
-        def run(command, row=row):
+        def run(command, row=row, expected=(0,)):
             result = subprocess.run([str(x) for x in command], capture_output=True, text=True,
                                     errors="backslashreplace", timeout=120)
             row["commands"].append(dict(command=[str(x) for x in command],
                                         status=result.returncode, stdout=result.stdout,
                                         stderr=result.stderr))
             (output / "report.json").write_text(json.dumps(reports, indent=2) + "\n")
-            result.check_returncode()
+            if result.returncode not in expected:
+                result.check_returncode()
             return result.stdout
 
         run([tools["mke2fs"], "-F", "-t", "ext4", "-b", block, "-N", 256, "-I", 256, "-m", 0,
              "-O", "none," + ",".join(sorted(features)), "-U", UUID,
              "-E", f"mmp_update_interval={profile['interval']},lazy_itable_init=0,nodiscard",
              "-d", tree, image, IMAGE_BYTES // block])
+        if "quota" in features:
+            # mke2fs -d imports host-owned files after initial quota accounting.
+            # Author those usage records before the unchanged strict clean check.
+            run([tools["e2fsck"], "-fy", image], expected=(0, 1))
         run([tools["e2fsck"], "-fn", image])
         mmp = mmp_fields(run([tools["debugfs"], "-R", "dump_mmp", image]))
         if mmp["sequence"] != MMP_SEQUENCE_CLEAN or mmp["interval"] != profile["interval"]:
