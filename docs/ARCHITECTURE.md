@@ -970,18 +970,19 @@ as Linux permits, while creation, links
 and renames into or out of the directory still return `EXT4_ENCRYPTED`. An encrypted
 symlink reads as the no-key name of its ciphertext with zero hash words. V2
 casefolded encrypted directories use the hash words stored alongside each name
-without deriving a key, including on volumes without DIR_INDEX; their namespace
-mutations remain unsupported.
+without deriving a key, including on volumes without DIR_INDEX. Their no-key
+identities also permit unlink and rmdir; mutations that prepare new encrypted names
+still require the key.
 
 Operations that need no plaintext remain available: owner, permission, timestamp and
 ordinary attribute changes on encrypted objects; rename, link and removal of an
 encrypted object whose parent is unencrypted, including a moved directory's dotdot
 update; rmdir of an empty encrypted directory; and final deletion, which releases
-the complete map. The directory move and rmdir cases currently require ordinary
-encrypted directories: combined layouts retain the temporary mutation guards.
-Directory validation accepts any name byte in encrypted
-directories, whose names are ciphertext, while still checking records, checksums and
-the index hash of the stored bytes. The fscrypt context attribute (index 9) cannot be
+the complete map. These metadata-only namespace cases also support block-backed
+v2 combined directories. Directory validation accepts any name byte in encrypted
+directories, whose names are ciphertext, while still checking records and checksums.
+Ordinary encrypted indexes hash stored bytes; combined indexes route by each
+entry's stored keyed hash. The fscrypt context attribute (index 9) cannot be
 created, replaced or removed through attribute interfaces. Offline cleanup trims a
 linked encrypted orphan without zeroing its partial last block, which it cannot
 decrypt; as in Linux, those bytes past EOF stay ciphertext and are never read.
@@ -1020,16 +1021,29 @@ empty string, so all such names are equal. `ext4_set_inode_flags` sets or clears
 flag, as Linux's `FS_IOC_SETFLAGS` does, only on an empty directory of a casefold
 volume, so no stored name or index hash depends on the previous rule: other volumes
 return `EXT4_UNSUPPORTED`, other types `EXT4_NOT_DIRECTORY` and directories with
-entries `EXT4_NOT_EMPTY`. Encrypted directories currently reject casefold flag
-transitions with `EXT4_UNSUPPORTED`: their combined format adds stored hashes to
-non-dot name records and requires a different directory hash. Low-level directory
-scan, initialization, insertion, removal and replacement also reject that combined
-layout before touching transaction state, including callers in semantic fast-commit
-replay. An inode-only fast-commit record cannot create or change that layout;
-unchanged metadata-only records remain eligible. A semantic replay refusal cancels
-its private transaction, but ordinary committed journal replay and MMP may already
-have written before it. This is a temporary safety boundary, not combined-format
-write support; layout-preserving writes and policy transitions remain required.
+entries `EXT4_NOT_EMPTY`. Encrypted directories require a v2 policy. Their empty
+format transitions validate the complete old layout before staging changes: entering
+the combined layout canonicalizes empty leaves and changes an index's root to
+SipHash version 6; leaving it retains compatible empty records and changes only the
+index's root hash version. Empty index topology and hash-range fences remain valid.
+Inline plaintext storage expands before encryption, and its new mapping flags survive
+the policy change. Preparation or credit exhaustion cancels every private change;
+accepted deferred publication invalidates cached CTS/hash pairs immediately.
+
+Namespace changes own one prepared name per parent. It retains plaintext,
+first-fold comparison, the final hash, and ciphertext without retaining borrowed
+crypto handles. Scanning and insertion reuse that preparation, so repacking preserves
+existing ciphertext and stored hashes instead of encrypting or hashing them again.
+A keyless removal first resolves its no-key query into the full stored identity;
+subsequent scans also require the same inode. Dots and empty-directory validation
+need no name-fold allocation. Strict malformed plaintext remains unmatchable, while
+its no-key identity still permits removal. Combined inline storage remains refused.
+
+Linux excludes encrypted-parent namespace operations from semantic fast commits.
+Replay therefore refuses those name records before initializing or changing a child,
+and retains the inode-only combined-layout transition boundary; full block journal
+replay remains supported. This refusal cancels its private transaction, but journal
+replay and MMP may already have written before the semantic record is encountered.
 
 Reading an existing v2 encrypted/casefold directory decodes the two little-endian
 stored hash words after each non-dot ciphertext name, including alignment and

@@ -1,30 +1,35 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "directory_write.h"
+#include "fscrypt.h"
 
 /* Like Linux, casefolding changes only on an empty directory of a casefold volume,
  * so no stored name or index hash ever depends on the other comparison rule. */
 static enum ext4_result
 ext4_casefold_change_valid(struct ext4_fs *fs, struct ext4_transaction *transaction,
-    struct ext4_inode *inode, struct ext4_inode_disk *disk)
+    struct ext4_inode *inode, struct ext4_inode_disk *disk, uint32_t desired)
 {
 	struct ext4_allocation allocation;
-	struct ext4_directory_slot slot;
+	struct ext4_fscrypt_policy policy;
 	enum ext4_result error;
 
-	/* Switching an encrypted directory also changes its stored hash layout. */
-	if (inode->flags & EXT4_INODE_ENCRYPT) {
-		return EXT4_UNSUPPORTED;
-	}
 	if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_CASEFOLD)) {
 		return EXT4_UNSUPPORTED;
 	}
 	if ((inode->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
 		return EXT4_NOT_DIRECTORY;
 	}
+	if (inode->flags & EXT4_INODE_ENCRYPT) {
+		error = ext4_fscrypt_policy(fs, inode, &policy);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		if (policy.version != EXT4_FSCRYPT_CONTEXT_V2) {
+			return EXT4_UNSUPPORTED;
+		}
+	}
 	error = ext4_allocation_init(&allocation, fs, transaction, inode);
 	if (error == EXT4_OK) {
-		error = ext4_directory_scan(
-		    &allocation, inode, disk, NULL, 0, EXT4_DIRECTORY_EMPTY, 0, &slot);
+		error = ext4_directory_change_format(&allocation, inode, disk, desired);
 	}
 	ext4_allocation_destroy(&allocation);
 	return error;
@@ -41,6 +46,7 @@ ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 	uint32_t allowed = EXT4_INODE_MODIFIABLE_FLAGS;
 	uint32_t desired;
 	uint16_t type;
+	bool format_changed;
 	enum ext4_result error;
 
 	if (fs == NULL || change_time == NULL || result == NULL || mask == 0 || (flags & ~mask)) {
@@ -55,7 +61,8 @@ ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 	if (fs->journal == NULL) {
 		return EXT4_READ_ONLY;
 	}
-	error = ext4_transaction_begin(fs->journal, 1, &transaction);
+	error = ext4_transaction_begin(fs->journal,
+	    mask & EXT4_INODE_CASEFOLD ? ext4_journal_credits(fs->journal) : 1, &transaction);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -79,8 +86,9 @@ ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 		error = EXT4_INVALID_ARGUMENT;
 		goto cancel;
 	}
-	if ((desired ^ inode.flags) & EXT4_INODE_CASEFOLD) {
-		error = ext4_casefold_change_valid(fs, transaction, &inode, disk);
+	format_changed = ((desired ^ inode.flags) & EXT4_INODE_CASEFOLD) != 0;
+	if (format_changed) {
+		error = ext4_casefold_change_valid(fs, transaction, &inode, disk, desired);
 		if (error != EXT4_OK) {
 			goto cancel;
 		}
@@ -92,6 +100,8 @@ ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
+	/* Expansion may have changed allocation flags while preserving policy bits. */
+	desired = (inode.flags & ~mask) | flags;
 	ext4_encode32(&disk->flags, desired);
 	ext4_inode_checksum_set(fs, number, disk);
 	error = ext4_inode_decode_live(fs, number, disk, &inode);
@@ -107,6 +117,9 @@ ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 			fs->aborted = true;
 		}
 		return error;
+	}
+	if (format_changed && (inode.flags & EXT4_INODE_ENCRYPT)) {
+		ext4_fscrypt_forget(fs);
 	}
 	*result = inode;
 	return EXT4_OK;

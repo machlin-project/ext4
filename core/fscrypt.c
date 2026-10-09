@@ -650,7 +650,6 @@ ext4_set_encryption_policy(struct ext4_fs *fs, uint32_t number, uint32_t generat
 	struct ext4_inode inode;
 	struct ext4_fscrypt_policy policy;
 	struct ext4_fscrypt_policy existing;
-	struct ext4_directory_slot slot;
 	void *master = NULL;
 	bool ready = false;
 	enum ext4_result error;
@@ -705,6 +704,10 @@ ext4_set_encryption_policy(struct ext4_fs *fs, uint32_t number, uint32_t generat
 	}
 	if (error == EXT4_OK && (inode.flags & EXT4_INODE_ENCRYPT)) {
 		error = ext4_fscrypt_policy(fs, &inode, &existing);
+		if (error == EXT4_OK && ext4_directory_has_hashes(inode.flags) &&
+		    existing.version != EXT4_FSCRYPT_CONTEXT_V2) {
+			error = EXT4_UNSUPPORTED;
+		}
 		if (error == EXT4_OK) {
 			error =
 			    ext4_fscrypt_policy_equal(&existing, &policy) ? EXT4_OK : EXT4_EXISTS;
@@ -715,22 +718,20 @@ ext4_set_encryption_policy(struct ext4_fs *fs, uint32_t number, uint32_t generat
 		}
 		return error;
 	}
-	/* Casefolded encrypted names hash with a derived key, which is not implemented. */
-	if (error == EXT4_OK && (inode.flags & (EXT4_INODE_CASEFOLD | EXT4_INODE_IMMUTABLE))) {
-		error =
-		    inode.flags & EXT4_INODE_IMMUTABLE ? EXT4_PERMISSION_DENIED : EXT4_UNSUPPORTED;
+	if (error == EXT4_OK && (inode.flags & EXT4_INODE_IMMUTABLE)) {
+		error = EXT4_PERMISSION_DENIED;
+	}
+	if (error == EXT4_OK && (inode.flags & EXT4_INODE_CASEFOLD) &&
+	    policy.version != EXT4_FSCRYPT_CONTEXT_V2) {
+		error = EXT4_UNSUPPORTED;
 	}
 	if (error == EXT4_OK) {
 		error = ext4_allocation_init(&allocation, fs, transaction, &inode);
 		ready = error == EXT4_OK;
 	}
 	if (error == EXT4_OK) {
-		error = ext4_directory_scan(
-		    &allocation, &inode, disk, NULL, 0, EXT4_DIRECTORY_EMPTY, 0, &slot);
-	}
-	/* As in Linux, an inline directory moves to a block before it is encrypted. */
-	if (error == EXT4_OK) {
-		error = ext4_inline_expand(&allocation, &inode, disk);
+		error = ext4_directory_change_format(&allocation, &inode, disk,
+		    inode.flags | EXT4_INODE_ENCRYPT);
 	}
 	if (error == EXT4_OK) {
 		error = ext4_fscrypt_store(&allocation, &inode, disk, &policy);
@@ -756,6 +757,7 @@ ext4_set_encryption_policy(struct ext4_fs *fs, uint32_t number, uint32_t generat
 		}
 		return error;
 	}
+	ext4_fscrypt_forget(fs);
 	*result = inode;
 	return EXT4_OK;
 }

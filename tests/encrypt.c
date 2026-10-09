@@ -1555,9 +1555,10 @@ writable(struct device *device, const char *exports, const char *source)
 }
 
 
-/* Until stored hash layout transitions are implemented, neither policy version
- * may gain or lose CASEFOLD through the flag setter. The clear probe injects an
- * empty combined directory with valid checksums; v1 is intentionally invalid. */
+#include "encrypted_casefold_namespace.h"
+
+/* Version 2 transitions are writable; version 1 combined directories remain
+ * invalid. The v1 clear probe injects that invalid combination with valid CRCs. */
 static void
 keyed_casefold_boundary(struct device *device, uint8_t version)
 {
@@ -1569,6 +1570,8 @@ keyed_casefold_boundary(struct device *device, uint8_t version)
 	struct ext4_crypto_environment crypto;
 	struct ext4_inode directory;
 	struct ext4_inode result;
+	struct ext4_inode first;
+	struct ext4_inode file;
 	struct ext4_fs *fs;
 	struct keyring keyring;
 	uint8_t *before = malloc(device->size);
@@ -1609,6 +1612,31 @@ keyed_casefold_boundary(struct device *device, uint8_t version)
 	EXPECT(ext4_sync(fs), EXT4_OK);
 	memcpy(before, device->cache, device->size);
 	events = device->events;
+	if (version == FSCRYPT_V2) {
+		EXPECT(ext4_set_inode_flags(fs, directory.number, directory.generation,
+		    EXT4_INODE_CASEFOLD, EXT4_INODE_CASEFOLD, &encrypt_time, &directory), EXT4_OK);
+		casefold_namespace(device, fs, &directory);
+		EXPECT(ext4_mkdir(fs, EXT4_ROOT_INODE, 0, (const uint8_t *)"casefold-first", 14,
+		    &update, &encrypt_time, &first), EXT4_OK);
+		EXPECT(ext4_set_inode_flags(fs, first.number, first.generation,
+		    EXT4_INODE_CASEFOLD, EXT4_INODE_CASEFOLD, &encrypt_time, &first), EXT4_OK);
+		EXPECT(ext4_set_encryption_policy(fs, first.number, first.generation,
+		    &policy, &first), EXT4_OK);
+		EXPECT(ext4_create(fs, first.number, first.generation, (const uint8_t *)"First", 5,
+		    &update, &encrypt_time, &file), EXT4_OK);
+		result = find(fs, first.number, "FIRST");
+		CHECK(result.number == file.number);
+		EXPECT(ext4_unlink(fs, first.number, first.generation, (const uint8_t *)"first", 5,
+		    file.number, file.generation, &encrypt_time, &result), EXT4_OK);
+		EXPECT(ext4_rmdir(fs, EXT4_ROOT_INODE, 0, (const uint8_t *)"casefold-first", 14,
+		    first.number, first.generation, &encrypt_time, &result), EXT4_OK);
+		EXPECT(ext4_sync(fs), EXT4_OK);
+		ext4_unmount(fs);
+		CHECK(keyring.handles == 0 && device->live == 0);
+		casefold_transition_cuts(device, directory.number, directory.generation, &keyring, false);
+		casefold_transition_cuts(device, directory.number, directory.generation, &keyring, true);
+		goto restore;
+	}
 	EXPECT(ext4_set_inode_flags(fs, directory.number, directory.generation,
 		   EXT4_INODE_CASEFOLD, EXT4_INODE_CASEFOLD, &encrypt_time, &result),
 	    EXT4_UNSUPPORTED);
@@ -1633,13 +1661,16 @@ keyed_casefold_boundary(struct device *device, uint8_t version)
 	CHECK(memcmp(before, device->stable, device->size) == 0);
 	ext4_unmount(fs);
 	CHECK(device->live == 0 && keyring.handles == 0);
+restore:
 	ext4_encode32(&super->feature_incompat, features);
 	ext4_encode16(&super->encoding, encoding);
 	ext4_encode16(&super->encoding_flags, encoding_flags);
 	ext4_encode32(&super->checksum, checksum);
 	device_reset(device, device->base);
 	free(before);
-	printf("PASS encrypted v%u casefold transition refusal: unchanged media\n", version);
+	printf("PASS encrypted v%u casefold %s\n", version,
+	    version == FSCRYPT_V2 ? "namespace and empty indexed transitions" :
+	    "invalid transition refusal: unchanged media");
 }
 
 #include "crypto_failures.h"

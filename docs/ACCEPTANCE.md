@@ -37,10 +37,10 @@ silently reclassified to declare the project complete.
 ### Expanded encrypted/casefold compatibility
 
 The historical queue below predates combined encrypted/casefold support. This
-expansion remains open: existing block-backed v2 directories have keyed and no-key
-read/lookup support, but combined namespace mutations and empty-directory policy
-transitions still return unsupported. V1 combined policies are invalid in Linux
-and remain refused. Combined inline directories also remain unsupported.
+expansion remains open for independent/native acceptance. Block-backed v2 directories
+have keyed and no-key read/lookup, prepared-name namespace mutations and transactional
+empty-directory policy transitions. V1 combined policies are invalid in Linux and
+remain refused. Combined inline directories also remain unsupported.
 
 Portable evidence includes 29 independently authored OpenSSL CTS/SipHash filename
 profiles across 1/4/64 KiB linear/indexed, checksum and strict/relaxed wire models.
@@ -55,6 +55,24 @@ cannot run its ptrace-dependent shutdown check; this is not leak-check acceptanc
 The strict portable build and 68 selected regressions pass, including two-leaf
 depth-0/depth-1 routing, odd collision continuation, malformed selected leaves,
 reserved hash normalization and the existing verity, orphan and MMP checks.
+
+The writable-stage strict build and 68 selected regressions pass. Its independent
+filename models check replace/remove/reinsert snapshots, exact ciphertext and stored
+hash bytes, both empty format transitions, ordinary/SipHash root versions, strict
+malformed-name refusal, no-key removal and cancellation with unchanged media. The
+expanded 29-profile run also passes 582 allocation and 330 read-failure boundaries
+on the one-character, non-strict, no-growth wire-model mutation/transition path.
+Every transaction is canceled: each cut balances allocations and key handles,
+leaves the image unchanged and invokes no write or flush callback. This does not
+establish quota refusal, committed namespace changes, splitting or crash durability. A
+prepared name's hash is reused through scanning and reinsertion; the test provider
+also rejects any repeated encryption after preparation. The
+native encryption test now defines v2 creation/duplicate lookup, inherited subdirectories,
+cross-nonce rename, exchange, indexed hardlinks/removal, case-sensitive intermediate
+layout, both policy-setting orders and every observed write/barrier cut of empty
+index transitions in both directions. Those newly defined real-image paths have
+not run locally; hosted image execution, independent crash/recovery exports and
+Linux roundtrips are still required. Portable passing counts do not close those gates.
 
 Every block of this historical queue was closed by CI run 36574519444, which passed all nine suites with
 no-key names, probed index changes, the encryption, verity and casefolding

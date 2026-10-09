@@ -133,11 +133,15 @@ edge_slot(struct ext4_fs *fs, const struct ext4_inode *parent, const uint8_t *na
 {
 	struct edge_view view;
 	struct ext4_directory_slot slot;
+	struct ext4_directory_request request = { 0 };
 
 	edge_open(fs, parent, &view);
+	EXPECT(ext4_directory_request_open(fs, &view.inode, name, length,
+	    EXT4_NAME_REQUIRE_KEY, NULL, &request), EXT4_OK);
 	EXPECT(ext4_directory_scan(
-		   &view.allocation, &view.inode, view.disk, name, length, action, 0, &slot),
+		   &view.allocation, &view.inode, view.disk, &request, action, 0, &slot),
 	    EXT4_OK);
+	ext4_directory_request_close(fs, &request);
 	edge_close(&view);
 	return slot;
 }

@@ -14,8 +14,8 @@ struct ext4_rename_state {
 	struct ext4_directory_slot entries[2];
 	struct ext4_directory_slot dotdot[2];
 	struct ext4_allocation allocation;
-	/* Names as an encrypted parent stores them. */
-	struct ext4_rename_entry ciphered[2];
+	/* Each parent owns an independent plaintext and disk-name preparation. */
+	struct ext4_directory_request requests[2];
 	uint8_t cipher[2][EXT4_NAME_MAX];
 	struct ext4_fscrypt_policy whiteout_policy;
 };
@@ -116,52 +116,6 @@ ext4_directory_links_valid(struct ext4_fs *fs, const struct ext4_inode *inode, b
 		return (fs->info.feature_ro_compat & EXT4_FEATURE_RO_DIR_NLINK) != 0;
 	}
 	return empty ? inode->links == 2 : inode->links >= 2;
-}
-
-/* Names in an encrypted directory are stored and hashed as ciphertext: encrypt the
- * name as it would be stored, or for a removal without the key, resolve a no-key name
- * to its stored ciphertext. Casefolded encrypted directories hash plaintext with a
- * derived key, which is not implemented. Other directories keep the name. */
-static enum ext4_result
-ext4_namespace_cipher(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_t **name,
-    size_t *name_length, uint8_t *cipher, bool removal)
-{
-	struct ext4_fscrypt_key key;
-	struct ext4_fscrypt_nokey nokey;
-	uint8_t padded[EXT4_NAME_MAX];
-	uint32_t number;
-	size_t length = 0;
-	enum ext4_result error;
-
-	if (!(directory->flags & EXT4_INODE_ENCRYPT)) {
-		return EXT4_OK;
-	}
-	error = ext4_fscrypt_key(fs, directory, &key);
-	if ((error == EXT4_OK || error == EXT4_ENCRYPTED) &&
-	    (directory->flags & EXT4_INODE_CASEFOLD)) {
-		error = EXT4_UNSUPPORTED;
-	}
-	/* As in Linux, a removal without the key names its entry by a no-key name. */
-	if (error == EXT4_ENCRYPTED && removal) {
-		if (!ext4_fscrypt_nokey_decode(*name, *name_length, &nokey)) {
-			return EXT4_NOT_FOUND;
-		}
-		error = ext4_directory_nokey_find(fs, directory, &nokey, cipher, &length, &number);
-		if (error == EXT4_OK) {
-			*name = cipher;
-			*name_length = length;
-		}
-		return error;
-	}
-	if (error == EXT4_OK) {
-		error = ext4_fscrypt_name_encrypt(
-		    fs, &key, *name, *name_length, EXT4_NAME_MAX, padded, cipher, &length);
-	}
-	if (error == EXT4_OK) {
-		*name = cipher;
-		*name_length = length;
-	}
-	return error;
 }
 
 /* An encrypted symlink stores its target encrypted with the symlink's own key. */
@@ -322,6 +276,7 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	struct ext4_inode child;
 	struct ext4_inode_update times;
 	struct ext4_directory_slot slot;
+	struct ext4_directory_request request = { 0 };
 	struct ext4_allocation allocation;
 	struct ext4_fscrypt_policy policy;
 	uint8_t cipher[EXT4_NAME_MAX];
@@ -393,7 +348,8 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		goto cancel;
 	}
 	/* New names in an encrypted directory are encrypted with its key. */
-	error = ext4_namespace_cipher(fs, &parent, &name, &name_length, cipher, false);
+	error = ext4_directory_request_open(fs, &parent, name, name_length,
+	    EXT4_NAME_REQUIRE_KEY, cipher, &request);
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
@@ -453,7 +409,7 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 	}
 	ready = true;
 	error = ext4_directory_scan(
-	    &allocation, &parent, parent_disk, name, name_length, EXT4_DIRECTORY_INSERT, 0, &slot);
+	    &allocation, &parent, parent_disk, &request, EXT4_DIRECTORY_INSERT, 0, &slot);
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
@@ -496,7 +452,7 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		goto cancel;
 	}
 	error = ext4_directory_insert(
-	    &allocation, &parent, parent_disk, &slot, child.number, type, name, name_length);
+	    &allocation, &parent, parent_disk, &slot, child.number, type, &request);
 	if (error == EXT4_OK && create_mode == EXT4_MODE_DIRECTORY) {
 		error = ext4_directory_links(&allocation, parent_disk, &parent, 1, 0);
 	}
@@ -519,6 +475,7 @@ ext4_namespace_add(struct ext4_fs *fs, uint32_t directory, uint32_t directory_ge
 		fs->environment.release(
 		    fs->environment.context, stored_target, fs->info.block_size);
 	}
+	ext4_directory_request_close(fs, &request);
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
 		if (!ext4_commit_rejected(fs->journal, error)) {
@@ -538,6 +495,7 @@ cancel:
 		fs->environment.release(
 		    fs->environment.context, stored_target, fs->info.block_size);
 	}
+	ext4_directory_request_close(fs, &request);
 	ext4_transaction_cancel(transaction);
 	return error;
 }
@@ -672,6 +630,7 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 	struct ext4_allocation allocation;
 	struct ext4_directory_slot slot;
 	struct ext4_directory_slot empty;
+	struct ext4_directory_request request = { 0 };
 	uint8_t cipher[EXT4_NAME_MAX];
 	uint16_t type;
 	bool ready = false;
@@ -713,7 +672,8 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 		error = EXT4_PERMISSION_DENIED;
 		goto cancel;
 	}
-	error = ext4_namespace_cipher(fs, &parent, &name, &name_length, cipher, true);
+	error = ext4_directory_request_open(fs, &parent, name, name_length,
+	    EXT4_NAME_ALLOW_NOKEY_REMOVAL, cipher, &request);
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
@@ -727,7 +687,7 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 	}
 	ready = true;
 	error = ext4_directory_scan(
-	    &allocation, &parent, parent_disk, name, name_length, EXT4_DIRECTORY_FIND, 0, &slot);
+	    &allocation, &parent, parent_disk, &request, EXT4_DIRECTORY_FIND, 0, &slot);
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
@@ -762,7 +722,7 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 		goto cancel;
 	}
 	if (remove_directory) {
-		error = ext4_directory_scan(&allocation, &child, child_disk, NULL, 0,
+		error = ext4_directory_scan(&allocation, &child, child_disk, NULL,
 		    EXT4_DIRECTORY_EMPTY, parent.number, &empty);
 		if (error != EXT4_OK) {
 			goto cancel;
@@ -811,6 +771,7 @@ ext4_namespace_remove(struct ext4_fs *fs, uint32_t directory, uint32_t directory
 		goto cancel;
 	}
 	ext4_allocation_destroy(&allocation);
+	ext4_directory_request_close(fs, &request);
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
 		if (!ext4_commit_rejected(fs->journal, error)) {
@@ -830,6 +791,7 @@ cancel:
 	if (ready) {
 		ext4_allocation_destroy(&allocation);
 	}
+	ext4_directory_request_close(fs, &request);
 	ext4_transaction_cancel(transaction);
 	return error;
 }
@@ -863,7 +825,7 @@ ext4_rename_resolve(
 	enum ext4_result error;
 
 	error = ext4_directory_scan(allocation, &state->parents[index], state->parent_disks[index],
-	    entry->name, entry->name_length, EXT4_DIRECTORY_FIND, 0, slot);
+	    &state->requests[index], EXT4_DIRECTORY_FIND, 0, slot);
 	if (error == EXT4_NOT_FOUND && index == 1) {
 		return entry->inode == 0 ? EXT4_OK : EXT4_STALE;
 	}
@@ -949,6 +911,7 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 	struct ext4_transaction *transaction;
 	struct ext4_inode_update times;
 	struct ext4_directory_slot space;
+	struct ext4_directory_request dot = { 0 };
 	uint32_t feature_compat;
 	uint32_t feature_ro_compat;
 	unsigned int index;
@@ -1018,14 +981,12 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 			error = EXT4_NOT_FOUND;
 			goto cancel;
 		}
-		state->ciphered[index] = *names[index];
-		error =
-		    ext4_namespace_cipher(fs, &state->parents[index], &state->ciphered[index].name,
-			&state->ciphered[index].name_length, state->cipher[index], false);
+		error = ext4_directory_request_open(fs, &state->parents[index], names[index]->name,
+		    names[index]->name_length, EXT4_NAME_REQUIRE_KEY, state->cipher[index],
+		    &state->requests[index]);
 		if (error != EXT4_OK) {
 			goto cancel;
 		}
-		names[index] = &state->ciphered[index];
 		if (!ext4_directory_links_valid(fs, &state->parents[index], false)) {
 			error = EXT4_CORRUPT;
 			goto cancel;
@@ -1098,9 +1059,14 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 			error = EXT4_CORRUPT;
 			goto cancel;
 		}
-		error = ext4_directory_scan(&state->allocation, &state->objects[index],
-		    state->object_disks[index], (const uint8_t *)"..", 2, EXT4_DIRECTORY_FIND,
-		    names[index]->directory, &state->dotdot[index]);
+		error = ext4_directory_request_open(fs, &state->objects[index],
+		    (const uint8_t *)"..", 2, EXT4_NAME_REQUIRE_KEY, NULL, &dot);
+		if (error == EXT4_OK) {
+			error = ext4_directory_scan(&state->allocation, &state->objects[index],
+			    state->object_disks[index], &dot, EXT4_DIRECTORY_FIND,
+			    names[index]->directory, &state->dotdot[index]);
+		}
+		ext4_directory_request_close(fs, &dot);
 		if (error != EXT4_OK) {
 			goto cancel;
 		}
@@ -1137,7 +1103,7 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 	if (exists && !exchange) {
 		if (directory[1]) {
 			error = ext4_directory_scan(&state->allocation, &state->objects[1],
-			    state->object_disks[1], NULL, 0, EXT4_DIRECTORY_EMPTY,
+			    state->object_disks[1], NULL, EXT4_DIRECTORY_EMPTY,
 			    destination->directory, &space);
 			if (error != EXT4_OK) {
 				goto cancel;
@@ -1188,13 +1154,12 @@ ext4_namespace_rename(struct ext4_fs *fs, const struct ext4_rename_entry *source
 	if (!exists) {
 		/* The destination name as its parent stores it. */
 		error = ext4_directory_scan(&state->allocation, &state->parents[1],
-		    state->parent_disks[1], names[1]->name, names[1]->name_length,
+		    state->parent_disks[1], &state->requests[1],
 		    EXT4_DIRECTORY_INSERT, 0, &space);
 		if (error == EXT4_OK) {
 			error = ext4_directory_insert(&state->allocation, &state->parents[1],
 			    state->parent_disks[1], &space, state->objects[0].number,
-			    ext4_namespace_type(state->objects[0].mode), names[1]->name,
-			    names[1]->name_length);
+			    ext4_namespace_type(state->objects[0].mode), &state->requests[1]);
 		}
 	}
 	if (error != EXT4_OK) {
@@ -1276,6 +1241,9 @@ cancel:
 	}
 	ext4_transaction_cancel(transaction);
 out:
+	for (index = 0; index < 2; index++) {
+		ext4_directory_request_close(fs, &state->requests[index]);
+	}
 	fs->environment.release(fs->environment.context, state, sizeof(*state));
 	return error;
 }

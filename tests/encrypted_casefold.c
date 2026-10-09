@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "directory_index.h"
+#include "directory_write.h"
 #include "fscrypt.h"
 #include "keyring.h"
 #include "xattr.h"
@@ -48,6 +49,8 @@ struct model {
 	uint32_t live;
 	uint32_t allocations;
 	uint32_t reads;
+	uint32_t writes;
+	uint32_t flushes;
 	uint32_t fail_allocation;
 	uint32_t fail_read;
 	uint32_t cipher_calls;
@@ -55,6 +58,8 @@ struct model {
 	uint32_t derives;
 	uint64_t forced_hash;
 	bool force_hash;
+	bool hash_original;
+	bool allow_encrypt;
 	bool missing_key;
 	bool fail_hash;
 	bool fail_cipher;
@@ -176,7 +181,7 @@ model_cipher(void *context, void *key, uint8_t mode, bool encrypt, const uint8_t
 	struct model *model = context;
 
 	model->cipher_calls++;
-	CHECK(!encrypt && mode == EXT4_FSCRYPT_MODE_AES_256_CTS);
+	CHECK((!encrypt || model->allow_encrypt) && mode == EXT4_FSCRYPT_MODE_AES_256_CTS);
 	return model->fail_cipher ? EXT4_IO :
 	    keyring_cipher(context, key, mode, encrypt, iv, input, output, length);
 }
@@ -185,10 +190,12 @@ static enum ext4_result
 model_hash(void *context, void *key, const uint8_t *name, size_t length, uint64_t *hash)
 {
 	struct model *model = context;
+	uint32_t wanted = model->fixture->fields[model->hash_original ? HASH_LENGTH : QUERY_HASH_LENGTH];
+	const uint8_t *bytes = model->hash_original ? model->fixture->hash : model->fixture->query_hash;
 
 	model->hash_calls++;
-	CHECK(length == model->fixture->fields[QUERY_HASH_LENGTH]);
-	CHECK(memcmp(name, model->fixture->query_hash, length) == 0);
+	CHECK(length == wanted);
+	CHECK(memcmp(name, bytes, length) == 0);
 	if (model->force_hash && !model->fail_hash) {
 		*hash = model->forced_hash;
 		return EXT4_OK;
@@ -587,6 +594,82 @@ decode_bounds(struct model *model, bool indexed)
 }
 
 static void
+prepared_requests(struct model *model)
+{
+	const struct fixture *fixture = model->fixture;
+	struct ext4_fs *fs = &model->fs;
+	struct ext4_crypto_environment crypto = model_crypto(model);
+	struct ext4_directory_request request = { 0 };
+	struct ext4_name_hash stored = { fixture->fields[STORED_MAJOR], fixture->fields[STORED_MINOR] };
+	struct ext4_name_hash hash;
+	uint8_t cipher[EXT4_NAME_MAX];
+	uint32_t derives;
+	bool match;
+
+	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	model->hash_original = true;
+	model->allow_encrypt = true;
+	EXPECT(ext4_directory_request_open(fs, &model->directory, fixture->name,
+		   fixture->fields[NAME_LENGTH], EXT4_NAME_REQUIRE_KEY, cipher, &request), EXT4_OK);
+	model->allow_encrypt = false;
+	CHECK(request.identity == EXT4_NAME_KEYED && request.hash_ready);
+	CHECK(request.compare.name == fixture->name && request.compare.length == fixture->fields[NAME_LENGTH]);
+	CHECK(request.disk_name == cipher && request.disk_length == fixture->fields[CIPHER_LENGTH]);
+	CHECK(memcmp(cipher, fixture->cipher, request.disk_length) == 0);
+	CHECK(request.hash.major == stored.major && request.hash.minor == stored.minor);
+	EXPECT(ext4_directory_request_match(fs, &request, fixture->cipher,
+		   fixture->fields[CIPHER_LENGTH], &stored, &match), EXT4_OK);
+	CHECK(match == (!fs->casefold_strict || fixture->fields[NAME_VALID] != 0));
+	/* Replacing the provider evicts both handles. The request owns only bytes
+	 * and folds, and comparison must acquire a fresh pair rather than use them. */
+	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	CHECK(model->keyring.handles == 0);
+	EXPECT(ext4_directory_request_match(fs, &request, fixture->cipher,
+		   fixture->fields[CIPHER_LENGTH], &stored, &match), EXT4_OK);
+	CHECK(match == (!fs->casefold_strict || fixture->fields[NAME_VALID] != 0));
+	model->fail_cipher = true;
+	EXPECT(ext4_directory_request_match(fs, &request, fixture->cipher,
+		   fixture->fields[CIPHER_LENGTH], &stored, &match), EXT4_IO);
+	CHECK(!match);
+	model->fail_cipher = false;
+	ext4_directory_request_close(fs, &request);
+	CHECK(model->live == 0);
+	derives = model->derives;
+	EXPECT(ext4_directory_request_open(fs, &model->directory, (const uint8_t *)".",
+		   1, EXT4_NAME_REQUIRE_KEY, NULL, &request), EXT4_OK);
+	CHECK(request.compare.folds == NULL && request.nokey == NULL && model->derives == derives);
+	ext4_directory_request_close(fs, &request);
+	EXPECT(ext4_set_crypto(fs, NULL), EXT4_OK);
+	EXPECT(ext4_directory_request_open(fs, &model->directory, fixture->nokey,
+		   fixture->nokey_length, EXT4_NAME_ALLOW_NOKEY_REMOVAL, cipher, &request), EXT4_OK);
+	CHECK(request.identity == EXT4_NAME_NOKEY_QUERY && request.compare.folds == NULL);
+	CHECK(ext4_directory_request_probe(&request));
+	EXPECT(ext4_directory_request_hash(fs, &request, EXT4_HASH_SIPHASH, NULL, &hash), EXT4_OK);
+	CHECK(hash.major == stored.major && hash.minor == stored.minor);
+	EXPECT(ext4_directory_request_match(fs, &request, fixture->cipher,
+		   fixture->fields[CIPHER_LENGTH], &stored, &match), EXT4_OK);
+	CHECK(match && model->keyring.handles == 0);
+	memcpy(cipher, fixture->cipher, fixture->fields[CIPHER_LENGTH]);
+	request.disk_name = cipher;
+	request.disk_length = fixture->fields[CIPHER_LENGTH];
+	request.resolved_number = 3;
+	request.identity = EXT4_NAME_NOKEY_RESOLVED;
+	request.hash = stored;
+	request.hash_ready = true;
+	EXPECT(ext4_directory_request_match(fs, &request, fixture->cipher,
+		   fixture->fields[CIPHER_LENGTH], &stored, &match), EXT4_OK);
+	CHECK(match);
+	cipher[0] ^= 1U;
+	EXPECT(ext4_directory_request_match(fs, &request, fixture->cipher,
+		   fixture->fields[CIPHER_LENGTH], &stored, &match), EXT4_OK);
+	CHECK(!match);
+	ext4_directory_request_close(fs, &request);
+	CHECK(model->live == 0 && model->keyring.handles == 0);
+	model->hash_original = false;
+	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+}
+
+static void
 policy_refusals(struct model *model)
 {
 	struct ext4_fs *fs = &model->fs;
@@ -706,6 +789,7 @@ check_case(const struct fixture *fixture, uint32_t block_size, bool indexed,
 			index_routes(model);
 		}
 	}
+	prepared_requests(model);
 	policy_refusals(model);
 	EXPECT(ext4_set_crypto(&model->fs, NULL), EXT4_OK);
 	CHECK(model->keyring.handles == 0 && model->live == 0);
@@ -763,6 +847,8 @@ fixture_open(struct fixture *fixture, const char *directory, const char *stem)
 	free(bytes);
 }
 
+#include "encrypted_casefold_write.h"
+
 int
 main(int argc, char **argv)
 {
@@ -789,6 +875,8 @@ main(int argc, char **argv)
 			for (checksum = 0; checksum < 2; checksum++) {
 				for (strict = 0; strict < 2; strict++) {
 					check_case(fixture, sizes[size], indexed != 0,
+					    checksum != 0, strict != 0);
+					mutation_snapshots(fixture, sizes[size], indexed != 0,
 					    checksum != 0, strict != 0);
 				}
 			}

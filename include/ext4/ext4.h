@@ -432,7 +432,8 @@ enum ext4_result ext4_set_volume_name(struct ext4_fs *fs, const uint8_t *name, s
  * platform updates, not an explicitly admitted timestamp change. mask may also
  * select CASEFOLD, which changes only on empty directories of casefold volumes:
  * other volumes return UNSUPPORTED, other types NOT_DIRECTORY and directories
- * with entries NOT_EMPTY. */
+ * with entries NOT_EMPTY. Encrypted directories require a v2 policy; their
+ * stored directory format and cached hash keys change transactionally. */
 enum ext4_result ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint32_t generation,
     uint32_t mask, uint32_t flags, const struct ext4_timestamp *change_time,
     struct ext4_inode *result);
@@ -667,7 +668,9 @@ enum ext4_result ext4_get_encryption_policy(
  * Objects created in the directory inherit the policy with nonces of their own. A
  * directory with the same policy is unchanged; another policy returns EXISTS,
  * entries NOT_EMPTY, and other types NOT_DIRECTORY. Unsupported modes and flags,
- * and casefolded directories, return UNSUPPORTED. result receives the directory. */
+ * including v1 on a casefolded directory, return UNSUPPORTED. Empty casefolded
+ * directories accept v2 with a transactional stored-hash layout transition.
+ * result receives the directory. */
 enum ext4_result ext4_set_encryption_policy(struct ext4_fs *fs, uint32_t number,
     uint32_t generation, const struct ext4_encryption_policy *policy, struct ext4_inode *result);
 

@@ -10,8 +10,8 @@ the Machlin lab owns combined kernel and VM acceptance.
 
 ## Status
 
-The portable core's functional acceptance queue is complete, subject to the explicit
-format limits and interoperability exceptions in [the acceptance matrix](docs/ACCEPTANCE.md).
+The historical portable-core acceptance queue is closed. Expanded feature combinations
+and native interoperability gates remain open in [the acceptance matrix](docs/ACCEPTANCE.md).
 It supports ordinary and verified reads, transactional writes, allocation and
 preallocation, extent and indirect maps, namespace operations, indexed directories, extended attributes,
 inline data, clustered allocation, quotas, multi-mount protection, fscrypt and

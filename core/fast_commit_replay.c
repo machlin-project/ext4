@@ -585,6 +585,7 @@ ext4_fc_apply_name(struct ext4_fc_replay *replay, uint16_t type,
 	struct ext4_inode parent;
 	struct ext4_inode child;
 	struct ext4_directory_slot slot;
+	struct ext4_directory_request request = { 0 };
 	struct ext4_fc_inode_state *state;
 	const uint8_t *name = (const uint8_t *)(record + 1);
 	uint32_t index;
@@ -607,6 +608,12 @@ ext4_fc_apply_name(struct ext4_fc_replay *replay, uint16_t type,
 	}
 	if ((parent.mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
 		return EXT4_CORRUPT;
+	}
+	/* Linux excludes encrypted-parent namespace changes from fast commits.
+	 * A semantic name record cannot supply ciphertext and its keyed hashes;
+	 * ordinary block journal replay remains the interoperable path. */
+	if (parent.flags & EXT4_INODE_ENCRYPT) {
+		return EXT4_UNSUPPORTED;
 	}
 	error = ext4_fc_inode_get(replay, ext4_le32(&record->inode), &child_disk, &child);
 	if (error != EXT4_OK) {
@@ -633,14 +640,20 @@ ext4_fc_apply_name(struct ext4_fc_replay *replay, uint16_t type,
 		replay->allocation.allocated = 0;
 		replay->allocation.freed = 0;
 	}
-	error = ext4_directory_scan(&replay->allocation, &parent, parent_disk, name, length,
+	error = ext4_directory_request_open(fs, &parent, name, length,
+	    EXT4_NAME_LOGGED, NULL, &request);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	error = ext4_directory_scan(&replay->allocation, &parent, parent_disk, &request,
 	    type == EXT4_FC_UNLINK ? EXT4_DIRECTORY_FIND : EXT4_DIRECTORY_INSERT, 0, &slot);
 	if (type == EXT4_FC_UNLINK) {
 		if (error == EXT4_NOT_FOUND) {
-			return EXT4_OK;
+			error = EXT4_OK;
+			goto out;
 		}
 		if (error != EXT4_OK || slot.number != child.number) {
-			return error == EXT4_OK ? EXT4_OK : error;
+			goto out;
 		}
 		error = ext4_directory_remove(&replay->allocation, &parent, &slot);
 		if (error == EXT4_OK && child.links != 0) {
@@ -651,16 +664,18 @@ ext4_fc_apply_name(struct ext4_fc_replay *replay, uint16_t type,
 	} else if (error == EXT4_EXISTS) {
 		/* A previous interrupted replay may already have installed this name. */
 		if (slot.number != child.number) {
-			return EXT4_CORRUPT;
+			error = EXT4_CORRUPT;
+			goto out;
 		}
 		error = EXT4_OK;
 	} else if (error == EXT4_OK) {
 		error = ext4_directory_insert(&replay->allocation, &parent, parent_disk, &slot,
-		    child.number, ext4_fc_type(child.mode), name, length);
+		    child.number, ext4_fc_type(child.mode), &request);
 		change_parent_links = directory;
 		if (error == EXT4_OK && type == EXT4_FC_LINK) {
 			if (child.links == EXT4_LINK_MAX) {
-				return EXT4_CORRUPT;
+				error = EXT4_CORRUPT;
+				goto out;
 			}
 			ext4_encode16(&child_disk->links, child.links + 1U);
 		}
@@ -671,13 +686,15 @@ ext4_fc_apply_name(struct ext4_fc_replay *replay, uint16_t type,
 			    (fs->info.feature_ro_compat & EXT4_FEATURE_RO_DIR_NLINK)) {
 				/* Indexed directories may already have an unknown link count. */
 			} else if (parent.links < 2) {
-				return EXT4_CORRUPT;
+				error = EXT4_CORRUPT;
+				goto out;
 			} else if (type == EXT4_FC_UNLINK) {
 				ext4_encode16(&parent_disk->links, parent.links - 1U);
 			} else if (parent.links == EXT4_LINK_MAX) {
 				if (!(ext4_le32(&parent_disk->flags) & EXT4_INODE_INDEX) ||
 				    !(fs->info.feature_ro_compat & EXT4_FEATURE_RO_DIR_NLINK)) {
-					return EXT4_CORRUPT;
+					error = EXT4_CORRUPT;
+					goto out;
 				}
 				ext4_encode16(&parent_disk->links, 1);
 			} else {
@@ -687,6 +704,8 @@ ext4_fc_apply_name(struct ext4_fc_replay *replay, uint16_t type,
 		ext4_inode_checksum_set(fs, parent.number, parent_disk);
 		ext4_inode_checksum_set(fs, child.number, child_disk);
 	}
+out:
+	ext4_directory_request_close(fs, &request);
 	return error;
 }
 

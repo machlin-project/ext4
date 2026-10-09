@@ -855,6 +855,7 @@ changing_media_guards(struct device *device, uint32_t ordinal, bool conversion)
 	struct ext4_allocation allocation;
 	struct ext4_directory_index tree;
 	struct ext4_directory_slot slot;
+	struct ext4_directory_request request = { 0 };
 	uint8_t name[EXT4_NAME_MAX + 1];
 	uint64_t physical;
 	unsigned int kind;
@@ -870,9 +871,12 @@ changing_media_guards(struct device *device, uint32_t ordinal, bool conversion)
 			   fs, transaction, parent.number, parent.generation, &disk, &parent),
 		    EXT4_OK);
 		EXPECT(ext4_allocation_init(&allocation, fs, transaction, &parent), EXT4_OK);
-		EXPECT(ext4_directory_scan(&allocation, &parent, disk, name, EXT4_NAME_MAX,
+		EXPECT(ext4_directory_request_open(fs, &parent, name, EXT4_NAME_MAX,
+			   EXT4_NAME_REQUIRE_KEY, NULL, &request), EXT4_OK);
+		EXPECT(ext4_directory_scan(&allocation, &parent, disk, &request,
 			   EXT4_DIRECTORY_INSERT, 0, &slot),
 		    EXT4_OK);
+		ext4_directory_request_close(fs, &request);
 		CHECK(conversion ? slot.physical == 0 : slot.repack);
 		if (!conversion) {
 			EXPECT(ext4_index_open(&allocation, &parent, disk, &tree, true), EXT4_OK);
@@ -928,6 +932,7 @@ prepare_index_creation(struct device *device)
 	struct ext4_inode result;
 	struct ext4_inode_update update = attributes();
 	struct ext4_directory_slot slot;
+	struct ext4_directory_request request = { 0 };
 	uint8_t name[EXT4_NAME_MAX + 1];
 	uint32_t ordinal;
 
@@ -958,9 +963,12 @@ prepare_index_creation(struct device *device)
 			   fs, transaction, parent.number, parent.generation, &disk, &parent),
 		    EXT4_OK);
 		EXPECT(ext4_allocation_init(&allocation, fs, transaction, &parent), EXT4_OK);
-		EXPECT(ext4_directory_scan(&allocation, &parent, disk, name, EXT4_NAME_MAX,
+		EXPECT(ext4_directory_request_open(fs, &parent, name, EXT4_NAME_MAX,
+			   EXT4_NAME_REQUIRE_KEY, NULL, &request), EXT4_OK);
+		EXPECT(ext4_directory_scan(&allocation, &parent, disk, &request,
 			   EXT4_DIRECTORY_INSERT, 0, &slot),
 		    EXT4_OK);
+		ext4_directory_request_close(fs, &request);
 		ext4_allocation_destroy(&allocation);
 		ext4_transaction_cancel(transaction);
 		if (slot.physical == 0) {
