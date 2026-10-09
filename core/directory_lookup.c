@@ -25,6 +25,11 @@ struct ext4_lookup_state {
 	struct ext4_lookup_node nodes[EXT4_DX_MAX_INDIRECT_LEVELS + 1U];
 	uint8_t *leaf;
 	struct ext4_directory_name key;
+	struct ext4_fscrypt_key crypt;
+	const struct ext4_fscrypt_nokey *nokey;
+	uint32_t minor_hash;
+	bool encrypted_fold;
+	bool hash_filter;
 };
 
 static const struct ext4_dx_entry_disk *
@@ -136,15 +141,49 @@ ext4_lookup_child(const struct ext4_lookup_node *node, uint16_t position, uint32
 	return EXT4_OK;
 }
 
+/* Keep plaintext, folded plaintext and no-key identity separate. Ciphertext
+ * never enters Unicode normalization, and provider failures remain errors. */
+static enum ext4_result
+ext4_lookup_match(struct ext4_lookup_state *state, const struct ext4_dir_entry *entry,
+    const struct ext4_name_hash *stored, bool *match)
+{
+	uint8_t plain[EXT4_NAME_MAX];
+	size_t length = 0;
+	enum ext4_result error;
+
+	*match = false;
+	if (state->nokey != NULL) {
+		*match = !ext4_fscrypt_dot(entry->name, entry->name_length) &&
+		    ext4_fscrypt_nokey_match(state->nokey, entry->name, entry->name_length);
+		return EXT4_OK;
+	}
+	if (!state->encrypted_fold || ext4_fscrypt_dot(state->name, state->name_length) ||
+	    ext4_fscrypt_dot(entry->name, entry->name_length)) {
+		*match = ext4_directory_name_match(&state->key, entry->name, entry->name_length);
+		return EXT4_OK;
+	}
+	if (state->hash_filter &&
+	    (stored->major != state->hash || stored->minor != state->minor_hash)) {
+		return EXT4_OK;
+	}
+	error = ext4_fscrypt_name_decrypt(state->fs, &state->crypt, entry->name,
+	    entry->name_length, sizeof(plain), plain, &length);
+	if (error == EXT4_OK) {
+		*match = ext4_directory_name_match(&state->key, plain, length);
+	}
+	return error;
+}
+
 static enum ext4_result
 ext4_lookup_scan(struct ext4_lookup_state *state, uint32_t logical,
     const struct ext4_index_range *range, uint32_t *number)
 {
 	struct ext4_dir_entry entry;
-	struct ext4_name_hash hash;
+	struct ext4_name_hash hash = { 0, 0 };
 	uint32_t found = 0;
 	uint32_t offset = 0;
 	uint32_t length;
+	bool match;
 	enum ext4_result error;
 
 	error = ext4_lookup_read(state, logical, state->leaf);
@@ -156,7 +195,7 @@ ext4_lookup_scan(struct ext4_lookup_state *state, uint32_t logical,
 	}
 	while (offset < state->fs->info.block_size) {
 		error = ext4_directory_entry_decode(state->fs, state->leaf, offset,
-		    (state->directory->flags & EXT4_INODE_ENCRYPT) != 0, &entry, &length);
+		    state->directory->flags, &entry, &length, &hash);
 		if (error != EXT4_OK) {
 			return error;
 		}
@@ -170,16 +209,22 @@ ext4_lookup_scan(struct ext4_lookup_state *state, uint32_t logical,
 				entry.name[1] == '.')) {
 				return EXT4_CORRUPT;
 			}
-			error = ext4_directory_name_hash(&state->key, state->version,
-			    state->fs->directory_hash_seed, entry.name, entry.name_length, &hash);
-			if (error != EXT4_OK) {
-				return error;
+			if (!state->encrypted_fold) {
+				error = ext4_directory_name_hash(&state->key, state->version,
+				    state->fs->directory_hash_seed, entry.name, entry.name_length, &hash);
+				if (error != EXT4_OK) {
+					return error;
+				}
 			}
 			if (!ext4_index_contains(range, hash.major)) {
 				return EXT4_CORRUPT;
 			}
 		}
-		if (ext4_directory_name_match(&state->key, entry.name, entry.name_length)) {
+		error = ext4_lookup_match(state, &entry, &hash, &match);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		if (match) {
 			if (found != 0) {
 				return EXT4_CORRUPT;
 			}
@@ -250,7 +295,7 @@ ext4_lookup_indexed(struct ext4_lookup_state *state, uint32_t *number)
 {
 	struct ext4_index_metadata metadata;
 	struct ext4_index_range range;
-	struct ext4_name_hash hash;
+	struct ext4_name_hash hash = { 0, 0 };
 	struct ext4_lookup_node *root = &state->nodes[0];
 	struct ext4_lookup_node *node;
 	struct ext4_lookup_node *child;
@@ -279,7 +324,8 @@ ext4_lookup_indexed(struct ext4_lookup_state *state, uint32_t *number)
 	if (error != EXT4_OK) {
 		return error;
 	}
-	if (flags == (EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH)) {
+	if (state->version != EXT4_HASH_SIPHASH &&
+	    flags == (EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH)) {
 		return EXT4_CORRUPT;
 	}
 	if (state->name[0] == '.' &&
@@ -297,12 +343,14 @@ ext4_lookup_indexed(struct ext4_lookup_state *state, uint32_t *number)
 			state->version += EXT4_HASH_LEGACY_UNSIGNED;
 		}
 	}
-	error = ext4_directory_name_hash(&state->key, state->version,
-	    state->fs->directory_hash_seed, state->name, state->name_length, &hash);
-	if (error != EXT4_OK) {
-		return error;
+	if (!state->encrypted_fold) {
+		error = ext4_directory_name_hash(&state->key, state->version,
+		    state->fs->directory_hash_seed, state->name, state->name_length, &hash);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		state->hash = hash.major;
 	}
-	state->hash = hash.major;
 	root->position = ext4_lookup_position(root, state->hash);
 	for (;;) {
 		node = &state->nodes[level];
@@ -363,6 +411,8 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 	struct ext4_inode found = { 0 };
 	struct ext4_fscrypt_key key;
 	struct ext4_fscrypt_nokey nokey;
+	struct ext4_name_hash hash = { 0, 0 };
+	const struct ext4_casefold *hash_fold;
 	uint8_t cipher[EXT4_NAME_MAX];
 	uint8_t padded[EXT4_NAME_MAX];
 	uint8_t *buffer;
@@ -391,39 +441,51 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 	if ((directory->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
 		return EXT4_NOT_DIRECTORY;
 	}
-	/* Encrypted directories store and hash ciphertext names: the lookup name is
-	 * encrypted as it would be stored. Casefolded ones hash plaintext names with a
-	 * key derived for the directory, which is not implemented. */
+	state.encrypted_fold = ext4_directory_has_hashes(directory->flags);
+	error = ext4_fscrypt_directory_policy(fs, directory);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	/* Ordinary encryption uses ciphertext names; combined directories retain
+	 * plaintext for Unicode comparison and keyed hashing. */
 	if ((directory->flags & EXT4_INODE_ENCRYPT) && !ext4_fscrypt_dot(name, name_length)) {
 		error = ext4_fscrypt_key(fs, directory, &key);
-		if ((error == EXT4_OK || error == EXT4_ENCRYPTED) &&
-		    (directory->flags & EXT4_INODE_CASEFOLD)) {
-			error = EXT4_UNSUPPORTED;
-		}
 		/* Without the key, names are Linux's no-key names; others do not exist. */
 		if (error == EXT4_ENCRYPTED) {
 			if (!ext4_fscrypt_nokey_decode(name, name_length, &nokey)) {
 				return EXT4_NOT_FOUND;
 			}
-			error = ext4_directory_nokey_find(
-			    fs, directory, &nokey, cipher, &cipher_length, &number);
-			if (error == EXT4_OK) {
-				error = ext4_get_inode(fs, number, &found);
+			if (state.encrypted_fold) {
+				state.nokey = &nokey;
+				state.hash = ext4_le32((const struct ext4_le32 *)nokey.bytes);
+				error = EXT4_OK;
+			} else {
+				error = ext4_directory_nokey_find(
+				    fs, directory, &nokey, cipher, &cipher_length, &number);
+				if (error == EXT4_OK) {
+					error = ext4_get_inode(fs, number, &found);
+				}
+				if (error == EXT4_OK) {
+					*inode = found;
+				}
+				return error;
 			}
-			if (error == EXT4_OK) {
-				*inode = found;
-			}
-			return error;
 		}
-		if (error == EXT4_OK) {
+		if (error == EXT4_OK && !state.encrypted_fold) {
 			error = ext4_fscrypt_name_encrypt(fs, &key, name, name_length,
 			    EXT4_NAME_MAX, padded, cipher, &cipher_length);
 		}
 		if (error != EXT4_OK) {
 			return error;
 		}
-		name = cipher;
-		name_length = cipher_length;
+		if (state.encrypted_fold) {
+			if (state.nokey == NULL) {
+				state.crypt = key;
+			}
+		} else {
+			name = cipher;
+			name_length = cipher_length;
+		}
 	}
 	if (!(directory->flags & EXT4_INODE_INLINE_DATA) &&
 	    directory->size % fs->info.block_size != 0) {
@@ -446,10 +508,37 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 	state.name = name;
 	state.name_length = name_length;
 	state.leaf = buffer;
-	error = ext4_directory_name_open(fs, directory, name, name_length, &state.key);
+	error = state.nokey != NULL ? EXT4_OK :
+	    ext4_directory_name_open(fs, directory, name, name_length, &state.key);
 	if (error != EXT4_OK) {
 		fs->environment.release(fs->environment.context, buffer, capacity);
 		return error;
+	}
+	if (state.encrypted_fold && state.nokey == NULL &&
+	    !ext4_fscrypt_dot(name, name_length)) {
+		/* Linux's prepared name reserves a NUL within NAME_MAX. Its hash
+		 * wrapper folds that prepared result again: removing an ignorable
+		 * barrier can change canonical ordering on this second pass. Keep
+		 * the first fold for comparison, and reuse entry scratch for hashing. */
+		state.hash_filter = state.key.folded && state.key.folds[0].length != 0 &&
+		    state.key.folds[0].length < EXT4_NAME_MAX;
+		hash_fold = state.key.folded ? &state.key.folds[0] : NULL;
+		if (state.hash_filter) {
+			error = ext4_casefold_name(&state.key.folds[1], hash_fold->bytes,
+			    hash_fold->length);
+			if (error != EXT4_OK) {
+				goto out;
+			}
+			hash_fold = &state.key.folds[1];
+		}
+		error = ext4_fscrypt_name_hash(fs, &state.crypt,
+		    hash_fold != NULL ? hash_fold->bytes : name,
+		    hash_fold != NULL ? hash_fold->length : name_length, &hash);
+		if (error != EXT4_OK) {
+			goto out;
+		}
+		state.hash = hash.major;
+		state.minor_hash = hash.minor;
 	}
 	if (indexed) {
 		for (index = 0; index <= levels; index++) {
@@ -465,6 +554,7 @@ ext4_lookup(struct ext4_fs *fs, const struct ext4_inode *directory, const uint8_
 			*inode = found;
 		}
 	}
+out:
 	ext4_directory_name_close(fs, &state.key);
 	fs->environment.release(fs->environment.context, buffer, capacity);
 	return error;

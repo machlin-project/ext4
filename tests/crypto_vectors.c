@@ -186,6 +186,28 @@ hkdf(void)
 	CHECK(memcmp(output, wanted, sizeof(output)) == 0);
 }
 
+static void
+siphash(void)
+{
+	static const uint8_t lengths[] = { 0, 1, 7, 8, 15, 16 };
+	static const uint64_t answers[] = { UINT64_C(0x726fdb47dd0e0e31),
+		UINT64_C(0x74f839c593dc67fd), UINT64_C(0xab0200f58b01d137),
+		UINT64_C(0x93f5f5799a932462), UINT64_C(0xa129ca6149be45e5),
+		UINT64_C(0x3f2acc7f57c29bdb) };
+	uint8_t key[16];
+	uint8_t message[16];
+	size_t index;
+
+	/* SipHash authors' published CC0 vectors_sip64, also checked by the
+	 * independent EVP filename generator. */
+	for (index = 0; index < sizeof(key); index++) {
+		key[index] = message[index] = (uint8_t)index;
+	}
+	for (index = 0; index < sizeof(lengths); index++) {
+		CHECK(test_siphash24(key, message, lengths[index]) == answers[index]);
+	}
+}
+
 int
 main(void)
 {
@@ -193,6 +215,7 @@ main(void)
 	xts();
 	cts();
 	hkdf();
-	printf("PASS reference AES, XTS, CBC-CTS and HKDF-SHA512 known answers\n");
+	siphash();
+	printf("PASS reference AES, XTS, CBC-CTS, HKDF-SHA512 and SipHash-2-4 known answers\n");
 	return 0;
 }

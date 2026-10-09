@@ -353,11 +353,20 @@ ext4_fc_apply_inode(
 			/* A format transition needs its own conversion; neither root can
 			 * be interpreted as the other mapping representation. */
 			return EXT4_UNSUPPORTED;
+		} else if ((mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY &&
+		    ext4_directory_has_hashes(inode.flags | flags) &&
+		    ((inode.flags ^ flags) & (EXT4_INODE_ENCRYPT | EXT4_INODE_CASEFOLD))) {
+			/* An inode record alone cannot convert the stored name hash layout. */
+			return EXT4_UNSUPPORTED;
 		} else if ((mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY) {
 			directory_size = inode.size;
 			directory_flags = inode.flags & EXT4_INODE_INDEX;
 		}
 		orphan_next = created ? 0 : ext4_le32(&disk->deletion_time);
+	}
+	if (created && type == EXT4_MODE_DIRECTORY && ext4_directory_has_hashes(flags)) {
+		/* Semantic directory reconstruction does not yet emit stored name hashes. */
+		return EXT4_UNSUPPORTED;
 	}
 	if (created) {
 		ext4_zero(disk, fs->inode_size);

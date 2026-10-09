@@ -330,6 +330,11 @@ def main():
                 shutil.copyfile(before, candidate)
                 run(row, [helper, candidate, expected, "--" + damage])
                 row["malformed"][damage] = digest(candidate)
+        if name == "casefold-4k":
+            candidate = directory / "casefold-transition.img"
+            shutil.copyfile(before, candidate)
+            run(row, [helper, candidate, expected, "--casefold-transition"])
+            row["casefold_transition_sha256"] = digest(candidate)
         if large_prefix and not huge_prefix:
             candidate = directory / "conflicting-name-owner.img"
             shutil.copyfile(before, candidate)

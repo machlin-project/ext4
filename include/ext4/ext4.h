@@ -612,7 +612,7 @@ struct ext4_verity_parameters {
  * or AES-256-CBC with ciphertext stealing, as Linux's cts(cbc(aes)), over one name.
  * Input and output are distinct and need no special alignment. release_key
  * releases a handle of either kind.
- * random_bytes fills a new inode's nonce. The mount keeps up to 16 derived keys;
+ * random_bytes fills a new inode's nonce. The mount caches up to 16 inode key sets;
  * installing the environment again releases them, which is how a removed key stops
  * being used. Handles transfer to the core only on OK; a callback cleans up its
  * partial allocations on failure. cipher and random_bytes may modify their output
@@ -638,6 +638,11 @@ struct ext4_crypto_environment {
 	    const uint8_t *iv, const void *input, void *output, size_t length);
 	void (*release_key)(void *context, void *key);
 	enum ext4_result (*random_bytes)(void *context, void *buffer, size_t length);
+	/* Optional SipHash-2-4 for fscrypt v2 encrypted casefold directory names.
+	 * derive_key supplies a distinct 16-byte context-5 directory hash key.
+	 * Return the numeric 64-bit hash, independent of host byte order. */
+	enum ext4_result (*siphash)(void *context, void *key, const uint8_t *name,
+	    size_t name_length, uint64_t *hash);
 };
 /* Install or, with NULL, remove the adapter's cryptography; the core copies it. */
 enum ext4_result ext4_set_crypto(struct ext4_fs *fs, const struct ext4_crypto_environment *crypto);

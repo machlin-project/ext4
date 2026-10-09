@@ -34,7 +34,29 @@ silently reclassified to declare the project complete.
 
 ## Remaining portable-core work
 
-Every block of this queue is closed. CI run 36574519444 passed all nine suites with
+### Expanded encrypted/casefold compatibility
+
+The historical queue below predates combined encrypted/casefold support. This
+expansion remains open: existing block-backed v2 directories have keyed and no-key
+read/lookup support, but combined namespace mutations and empty-directory policy
+transitions still return unsupported. V1 combined policies are invalid in Linux
+and remain refused. Combined inline directories also remain unsupported.
+
+Portable evidence includes 29 independently authored OpenSSL CTS/SipHash filename
+profiles across 1/4/64 KiB linear/indexed, checksum and strict/relaxed wire models.
+Two combining-barrier profiles reproduce and correct the second-fold hash mismatch
+while preserving first-fold comparison. Paired cache eviction and derivation-failure
+tests cover 84 single/paired-key iterator cases; focused allocation/read failures
+preserve outputs and resource balance. These are synthetic wire models, not
+Linux-authored filesystem images. Native v2 PAD4/PAD32 linear/indexed roundtrips,
+independent fsck, broader HTree topology and the FSKit SipHash provider remain
+acceptance gates. Local ASan/UBSan checks disable LeakSanitizer because this executor
+cannot run its ptrace-dependent shutdown check; this is not leak-check acceptance.
+The strict portable build and 68 selected regressions pass, including two-leaf
+depth-0/depth-1 routing, odd collision continuation, malformed selected leaves,
+reserved hash normalization and the existing verity, orphan and MMP checks.
+
+Every block of this historical queue was closed by CI run 36574519444, which passed all nine suites with
 no-key names, probed index changes, the encryption, verity and casefolding
 sequences and writes without a journal.
 

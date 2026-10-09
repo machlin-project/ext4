@@ -68,6 +68,7 @@ foreach name, source : {
   'deferred': 'deferred',
   'verity': 'verity', 'encrypt': 'encrypt', 'casefold': 'casefold', 'casefold-fs': 'casefold_fs', 'quota': 'quota',
   'rename': 'rename', 'orphan': 'orphan', 'orphan-index': 'orphan_index', 'fscrypt-lifetime': 'fscrypt_lifetime',
+  'directory-guard': 'directory_guard', 'encrypted-casefold': 'encrypted_casefold',
 }
   programs += {name: executable('ext4-' + name + '-test', 'tests/' + source + '.c',
     include_directories: internal_headers, dependencies: posix_dependency)}

@@ -88,12 +88,17 @@ ext4_directory_checksum(
 
 enum ext4_result
 ext4_directory_entry_decode(struct ext4_fs *fs, const uint8_t *buffer, uint32_t offset,
-    bool ciphertext, struct ext4_dir_entry *entry, uint32_t *record_length)
+    uint32_t flags, struct ext4_dir_entry *entry, uint32_t *record_length,
+    struct ext4_name_hash *hash)
 {
 	const struct ext4_dir_header_disk *header;
+	const struct ext4_dir_hash_disk *stored;
 	uint32_t length;
 	uint32_t number;
 	uint16_t names;
+	uint32_t hash_offset = 0;
+	bool extended;
+	bool ciphertext = (flags & EXT4_INODE_ENCRYPT) != 0;
 	size_t index;
 	bool checksum_tail;
 	bool filetype = (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_FILETYPE) != 0;
@@ -118,6 +123,18 @@ ext4_directory_entry_decode(struct ext4_fs *fs, const uint8_t *buffer, uint32_t 
 	    names > EXT4_NAME_MAX || number > fs->info.inodes) {
 		return EXT4_CORRUPT;
 	}
+	extended = ext4_directory_has_hashes(flags) && !checksum_tail &&
+	    !ext4_fscrypt_dot(buffer + offset + sizeof(*header), names);
+	if (extended) {
+		hash_offset = sizeof(*header) +
+		    ((names + EXT4_DIRECTORY_ALIGNMENT - 1U) & ~(EXT4_DIRECTORY_ALIGNMENT - 1U));
+		/* Deleted records retain the parent-aware minimum as well. HTree
+		 * fake records span a full block; checksum tails and dots do not. */
+		if (length < sizeof(*header) + EXT4_DIRECTORY_ALIGNMENT + sizeof(*stored) ||
+		    hash_offset > length || sizeof(*stored) > length - hash_offset) {
+			return EXT4_CORRUPT;
+		}
+	}
 	if (number != 0) {
 		if (names == 0 || (filetype && header->type > EXT4_FT_SYMLINK)) {
 			return EXT4_CORRUPT;
@@ -130,6 +147,11 @@ ext4_directory_entry_decode(struct ext4_fs *fs, const uint8_t *buffer, uint32_t 
 		}
 		ext4_copy(entry->name, buffer + offset + sizeof(*header), names);
 		entry->name[names] = 0;
+		if (extended && hash != NULL) {
+			stored = (const struct ext4_dir_hash_disk *)(buffer + offset + hash_offset);
+			hash->major = ext4_le32(&stored->major);
+			hash->minor = ext4_le32(&stored->minor);
+		}
 	}
 	entry->inode = number;
 	entry->name_length = names;
@@ -140,7 +162,7 @@ ext4_directory_entry_decode(struct ext4_fs *fs, const uint8_t *buffer, uint32_t 
 
 static enum ext4_result
 ext4_directory_block_validate(
-    struct ext4_fs *fs, const uint8_t *buffer, uint32_t wanted, bool ciphertext)
+    struct ext4_fs *fs, const uint8_t *buffer, uint32_t wanted, uint32_t flags)
 {
 	struct ext4_dir_entry entry;
 	uint32_t offset = 0;
@@ -149,7 +171,7 @@ ext4_directory_block_validate(
 
 	while (offset < fs->info.block_size) {
 		error =
-		    ext4_directory_entry_decode(fs, buffer, offset, ciphertext, &entry, &length);
+		    ext4_directory_entry_decode(fs, buffer, offset, flags, &entry, &length, NULL);
 		if (error != EXT4_OK) {
 			return error;
 		}
@@ -175,9 +197,16 @@ ext4_directory_nokey_hashing(struct ext4_fs *fs, const struct ext4_inode *direct
 	enum ext4_result error;
 
 	*hashed = false;
-	if (!(fs->info.feature_compat & EXT4_FEATURE_COMPAT_DIR_INDEX) ||
+	if (ext4_directory_has_hashes(directory->flags) &&
+	    !(directory->flags & EXT4_INODE_INDEX)) {
+		*hashed = true;
+		*version = EXT4_HASH_SIPHASH;
+		return EXT4_OK;
+	}
+	if (!ext4_directory_has_hashes(directory->flags) &&
+	    (!(fs->info.feature_compat & EXT4_FEATURE_COMPAT_DIR_INDEX) ||
 	    fs->directory_hash_flags ==
-		(EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH)) {
+		(EXT4_SIGNED_DIRECTORY_HASH | EXT4_UNSIGNED_DIRECTORY_HASH))) {
 		return EXT4_OK;
 	}
 	if (directory->flags & EXT4_INODE_INDEX) {
@@ -217,6 +246,7 @@ ext4_directory_visit(struct ext4_fs *fs, const struct ext4_inode *directory, uin
     void *context, bool raw)
 {
 	struct ext4_dir_entry decoded;
+	struct ext4_index_metadata metadata;
 	struct ext4_fscrypt_key key;
 	struct ext4_name_hash hash = { 0, 0 };
 	uint8_t plain[EXT4_NAME_MAX];
@@ -246,14 +276,16 @@ ext4_directory_visit(struct ext4_fs *fs, const struct ext4_inode *directory, uin
 	if ((directory->mode & EXT4_MODE_TYPE) != EXT4_MODE_DIRECTORY) {
 		return EXT4_NOT_DIRECTORY;
 	}
-	/* Without the key, encrypted names are presented as Linux's no-key names.
-	 * Casefolded encrypted directories hash plaintext with a derived key, which
-	 * is not implemented. */
+	error = ext4_fscrypt_directory_policy(fs, directory);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	/* Without the key, encrypted names are presented as Linux's no-key names. */
 	if ((directory->flags & EXT4_INODE_ENCRYPT) && !raw) {
 		error = ext4_fscrypt_key(fs, directory, &key);
 		if (error == EXT4_ENCRYPTED) {
 			nokey = true;
-			error = directory->flags & EXT4_INODE_CASEFOLD ? EXT4_UNSUPPORTED : EXT4_OK;
+			error = EXT4_OK;
 		}
 		if (error != EXT4_OK) {
 			return error;
@@ -300,9 +332,12 @@ ext4_directory_visit(struct ext4_fs *fs, const struct ext4_inode *directory, uin
 		}
 		error = ext4_directory_checksum(
 		    fs, directory, (uint32_t)(block_offset / fs->info.block_size), buffer);
+		if (error == EXT4_OK && block_offset == 0 && (directory->flags & EXT4_INODE_INDEX)) {
+			error = ext4_index_decode(fs, directory, 0, buffer, &metadata);
+		}
 		if (error == EXT4_OK) {
 			error = ext4_directory_block_validate(
-			    fs, buffer, wanted, (directory->flags & EXT4_INODE_ENCRYPT) != 0);
+			    fs, buffer, wanted, directory->flags);
 		}
 		if (error != EXT4_OK) {
 			goto out;
@@ -310,7 +345,7 @@ ext4_directory_visit(struct ext4_fs *fs, const struct ext4_inode *directory, uin
 		offset = wanted;
 		while (offset < fs->info.block_size) {
 			error = ext4_directory_entry_decode(fs, buffer, offset,
-			    (directory->flags & EXT4_INODE_ENCRYPT) != 0, &decoded, &record_length);
+			    directory->flags, &decoded, &record_length, &hash);
 			if (error != EXT4_OK) {
 				goto out;
 			}
@@ -320,7 +355,7 @@ ext4_directory_visit(struct ext4_fs *fs, const struct ext4_inode *directory, uin
 			    !ext4_fscrypt_dot(decoded.name, decoded.name_length)) {
 				if (nokey && decoded.name_length < EXT4_FSCRYPT_NAME_MIN) {
 					error = EXT4_CORRUPT;
-				} else if (nokey && hashed) {
+				} else if (nokey && hashed && !ext4_directory_has_hashes(directory->flags)) {
 					error =
 					    ext4_directory_hash(version, fs->directory_hash_seed,
 						decoded.name, decoded.name_length, &hash);

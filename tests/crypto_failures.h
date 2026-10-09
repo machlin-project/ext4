@@ -81,7 +81,7 @@ crypto_failure_select(struct ext4_fs *fs, struct failing_crypto *crypto,
     enum crypto_failure operation, unsigned int fail_at)
 {
 	struct ext4_crypto_environment environment = { crypto, NULL, false, failing_find,
-		failing_derive, failing_cipher, failing_release, failing_random };
+		failing_derive, failing_cipher, failing_release, failing_random, NULL };
 
 	EXPECT(ext4_set_crypto(fs, NULL), EXT4_OK);
 	CHECK(crypto->keyring.handles == 0);

@@ -908,8 +908,8 @@ IV_INO_LBLK flags and data units other than the filesystem block are unsupported
 adapter finds the master key by the policy's identifier or descriptor and derives
 the inode's key: for version 2, HKDF-SHA512 with info "fscrypt", its NUL, context 2
 and the nonce; for version 1, AES-128-ECB under the nonce. Regular files use the
-contents mode and directories and symlinks the names mode. The mount keeps 16 derived
-keys by inode and generation; installing the environment again or unmounting
+contents mode and directories and symlinks the names mode. The mount caches keys for
+16 inode/generation pairs; installing the environment again or unmounting
 releases them. A file block is decrypted with its logical block number as the
 little-endian IV, while holes and unwritten blocks read as zeros. Directory names,
 except the unencrypted dot entries, are decrypted with the directory's key and a
@@ -918,8 +918,9 @@ padding and at least 16 bytes, encrypts it and finds the stored ciphertext, hash
 it as stored for indexed directories. Directory validation accepts any byte in
 encrypted names. A symlink target is a little-endian 16-bit ciphertext length and the
 ciphertext, in the inode or its block. Native mappings of encrypted files stay
-refused, since they would expose ciphertext. Casefolded encrypted directories hash
-plaintext names with a derived key and remain unsupported. Encrypted verity files
+refused, since they would expose ciphertext. Block-backed casefolded encrypted
+directories support v2 keyed and no-key reading, as described below; v1 combined
+policies and combined inline directories are unsupported. Encrypted verity files
 are read, measured and enabled with the existing supported fscrypt policy and key;
 data, tree, descriptor and signature blocks are decrypted before interpretation.
 
@@ -963,18 +964,22 @@ volumes that record neither or both signednesses, report zero words, since Linux
 would choose by its processor. A stored name shorter than 16 bytes cannot be
 ciphertext and is corruption. A lookup decodes the name, requires its unused bits to
 be zero and scans the directory for the entry whose ciphertext it carries, or whose
-prefix and tail hash it carries; a name that cannot be decoded is not found. Unlink
-and rmdir remove the entry found this way, as Linux permits, while creation, links
+prefix and tail hash it carries; a name that cannot be decoded is not found. In
+ordinary encrypted directories, unlink and rmdir remove the entry found this way,
+as Linux permits, while creation, links
 and renames into or out of the directory still return `EXT4_ENCRYPTED`. An encrypted
-symlink reads as the no-key name of its ciphertext with zero hash words. Casefolded
-encrypted directories, whose stored hashes need the key, return `EXT4_UNSUPPORTED`
-without it.
+symlink reads as the no-key name of its ciphertext with zero hash words. V2
+casefolded encrypted directories use the hash words stored alongside each name
+without deriving a key, including on volumes without DIR_INDEX; their namespace
+mutations remain unsupported.
 
 Operations that need no plaintext remain available: owner, permission, timestamp and
 ordinary attribute changes on encrypted objects; rename, link and removal of an
 encrypted object whose parent is unencrypted, including a moved directory's dotdot
 update; rmdir of an empty encrypted directory; and final deletion, which releases
-the complete map. Directory validation accepts any name byte in encrypted
+the complete map. The directory move and rmdir cases currently require ordinary
+encrypted directories: combined layouts retain the temporary mutation guards.
+Directory validation accepts any name byte in encrypted
 directories, whose names are ciphertext, while still checking records, checksums and
 the index hash of the stored bytes. The fscrypt context attribute (index 9) cannot be
 created, replaced or removed through attribute interfaces. Offline cleanup trims a
@@ -1015,9 +1020,42 @@ empty string, so all such names are equal. `ext4_set_inode_flags` sets or clears
 flag, as Linux's `FS_IOC_SETFLAGS` does, only on an empty directory of a casefold
 volume, so no stored name or index hash depends on the previous rule: other volumes
 return `EXT4_UNSUPPORTED`, other types `EXT4_NOT_DIRECTORY` and directories with
-entries `EXT4_NOT_EMPTY`. Encrypted casefolded
-directories store an extra hash in each name record; since every name operation in
-an encrypted directory returns `EXT4_ENCRYPTED`, the core never parses those records.
+entries `EXT4_NOT_EMPTY`. Encrypted directories currently reject casefold flag
+transitions with `EXT4_UNSUPPORTED`: their combined format adds stored hashes to
+non-dot name records and requires a different directory hash. Low-level directory
+scan, initialization, insertion, removal and replacement also reject that combined
+layout before touching transaction state, including callers in semantic fast-commit
+replay. An inode-only fast-commit record cannot create or change that layout;
+unchanged metadata-only records remain eligible. A semantic replay refusal cancels
+its private transaction, but ordinary committed journal replay and MMP may already
+have written before it. This is a temporary safety boundary, not combined-format
+write support; layout-preserving writes and policy transitions remain required.
+
+Reading an existing v2 encrypted/casefold directory decodes the two little-endian
+stored hash words after each non-dot ciphertext name, including alignment and
+deleted-record bounds. Dots, HTree fake entries and checksum tails retain their
+ordinary layouts. Indexed combined directories require hash version 6; that version
+is corruption on other directories. Linear and indexed lookups keep plaintext,
+folded comparison and ciphertext identities separate. A valid prepared fold of
+1 through 254 bytes enables the stored major/minor filter. Linux's hash wrapper
+folds that prepared result again, which can reorder marks separated by a removed
+ignorable character; comparison still uses the first fold. Empty and expanded
+folds are hashed without the prepared filter, and malformed names retain the
+existing relaxed/strict rules. Hash preparation reuses the entry-fold scratch
+allocation, rather than allocating a third fold.
+
+The optional `siphash` adapter callback computes SipHash-2-4 with a distinct
+16-byte v2 HKDF-SHA512 key, using context 5 and the directory nonce. The cache owns
+both that handle and the ordinary CTS handle; partial derivation, eviction,
+provider replacement and unmount release each acquired handle exactly once.
+Visitor callbacks can evict a pair, so iteration reacquires it before subsequent
+decryption. A keyed combined read without this callback returns `EXT4_UNSUPPORTED`;
+ordinary encryption does not require it. The FSKit provider has not yet added this
+callback or 16-byte derivation, so its keyed combined-directory integration remains
+pending. Without a key, both linear and indexed iteration encode the stored hash
+words in no-key names. Lookup uses the major word for index routing and ciphertext
+identity for matching; it neither folds the encoded name nor treats the minor word
+as an identity check. These envelope bytes target little-endian Linux systems.
 
 ## Quota and project accounting
 

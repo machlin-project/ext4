@@ -174,11 +174,22 @@ keyring_random(void *context, void *buffer, size_t length)
 	return EXT4_OK;
 }
 
+static enum ext4_result
+keyring_siphash(void *context, void *handle, const uint8_t *name, size_t length, uint64_t *hash)
+{
+	struct key *key = handle;
+
+	(void)context;
+	KEYRING_REQUIRE(key->size == 16);
+	*hash = test_siphash24(key->bytes, name, length);
+	return EXT4_OK;
+}
+
 static struct ext4_crypto_environment
 keyring_environment(struct keyring *keyring)
 {
 	struct ext4_crypto_environment crypto = { keyring, NULL, false, keyring_find,
-		keyring_derive, keyring_cipher, keyring_release, keyring_random };
+		keyring_derive, keyring_cipher, keyring_release, keyring_random, keyring_siphash };
 
 	return crypto;
 }

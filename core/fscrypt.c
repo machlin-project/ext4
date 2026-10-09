@@ -221,6 +221,9 @@ ext4_fscrypt_remember(
 
 	if (fs->fscrypt_key_count == EXT4_FSCRYPT_KEYS) {
 		fs->crypto.release_key(fs->crypto.context, entry->handle);
+		if (entry->hash_handle != NULL) {
+			fs->crypto.release_key(fs->crypto.context, entry->hash_handle);
+		}
 	} else {
 		fs->fscrypt_key_count++;
 	}
@@ -230,19 +233,24 @@ ext4_fscrypt_remember(
 	entry->handle = key->handle;
 	entry->mode = key->mode;
 	entry->flags = key->flags;
+	entry->hash_handle = key->hash_handle;
 }
 
-enum ext4_result
-ext4_fscrypt_derive(struct ext4_fs *fs, const struct ext4_fscrypt_policy *policy, uint32_t type,
-    struct ext4_fscrypt_key *key)
+static enum ext4_result
+ext4_fscrypt_derive_keys(struct ext4_fs *fs, const struct ext4_fscrypt_policy *policy,
+    uint32_t type, bool hashed, struct ext4_fscrypt_key *key)
 {
 	uint8_t info[EXT4_FSCRYPT_HKDF_PREFIX_SIZE + 1U + EXT4_FSCRYPT_NONCE_SIZE];
 	void *master = NULL;
 	size_t info_size;
 	enum ext4_result error;
 
+	ext4_zero(key, sizeof(*key));
 	if (fs->crypto.find_key == NULL) {
 		return EXT4_ENCRYPTED;
+	}
+	if (hashed && policy->version != EXT4_FSCRYPT_CONTEXT_V2) {
+		return EXT4_UNSUPPORTED;
 	}
 	if (type != EXT4_MODE_REGULAR && type != EXT4_MODE_DIRECTORY && type != EXT4_MODE_SYMLINK) {
 		return EXT4_UNSUPPORTED;
@@ -258,6 +266,10 @@ ext4_fscrypt_derive(struct ext4_fs *fs, const struct ext4_fscrypt_policy *policy
 	if (error != EXT4_OK) {
 		return error;
 	}
+	if (hashed && fs->crypto.siphash == NULL) {
+		fs->crypto.release_key(fs->crypto.context, master);
+		return EXT4_UNSUPPORTED;
+	}
 	if (policy->version == EXT4_FSCRYPT_CONTEXT_V2) {
 		ext4_copy(info, EXT4_FSCRYPT_HKDF_PREFIX, EXT4_FSCRYPT_HKDF_PREFIX_SIZE);
 		info[EXT4_FSCRYPT_HKDF_PREFIX_SIZE] = EXT4_FSCRYPT_HKDF_PER_FILE_KEY;
@@ -272,8 +284,73 @@ ext4_fscrypt_derive(struct ext4_fs *fs, const struct ext4_fscrypt_policy *policy
 	    key->mode == EXT4_FSCRYPT_MODE_AES_256_XTS ? EXT4_FSCRYPT_XTS_KEY_SIZE
 						       : EXT4_FSCRYPT_CTS_KEY_SIZE,
 	    &key->handle);
+	if (error == EXT4_OK && hashed) {
+		info[EXT4_FSCRYPT_HKDF_PREFIX_SIZE] = EXT4_FSCRYPT_HKDF_DIRECTORY_HASH;
+		error = fs->crypto.derive_key(fs->crypto.context, master, policy->version,
+		    info, info_size, EXT4_FSCRYPT_HASH_KEY_SIZE, &key->hash_handle);
+		if (error != EXT4_OK) {
+			fs->crypto.release_key(fs->crypto.context, key->handle);
+			key->handle = NULL;
+			key->hash_handle = NULL;
+		}
+	}
 	fs->crypto.release_key(fs->crypto.context, master);
 	return error;
+}
+
+enum ext4_result
+ext4_fscrypt_derive(struct ext4_fs *fs, const struct ext4_fscrypt_policy *policy, uint32_t type,
+    struct ext4_fscrypt_key *key)
+{
+	return ext4_fscrypt_derive_keys(fs, policy, type, false, key);
+}
+
+enum ext4_result
+ext4_fscrypt_directory_policy(struct ext4_fs *fs, const struct ext4_inode *directory)
+{
+	struct ext4_fscrypt_policy policy;
+	enum ext4_result error;
+
+	if (!ext4_directory_has_hashes(directory->flags)) {
+		return EXT4_OK;
+	}
+	if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_CASEFOLD)) {
+		return EXT4_CORRUPT;
+	}
+	/* Linux encryption uses block-backed directories. Do not send combined
+	 * ciphertext through the inline plaintext record parser. */
+	if (directory->flags & EXT4_INODE_INLINE_DATA) {
+		return EXT4_UNSUPPORTED;
+	}
+	error = ext4_fscrypt_policy(fs, directory, &policy);
+	if (error == EXT4_OK && policy.version != EXT4_FSCRYPT_CONTEXT_V2) {
+		error = EXT4_UNSUPPORTED;
+	}
+	return error;
+}
+
+enum ext4_result
+ext4_fscrypt_name_hash(struct ext4_fs *fs, const struct ext4_fscrypt_key *key,
+    const uint8_t *name, size_t length, struct ext4_name_hash *hash)
+{
+	struct ext4_name_hash result;
+	uint64_t combined = 0;
+	enum ext4_result error;
+
+	if (key->hash_handle == NULL || fs->crypto.siphash == NULL) {
+		return EXT4_UNSUPPORTED;
+	}
+	error = fs->crypto.siphash(fs->crypto.context, key->hash_handle, name, length, &combined);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	result.major = (uint32_t)(combined >> 32) & ~1U;
+	result.minor = (uint32_t)combined;
+	if (result.major == EXT4_HASH_EOF) {
+		result.major -= 2U;
+	}
+	*hash = result;
+	return EXT4_OK;
 }
 
 enum ext4_result
@@ -290,6 +367,7 @@ ext4_fscrypt_key(struct ext4_fs *fs, const struct ext4_inode *inode, struct ext4
 			key->handle = entry->handle;
 			key->mode = entry->mode;
 			key->flags = entry->flags;
+			key->hash_handle = entry->hash_handle;
 			return EXT4_OK;
 		}
 	}
@@ -298,7 +376,9 @@ ext4_fscrypt_key(struct ext4_fs *fs, const struct ext4_inode *inode, struct ext4
 	}
 	error = ext4_fscrypt_policy(fs, inode, &policy);
 	if (error == EXT4_OK) {
-		error = ext4_fscrypt_derive(fs, &policy, inode->mode & EXT4_MODE_TYPE, key);
+		error = ext4_fscrypt_derive_keys(fs, &policy, inode->mode & EXT4_MODE_TYPE,
+		    (inode->mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY &&
+			ext4_directory_has_hashes(inode->flags), key);
 	}
 	if (error == EXT4_OK) {
 		ext4_fscrypt_remember(fs, inode, key);
@@ -313,6 +393,9 @@ ext4_fscrypt_forget(struct ext4_fs *fs)
 
 	for (index = 0; index < fs->fscrypt_key_count; index++) {
 		fs->crypto.release_key(fs->crypto.context, fs->fscrypt_keys[index].handle);
+		if (fs->fscrypt_keys[index].hash_handle != NULL) {
+			fs->crypto.release_key(fs->crypto.context, fs->fscrypt_keys[index].hash_handle);
+		}
 	}
 	fs->fscrypt_key_count = 0;
 	fs->fscrypt_key_next = 0;

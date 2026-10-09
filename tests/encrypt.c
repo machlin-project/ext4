@@ -1554,6 +1554,94 @@ writable(struct device *device, const char *exports, const char *source)
 	puts("PASS writable owner preserves ciphertext and changes unencrypted names");
 }
 
+
+/* Until stored hash layout transitions are implemented, neither policy version
+ * may gain or lose CASEFOLD through the flag setter. The clear probe injects an
+ * empty combined directory with valid checksums; v1 is intentionally invalid. */
+static void
+keyed_casefold_boundary(struct device *device, uint8_t version)
+{
+	struct ext4_super_disk *super =
+	    (struct ext4_super_disk *)(device->base + EXT4_SUPER_OFFSET);
+	struct ext4_inode_disk *disk;
+	struct ext4_inode_update update = creation();
+	struct ext4_encryption_policy policy = { 0 };
+	struct ext4_crypto_environment crypto;
+	struct ext4_inode directory;
+	struct ext4_inode result;
+	struct ext4_fs *fs;
+	struct keyring keyring;
+	uint8_t *before = malloc(device->size);
+	uint64_t offset;
+	uint32_t features;
+	uint32_t checksum;
+	uint32_t events;
+	uint16_t encoding;
+	uint16_t encoding_flags;
+
+	CHECK(before != NULL);
+	enable_encryption(device);
+	features = ext4_le32(&super->feature_incompat);
+	checksum = ext4_le32(&super->checksum);
+	encoding = ext4_le16(&super->encoding);
+	encoding_flags = ext4_le16(&super->encoding_flags);
+	ext4_encode32(&super->feature_incompat, features | EXT4_FEATURE_INCOMPAT_CASEFOLD);
+	ext4_encode16(&super->encoding, EXT4_ENCODING_UTF8_12_1);
+	ext4_encode16(&super->encoding_flags, 0);
+	if (device->metadata_checksum) {
+		ext4_encode32(&super->checksum,
+		    ext4_crc32c(UINT32_MAX, super, offsetof(struct ext4_super_disk, checksum)));
+	}
+	device_reset(device, device->base);
+	keyring_init(&keyring, PROBE_KEY_OFFSET);
+	crypto = keyring_environment(&keyring);
+	policy.version = version;
+	policy.contents_mode = EXT4_FSCRYPT_MODE_AES_256_XTS;
+	policy.filenames_mode = EXT4_FSCRYPT_MODE_AES_256_CTS;
+	memcpy(policy.identifier, version == FSCRYPT_V1 ? keyring.descriptor : keyring.identifier,
+	    version == FSCRYPT_V1 ? sizeof(keyring.descriptor) : sizeof(keyring.identifier));
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	EXPECT(ext4_mkdir(fs, EXT4_ROOT_INODE, 0, (const uint8_t *)"casefold-guard", 14,
+		   &update, &encrypt_time, &directory), EXT4_OK);
+	EXPECT(ext4_set_encryption_policy(fs, directory.number, directory.generation,
+		   &policy, &directory), EXT4_OK);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	memcpy(before, device->cache, device->size);
+	events = device->events;
+	EXPECT(ext4_set_inode_flags(fs, directory.number, directory.generation,
+		   EXT4_INODE_CASEFOLD, EXT4_INODE_CASEFOLD, &encrypt_time, &result),
+	    EXT4_UNSUPPORTED);
+	CHECK(device->events == events && memcmp(before, device->cache, device->size) == 0);
+	CHECK(memcmp(before, device->stable, device->size) == 0);
+	ext4_unmount(fs);
+	CHECK(keyring.handles == 0);
+
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	EXPECT(ext4_inode_location(fs, directory.number, &offset), EXT4_OK);
+	disk = (struct ext4_inode_disk *)(device->cache + offset);
+	ext4_encode32(&disk->flags, ext4_le32(&disk->flags) | EXT4_INODE_CASEFOLD);
+	ext4_inode_checksum_set(fs, directory.number, disk);
+	memcpy(device->stable, device->cache, device->size);
+	ext4_unmount(fs);
+	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	memcpy(before, device->cache, device->size);
+	events = device->events;
+	EXPECT(ext4_set_inode_flags(fs, directory.number, directory.generation,
+		   EXT4_INODE_CASEFOLD, 0, &encrypt_time, &result), EXT4_UNSUPPORTED);
+	CHECK(device->events == events && memcmp(before, device->cache, device->size) == 0);
+	CHECK(memcmp(before, device->stable, device->size) == 0);
+	ext4_unmount(fs);
+	CHECK(device->live == 0 && keyring.handles == 0);
+	ext4_encode32(&super->feature_incompat, features);
+	ext4_encode16(&super->encoding, encoding);
+	ext4_encode16(&super->encoding_flags, encoding_flags);
+	ext4_encode32(&super->checksum, checksum);
+	device_reset(device, device->base);
+	free(before);
+	printf("PASS encrypted v%u casefold transition refusal: unchanged media\n", version);
+}
+
 #include "crypto_failures.h"
 
 int
@@ -1596,6 +1684,7 @@ main(int argc, char **argv)
 	}
 	storage_open(&device, image);
 	if (write) {
+		keyed_casefold_boundary(&device, version);
 		keyed_write(&device, exports, image, version);
 		if (version == FSCRYPT_V2) {
 			keyed_callback_failures(&device);

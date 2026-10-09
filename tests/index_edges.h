@@ -194,7 +194,7 @@ edge_leaf_empty(struct edge_view *view, uint32_t logical)
 	EXPECT(ext4_index_read(&view->tree, logical, &physical), EXT4_OK);
 	while (offset < view->allocation.fs->info.block_size) {
 		EXPECT(ext4_directory_entry_decode(view->allocation.fs, view->allocation.scratch,
-			   offset, false, &entry, &length),
+			   offset, 0, &entry, &length, NULL),
 		    EXT4_OK);
 		if (entry.inode != 0) {
 			return false;

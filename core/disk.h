@@ -35,6 +35,7 @@
 #define EXT4_HASH_LEGACY_UNSIGNED 3U
 #define EXT4_HASH_HALF_MD4_UNSIGNED 4U
 #define EXT4_HASH_TEA_UNSIGNED 5U
+#define EXT4_HASH_SIPHASH 6U
 #define EXT4_HASH_EOF 0xfffffffeU
 #define EXT4_SIGNED_DIRECTORY_HASH 0x0001U
 #define EXT4_UNSIGNED_DIRECTORY_HASH 0x0002U
@@ -440,6 +441,12 @@ struct ext4_dir_header_disk {
 	struct ext4_le16 record_length;
 	uint8_t name_length;
 	uint8_t type;
+};
+
+/* Encrypted casefolded entries store this after the aligned ciphertext name. */
+struct ext4_dir_hash_disk {
+	struct ext4_le32 major;
+	struct ext4_le32 minor;
 };
 
 struct ext4_dir_tail_disk {

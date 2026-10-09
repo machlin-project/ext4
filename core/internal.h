@@ -101,6 +101,7 @@ struct ext4_fscrypt_cached_key {
 	void *handle;
 	uint8_t mode;
 	uint8_t flags;
+	void *hash_handle;
 };
 
 /* Consecutive inode tables: groups first_group through first_group + groups - 1
@@ -277,10 +278,19 @@ enum ext4_result ext4_edit_inode(struct ext4_fs *fs, struct ext4_transaction *tr
     uint32_t number, uint32_t generation, struct ext4_inode_disk **disk, struct ext4_inode *inode);
 uint32_t ext4_directory_record_length(
     struct ext4_fs *fs, const struct ext4_dir_header_disk *header);
+/* Encrypted casefold directories store a hash extension after each non-dot name. */
+static inline bool
+ext4_directory_has_hashes(uint32_t flags)
+{
+	return (flags & (EXT4_INODE_ENCRYPT | EXT4_INODE_CASEFOLD)) ==
+	    (EXT4_INODE_ENCRYPT | EXT4_INODE_CASEFOLD);
+}
+
 /* Names in an encrypted directory are ciphertext and may hold any byte; other names
  * may hold neither NUL nor '/'. */
 enum ext4_result ext4_directory_entry_decode(struct ext4_fs *fs, const uint8_t *buffer,
-    uint32_t offset, bool ciphertext, struct ext4_dir_entry *entry, uint32_t *record_length);
+    uint32_t offset, uint32_t flags, struct ext4_dir_entry *entry, uint32_t *record_length,
+    struct ext4_name_hash *hash);
 /* The caller resolves the on-disk signedness policy into a hash version.
  * Seed words are host-order; NULL/all-zero uses the specified default seed.
  * Failure leaves result unchanged. This hashes bytes without name normalization. */

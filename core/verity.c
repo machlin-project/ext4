@@ -308,7 +308,8 @@ ext4_set_crypto(struct ext4_fs *fs, const struct ext4_crypto_environment *crypto
 		    (crypto->derive_key != NULL) != fscrypt ||
 		    (crypto->cipher != NULL) != fscrypt ||
 		    (crypto->release_key != NULL) != fscrypt ||
-		    (crypto->random_bytes != NULL) != fscrypt) {
+		    (crypto->random_bytes != NULL) != fscrypt ||
+		    (crypto->siphash != NULL && !fscrypt)) {
 			return EXT4_INVALID_ARGUMENT;
 		}
 	}

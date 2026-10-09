@@ -391,6 +391,9 @@ ext4_directory_scan(struct ext4_allocation *allocation, struct ext4_inode *paren
 	struct ext4_directory_name key;
 	enum ext4_result error;
 
+	if (ext4_directory_has_hashes(parent->flags)) {
+		return EXT4_UNSUPPORTED;
+	}
 	/* A strict encoding admits only names the directory can fold. */
 	if (action == EXT4_DIRECTORY_INSERT && ext4_directory_casefolded(fs, parent) &&
 	    fs->casefold_strict && !ext4_utf8_name_valid(name, name_length)) {
@@ -825,6 +828,9 @@ ext4_directory_insert(struct ext4_allocation *allocation, const struct ext4_inod
 	bool zero;
 	enum ext4_result error;
 
+	if (ext4_directory_has_hashes(parent->flags)) {
+		return EXT4_UNSUPPORTED;
+	}
 	if (slot->inline_disk != NULL) {
 		buffer = (uint8_t *)ext4_directory_inline_entry(slot, slot->offset);
 		if (slot->used != 0) {
@@ -883,6 +889,9 @@ ext4_directory_initialize(struct ext4_allocation *allocation, struct ext4_inode 
 	bool inline_created;
 	enum ext4_result error;
 
+	if (ext4_directory_has_hashes(inode->flags)) {
+		return EXT4_UNSUPPORTED;
+	}
 	/* Like Linux, encrypted directories never keep their entries in the inode. */
 	inline_created = false;
 	error = inode->flags & EXT4_INODE_ENCRYPT
@@ -921,6 +930,9 @@ ext4_directory_remove(struct ext4_allocation *allocation, const struct ext4_inod
 	uint32_t length;
 	enum ext4_result error;
 
+	if (ext4_directory_has_hashes(parent->flags)) {
+		return EXT4_UNSUPPORTED;
+	}
 	buffer = NULL;
 	if (slot->inline_disk != NULL) {
 		entry = ext4_directory_inline_entry(slot, slot->offset);
@@ -965,6 +977,9 @@ ext4_directory_replace(struct ext4_allocation *allocation, const struct ext4_ino
 	void *buffer;
 	enum ext4_result error;
 
+	if (ext4_directory_has_hashes(parent->flags)) {
+		return EXT4_UNSUPPORTED;
+	}
 	buffer = NULL;
 	if (slot->inline_disk != NULL && slot->offset == EXT4_INLINE_DOT_SIZE) {
 		if (type != EXT4_FT_DIRECTORY ||

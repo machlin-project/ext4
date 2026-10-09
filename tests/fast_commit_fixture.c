@@ -52,7 +52,8 @@ enum fixture_damage {
 	DAMAGE_INDIRECT_LOGICAL_LIMIT,
 	DAMAGE_NAME_OWNER,
 	DAMAGE_SYSTEM_RANGE,
-	DAMAGE_FOREIGN_RANGE
+	DAMAGE_FOREIGN_RANGE,
+	DAMAGE_CASEFOLD_TRANSITION
 };
 
 struct fixture {
@@ -233,6 +234,15 @@ inode_record(struct fixture *fixture, ext2_ino_t number, unsigned int links)
 	if (fixture->damage == DAMAGE_SPECIAL_SIZE &&
 	    number == lookup(fixture, EXT2_ROOT_INO, "character-wide")) {
 		inode->i_size = 1;
+	}
+	if (fixture->damage == DAMAGE_CASEFOLD_TRANSITION && number == EXT2_ROOT_INO) {
+		struct ext2_inode original;
+
+		check(ext2fs_read_inode(fixture->pending, number, &original),
+		    "read unchanged-generation directory");
+		require(original.i_generation == inode->i_generation,
+		    "require unchanged-generation flag transition");
+		inode->i_flags |= EXT4_ENCRYPT_FL | EXT4_CASEFOLD_FL;
 	}
 	check(ext2fs_inode_csum_set(fixture->expected, number, inode), "checksum logged inode");
 #ifdef WORDS_BIGENDIAN
@@ -754,6 +764,8 @@ main(int argc, char **argv)
 			fixture.damage = DAMAGE_FOREIGN_RANGE;
 		} else if (strcmp(argv[3], "--indirect-logical-limit") == 0) {
 			fixture.damage = DAMAGE_INDIRECT_LOGICAL_LIMIT;
+		} else if (strcmp(argv[3], "--casefold-transition") == 0) {
+			fixture.damage = DAMAGE_CASEFOLD_TRANSITION;
 		} else {
 			require(0, "unknown fixture damage mode");
 		}
@@ -765,6 +777,12 @@ main(int argc, char **argv)
 	    "open independently authored expected filesystem");
 	require(fixture.pending->blocksize == fixture.expected->blocksize,
 	    "require matching fixture geometry");
+	if (fixture.damage == DAMAGE_CASEFOLD_TRANSITION) {
+		require(ext2fs_has_feature_casefold(fixture.pending->super),
+		    "require independently authored casefold encoding");
+		ext2fs_set_feature_encrypt(fixture.pending->super);
+		ext2fs_mark_super_dirty(fixture.pending);
+	}
 	fixture.block = calloc(1, fixture.pending->blocksize);
 	require(fixture.block != NULL, "allocate fixture block");
 	physical = mapped_block(fixture.pending, fixture.pending->super->s_journal_inum, 0, &flags);
@@ -798,6 +816,13 @@ main(int argc, char **argv)
 
 	head.fc_tid = ext2fs_cpu_to_le32(FIXTURE_SEQUENCE);
 	record(&fixture, EXT4_FC_TAG_HEAD, &head, sizeof(head));
+	if (fixture.damage == DAMAGE_CASEFOLD_TRANSITION) {
+		/* A checksummed negative transition, not a valid encrypted context. */
+		inode_record(&fixture, EXT2_ROOT_INO, 0);
+		commit(&fixture);
+		goto write_stream;
+	}
+
 	hello = lookup(&fixture, EXT2_ROOT_INO, "renamed");
 	check(ext2fs_read_inode(fixture.pending, hello, &source), "read source range length");
 	require(source.i_size_high == 0, "bound source range length");
@@ -858,10 +883,11 @@ main(int argc, char **argv)
 		if (fixture.damage == DAMAGE_NAME_OWNER) {
 			name_record(&fixture, EXT4_FC_TAG_LINK, directory, hello, name);
 		}
-	} else if (argc == 4) {
+	} else if (argc == 4 && fixture.damage != DAMAGE_CASEFOLD_TRANSITION) {
 		special_records(&fixture);
 	}
 	commit(&fixture);
+write_stream:
 	for (block = fixture.first; block < fixture.blocks; block++) {
 		journal_write(&fixture, block,
 		    fixture.stream + (size_t)(block - fixture.first) * fixture.pending->blocksize);

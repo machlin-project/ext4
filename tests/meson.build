@@ -15,7 +15,7 @@ foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures', 'geometry_fixtures',
   'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
   'directory_index_64k_fixture', 'large_file_fixtures', 'large_volume_fixtures', 'external_journal_fixtures',
-  'fast_commit_fixtures', 'mmp_fixtures', 'verity_fixtures', 'encrypted_verity_fixtures', 'verity_enable_vectors', 'casefold_vectors',
+  'fast_commit_fixtures', 'mmp_fixtures', 'verity_fixtures', 'encrypted_verity_fixtures', 'encrypted_casefold_fixtures', 'verity_enable_vectors', 'casefold_vectors',
   'casefold_fixtures', 'quota_fixtures', 'format_fixtures', 'unjournaled_fixtures']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
@@ -31,6 +31,11 @@ if paths['fast_commit_fixtures'] != ''
       args: [directory / 'pending.journal', '7', '3'], timeout: 300, suite: 'fast-commit')
     test('fast-commit-recovery-' + profile, programs['fast-commit-recovery'],
       args: [directory / 'pending.img', directory / 'expected.img'], timeout: 300, suite: 'fast-commit')
+    if profile == 'casefold-4k'
+      test('fast-commit-casefold-transition-' + profile, programs['fast-commit-recovery'],
+        args: [directory / 'casefold-transition.img', directory / 'expected.img', '--unsupported'],
+        timeout: 300, suite: 'fast-commit')
+    endif
     if profile in ['1k', '4k', 'orphan-4k', 'quota-4k']
       # Replay derives the free counters Linux leaves stale in the superblock.
       test('fast-commit-stale-summary-' + profile, programs['fast-commit-recovery'],
@@ -802,3 +807,16 @@ endif
 test('orphan-slot-index', programs['orphan-index'], suite: 'core')
 
 test('fscrypt-visitor-key-lifetime', programs['fscrypt-lifetime'], suite: 'core')
+
+test('encrypted-casefold-mutation-admission', programs['directory-guard'], suite: 'core')
+
+if paths['encrypted_casefold_fixtures'] != ''
+  foreach profile : ['ascii-1', 'ascii-15', 'ascii-16', 'ascii-17', 'ascii-28', 'ascii-31',
+    'ascii-32', 'ascii-144', 'ascii-148', 'ascii-149', 'ascii-150', 'ascii-252', 'ascii-253',
+    'ascii-254', 'ascii-255', 'sharp-s', 'canonical-accent', 'sigma', 'dotted-i', 'ligature',
+    'empty-fold', 'fold-254', 'fold-255', 'expanded-fold', 'different', 'invalid-exact',
+    'invalid-different', 'combining-barrier', 'combining-barrier-distinct']
+    test('encrypted-casefold-' + profile, programs['encrypted-casefold'],
+      args: [paths['encrypted_casefold_fixtures'], profile], timeout: 300, suite: 'core')
+  endforeach
+endif

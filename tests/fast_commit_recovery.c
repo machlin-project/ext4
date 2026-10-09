@@ -599,6 +599,7 @@ main(int argc, char **argv)
 	bool orphans;
 	bool journal_map;
 	bool reject;
+	bool unsupported;
 	bool sampled;
 	bool benchmark;
 	enum ext4_result error;
@@ -607,7 +608,7 @@ main(int argc, char **argv)
 		fprintf(stderr,
 		    "usage: %s PENDING_IMAGE VERIFIED_REFERENCE_IMAGE "
 		    "[--faults|--resources|--sampled-faults|--sampled-resources|"
-		    "--orphans|--journal-map|--reject|--benchmark]\n",
+		    "--orphans|--journal-map|--reject|--unsupported|--benchmark]\n",
 		    argv[0]);
 		return 2;
 	}
@@ -621,7 +622,8 @@ main(int argc, char **argv)
 	benchmark = argc == 4 && strcmp(argv[3], "--benchmark") == 0;
 	orphans = argc == 4 && strcmp(argv[3], "--orphans") == 0;
 	journal_map = argc == 4 && strcmp(argv[3], "--journal-map") == 0;
-	reject = argc == 4 && strcmp(argv[3], "--reject") == 0;
+	unsupported = argc == 4 && strcmp(argv[3], "--unsupported") == 0;
+	reject = unsupported || (argc == 4 && strcmp(argv[3], "--reject") == 0);
 	CHECK(argc == 3 || faults || resources || orphans || journal_map || reject || benchmark);
 	EXPECT(ext4_posix_open(&source, argv[1]), EXT4_OK);
 	EXPECT(ext4_posix_open(&oracle, argv[2]), EXT4_OK);
@@ -656,14 +658,17 @@ main(int argc, char **argv)
 		goto out;
 	}
 	if (reject) {
-		EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_CORRUPT);
-		CHECK(device->live == 0 && report.fast_commits == 0 && report.replayed_blocks == 0);
+		EXPECT(ext4_recover(&device->environment, &device->writer, &report),
+		    unsupported ? EXT4_UNSUPPORTED : EXT4_CORRUPT);
+		CHECK(device->live == 0 && device->live_bytes == 0 &&
+		    report.fast_commits == 0 && report.replayed_blocks == 0);
 		for (stop = 0; stop < device->events; stop++) {
 			CHECK(device->history[stop].flush);
 		}
 		CHECK(memcmp(device->base, device->cache, device->size) == 0);
+		CHECK(memcmp(device->base, device->stable, device->size) == 0);
 		printf(
-		    "PASS malformed fast-commit payload rejected without home or journal writes\n");
+		    "PASS refused fast-commit payload without home or journal writes\n");
 		goto out;
 	}
 	EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_OK);

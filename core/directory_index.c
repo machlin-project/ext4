@@ -81,9 +81,13 @@ ext4_index_decode(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t l
 			sizeof(*root) - offsetof(struct ext4_dx_root_prefix_disk, reserved)) {
 			return EXT4_CORRUPT;
 		}
-		if (root->flags != 0 || root->hash_version > EXT4_HASH_TEA_UNSIGNED ||
+		if (root->flags != 0 || root->hash_version > EXT4_HASH_SIPHASH ||
 		    root->indirect_levels > ext4_index_max_levels(fs)) {
 			return EXT4_UNSUPPORTED;
+		}
+		if ((root->hash_version == EXT4_HASH_SIPHASH) !=
+		    ext4_directory_has_hashes(inode->flags)) {
+			return EXT4_CORRUPT;
 		}
 		decoded.levels = root->indirect_levels;
 		decoded.version = root->hash_version;

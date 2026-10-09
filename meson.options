@@ -81,6 +81,9 @@ option('verity_fixtures', type: 'string', value: '',
 option('encrypted_verity_fixtures', type: 'string', value: '',
   description: 'Path to independent encrypted-verity file-fork unit fixtures')
 
+option('encrypted_casefold_fixtures', type: 'string', value: '',
+  description: 'Path to independent EVP encrypted-casefold filename vectors')
+
 option('casefold_vectors', type: 'string', value: '',
   description: 'Path to e2fsprogs utf8-12.1 casefold and hash vectors')
 

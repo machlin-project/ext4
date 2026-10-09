@@ -18,6 +18,7 @@
 struct model_key {
 	bool live;
 	uint8_t owner;
+	bool hashed;
 };
 struct model {
 	struct ext4_fs fs;
@@ -32,6 +33,10 @@ struct model {
 	uint32_t stale_cipher;
 	uint32_t expected_owner;
 	uint32_t directory_derives;
+	uint32_t hash_derives;
+	uint32_t fail_hash_derive;
+	uint32_t stale_hash;
+	bool paired;
 	uint32_t entries;
 	uint32_t evict_at;
 	uint32_t fail_derive;
@@ -104,12 +109,18 @@ model_derive(void *opaque, void *master, uint8_t version, const uint8_t *info,
 	uint8_t owner;
 
 	CHECK(key->live && version == 2 && info_size == 25);
-	CHECK(key_size == 32 || key_size == 64);
+	CHECK(key_size == 16 || key_size == 32 || key_size == 64);
+	CHECK(info[8] == (key_size == 16 ? 5U : 2U));
 	owner = info[9];
-	if (owner == 2 && ++m->directory_derives == m->fail_derive) {
+	if (owner == 2 && key_size != 16 && ++m->directory_derives == m->fail_derive) {
 		return EXT4_IO;
 	}
-	*output = model_new(m, owner);
+	if (key_size == 16 && ++m->hash_derives == m->fail_hash_derive) {
+		return EXT4_IO;
+	}
+	key = model_new(m, owner);
+	key->hashed = key_size == 16;
+	*output = key;
 	return EXT4_OK;
 }
 
@@ -134,6 +145,7 @@ model_cipher(void *opaque, void *handle, uint8_t mode, bool encrypt,
 	struct model_key *key = handle;
 
 	(void)iv;
+	CHECK(!key->hashed);
 	CHECK(!encrypt && (mode == EXT4_FSCRYPT_MODE_AES_256_CTS ||
 	    mode == EXT4_FSCRYPT_MODE_AES_256_XTS));
 	if (!key->live) {
@@ -142,6 +154,23 @@ model_cipher(void *opaque, void *handle, uint8_t mode, bool encrypt,
 	}
 	CHECK(key->owner == m->expected_owner);
 	memcpy(output, input, length);
+	return EXT4_OK;
+}
+
+static enum ext4_result
+model_hash(void *opaque, void *handle, const uint8_t *name, size_t length, uint64_t *hash)
+{
+	struct model *m = opaque;
+	struct model_key *key = handle;
+
+	(void)name;
+	(void)length;
+	CHECK(key->hashed && key->owner == 2);
+	if (!key->live) {
+		m->stale_hash++;
+		return EXT4_IO;
+	}
+	*hash = UINT64_C(0x123400000000);
 	return EXT4_OK;
 }
 
@@ -165,7 +194,8 @@ model_inode(struct model *m, uint32_t number, bool directory)
 	ext4_encode16(&disk->mode, directory ? EXT4_MODE_DIRECTORY | 0755 : EXT4_MODE_REGULAR | 0644);
 	ext4_encode16(&disk->links, 1);
 	ext4_encode32(&disk->generation, 1);
-	ext4_encode32(&disk->flags, EXT4_INODE_ENCRYPT);
+	ext4_encode32(&disk->flags, EXT4_INODE_ENCRYPT |
+	    (directory && m->paired ? EXT4_INODE_CASEFOLD : 0U));
 	ext4_encode32(&disk->size_lo, bs);
 	ext4_encode32(&disk->blocks_lo, bs / 512U);
 	ext4_encode32((struct ext4_le32 *)disk->block_data, directory ? 20U : 21U);
@@ -195,10 +225,16 @@ model_entry(struct model *m, uint32_t offset, uint32_t length, const char *name,
 	entry->name_length = names;
 	entry->type = EXT4_FT_REGULAR;
 	memcpy(bytes + sizeof(*entry), name, strlen(name));
+	if (m->paired && names == 16) {
+		struct ext4_dir_hash_disk *hash = (void *)(bytes + sizeof(*entry) + names);
+
+		ext4_encode32(&hash->major, 0x1234);
+		ext4_encode32(&hash->minor, 0);
+	}
 }
 
 static void
-model_init(struct model *m, uint32_t bs, bool cross_block, bool nokey)
+model_init(struct model *m, uint32_t bs, bool cross_block, bool nokey, bool paired)
 {
 	struct ext4_fs *fs = &m->fs;
 	struct ext4_crypto_environment crypto = { 0 };
@@ -206,6 +242,7 @@ model_init(struct model *m, uint32_t bs, bool cross_block, bool nokey)
 	uint32_t number;
 
 	m->nokey = nokey;
+	m->paired = paired;
 	m->size = (size_t)bs * 64U;
 	m->device = calloc(1, m->size);
 	CHECK(m->device != NULL);
@@ -217,6 +254,7 @@ model_init(struct model *m, uint32_t bs, bool cross_block, bool nokey)
 	crypto.cipher = model_cipher;
 	crypto.release_key = model_key_release;
 	crypto.random_bytes = model_random;
+	crypto.siphash = paired ? model_hash : NULL;
 	CHECK(ext4_set_crypto(fs, nokey ? NULL : &crypto) == EXT4_OK);
 	m->expected_owner = 2;
 	fs->info.block_size = bs;
@@ -224,7 +262,8 @@ model_init(struct model *m, uint32_t bs, bool cross_block, bool nokey)
 	fs->info.inodes = 32;
 	fs->info.groups = 1;
 	fs->info.feature_compat = EXT4_FEATURE_COMPAT_EXT_ATTR;
-	fs->info.feature_incompat = EXT4_FEATURE_INCOMPAT_ENCRYPT | EXT4_FEATURE_INCOMPAT_FILETYPE;
+	fs->info.feature_incompat = EXT4_FEATURE_INCOMPAT_ENCRYPT | EXT4_FEATURE_INCOMPAT_FILETYPE |
+	    (paired ? EXT4_FEATURE_INCOMPAT_CASEFOLD : 0U);
 	fs->inode_size = 256;
 	fs->descriptor_size = 32;
 	fs->inodes_per_group = 32;
@@ -250,8 +289,8 @@ model_init(struct model *m, uint32_t bs, bool cross_block, bool nokey)
 		model_entry(m, 24, bs - 24U, "first", 16);
 		model_entry(m, bs, bs, "second", 16);
 	} else {
-		model_entry(m, 24, 24, "first", 16);
-		model_entry(m, 48, bs - 48U, "second", 16);
+		model_entry(m, 24, paired ? 32U : 24U, "first", 16);
+		model_entry(m, paired ? 56U : 48U, bs - (paired ? 56U : 48U), "second", 16);
 	}
 	CHECK(ext4_get_inode(fs, 2, &m->directory) == EXT4_OK);
 }
@@ -293,30 +332,39 @@ model_visit(void *opaque, const struct ext4_dir_entry *entry, uint64_t next_cook
 }
 
 static void
-model_run(uint32_t bs, uint32_t evict_at, bool fail, bool cross_block, bool nokey)
+model_run(uint32_t bs, uint32_t evict_at, unsigned int fail, bool cross_block, bool nokey,
+    bool paired)
 {
 	struct model *m = calloc(1, sizeof(*m));
 	uint64_t cookie = 0;
+	struct ext4_inode found;
 	enum ext4_result error;
 
 	CHECK(m != NULL);
-	model_init(m, bs, cross_block, nokey);
+	model_init(m, bs, cross_block, nokey, paired);
 	m->evict_at = evict_at;
-	m->fail_derive = fail ? 2U : 0U;
+	m->fail_derive = fail == 1U ? 2U : 0U;
+	m->fail_hash_derive = fail == 2U ? 2U : 0U;
 	error = ext4_iterate_dir(&m->fs, &m->directory, &cookie, model_visit, m);
 	CHECK(m->stale_cipher == 0);
 	CHECK(error == (fail ? EXT4_IO : EXT4_NOT_FOUND));
 	CHECK(m->entries == (fail ? (evict_at == 1U ? 2U : 3U) : 4U));
-	CHECK(cookie == (fail ? (evict_at == 1U ? 24U : (cross_block ? bs : 48U))
+	CHECK(cookie == (fail ? (evict_at == 1U ? 24U : (cross_block ? bs : (paired ? 56U : 48U)))
 			      : (cross_block ? 2U * bs : bs)));
 	CHECK(m->evicted == (evict_at != 0));
 	CHECK(m->directory_derives == (nokey ? 0U : (evict_at == 0 ? 1U : 2U)));
 	if (fail) {
 		m->fail_derive = 0;
+		m->fail_hash_derive = 0;
 		CHECK(ext4_iterate_dir(&m->fs, &m->directory, &cookie, model_visit, m) ==
 		    EXT4_NOT_FOUND);
 		CHECK(m->entries == 4U && cookie == (cross_block ? 2U * bs : bs));
 		CHECK(m->directory_derives == 3U && m->stale_cipher == 0);
+	}
+	if (paired && !nokey) {
+		CHECK(ext4_lookup(&m->fs, &m->directory, (const uint8_t *)"first", 5, &found) == EXT4_OK);
+		CHECK(found.number == 3 && m->stale_hash == 0);
+		CHECK(m->hash_derives == (fail == 2U ? 3U : (evict_at == 0 ? 1U : 2U)));
 	}
 	CHECK(ext4_set_crypto(&m->fs, NULL) == EXT4_OK);
 	CHECK(m->key_live == 0 && m->released == m->allocated && m->live == 0);
@@ -329,21 +377,28 @@ main(void)
 {
 	static const uint32_t sizes[] = { 1024, 4096, 65536 };
 	size_t i;
+	unsigned int paired;
 
 	for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
-		model_run(sizes[i], 0, false, false, false);
-		model_run(sizes[i], 0, false, true, false);
-		model_run(sizes[i], 1, false, false, false);
-		model_run(sizes[i], 1, false, true, false);
-		model_run(sizes[i], 3, false, false, false);
-		model_run(sizes[i], 3, false, true, false);
-		model_run(sizes[i], 1, true, false, false);
-		model_run(sizes[i], 1, true, true, false);
-		model_run(sizes[i], 3, true, false, false);
-		model_run(sizes[i], 3, true, true, false);
-		model_run(sizes[i], 0, false, false, true);
-		model_run(sizes[i], 0, false, true, true);
+		for (paired = 0; paired < 2; paired++) {
+			model_run(sizes[i], 0, 0, false, false, paired != 0);
+			model_run(sizes[i], 0, 0, true, false, paired != 0);
+			model_run(sizes[i], 1, 0, false, false, paired != 0);
+			model_run(sizes[i], 1, 0, true, false, paired != 0);
+			model_run(sizes[i], 3, 0, false, false, paired != 0);
+			model_run(sizes[i], 3, 0, true, false, paired != 0);
+			model_run(sizes[i], 1, 1, false, false, paired != 0);
+			model_run(sizes[i], 1, 1, true, false, paired != 0);
+			model_run(sizes[i], 3, 1, false, false, paired != 0);
+			model_run(sizes[i], 3, 1, true, false, paired != 0);
+			model_run(sizes[i], 0, 0, false, true, paired != 0);
+			model_run(sizes[i], 0, 0, true, true, paired != 0);
+		}
+		model_run(sizes[i], 1, 2, false, false, true);
+		model_run(sizes[i], 1, 2, true, false, true);
+		model_run(sizes[i], 3, 2, false, false, true);
+		model_run(sizes[i], 3, 2, true, false, true);
 	}
-	puts("fscrypt visitor lifetime: 36 cases passed");
+	puts("fscrypt visitor lifetime: 84 single/paired-key cases passed");
 	return 0;
 }

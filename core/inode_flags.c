@@ -11,6 +11,10 @@ ext4_casefold_change_valid(struct ext4_fs *fs, struct ext4_transaction *transact
 	struct ext4_directory_slot slot;
 	enum ext4_result error;
 
+	/* Switching an encrypted directory also changes its stored hash layout. */
+	if (inode->flags & EXT4_INODE_ENCRYPT) {
+		return EXT4_UNSUPPORTED;
+	}
 	if (!(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_CASEFOLD)) {
 		return EXT4_UNSUPPORTED;
 	}

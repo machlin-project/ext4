@@ -28,6 +28,8 @@
 #define EXT4_FSCRYPT_HKDF_PREFIX "fscrypt"
 #define EXT4_FSCRYPT_HKDF_PREFIX_SIZE 8U
 #define EXT4_FSCRYPT_HKDF_PER_FILE_KEY 2U
+#define EXT4_FSCRYPT_HKDF_DIRECTORY_HASH 5U
+#define EXT4_FSCRYPT_HASH_KEY_SIZE 16U
 /* An encrypted symlink stores its ciphertext's length before it. */
 #define EXT4_FSCRYPT_SYMLINK_HEADER 2U
 /* Linux's no-key names encode, with base64url and no padding, the name's two
@@ -77,6 +79,7 @@ struct ext4_fscrypt_key {
 	void *handle;
 	uint8_t mode;
 	uint8_t flags;
+	void *hash_handle;
 };
 
 /* A decoded no-key name: the full ciphertext, or its prefix and the rest's SHA-256. */
@@ -100,6 +103,11 @@ enum ext4_result ext4_fscrypt_derive(struct ext4_fs *fs, const struct ext4_fscry
  * inode query can evict it. Reacquire after callbacks that permit such queries. */
 enum ext4_result ext4_fscrypt_key(
     struct ext4_fs *fs, const struct ext4_inode *inode, struct ext4_fscrypt_key *key);
+enum ext4_result ext4_fscrypt_directory_policy(
+    struct ext4_fs *fs, const struct ext4_inode *directory);
+enum ext4_result ext4_fscrypt_name_hash(struct ext4_fs *fs,
+    const struct ext4_fscrypt_key *key, const uint8_t *name, size_t length,
+    struct ext4_name_hash *hash);
 /* Release every cached key. */
 void ext4_fscrypt_forget(struct ext4_fs *fs);
 /* Decrypt or encrypt one filesystem block of contents at a logical block. */

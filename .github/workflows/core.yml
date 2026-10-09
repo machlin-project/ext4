@@ -181,6 +181,11 @@ jobs:
         run: |
           python3 tests/generate_encrypted_verity.py --output artifacts/encrypted-verity-forks \
             2>&1 | tee artifacts/checks/encrypted-verity-forks.log
+      - name: Generate independent encrypted-casefold filenames
+        if: matrix.suite == 'core'
+        run: |
+          python3 tests/generate_encrypted_casefold.py --output artifacts/encrypted-casefold-filenames \
+            2>&1 | tee artifacts/checks/encrypted-casefold-filenames.log
       - name: Generate casefold vectors and casefolded directories
         if: matrix.suite == 'format'
         run: |
@@ -243,7 +248,8 @@ jobs:
               -Dunjournaled_fixtures="$PWD/artifacts/unjournaled-fixtures")
           fi
           if [[ '${{ matrix.suite }}' == core ]]; then
-            crypto_options=(-Dencrypted_verity_fixtures="$PWD/artifacts/encrypted-verity-forks")
+            crypto_options=(-Dencrypted_verity_fixtures="$PWD/artifacts/encrypted-verity-forks" \
+              -Dencrypted_casefold_fixtures="$PWD/artifacts/encrypted-casefold-filenames")
             group_options=(-Dgroup_checksum_fixtures="$PWD/artifacts/group-checksum-fixtures" \
               -Dgeometry_fixtures="$PWD/artifacts/geometry-fixtures")
             xattr_options=(-Dxattr_fixtures="$PWD/artifacts/xattr-fixtures" \

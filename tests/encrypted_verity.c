@@ -248,7 +248,7 @@ install_key(struct fixture *f, bool wrong)
 		((struct key *)key.handle)->bytes[0] ^= 1;
 	}
 	f->fs.fscrypt_keys[0] = (struct ext4_fscrypt_cached_key){ f->inode.number,
-		f->inode.generation, key.handle, key.mode, key.flags };
+		f->inode.generation, key.handle, key.mode, key.flags, NULL };
 	f->fs.fscrypt_key_count = 1;
 	f->fs.fscrypt_key_next = 1;
 }
