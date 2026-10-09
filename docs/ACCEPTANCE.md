@@ -3841,3 +3841,34 @@ mounted and measured by Linux, independent ciphertext-fork comparison after actu
 enabling, and post-crash e2fsck acceptance remain explicit open gates. Registration,
 compilation, synthetic tests, or historical separate encryption/verity acceptance
 do not close those gates.
+
+
+## Native encrypted-casefold reference capability
+
+The existing pinned arm64 guest lacks CONFIG_UNICODE. Its encryption-only passes
+cannot establish encrypted-casefold interoperability. The format CI job therefore
+has a separate capability probe on its existing standard Ubuntu runner. It creates
+two disposable 32 MiB images (1 KiB relaxed and 4 KiB strict utf8-12.1), checks both
+PAD4/PAD32 policies in both empty-directory setup orders, and verifies Unicode
+alias identity, duplicate refusal, stored spelling and content. Fresh read-only
+attachments check keyless lookup/content refusal and keyed reads without changing
+media. Nonrepairing e2fsck must pass. Images and kernel/probe/command evidence are
+retained under native-casefold-capability; a missing capability fails visibly.
+
+The probe expects a caller-supplied, already-mounted disposable test directory and
+contains no mounts, module loading or reboot path. Its wrapper replaces itself into
+a private mount
+namespace and owns only newly created images and their verified loop attachments.
+Cleanup reconciles actual ownership after failures, including interrupts or report
+write errors. It refuses ambiguous owners and never detaches a live mount after
+failed unmount. SIGKILL or a kernel-stuck operation still requires teardown of the
+disposable hosted VM. Never run this wrapper against the owner's computer or a
+persistent machine. The mocked lifecycle tests exercise control flow only.
+
+At preparation, the C probe compiled with strict warnings and ASan/UBSan; its usage
+refusal and the four mocked lifecycle tests passed. No native mount was executed
+locally. Even a successful hosted capability result establishes only a usable
+Linux reference: the core does not participate. Linux-authored/core-mutated/Linux
+verified combined trees, independent ciphertext and stored SipHash comparison,
+indexed growth, deeper trees, crash durability, 64 KiB native operation and FSKit's
+optional SipHash provider remain separate open gates.

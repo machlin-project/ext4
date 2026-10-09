@@ -1223,6 +1223,23 @@ jobs:
             --output artifacts/quota-independent 2>&1 | tee artifacts/checks/quota-independent.log
           find artifacts/quota-exports artifacts/quota-independent -type f \
             ! -name '*.json' ! -name '*.log' ! -name '*.xml' -delete
+      - name: Check native encrypted-casefold kernel capability
+        if: matrix.suite == 'format'
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/native-casefold-probe
+          python3 tests/test_casefold_capability.py \
+            2>&1 | tee artifacts/checks/native-casefold-lifecycle.log
+          "$CC" -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wformat=2 -Wshadow \
+            -Wconversion tests/linux_casefold_capability.c \
+            -o artifacts/native-casefold-probe/probe
+          sudo env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 \
+            ImageVersion="${ImageVersion:-unknown}" \
+            python3 tests/run_casefold_capability.py \
+            --probe "$PWD/artifacts/native-casefold-probe/probe" \
+            --tools-root "$PWD/vendor/e2fsprogs/build" \
+            --output "$PWD/artifacts/native-casefold-capability" \
+            2>&1 | tee artifacts/checks/native-casefold-capability.log
       - name: Remove fixture-host symlinks before artifact discovery
         if: always()
         run: |
@@ -1241,6 +1258,7 @@ jobs:
             artifacts/**/*.json
             artifacts/**/*.xml
             artifacts/casefold-independent/*.img
+            artifacts/native-casefold-capability/*/capability.img
             artifacts/fixtures/features.txt
             artifacts/fixtures/tool-versions.txt
             .build/meson-logs/meson-log.txt
