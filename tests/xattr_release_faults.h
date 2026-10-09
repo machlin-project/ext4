@@ -54,7 +54,8 @@ release_attempt(struct device *device, enum release_kind kind, unsigned int faul
 	CHECK(duplicate == hold && hold->references == 2);
 	remove_inode(fs, &root, release_paths[kind], &inode);
 	remove_inode(fs, &root, "plain", &other);
-	CHECK(fs->last_orphan == other.number && hold->unlinked && other_hold->unlinked);
+	CHECK(storage_orphan_registered(fs, other.number) &&
+	    hold->unlinked && other_hold->unlinked);
 	/* Namespace deletion already committed. A crash during either final release
 	 * must finish both deletions even if no cleanup transaction has committed. */
 	if (pending != NULL) {
@@ -93,11 +94,11 @@ release_attempt(struct device *device, enum release_kind kind, unsigned int faul
 		EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &result), EXT4_RECOVERY_REQUIRED);
 		EXPECT(ext4_release_inode(other_hold), EXT4_RECOVERY_REQUIRED);
 	} else {
-		CHECK(!fs->aborted && fs->last_orphan == other.number &&
+		CHECK(!fs->aborted && storage_orphan_registered(fs, other.number) &&
 		    fs->info.free_inodes == free_inodes + 1 &&
 		    fs->info.free_blocks == free_blocks + released_blocks);
 		EXPECT(ext4_release_inode(other_hold), EXT4_OK);
-		CHECK(fs->last_orphan == 0 && fs->info.free_inodes == free_inodes + 2);
+		CHECK(storage_orphans_empty(fs) && fs->info.free_inodes == free_inodes + 2);
 		EXPECT(ext4_sync(fs), EXT4_OK);
 	}
 	CHECK(fs->hold_count == 0);

@@ -2,6 +2,7 @@
 #include "allocate.h"
 #include "xattr.h"
 #include "inline.h"
+#include "transaction.h"
 
 #define EXT4_ORPHAN_MAPPED_CREDITS (3U * (2U * EXT4_EXTENT_MAX_DEPTH + 1U) + 6U)
 #define EXT4_ORPHAN_UNMAPPED_CREDITS 5U
@@ -78,6 +79,257 @@ ext4_orphan_file_block(struct ext4_fs *fs, uint32_t logical, const void *buffer)
 	return EXT4_OK;
 }
 
+/* Inode numbers are unique across the orphan file. Physical slots remain stable
+ * for this preallocated-file writer; growth has a separate ownership contract. */
+static uint32_t
+ext4_orphan_find(const struct ext4_orphan_file *file, uint32_t number)
+{
+	uint32_t low = 0;
+	uint32_t high = file->pending;
+	uint32_t middle;
+
+	while (low < high) {
+		middle = low + (high - low) / 2U;
+		if (file->slots[middle].number < number) {
+			low = middle + 1U;
+		} else {
+			high = middle;
+		}
+	}
+	return low;
+}
+
+static void
+ext4_orphan_sift(struct ext4_orphan_slot *slots, uint32_t count, uint32_t root)
+{
+	struct ext4_orphan_slot value = slots[root];
+	uint32_t child;
+
+	while (root < count / 2U) {
+		child = root * 2U + 1U;
+		if (child + 1U < count && slots[child].number < slots[child + 1U].number) {
+			child++;
+		}
+		if (value.number >= slots[child].number) {
+			break;
+		}
+		slots[root] = slots[child];
+		root = child;
+	}
+	slots[root] = value;
+}
+
+static void
+ext4_orphan_sort(struct ext4_orphan_slot *slots, uint32_t count)
+{
+	struct ext4_orphan_slot value;
+	uint32_t index;
+
+	for (index = count / 2U; index != 0; index--) {
+		ext4_orphan_sift(slots, count, index - 1U);
+	}
+	for (index = count; index > 1U; index--) {
+		value = slots[0];
+		slots[0] = slots[index - 1U];
+		slots[index - 1U] = value;
+		ext4_orphan_sift(slots, index - 1U, 0);
+	}
+}
+
+static enum ext4_result
+ext4_orphan_index_reserve(struct ext4_fs *fs, uint32_t count)
+{
+	struct ext4_orphan_file *file = fs->orphan_file;
+	struct ext4_orphan_slot *slots;
+	uint32_t capacity = file->slot_capacity == 0 ? 16U : file->slot_capacity;
+
+	if (count > EXT4_ORPHAN_FILE_MAX_ENTRIES) {
+		return EXT4_UNSUPPORTED;
+	}
+	if (count <= file->slot_capacity) {
+		return EXT4_OK;
+	}
+	while (capacity < count) {
+		capacity *= 2U;
+	}
+	slots = fs->environment.allocate(fs->environment.context, capacity * sizeof(*slots));
+	if (slots == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	if (file->slots != NULL) {
+		ext4_copy(slots, file->slots, file->pending * sizeof(*slots));
+		fs->environment.release(fs->environment.context, file->slots,
+		    file->slot_capacity * sizeof(*slots));
+	}
+	file->slots = slots;
+	file->slot_capacity = capacity;
+	return EXT4_OK;
+}
+
+/* Build an index delta from private snapshots. Reserving capacity can change only
+ * storage, never membership; refusal leaves the live orphan set unchanged. */
+enum ext4_result
+ext4_orphan_transaction_prepare(struct ext4_transaction *transaction)
+{
+	struct ext4_fs *fs = transaction->journal->fs;
+	struct ext4_orphan_file *file = fs->orphan_file;
+	struct ext4_orphan_slot *changes;
+	const struct ext4_le32 *entries;
+	const struct ext4_le32 *previous;
+	const struct ext4_orphan_slot *reference;
+	uint32_t removed = 0;
+	uint32_t added = 0;
+	uint32_t logical;
+	uint32_t slot;
+	uint32_t number;
+	uint32_t position;
+	uint32_t index;
+	uint32_t pass;
+	enum ext4_result error;
+
+	if (file == NULL || !transaction->orphan_touched) {
+		return EXT4_OK;
+	}
+	/* Count once, allocate exactly once, then record the same immutable delta. */
+	for (pass = 0; pass < 2; pass++) {
+		removed = 0;
+		added = 0;
+		for (index = 0; index < file->pending; index++) {
+			reference = &file->slots[index];
+			entries = ext4_transaction_peek(
+			    transaction, file->blocks[reference->logical]);
+			if (entries != NULL &&
+			    ext4_le32(&entries[reference->slot]) != reference->number) {
+				if (pass != 0) {
+					transaction->orphan_changes[removed] = *reference;
+				}
+				removed++;
+			}
+		}
+		for (logical = 0; logical < file->block_count; logical++) {
+			entries = ext4_transaction_peek(transaction, file->blocks[logical]);
+			if (entries == NULL) {
+				continue;
+			}
+			error = ext4_orphan_file_block(fs, logical, entries);
+			if (error != EXT4_OK) {
+				return error;
+			}
+			for (slot = 0; slot < ext4_orphan_slots(fs); slot++) {
+				number = ext4_le32(&entries[slot]);
+				if (number == 0) {
+					continue;
+				}
+				if (number < fs->first_inode || number > fs->info.inodes ||
+				    number == fs->journal_inode ||
+				    number == fs->orphan_file_inode) {
+					return EXT4_CORRUPT;
+				}
+				position = ext4_orphan_find(file, number);
+				if (position < file->pending &&
+				    file->slots[position].number == number) {
+					reference = &file->slots[position];
+					if (reference->logical == logical &&
+					    reference->slot == slot) {
+						continue;
+					}
+					previous = ext4_transaction_peek(transaction,
+					    file->blocks[reference->logical]);
+					if (previous == NULL ||
+					    ext4_le32(&previous[reference->slot]) == number) {
+						return EXT4_CORRUPT;
+					}
+				}
+				if (added == EXT4_ORPHAN_FILE_MAX_ENTRIES) {
+					return EXT4_UNSUPPORTED;
+				}
+				if (pass != 0) {
+					transaction->orphan_changes[removed + added] =
+					    (struct ext4_orphan_slot){ number, logical, slot };
+				}
+				added++;
+			}
+		}
+		if (pass == 0) {
+			if (removed == 0 && added == 0) {
+				return EXT4_OK;
+			}
+			error = ext4_orphan_index_reserve(fs, file->pending - removed + added);
+			if (error != EXT4_OK) {
+				return error;
+			}
+			changes = fs->environment.allocate(fs->environment.context,
+			    (size_t)(removed + added) * sizeof(*changes));
+			if (changes == NULL) {
+				return EXT4_NO_MEMORY;
+			}
+			transaction->orphan_changes = changes;
+			transaction->orphan_removed = removed;
+			transaction->orphan_added = added;
+		}
+	}
+	ext4_orphan_sort(transaction->orphan_changes + removed, added);
+	for (index = 1; index < added; index++) {
+		if (transaction->orphan_changes[removed + index - 1U].number ==
+		    transaction->orphan_changes[removed + index].number) {
+			return EXT4_CORRUPT;
+		}
+	}
+	return EXT4_OK;
+}
+
+void
+ext4_orphan_transaction_cancel(struct ext4_transaction *transaction)
+{
+	struct ext4_fs *fs = transaction->journal->fs;
+
+	if (transaction->orphan_changes != NULL) {
+		fs->environment.release(fs->environment.context, transaction->orphan_changes,
+		    (size_t)(transaction->orphan_removed + transaction->orphan_added) *
+			sizeof(*transaction->orphan_changes));
+		transaction->orphan_changes = NULL;
+	}
+}
+
+/* No fallible work remains. A retained compound already published its index when
+ * it accepted the operation, so later durable commits carry no index delta. */
+void
+ext4_orphan_transaction_publish(struct ext4_transaction *transaction)
+{
+	struct ext4_orphan_file *file = transaction->journal->fs->orphan_file;
+	const struct ext4_orphan_slot *change;
+	uint32_t position;
+	uint32_t index;
+	uint32_t move;
+
+	if (transaction->orphan_changes == NULL) {
+		return;
+	}
+	for (index = 0; index < transaction->orphan_removed; index++) {
+		change = &transaction->orphan_changes[index];
+		position = ext4_orphan_find(file, change->number);
+		for (move = position + 1U; move < file->pending; move++) {
+			file->slots[move - 1U] = file->slots[move];
+		}
+		file->pending--;
+		file->state[change->logical].free++;
+		file->state[change->logical].cursor = change->slot;
+	}
+	for (; index < transaction->orphan_removed + transaction->orphan_added; index++) {
+		change = &transaction->orphan_changes[index];
+		position = ext4_orphan_find(file, change->number);
+		for (move = file->pending; move > position; move--) {
+			file->slots[move] = file->slots[move - 1U];
+		}
+		file->slots[position] = *change;
+		file->pending++;
+		file->state[change->logical].free--;
+		file->state[change->logical].cursor = change->slot + 1U;
+		file->cursor = change->logical;
+	}
+	ext4_orphan_transaction_cancel(transaction);
+}
+
 void
 ext4_orphan_file_close(struct ext4_fs *fs)
 {
@@ -89,6 +341,14 @@ ext4_orphan_file_close(struct ext4_fs *fs)
 	if (file->blocks != NULL) {
 		fs->environment.release(
 		    fs->environment.context, file->blocks, file->capacity * sizeof(*file->blocks));
+	}
+	if (file->slots != NULL) {
+		fs->environment.release(fs->environment.context, file->slots,
+		    file->slot_capacity * sizeof(*file->slots));
+	}
+	if (file->state != NULL) {
+		fs->environment.release(fs->environment.context, file->state,
+		    file->block_count * sizeof(*file->state));
 	}
 	fs->environment.release(fs->environment.context, file, sizeof(*file));
 	fs->orphan_file = NULL;
@@ -159,10 +419,13 @@ ext4_orphan_file_prepare(struct ext4_fs *fs)
 	file->capacity = file->block_count * (EXT4_EXTENT_MAX_DEPTH + 1U);
 	file->blocks = fs->environment.allocate(
 	    fs->environment.context, file->capacity * sizeof(*file->blocks));
-	if (file->blocks == NULL) {
+	file->state = fs->environment.allocate(
+	    fs->environment.context, file->block_count * sizeof(*file->state));
+	if (file->blocks == NULL || file->state == NULL) {
 		error = EXT4_NO_MEMORY;
 		goto out;
 	}
+	ext4_zero(file->state, file->block_count * sizeof(*file->state));
 	error = ext4_inode_has_xattrs(fs, disk) || (file->inode.flags & EXT4_INODE_RESTRICTED_FLAGS)
 	    ? EXT4_UNSUPPORTED
 	    : ext4_inode_writable(fs, disk, &file->inode);
@@ -221,8 +484,22 @@ ext4_orphan_file_prepare(struct ext4_fs *fs)
 		}
 		for (slot = 0; slot < ext4_orphan_slots(fs); slot++) {
 			if (ext4_le32(&entries[slot]) != 0) {
-				file->pending++;
+				error = ext4_orphan_index_reserve(fs, file->pending + 1U);
+				if (error != EXT4_OK) {
+					goto out;
+				}
+				file->slots[file->pending++] = (struct ext4_orphan_slot){
+					ext4_le32(&entries[slot]), logical, slot };
+			} else {
+				file->state[logical].free++;
 			}
+		}
+	}
+	ext4_orphan_sort(file->slots, file->pending);
+	for (index = 1; index < file->pending; index++) {
+		if (file->slots[index - 1U].number == file->slots[index].number) {
+			error = EXT4_CORRUPT;
+			goto out;
 		}
 	}
 	if (file->inode.blocks_512 !=
@@ -367,6 +644,14 @@ ext4_orphan_chain(
 			error = EXT4_CORRUPT;
 			break;
 		}
+		if (fs->orphan_file != NULL) {
+			middle = ext4_orphan_find(fs->orphan_file, number);
+			if (middle < fs->orphan_file->pending &&
+			    fs->orphan_file->slots[middle].number == number) {
+				error = EXT4_CORRUPT;
+				break;
+			}
+		}
 		low = 0;
 		high = count;
 		while (low < high) {
@@ -421,7 +706,8 @@ ext4_orphan_chain(
 		for (hold = fs->holds; hold != NULL; hold = hold->next) {
 			held += hold->unlinked ? 1U : 0U;
 		}
-		if (held != visited) {
+		if ((uint64_t)held != (uint64_t)visited +
+			(fs->orphan_file == NULL ? 0U : fs->orphan_file->pending)) {
 			error = EXT4_CORRUPT;
 		}
 	}
@@ -429,22 +715,14 @@ ext4_orphan_chain(
 	return error;
 }
 
-enum ext4_result
-ext4_orphan_validate_live(struct ext4_fs *fs)
-{
-	if (fs->orphan_file != NULL && fs->orphan_file->pending != 0) {
-		return EXT4_RECOVERY_REQUIRED;
-	}
-	return ext4_orphan_chain(fs, NULL, 0, true);
-}
-
-enum ext4_result
-ext4_orphan_validate(struct ext4_fs *fs)
+static enum ext4_result
+ext4_orphan_validate_all(struct ext4_fs *fs, bool live)
 {
 	struct ext4_orphan_file *file = fs->orphan_file;
 	struct ext4_block_range *numbers;
 	struct ext4_inode_disk *disk;
 	struct ext4_inode inode;
+	struct ext4_inode_hold *hold;
 	struct ext4_le32 *entries;
 	uint64_t offset = 0;
 	uint32_t logical;
@@ -456,7 +734,7 @@ ext4_orphan_validate(struct ext4_fs *fs)
 	enum ext4_result error = EXT4_OK;
 
 	if (file == NULL || file->pending == 0) {
-		return ext4_orphan_chain(fs, NULL, 0, false);
+		return ext4_orphan_chain(fs, NULL, 0, live);
 	}
 	bytes = (size_t)file->pending * sizeof(*numbers);
 	numbers = fs->environment.allocate(fs->environment.context, bytes);
@@ -500,6 +778,14 @@ ext4_orphan_validate(struct ext4_fs *fs)
 				error = EXT4_CORRUPT;
 				goto out;
 			}
+			if (live) {
+				hold = ext4_inode_find_hold(fs, number);
+				if (hold == NULL || !hold->unlinked || hold->references == 0 ||
+				    hold->generation != inode.generation || inode.links != 0) {
+					error = EXT4_CORRUPT;
+					goto out;
+				}
+			}
 			numbers[count].first = number;
 			numbers[count++].length = 1;
 		}
@@ -512,7 +798,7 @@ ext4_orphan_validate(struct ext4_fs *fs)
 	 * is then checked against this set before either representation is edited. */
 	error = ext4_ranges_sort(numbers, &count);
 	if (error == EXT4_OK) {
-		error = ext4_orphan_chain(fs, numbers, count, false);
+		error = ext4_orphan_chain(fs, numbers, count, live);
 	}
 out:
 	if (entries != NULL) {
@@ -528,52 +814,121 @@ out:
 }
 
 enum ext4_result
+ext4_orphan_validate_live(struct ext4_fs *fs)
+{
+	return ext4_orphan_validate_all(fs, true);
+}
+
+enum ext4_result
+ext4_orphan_validate(struct ext4_fs *fs)
+{
+	return ext4_orphan_validate_all(fs, false);
+}
+
+static void
+ext4_orphan_file_seal(struct ext4_fs *fs, uint32_t logical, void *buffer)
+{
+	struct ext4_orphan_tail_disk *tail = (struct ext4_orphan_tail_disk *)((uint8_t *)buffer +
+	    fs->info.block_size - sizeof(*tail));
+
+	if (fs->metadata_checksum) {
+		ext4_encode32(&tail->checksum, ext4_orphan_file_checksum(fs, logical, buffer));
+	}
+}
+
+enum ext4_result
 ext4_orphan_file_remove(struct ext4_allocation *allocation, uint32_t number, bool *removed)
 {
 	struct ext4_fs *fs = allocation->fs;
 	struct ext4_orphan_file *file = fs->orphan_file;
-	struct ext4_orphan_tail_disk *tail;
+	struct ext4_orphan_slot reference;
+	struct ext4_le32 *entries;
+	void *buffer;
+	uint32_t position;
+	enum ext4_result error;
+
+	*removed = false;
+	if (file == NULL) {
+		return EXT4_OK;
+	}
+	position = ext4_orphan_find(file, number);
+	if (position == file->pending || file->slots[position].number != number) {
+		return EXT4_OK;
+	}
+	reference = file->slots[position];
+	error = ext4_transaction_buffer(allocation->transaction, file->blocks[reference.logical],
+	    &buffer);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	error = ext4_orphan_file_block(fs, reference.logical, buffer);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	entries = buffer;
+	/* Fast-commit inode reuse can remove the same original slot twice in one
+	 * private conversion. Membership publishes only when that conversion commits. */
+	if (ext4_le32(&entries[reference.slot]) == 0) {
+		return EXT4_OK;
+	}
+	if (ext4_le32(&entries[reference.slot]) != number) {
+		return EXT4_CORRUPT;
+	}
+	ext4_encode32(&entries[reference.slot], 0);
+	ext4_orphan_file_seal(fs, reference.logical, buffer);
+	allocation->transaction->orphan_touched = true;
+	*removed = true;
+	return EXT4_OK;
+}
+
+static enum ext4_result
+ext4_orphan_file_add(struct ext4_allocation *allocation, uint32_t number, bool *added)
+{
+	struct ext4_fs *fs = allocation->fs;
+	struct ext4_orphan_file *file = fs->orphan_file;
 	struct ext4_le32 *entries;
 	void *buffer;
 	uint32_t logical;
 	uint32_t slot;
+	uint32_t block;
+	uint32_t step;
+	uint32_t position;
+	uint32_t slots = ext4_orphan_slots(fs);
 	enum ext4_result error;
 
-	*removed = false;
-	if (file == NULL || file->pending == 0) {
+	*added = false;
+	/* Direct writers preserve their legacy dirty-superblock contract. */
+	if (file == NULL || fs->journal->direct || file->pending == EXT4_ORPHAN_FILE_MAX_ENTRIES) {
 		return EXT4_OK;
 	}
-	/* The complete orphan set was validated before semantic replay. Reads
-	 * include earlier removals in this transaction, including inode reuse
-	 * more than once within the same fast-commit prefix. */
-	for (logical = 0; logical < file->block_count; logical++) {
-		error = ext4_transaction_read(
-		    allocation->transaction, file->blocks[logical], allocation->scratch);
-		if (error == EXT4_OK) {
-			error = ext4_orphan_file_block(fs, logical, allocation->scratch);
+	position = ext4_orphan_find(file, number);
+	if (position < file->pending && file->slots[position].number == number) {
+		return EXT4_CORRUPT;
+	}
+	for (block = 0; block < file->block_count; block++) {
+		logical = (file->cursor + block) % file->block_count;
+		if (file->state[logical].free == 0) {
+			continue;
 		}
+		error = ext4_transaction_buffer(
+		    allocation->transaction, file->blocks[logical], &buffer);
 		if (error != EXT4_OK) {
 			return error;
 		}
-		entries = (struct ext4_le32 *)allocation->scratch;
-		for (slot = 0; slot < ext4_orphan_slots(fs); slot++) {
-			if (ext4_le32(&entries[slot]) != number) {
+		error = ext4_orphan_file_block(fs, logical, buffer);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		entries = buffer;
+		for (step = 0; step < slots; step++) {
+			slot = (file->state[logical].cursor + step) % slots;
+			if (ext4_le32(&entries[slot]) != 0) {
 				continue;
 			}
-			error = ext4_transaction_buffer(
-			    allocation->transaction, file->blocks[logical], &buffer);
-			if (error != EXT4_OK) {
-				return error;
-			}
-			entries = buffer;
-			ext4_encode32(&entries[slot], 0);
-			tail = (struct ext4_orphan_tail_disk *)((uint8_t *)entries +
-			    fs->info.block_size - sizeof(*tail));
-			if (fs->metadata_checksum) {
-				ext4_encode32(&tail->checksum,
-				    ext4_orphan_file_checksum(fs, logical, entries));
-			}
-			*removed = true;
+			ext4_encode32(&entries[slot], number);
+			ext4_orphan_file_seal(fs, logical, buffer);
+			allocation->transaction->orphan_touched = true;
+			*added = true;
 			return EXT4_OK;
 		}
 	}
@@ -672,6 +1027,7 @@ ext4_orphan_file_transfer(struct ext4_fs *fs, uint32_t *cursor, struct ext4_reco
 	 * leaves this inode in exactly one format; the existing bounded cleaner
 	 * can then resume from either side of that transfer. */
 	ext4_encode32(&entries[slot], 0);
+	transaction->orphan_touched = true;
 	tail = (struct ext4_orphan_tail_disk *)((uint8_t *)entries + fs->info.block_size -
 	    sizeof(*tail));
 	if (fs->metadata_checksum) {
@@ -684,7 +1040,6 @@ ext4_orphan_file_transfer(struct ext4_fs *fs, uint32_t *cursor, struct ext4_reco
 		return error;
 	}
 	fs->last_orphan = number;
-	file->pending--;
 	*cursor = logical * slots + slot + 1;
 	report->orphan_transactions++;
 	report->orphan_file_transfers++;
@@ -736,7 +1091,8 @@ ext4_orphan_step_blocks(const struct ext4_fs *fs, const struct ext4_inode *inode
 
 static enum ext4_result
 ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool retained,
-    uint32_t *limit, bool validate, bool *completed, struct ext4_recovery_report *report)
+    bool file_owned, uint32_t *limit, bool validate, bool *completed,
+    struct ext4_recovery_report *report)
 {
 	struct ext4_transaction *transaction;
 	struct ext4_allocation allocation;
@@ -752,6 +1108,7 @@ ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool re
 	bool mapped;
 	bool previous_mapped;
 	bool done = true;
+	bool removed;
 	enum ext4_result error;
 
 	error =
@@ -820,7 +1177,12 @@ ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool re
 		} else {
 			ext4_encode32(&disk->deletion_time, 0);
 		}
-		if (error == EXT4_OK && previous == 0) {
+		if (error == EXT4_OK && file_owned) {
+			error = ext4_orphan_file_remove(&allocation, number, &removed);
+			if (error == EXT4_OK && !removed) {
+				error = EXT4_CORRUPT;
+			}
+		} else if (error == EXT4_OK && previous == 0) {
 			if (fs->last_orphan != number) {
 				error = EXT4_CORRUPT;
 			} else {
@@ -866,7 +1228,7 @@ ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool re
 	}
 	report->orphan_transactions++;
 	if (done && !retained) {
-		if (previous == 0) {
+		if (!file_owned && previous == 0) {
 			fs->last_orphan = next;
 		}
 		report->cleaned_orphans++;
@@ -885,11 +1247,19 @@ enum ext4_result
 ext4_orphan_link(struct ext4_allocation *allocation, uint32_t number, struct ext4_inode_disk *disk)
 {
 	struct ext4_fs *fs = allocation->fs;
+	bool added;
 	enum ext4_result error;
 
 	error = ext4_allocation_super(allocation);
 	if (error == EXT4_OK && ext4_le32(&allocation->super->last_orphan) != fs->last_orphan) {
 		error = EXT4_CORRUPT;
+	}
+	if (error == EXT4_OK) {
+		error = ext4_orphan_file_add(allocation, number, &added);
+	}
+	if (error == EXT4_OK && added) {
+		ext4_encode32(&disk->deletion_time, 0);
+		return EXT4_OK;
 	}
 	if (error == EXT4_OK) {
 		ext4_encode32(&disk->deletion_time, fs->last_orphan);
@@ -912,9 +1282,26 @@ ext4_orphan_unlink(struct ext4_allocation *allocation, uint32_t number,
 	uint32_t previous = 0;
 	uint32_t next = ext4_le32(&disk->deletion_time);
 	bool mapped;
+	bool removed;
 	enum ext4_result error;
 
-	error = ext4_orphan_validate(fs);
+	error = ext4_orphan_file_remove(allocation, number, &removed);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (removed) {
+		if (ext4_le32(&disk->deletion_time) != 0) {
+			return EXT4_CORRUPT;
+		}
+		error = ext4_inode_allocated(fs, number);
+		if (error != EXT4_OK) {
+			return error;
+		}
+		*last_orphan = fs->last_orphan;
+		ext4_encode32(&disk->deletion_time, 0);
+		return EXT4_OK;
+	}
+	error = ext4_orphan_chain(fs, NULL, 0, false);
 	if (error == EXT4_OK) {
 		error = ext4_allocation_super(allocation);
 	}
@@ -976,6 +1363,32 @@ ext4_orphan_unlink(struct ext4_allocation *allocation, uint32_t number,
 	return EXT4_OK;
 }
 
+/* The index locates intent but does not replace validation of its stored bytes.
+ * Recheck the selected slot before any bounded reclamation batch can write. */
+static enum ext4_result
+ext4_orphan_file_verify(struct ext4_fs *fs, const struct ext4_orphan_slot *reference)
+{
+	struct ext4_le32 *entries;
+	enum ext4_result error;
+
+	entries = fs->environment.allocate(fs->environment.context, fs->info.block_size);
+	if (entries == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	error = ext4_block_read(fs, fs->orphan_file->blocks[reference->logical], entries);
+	if (error == EXT4_OK) {
+		error = ext4_orphan_file_block(fs, reference->logical, entries);
+	}
+	if (error == EXT4_OK && ext4_le32(&entries[reference->slot]) != reference->number) {
+		error = EXT4_CORRUPT;
+	}
+	fs->environment.release(fs->environment.context, entries, fs->info.block_size);
+	if (error == EXT4_OK) {
+		error = ext4_inode_allocated(fs, reference->number);
+	}
+	return error;
+}
+
 enum ext4_result
 ext4_orphan_finish_inode(struct ext4_fs *fs, uint32_t number, uint32_t generation, bool retained)
 {
@@ -989,9 +1402,20 @@ ext4_orphan_finish_inode(struct ext4_fs *fs, uint32_t number, uint32_t generatio
 	bool mapped;
 	bool completed = false;
 	bool validate = true;
+	bool file_owned = false;
+	uint32_t position;
 	enum ext4_result error;
 
-	error = ext4_orphan_validate(fs);
+	if (fs->orphan_file != NULL) {
+		position = ext4_orphan_find(fs->orphan_file, number);
+		file_owned = position < fs->orphan_file->pending &&
+		    fs->orphan_file->slots[position].number == number;
+		if (file_owned) {
+			cursor = number;
+		}
+	}
+	error = file_owned ? ext4_orphan_file_verify(fs, &fs->orphan_file->slots[position])
+			   : ext4_orphan_chain(fs, NULL, 0, false);
 	if (error != EXT4_OK) {
 		return error;
 	}
@@ -1006,6 +1430,9 @@ ext4_orphan_finish_inode(struct ext4_fs *fs, uint32_t number, uint32_t generatio
 		}
 		if (error == EXT4_OK) {
 			error = ext4_orphan_record(fs, cursor, disk, &inode, &mapped);
+		}
+		if (error == EXT4_OK && file_owned && ext4_le32(&disk->deletion_time) != 0) {
+			error = EXT4_CORRUPT;
 		}
 		if (error != EXT4_OK || cursor == number) {
 			break;
@@ -1028,8 +1455,8 @@ ext4_orphan_finish_inode(struct ext4_fs *fs, uint32_t number, uint32_t generatio
 	}
 	ext4_zero(&report, sizeof(report));
 	while (!completed) {
-		error = ext4_orphan_step(
-		    fs, number, previous, retained, &limit, validate, &completed, &report);
+		error = ext4_orphan_step(fs, number, previous, retained, file_owned, &limit,
+		    validate, &completed, &report);
 		if (error == EXT4_RANGE && !fs->aborted && limit > 1) {
 			limit /= 2;
 			continue;
@@ -1080,7 +1507,7 @@ ext4_orphan_cleanup(struct ext4_fs *fs, struct ext4_recovery_report *report)
 		validate = true;
 		do {
 			error = ext4_orphan_step(
-			    fs, number, 0, false, &limit, validate, &completed, report);
+			    fs, number, 0, false, false, &limit, validate, &completed, report);
 			if (error == EXT4_RANGE && !fs->aborted && limit > 1) {
 				limit /= 2;
 				continue;

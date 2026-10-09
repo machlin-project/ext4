@@ -1085,12 +1085,13 @@ ext4_commit_rejected(const struct ext4_journal *journal, enum ext4_result error)
 /* Publish the free counters from the transaction's superblock; several allocation
  * contexts, such as private value inodes and quota growth, can share one. */
 static void
-ext4_transaction_publish(const struct ext4_transaction *transaction)
+ext4_transaction_publish(struct ext4_transaction *transaction)
 {
 	struct ext4_fs *fs = transaction->journal->fs;
 	const struct ext4_super_disk *super;
 	uint32_t index;
 
+	ext4_orphan_transaction_publish(transaction);
 	for (index = 0; index < transaction->count; index++) {
 		if (transaction->entries[index].block != EXT4_SUPER_OFFSET / fs->info.block_size) {
 			continue;
@@ -1100,6 +1101,7 @@ ext4_transaction_publish(const struct ext4_transaction *transaction)
 							 .buffer +
 			EXT4_SUPER_OFFSET % fs->info.block_size);
 		fs->info.free_inodes = ext4_le32(&super->free_inodes);
+		fs->last_orphan = ext4_le32(&super->last_orphan);
 		fs->info.free_blocks = ext4_le32(&super->free_blocks_lo);
 		if (fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
 			fs->info.free_blocks |= (uint64_t)ext4_le32(&super->free_blocks_hi) << 32;
@@ -1601,6 +1603,9 @@ ext4_transaction_commit(struct ext4_transaction *transaction)
 	 * snapshots. A preparation refusal leaves held readers' views unchanged. */
 	transaction->quota_phase = true;
 	error = ext4_quota_commit(transaction);
+	if (error == EXT4_OK) {
+		error = ext4_orphan_transaction_prepare(transaction);
+	}
 	if (error == EXT4_OK) {
 		error = ext4_transaction_prepare_data(transaction);
 	}

@@ -310,7 +310,7 @@ held_shared(struct device *device, const char *exports, const char *path)
 	}
 	remove_inode(fs, &root, "block", &inode);
 	remove_inode(fs, &root, "plain", &other);
-	CHECK(fs->last_orphan == other.number && references(device, shared_block) == 2);
+	CHECK(storage_orphan_registered(fs, other.number) && references(device, shared_block) == 2);
 	value_is(fs, &inode, EXT4_XATTR_USER, "binary", original, sizeof(original));
 	replacement =
 	    change(EXT4_XATTR_REPLACE, EXT4_XATTR_USER, "binary", changed, sizeof(changed));
@@ -324,7 +324,8 @@ held_shared(struct device *device, const char *exports, const char *path)
 	value_is(fs, &shared, EXT4_XATTR_USER, "binary", original, sizeof(original));
 	update = attributes(false, NULL, 0);
 	EXPECT(ext4_truncate(fs, inode.number, inode.generation, 17, &update, &result), EXT4_OK);
-	CHECK(result.links == 0 && result.size == 17 && fs->last_orphan == other.number);
+	CHECK(result.links == 0 && result.size == 17 &&
+	    storage_orphan_registered(fs, other.number));
 	value_is(fs, &result, EXT4_XATTR_USER, "binary", changed, sizeof(changed));
 	replacement = change(EXT4_XATTR_REMOVE, EXT4_XATTR_USER, "binary", NULL, 0);
 	update = attributes(false, &replacement, 1);
@@ -348,9 +349,10 @@ held_shared(struct device *device, const char *exports, const char *path)
 	EXPECT(ext4_release_inode(duplicate), EXT4_OK);
 	CHECK(hold->references == 1 && fs->info.free_inodes == free_inodes);
 	EXPECT(ext4_release_inode(hold), EXT4_OK);
-	CHECK(fs->last_orphan == other.number && fs->info.free_inodes == free_inodes + 1);
+	CHECK(storage_orphan_registered(fs, other.number) &&
+	    fs->info.free_inodes == free_inodes + 1);
 	EXPECT(ext4_release_inode(other_hold), EXT4_OK);
-	CHECK(fs->last_orphan == 0 && fs->hold_count == 0 &&
+	CHECK(storage_orphans_empty(fs) && fs->hold_count == 0 &&
 	    fs->info.free_inodes == free_inodes + 2 && fs->info.free_blocks == free_blocks);
 	value_is(fs, &shared, EXT4_XATTR_USER, "binary", original, sizeof(original));
 	EXPECT(ext4_sync(fs), EXT4_OK);
@@ -421,7 +423,7 @@ credit_guard(struct device *device)
 	    ext4_truncate_atomic(fs, inode.number, inode.generation, 0, &update, &result), EXT4_OK);
 	EXPECT(ext4_hold_inode(fs, inode.number, inode.generation, &hold), EXT4_OK);
 	remove_inode(fs, &root, "plain", &inode);
-	CHECK(fs->last_orphan == inode.number);
+	CHECK(storage_orphan_registered(fs, inode.number));
 	writes = device->writes;
 	live = device->live;
 	free_blocks = fs->info.free_blocks;
@@ -528,7 +530,7 @@ replacement(struct device *device, const char *exports, const char *path)
 			    fs, &source, EXT4_XATTR_USER, "binary", original, sizeof(original));
 		}
 		EXPECT(ext4_release_inode(hold), EXT4_OK);
-		CHECK(fs->last_orphan == 0 && fs->info.free_inodes == free_inodes &&
+		CHECK(storage_orphans_empty(fs) && fs->info.free_inodes == free_inodes &&
 		    fs->info.free_blocks == free_blocks &&
 		    (source_block == 0 || references(device, source_block) == source_references));
 		EXPECT(ext4_sync(fs), EXT4_OK);

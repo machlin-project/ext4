@@ -29,6 +29,17 @@ struct ext4_name_hash {
 #define EXT4_ORPHAN_FILE_MAX_BLOCKS 512U
 #define EXT4_ORPHAN_FILE_MAX_ENTRIES (1U << 20)
 
+struct ext4_orphan_slot {
+	uint32_t number;
+	uint32_t logical;
+	uint32_t slot;
+};
+
+struct ext4_orphan_block {
+	uint32_t free;
+	uint32_t cursor;
+};
+
 struct ext4_orphan_file {
 	struct ext4_inode inode;
 	/* Data block addresses followed by unique mapping-node addresses. */
@@ -37,6 +48,11 @@ struct ext4_orphan_file {
 	uint32_t block_count;
 	uint32_t mapping_count;
 	uint32_t pending;
+	/* Sorted inode-to-slot index and bounded per-block allocation hints. */
+	struct ext4_orphan_slot *slots;
+	uint32_t slot_capacity;
+	struct ext4_orphan_block *state;
+	uint32_t cursor;
 };
 
 #define EXT4_QUOTA_TYPES 3U

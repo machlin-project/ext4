@@ -183,7 +183,8 @@ ext4_sync(struct ext4_fs *fs)
 	}
 	/* A failed checkpoint leaves the committed transactions for recovery. */
 	error = ext4_journal_checkpoint(fs->journal);
-	if (error == EXT4_OK && fs->last_orphan != 0) {
+	if (error == EXT4_OK && (fs->last_orphan != 0 ||
+		(fs->orphan_file != NULL && fs->orphan_file->pending != 0))) {
 		error = ext4_orphan_validate_live(fs);
 		if (error == EXT4_OK &&
 		    (fs->journal->transaction_active || fs->journal->start != 0)) {
@@ -1672,8 +1673,7 @@ ext4_truncate_start(struct ext4_fs *fs, uint32_t number, uint32_t generation, ui
 				if (allocation.freed == 0) {
 					error = EXT4_CORRUPT;
 				} else if (inode.links != 0) {
-					ext4_encode32(&disk->deletion_time, fs->last_orphan);
-					ext4_encode32(&allocation.super->last_orphan, number);
+					error = ext4_orphan_link(&allocation, number, disk);
 				}
 			}
 		}
@@ -1724,9 +1724,6 @@ attributes:
 	error = ext4_edit_commit(fs, transaction);
 	if (error == EXT4_OK) {
 		fs->info.feature_compat = feature_compat;
-		if (!done && inode.links != 0) {
-			fs->last_orphan = number;
-		}
 		*pending = !done;
 		*result = inode;
 	}

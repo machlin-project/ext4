@@ -638,12 +638,7 @@ ext4_namespace_orphan_prepare(struct ext4_allocation *allocation, const struct e
 	if (error != EXT4_OK) {
 		return error;
 	}
-	if (ext4_le32(&allocation->super->last_orphan) != fs->last_orphan) {
-		return EXT4_CORRUPT;
-	}
-	ext4_encode32(&disk->deletion_time, fs->last_orphan);
-	ext4_encode32(&allocation->super->last_orphan, inode->number);
-	return EXT4_OK;
+	return ext4_orphan_link(allocation, inode->number, disk);
 }
 
 static enum ext4_result
@@ -652,7 +647,6 @@ ext4_namespace_orphan_complete(struct ext4_fs *fs, uint32_t number, uint32_t gen
 	struct ext4_inode_hold *hold = ext4_inode_find_hold(fs, number);
 	enum ext4_result error;
 
-	fs->last_orphan = number;
 	if (hold != NULL) {
 		hold->unlinked = true;
 		return EXT4_OK;

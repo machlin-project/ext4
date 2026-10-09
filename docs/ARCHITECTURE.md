@@ -677,7 +677,7 @@ changed mapping/metadata set exceeds the transaction bound.
 
 `ext4_truncate` uses bounded batches to shrink a live regular file. Its first
 transaction validates the complete map, captures the admitted attributes and
-target size, zeroes the retained tail, removes a first batch and records a legacy
+target size, zeroes the retained tail, removes a first batch and records an
 orphan intent if more work remains. Further cleanup uses the same restartable
 owner as offline recovery; the final batch removes the intent. The filesystem
 owner excludes all other reads and mutations throughout the call. A successful
@@ -734,10 +734,31 @@ from completed orphan entries and total cleanup transactions.
 
 Every writing transaction on this feature retains ORPHAN_PRESENT alongside RECOVER;
 clean finish clears both only after the validated file and legacy list are empty.
-Read-only mounts reject ORPHAN_PRESENT even if RECOVER is absent. Live truncation
-and unlink continue to use the legacy list on these volumes. Scalable concurrent
-insertion, orphan-file growth and integration with the owning platform's object
-lifetime remain separate work.
+Read-only mounts reject ORPHAN_PRESENT even if RECOVER is absent.
+
+On journaled mounts, live unlink, bounded truncate and verity construction use an
+available slot in the existing file. Full files or the active-entry bound retain
+legacy-list fallback; corruption and allocation failures do not silently select
+another representation. Explicit unjournaled mounts keep their legacy dirty-state
+contract. No file growth or new private inode creation is performed.
+
+Mount admission builds a bounded, inode-sorted slot index and per-block free counts
+and cursors. Lookup is logarithmic and removal reads only the selected slot block;
+index insertion/removal shifts a bounded array rather than rescanning disk. Private
+snapshot changes prepare index deltas and any required capacity before commit I/O.
+Successful logical publication applies those deltas without allocation, including
+when a deferred compound accepts an operation. Refusal discards deltas without
+changing membership. Retained durable commits do not publish the same delta twice.
+The serialized owner validates inode generations before cleanup; the slot index is
+not an independently reusable handle.
+
+Live cleanup clears the file slot together with final inode/map release instead
+of transferring it through the global legacy head. Sync validates the union of
+file and legacy entries against held unlinked inodes and succeeds while keeping
+recovery intent for open deletions. Clean finish clears intent only when both are
+empty. Offline recovery retains the existing checked slot-to-legacy transfer
+protocol. Orphan-file growth, concurrent writers and platform lifetime integration
+remain separate work.
 
 Linux's primary free-block/inode summaries may lag committed group-descriptor
 changes. Explicit recovery reconstructs those totals from the validated, replayed

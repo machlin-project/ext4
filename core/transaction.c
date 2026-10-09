@@ -515,6 +515,7 @@ ext4_transaction_cancel(struct ext4_transaction *transaction)
 		return;
 	}
 	fs = transaction->journal->fs;
+	ext4_orphan_transaction_cancel(transaction);
 	for (index = 0; index < transaction->count; index++) {
 		ext4_transaction_release(fs, &transaction->entries[index]);
 	}

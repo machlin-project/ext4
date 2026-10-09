@@ -60,11 +60,9 @@ struct ext4_allocation {
 enum ext4_result ext4_allocation_init(struct ext4_allocation *allocation, struct ext4_fs *fs,
     struct ext4_transaction *transaction, const struct ext4_inode *inode);
 void ext4_allocation_destroy(struct ext4_allocation *allocation);
-/* Remove a previously validated modern orphan slot in the caller's private
- * transaction. Publish the pending-count decrement only after commit. */
-/* The legacy orphan list in the caller's transaction, for a linked inode whose
- * record the caller holds. link puts it at the head; unlink removes it from any
- * position without truncating it and reports the list head after the commit. */
+/* Orphan intent in the caller's private transaction. link uses an available file
+ * slot or the legacy head; unlink removes either representation without truncating
+ * the inode and reports the legacy head after commit. Publication is centralized. */
 enum ext4_result ext4_orphan_link(
     struct ext4_allocation *allocation, uint32_t number, struct ext4_inode_disk *disk);
 enum ext4_result ext4_orphan_unlink(struct ext4_allocation *allocation, uint32_t number,
@@ -72,6 +70,7 @@ enum ext4_result ext4_orphan_unlink(struct ext4_allocation *allocation, uint32_t
 /* Decode and validate an orphan-list inode record for reclamation. */
 enum ext4_result ext4_orphan_record(struct ext4_fs *fs, uint32_t number,
     struct ext4_inode_disk *disk, struct ext4_inode *inode, bool *mapped);
+/* Remove an indexed file slot; transaction publication owns the index change. */
 enum ext4_result ext4_orphan_file_remove(
     struct ext4_allocation *allocation, uint32_t number, bool *removed);
 enum ext4_result ext4_allocate_block(struct ext4_allocation *allocation, uint64_t *block);

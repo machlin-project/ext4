@@ -439,7 +439,7 @@ held_files(struct device *device)
 		    memcmp(device->cache + mapping.device_offset, bytes, device->block_size) == 0);
 	}
 	EXPECT(remove_inode(fs, &root, "held-file", &file, false, &result), EXT4_OK);
-	CHECK(result.links == 0 && hold->unlinked && fs->last_orphan == file.number);
+	CHECK(result.links == 0 && hold->unlinked && storage_orphan_registered(fs, file.number));
 	missing(fs, &root, "held-file");
 	EXPECT(ext4_get_inode(fs, file.number, &result), EXT4_NOT_FOUND);
 	EXPECT(ext4_read_held(hold, 0, observed, device->block_size, &completed), EXT4_OK);
@@ -452,7 +452,7 @@ held_files(struct device *device)
 		   file.number, file.generation, &update.change_time, &result),
 	    EXT4_NOT_FOUND);
 	EXPECT(remove_inode(fs, &root, "other-file", &other, false, &result), EXT4_OK);
-	CHECK(fs->last_orphan == other.number);
+	CHECK(storage_orphan_registered(fs, other.number));
 	update = attributes();
 	update.permissions = 0600;
 	update.uid = 12345;
@@ -471,13 +471,13 @@ held_files(struct device *device)
 	}
 	EXPECT(ext4_truncate(fs, replacement.number, replacement.generation, 0, &update, &result),
 	    EXT4_OK);
-	CHECK(result.links == 1 && result.size == 0 && fs->last_orphan == other.number);
+	CHECK(result.links == 1 && result.size == 0 && storage_orphan_registered(fs, other.number));
 	EXPECT(remove_inode(fs, &root, "replacement", &replacement, false, &result), EXT4_OK);
-	CHECK(fs->last_orphan == other.number);
+	CHECK(storage_orphan_registered(fs, other.number));
 	EXPECT(ext4_sync(fs), EXT4_OK);
 	EXPECT(ext4_mount(&device->environment, &reader), EXT4_RECOVERY_REQUIRED);
 	EXPECT(ext4_truncate(fs, file.number, file.generation, 1, &update, &result), EXT4_OK);
-	CHECK(result.links == 0 && result.size == 1 && fs->last_orphan == other.number);
+	CHECK(result.links == 0 && result.size == 1 && storage_orphan_registered(fs, other.number));
 	EXPECT(ext4_read_held(hold, 0, observed, device->block_size, &completed), EXT4_OK);
 	CHECK(completed == 1 && observed[0] == bytes[0]);
 	EXPECT(ext4_map_read_held(hold, device->block_size, device->block_size, &mapping),
@@ -501,11 +501,12 @@ held_files(struct device *device)
 	EXPECT(ext4_release_inode(duplicate), EXT4_OK);
 	CHECK(hold->references == 1 && fs->info.free_inodes == free_inodes - 2);
 	EXPECT(ext4_release_inode(hold), EXT4_OK);
-	CHECK(fs->last_orphan == other.number && fs->info.free_inodes == free_inodes - 1);
+	CHECK(storage_orphan_registered(fs, other.number) &&
+	    fs->info.free_inodes == free_inodes - 1);
 	EXPECT(ext4_refresh_inode(other_hold, &result), EXT4_OK);
 	CHECK(result.links == 0);
 	EXPECT(ext4_release_inode(other_hold), EXT4_OK);
-	CHECK(fs->last_orphan == 0 && fs->holds == NULL && fs->hold_count == 0);
+	CHECK(storage_orphans_empty(fs) && fs->holds == NULL && fs->hold_count == 0);
 	CHECK(fs->info.free_inodes == free_inodes && fs->info.free_blocks == free_blocks);
 	replacement = create(fs, &root, "reuse", false);
 	CHECK(replacement.number == file.number &&
@@ -835,7 +836,7 @@ directories_and_links(struct device *device, const char *exports, const char *pa
 		   child.number, child.generation, &update.change_time, &result),
 	    EXT4_OK);
 	EXPECT(remove_inode(fs, &root, "first-name", &child, false, &result), EXT4_OK);
-	CHECK(result.links == 1 && fs->last_orphan == 0);
+	CHECK(result.links == 1 && storage_orphans_empty(fs));
 	EXPECT(remove_inode(fs, &root, "second-name", &child, false, &result), EXT4_OK);
 	memset(target, 's', sizeof(target));
 	for (index = 0; index < 2; index++) {
@@ -1132,7 +1133,7 @@ release_attempt(struct device *device, enum hold_operation operation, unsigned i
 		EXPECT(
 		    ext4_hold_inode(fs, companion.number, companion.generation, &other), EXT4_OK);
 		EXPECT(remove_inode(fs, &root, "companion", &companion, false, &result), EXT4_OK);
-		CHECK(fs->last_orphan == companion.number);
+		CHECK(storage_orphan_registered(fs, companion.number));
 	}
 	EXPECT(ext4_sync(fs), EXT4_OK);
 	allocations = device->allocations;
@@ -1155,7 +1156,7 @@ release_attempt(struct device *device, enum hold_operation operation, unsigned i
 		error = ext4_truncate(fs, victim.number, victim.generation, 0, &update, &result);
 		if (error == EXT4_OK) {
 			CHECK(result.size == 0 && result.links == 0 && result.blocks_512 == 0 &&
-			    fs->last_orphan == companion.number);
+			    storage_orphan_registered(fs, companion.number));
 		} else {
 			CHECK(memcmp(&result, &untouched, sizeof(result)) == 0);
 		}
@@ -1166,11 +1167,11 @@ release_attempt(struct device *device, enum hold_operation operation, unsigned i
 		CHECK(fs->hold_count == (nonhead ? 1U : 0U));
 	}
 	if (error == EXT4_OK && nonhead) {
-		CHECK(fs->last_orphan == companion.number);
+		CHECK(storage_orphan_registered(fs, companion.number));
 		error = ext4_release_inode(other);
 	}
 	if (error == EXT4_OK) {
-		CHECK(fs->holds == NULL && fs->last_orphan == 0);
+		CHECK(fs->holds == NULL && storage_orphans_empty(fs));
 		error = ext4_sync(fs);
 	}
 	trace->allocations = device->allocations - allocations;
@@ -1286,6 +1287,108 @@ indexed_guard(struct device *device)
 	    "PASS indexed removal checks missing names and nonempty directories without writes\n");
 }
 
+/* Exercise actual live slots on independently generated orphan-file images,
+ * including sync with held deletions and crash recovery of durable slot intent. */
+static void
+orphan_file_modes(struct device *device, bool lazy, bool crash, bool corrupt)
+{
+	struct ext4_write_options options = { .commit_blocks = corrupt ? 0U : 32U,
+		.flags = EXT4_WRITE_ORDERED_DATA, .checkpoint_blocks = lazy ? 64U : 0 };
+	struct ext4_recovery_report report;
+	struct ext4_inode_update update = write_attributes();
+	struct ext4_fs *fs;
+	struct ext4_inode root;
+	struct ext4_inode file;
+	struct ext4_inode result;
+	struct ext4_inode_hold *hold;
+	struct ext4_orphan_slot reference;
+	struct ext4_super_disk *super;
+	struct ext4_le32 *entries = malloc(device->block_size);
+	uint32_t free_inodes;
+	uint32_t writes;
+	uint32_t block;
+	uint64_t offset;
+	size_t completed;
+
+	CHECK(entries != NULL);
+	device_reset(device, device->base);
+	fs = mount_writer(device, &root);
+	if (fs->orphan_file == NULL) {
+		ext4_unmount(fs);
+		free(entries);
+		return;
+	}
+	ext4_unmount(fs);
+	EXPECT(ext4_mount_writable_with_options(
+		   &device->environment, &device->writer, NULL, &options, &fs), EXT4_OK);
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	free_inodes = fs->info.free_inodes;
+	file = create(fs, &root, "slot-held", false);
+	if (corrupt) {
+		/* More than one cleanup batch makes late slot verification observable. */
+		memset(entries, 0x5a, device->block_size);
+		for (block = 0; block < TEST_REMOVAL_DATA_BLOCKS; block++) {
+			EXPECT(ext4_write(fs, file.number, file.generation,
+				   (uint64_t)block * device->block_size, entries, device->block_size,
+				   &update, &completed), EXT4_OK);
+			CHECK(completed == device->block_size);
+		}
+		EXPECT(ext4_get_inode(fs, file.number, &file), EXT4_OK);
+		CHECK(file.blocks_512 / (device->block_size / EXT4_SECTOR_SIZE) >
+		    EXT4_ORPHAN_BATCH_BLOCKS);
+	}
+	EXPECT(ext4_hold_inode(fs, file.number, file.generation, &hold), EXT4_OK);
+	EXPECT(remove_inode(fs, &root, "slot-held", &file, false, &result), EXT4_OK);
+	CHECK(fs->last_orphan == 0 && fs->orphan_file->pending == 1 && hold->unlinked);
+	CHECK(storage_orphan_registered(fs, file.number));
+	reference = fs->orphan_file->slots[0];
+	EXPECT(ext4_block_read(fs, fs->orphan_file->blocks[reference.logical], entries), EXT4_OK);
+	CHECK(ext4_le32(&entries[reference.slot]) == file.number);
+	EXPECT(crash ? ext4_commit(fs) : ext4_sync(fs), EXT4_OK);
+	super = (struct ext4_super_disk *)(device->stable + EXT4_SUPER_OFFSET);
+	CHECK(ext4_le32(&super->feature_ro_compat) & EXT4_FEATURE_RO_ORPHAN_PRESENT);
+	if (corrupt) {
+		/* A damaged slot must be found before any reclamation batch writes. */
+		offset = fs->orphan_file->blocks[reference.logical] * device->block_size +
+		    device->block_size - sizeof(struct ext4_orphan_tail_disk);
+		device->cache[offset] ^= 1U;
+		device->stable[offset] ^= 1U;
+		writes = device->writes;
+		EXPECT(ext4_release_inode(hold), EXT4_CORRUPT);
+		CHECK(device->writes == writes && fs->aborted);
+		ext4_unmount(fs);
+		free(entries);
+		device_reset(device, device->base);
+		return;
+	}
+	if (crash) {
+		ext4_unmount(fs);
+		device_reset(device, device->stable);
+		EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_OK);
+		CHECK(report.orphan_file_transfers == 1 && report.cleaned_orphans == 1);
+		fs = mount_writer(device, &root);
+		missing(fs, &root, "slot-held");
+	} else {
+		EXPECT(ext4_release_inode(hold), EXT4_OK);
+		CHECK(storage_orphans_empty(fs));
+		file = create(fs, &root, "slot-reused", false);
+		EXPECT(ext4_hold_inode(fs, file.number, file.generation, &hold), EXT4_OK);
+		EXPECT(remove_inode(fs, &root, "slot-reused", &file, false, &result), EXT4_OK);
+		CHECK(fs->orphan_file->pending == 1 &&
+		    fs->orphan_file->slots[0].logical == reference.logical &&
+		    fs->orphan_file->slots[0].slot == reference.slot);
+		EXPECT(ext4_release_inode(hold), EXT4_OK);
+	}
+	CHECK(storage_orphans_empty(fs) && fs->info.free_inodes == free_inodes);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	super = (struct ext4_super_disk *)(device->stable + EXT4_SUPER_OFFSET);
+	CHECK(!(ext4_le32(&super->feature_ro_compat) & EXT4_FEATURE_RO_ORPHAN_PRESENT));
+	ext4_unmount(fs);
+	CHECK(device->live == 0);
+	free(entries);
+	device_reset(device, device->base);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1316,6 +1419,11 @@ main(int argc, char **argv)
 			storage_close(&device);
 			continue;
 		}
+		orphan_file_modes(&device, false, false, false);
+		orphan_file_modes(&device, true, false, false);
+		orphan_file_modes(&device, false, true, false);
+		orphan_file_modes(&device, true, true, false);
+		orphan_file_modes(&device, false, false, true);
 		hold_faults(&device);
 		held_inode_resolution(&device);
 		held_write_metadata(&device);

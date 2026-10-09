@@ -264,6 +264,35 @@ storage_equal(struct device *device, const uint8_t *expected)
 	return true;
 }
 
+/* Clean orphan-file fixtures have available slots. Keep the old legacy-head
+ * oracle on legacy/direct mounts, and require actual indexed membership on file
+ * mounts rather than allowing an implementation to silently keep using a chain. */
+static inline bool
+storage_orphan_registered(const struct ext4_fs *fs, uint32_t number)
+{
+	uint32_t index;
+
+	if (fs->orphan_file == NULL || fs->journal->direct) {
+		return fs->last_orphan == number;
+	}
+	if (fs->last_orphan != 0) {
+		return false;
+	}
+	for (index = 0; index < fs->orphan_file->pending; index++) {
+		if (fs->orphan_file->slots[index].number == number) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static inline bool
+storage_orphans_empty(const struct ext4_fs *fs)
+{
+	return fs->last_orphan == 0 &&
+	    (fs->orphan_file == NULL || fs->orphan_file->pending == 0);
+}
+
 static inline bool
 storage_recover(struct device *device, const uint8_t *expected, bool committed)
 {

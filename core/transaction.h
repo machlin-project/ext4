@@ -42,6 +42,11 @@ struct ext4_transaction {
 	bool freed_overflow;
 	uint32_t freed_count;
 	struct ext4_block_range *freed;
+	/* Prepared private index deltas: removals first, then additions. */
+	struct ext4_orphan_slot *orphan_changes;
+	uint32_t orphan_removed;
+	uint32_t orphan_added;
+	bool orphan_touched;
 	struct ext4_transaction_entry entries[];
 };
 
@@ -50,5 +55,8 @@ enum ext4_result ext4_transaction_own(struct ext4_fs *fs, struct ext4_transactio
 void ext4_transaction_release(struct ext4_fs *fs, const struct ext4_transaction_entry *entry);
 /* The caller already reserved capacity and made every retained buffer owned. */
 void ext4_transaction_take(struct ext4_transaction *set, struct ext4_transaction *transaction);
+enum ext4_result ext4_orphan_transaction_prepare(struct ext4_transaction *transaction);
+void ext4_orphan_transaction_publish(struct ext4_transaction *transaction);
+void ext4_orphan_transaction_cancel(struct ext4_transaction *transaction);
 
 #endif

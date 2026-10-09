@@ -1151,9 +1151,6 @@ ext4_fast_commit_replay(struct ext4_fast_commit *log)
 		transaction = NULL;
 		if (error == EXT4_OK) {
 			fs->last_orphan = orphan_head;
-			if (fs->orphan_file != NULL) {
-				fs->orphan_file->pending -= replay->orphan_slots_removed;
-			}
 		}
 	}
 out:

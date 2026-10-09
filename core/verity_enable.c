@@ -206,9 +206,6 @@ ext4_verity_prepare(struct ext4_verity_builder *builder, bool *trimmed)
 		return error;
 	}
 	error = ext4_verity_step_commit(builder, transaction, &allocation, disk);
-	if (error == EXT4_OK) {
-		fs->last_orphan = builder->number;
-	}
 	return error;
 }
 

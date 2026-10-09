@@ -773,3 +773,5 @@ if paths['unjournaled_fixtures'] != ''
     sustained_seed += 1
   endforeach
 endif
+
+test('orphan-slot-index', programs['orphan-index'], suite: 'core')
