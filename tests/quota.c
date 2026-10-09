@@ -775,19 +775,37 @@ enforcement(struct device *device, const char *exports, const char *source)
 	expect_usage(fs, 0, EXISTING_OWNER, start.space, 2);
 	{
 		struct ext4_inode_update request_update = data_update(&limited);
+		struct ext4_inode_hold *hold;
+		struct ext4_read_state *reader;
 		const size_t length = 1024U * 1024U;
 		uint8_t *data = malloc(length);
 		uint8_t *before = malloc(device->size);
+		uint8_t expected;
+		uint8_t observed;
+		uint64_t revision;
+		size_t read;
+		uint32_t allocations;
 		uint32_t writes = device->writes;
 
 		CHECK(data != NULL && before != NULL);
 		memset(data, 'q', length);
 		memcpy(before, device->cache, device->size);
+		/* A refused mutation must not evict an unrelated held reader. */
+		EXPECT(ext4_hold_inode(fs, alice.number, alice.generation, &hold), EXT4_OK);
+		EXPECT(ext4_read_held(hold, 0, &expected, 1, &read), EXT4_OK);
+		CHECK(read == 1);
+		reader = hold->reader;
+		revision = fs->read_revision;
 		EXPECT(ext4_write_request(fs, limited.number, limited.generation, 0, data, length,
 			   &request_update, &completed),
 		    EXT4_QUOTA_EXCEEDED);
 		CHECK(completed == 0 && !fs->aborted && device->writes == writes);
 		CHECK(memcmp(before, device->cache, device->size) == 0);
+		CHECK(fs->read_revision == revision && hold->reader == reader);
+		allocations = device->allocations;
+		EXPECT(ext4_read_held(hold, 0, &observed, 1, &read), EXT4_OK);
+		CHECK(read == 1 && observed == expected && device->allocations == allocations);
+		EXPECT(ext4_release_inode(hold), EXT4_OK);
 		expect_usage(fs, 0, EXISTING_OWNER, start.space, 2);
 		free(before);
 		free(data);

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "journal.h"
+#include "map_read.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,7 @@ struct device {
 	size_t allocations;
 	size_t fail_allocation;
 	size_t live;
+	size_t reads;
 	size_t writes;
 	size_t largest_write;
 	size_t fail_write;
@@ -83,6 +85,7 @@ device_read(void *context, uint64_t offset, void *buffer, size_t length)
 	struct device *device = context;
 
 	CHECK(offset <= device->size && length <= device->size - offset);
+	device->reads++;
 	memcpy(buffer, device->home + offset, length);
 	return EXT4_OK;
 }
@@ -271,6 +274,7 @@ check_source(uint32_t block_size, enum source_case kind, size_t fail_allocation,
 	size_t allocations;
 	size_t live;
 	size_t available = 2U * block_size;
+	uint64_t revision;
 	bool retain_first = kind >= SOURCE_LOGGED;
 	bool retain_second = kind == SOURCE_LOGGED || kind == SOURCE_REUSED;
 	enum ext4_result error;
@@ -349,11 +353,18 @@ check_source(uint32_t block_size, enum source_case kind, size_t fail_allocation,
 	device.fail_allocation = fail_allocation == 0 ? 0 : allocations + fail_allocation;
 	device.fail_write = fail_write;
 	device.write_error = write_error;
+	revision = fs.read_revision;
 	error = ext4_transaction_commit(transaction);
 	CHECK(error ==
 	    (fail_allocation != 0 ? EXT4_NO_MEMORY : (fail_write != 0 ? write_error : EXT4_OK)));
 	CHECK(!journal.transaction_active && journal.aborted == (fail_write != 0));
 	CHECK(ext4_commit_rejected(&journal, error) == (fail_allocation != 0));
+	/* Borrowed-buffer preparation is still private. A later compound allocation
+	 * may follow a capacity-driven commit, so retain conservative invalidation. */
+	CHECK(fs.read_revision == revision +
+		(kind == SOURCE_LOGGED && fail_allocation != 0 && fail_allocation <= 2U
+			? 0U
+			: 1U));
 	check_bytes(source, 0xc1U, block_size);
 	check_bytes(source + block_size, 0xd1U, block_size);
 	CHECK(mprotect(source, 2U * block_size, PROT_READ | PROT_WRITE) == 0);
@@ -388,6 +399,98 @@ check_source(uint32_t block_size, enum source_case kind, size_t fail_allocation,
 	free(device.home);
 }
 
+/* Seed two already-validated held mappings in the synthetic owner. Preparation
+ * refusals must preserve both readers without metadata reads or allocations;
+ * successful deferred publication must still invalidate them, including wrap. */
+static void
+check_preparation_cache(uint32_t block_size, bool quota, size_t fault, uint64_t revision)
+{
+	struct device device = { .size = (size_t)DEVICE_BLOCKS * 2U * block_size };
+	struct ext4_fs fs = { 0 };
+	struct ext4_journal journal = { .fs = &fs,
+		.first = 1,
+		.last = DEVICE_BLOCKS * 2U,
+		.compound_blocks = COMPOUND_BLOCKS };
+	struct ext4_inode_hold holds[2] = { 0 };
+	struct ext4_read_state *readers[2];
+	struct ext4_transaction *transaction;
+	uint8_t *source = malloc(2U * block_size);
+	uint8_t *output = malloc(block_size);
+	size_t allocations;
+	size_t reads;
+	size_t completed;
+	size_t index;
+
+	device.home = malloc(device.size);
+	CHECK(device.home != NULL && source != NULL && output != NULL);
+	memset(device.home, HOME_BYTE, device.size);
+	memset(source, 0xc1U, 2U * block_size);
+	fs.info.block_size = block_size;
+	fs.info.blocks = DEVICE_BLOCKS * 2U;
+	fs.inode_size = EXT4_INODE_BASE_SIZE;
+	fs.environment = (struct ext4_environment){ &device, device.size, device_read,
+		device_allocate, device_release };
+	fs.journal = &journal;
+	fs.quota_active = quota;
+	fs.read_revision = revision;
+	fs.holds = holds;
+	holds[0].next = &holds[1];
+	journal.writer.context = &device;
+	journal.writer.write = device_write;
+	for (index = 0; index < 2U; index++) {
+		readers[index] = device_allocate(&device, sizeof(*readers[index]));
+		memset(readers[index], 0, sizeof(*readers[index]));
+		readers[index]->revision = revision;
+		readers[index]->inode.mode = EXT4_MODE_REGULAR;
+		readers[index]->inode.size = block_size;
+		readers[index]->mapping.run =
+		    (struct ext4_read_run){ 0, 1, DATA_FIRST + index };
+		holds[index].fs = &fs;
+		holds[index].references = 1;
+		holds[index].reader = readers[index];
+		CHECK(ext4_read_held(&holds[index], 0, output, block_size, &completed) == EXT4_OK);
+		CHECK(completed == block_size);
+		check_bytes(output, HOME_BYTE, block_size);
+	}
+	CHECK(ext4_transaction_begin(&journal, TRANSACTION_CREDITS, &transaction) == EXT4_OK);
+	CHECK(ext4_transaction_data_source(transaction, DATA_FIRST, source, block_size) == EXT4_OK);
+	CHECK(ext4_transaction_data_source(
+		  transaction, DATA_SECOND, source + block_size, block_size) == EXT4_OK);
+	device.fail_allocation = device.allocations + fault;
+	reads = device.reads;
+	CHECK(ext4_transaction_commit(transaction) == EXT4_NO_MEMORY);
+	CHECK(!journal.aborted && !journal.transaction_active && journal.compound == NULL);
+	CHECK(fs.read_revision == revision && device.writes == 0 && device.reads == reads);
+	CHECK(device.live == 2U);
+	check_bytes(device.home, HOME_BYTE, device.size);
+	device.fail_allocation = 0;
+	allocations = device.allocations;
+	for (index = 0; index < 2U; index++) {
+		CHECK(holds[index].reader == readers[index]);
+		CHECK(ext4_read_held(&holds[index], 0, output, block_size, &completed) == EXT4_OK);
+		CHECK(completed == block_size);
+		check_bytes(output, HOME_BYTE, block_size);
+	}
+	CHECK(device.allocations == allocations && device.reads == reads + 2U);
+	/* Retry without the injected refusal: the live compound now owns new bytes. */
+	CHECK(ext4_transaction_begin(&journal, TRANSACTION_CREDITS, &transaction) == EXT4_OK);
+	CHECK(ext4_transaction_data_source(transaction, DATA_FIRST, source, block_size) == EXT4_OK);
+	CHECK(ext4_transaction_commit(transaction) == EXT4_OK);
+	CHECK(fs.read_revision == revision + 1U && device.writes == 0);
+	CHECK(ext4_device_read(&fs, DATA_FIRST * (uint64_t)block_size, output, block_size) ==
+	    EXT4_OK);
+	check_bytes(output, 0xc1U, block_size);
+	for (index = 0; index < 2U; index++) {
+		CHECK((holds[index].reader == NULL) == (revision == UINT64_MAX));
+		ext4_drop_read_cache(&holds[index]);
+	}
+	ext4_transaction_cancel(journal.compound);
+	CHECK(device.live == 0);
+	free(output);
+	free(source);
+	free(device.home);
+}
+
 int
 main(void)
 {
@@ -414,8 +517,19 @@ main(void)
 		for (fail_allocation = 1; fail_allocation <= 3; fail_allocation++) {
 			check_source(
 			    block_sizes[index], SOURCE_LOGGED, fail_allocation, 0, EXT4_OK);
+			check_preparation_cache(block_sizes[index], true, fail_allocation, 0);
+			check_preparation_cache(
+			    block_sizes[index], true, fail_allocation, UINT64_MAX);
+			if (fail_allocation <= 2U) {
+				check_preparation_cache(
+				    block_sizes[index], false, fail_allocation, 0);
+				check_preparation_cache(
+				    block_sizes[index], false, fail_allocation, UINT64_MAX);
+			}
 		}
 	}
+	puts("PASS preparation refusals preserve two held reads with no cache allocation or "
+	     "metadata I/O");
 	puts("PASS journal snapshot ownership, allocation refusal and ordered write failures");
 	return 0;
 }

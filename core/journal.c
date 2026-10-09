@@ -1598,10 +1598,8 @@ ext4_transaction_commit(struct ext4_transaction *transaction)
 		ext4_transaction_cancel(transaction);
 		return EXT4_OK;
 	}
-	/* Even a failed commit can have written ordered data or home blocks. Readers
-	 * must refresh before reusing a snapshot; deferred publication is covered too. */
-	ext4_read_cache_invalidate(journal->fs);
-	/* Quota usage follows the inode records this transaction commits. */
+	/* Quota updates and borrowed-buffer ownership still affect only private
+	 * snapshots. A preparation refusal leaves held readers' views unchanged. */
 	transaction->quota_phase = true;
 	error = ext4_quota_commit(transaction);
 	if (error == EXT4_OK) {
@@ -1611,6 +1609,9 @@ ext4_transaction_commit(struct ext4_transaction *transaction)
 		ext4_transaction_cancel(transaction);
 		return error;
 	}
+	/* Even a failed commit can have written ordered data or home blocks. Readers
+	 * must refresh before reusing a snapshot; deferred publication is covered too. */
+	ext4_read_cache_invalidate(journal->fs);
 	if (journal->compound_blocks != 0 && !transaction->recovery) {
 		return ext4_transaction_merge(transaction);
 	}

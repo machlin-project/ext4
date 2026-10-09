@@ -820,7 +820,9 @@ nokey_export(struct ext4_fs *fs, struct model *model, const char *directory, con
 	manifest = fopen(path, "wx");
 	CHECK(manifest != NULL);
 	/* The vault's own name is in the unencrypted root; the subdirectory's is not. */
-	snprintf(paths[MODEL_VAULT], sizeof(paths[MODEL_VAULT]), "%s", model->paths[MODEL_VAULT]);
+	length = snprintf(
+	    paths[MODEL_VAULT], sizeof(paths[MODEL_VAULT]), "%s", model->paths[MODEL_VAULT]);
+	CHECK(length > 0 && (size_t)length < sizeof(paths[MODEL_VAULT]));
 	paths[MODEL_SUB][0] = 0;
 	for (index = MODEL_VAULT; index <= MODEL_SUB; index++) {
 		CHECK(paths[index][0] != 0);
@@ -834,8 +836,9 @@ nokey_export(struct ext4_fs *fs, struct model *model, const char *directory, con
 			}
 			fprintf(manifest, "name %s %s\n", paths[index], listing.names[entry]);
 			if (listing.numbers[entry] == model->directories[MODEL_SUB].number) {
-				snprintf(paths[MODEL_SUB], sizeof(paths[MODEL_SUB]), "%s/%s",
-				    paths[index], listing.names[entry]);
+				length = snprintf(paths[MODEL_SUB], sizeof(paths[MODEL_SUB]),
+				    "%s/%s", paths[index], listing.names[entry]);
+				CHECK(length > 0 && (size_t)length < sizeof(paths[MODEL_SUB]));
 			}
 			EXPECT(ext4_get_inode(fs, listing.numbers[entry], &inode), EXT4_OK);
 			if ((inode.mode & EXT4_MODE_TYPE) != EXT4_MODE_SYMLINK) {

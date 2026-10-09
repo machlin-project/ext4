@@ -1333,8 +1333,12 @@ always comes from the current journal snapshots or the environment; the held-rea
 cache itself stores no file data or pages. Legacy indirect maps reuse scratch and
 the last decoded run but do not cache leaves.
 
-A mount revision advances before every nonempty transaction commit attempt,
-covering direct writes, ordered data, deferred publication and failed commits.
+A mount revision advances after a nonempty transaction's private quota and
+borrowed-buffer preparation succeeds, before any commit path can publish or
+write. Preparation refusals preserve held snapshots because neither live bytes
+nor metadata have changed. Later failures still invalidate conservatively,
+covering direct writes, ordered data, capacity-driven commits and deferred
+publication.
 The next held read discards an older snapshot and refreshes inode identity, size,
 flags and mapping, including an inode unlinked while held. This conservative
 invalidation is constant time and includes unrelated inode mutations. Revision
