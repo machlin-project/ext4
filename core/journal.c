@@ -1119,7 +1119,8 @@ ext4_transaction_in_place(const struct ext4_transaction *transaction, uint64_t b
 	const struct ext4_journal *journal = transaction->journal;
 	uint32_t index;
 
-	if (!journal->ordered_data || transaction->freed_overflow || journal->freed_overflow ||
+	if (!journal->ordered_data || transaction->journal_data || transaction->freed_overflow ||
+	    journal->freed_overflow ||
 	    ext4_ranges_overlap(journal->freed, journal->freed_count, block, 1) ||
 	    (journal->compound != NULL &&
 		ext4_transaction_peek(journal->compound, block) != NULL) ||
@@ -1610,10 +1611,35 @@ ext4_transaction_commit(struct ext4_transaction *transaction)
 	/* Even a failed commit can have written ordered data or home blocks. Readers
 	 * must refresh before reusing a snapshot; deferred publication is covered too. */
 	ext4_read_cache_invalidate(journal->fs);
+	if (transaction->synchronous && !transaction->recovery) {
+		/* Keep this operation private until preceding deferred work is durable.
+		 * Merging first would publish it before a fallible forced commit. */
+		error = ext4_compound_commit(journal);
+		if (error != EXT4_OK) {
+			ext4_transaction_cancel(transaction);
+			return error;
+		}
+		return ext4_transaction_durable(transaction);
+	}
 	if (journal->compound_blocks != 0 && !transaction->recovery) {
 		return ext4_transaction_merge(transaction);
 	}
 	return ext4_transaction_durable(transaction);
+}
+
+void
+ext4_transaction_inode_policy(struct ext4_transaction *transaction, const struct ext4_inode *inode)
+{
+	if ((inode->flags & EXT4_INODE_SYNC) ||
+	    ((inode->mode & EXT4_MODE_TYPE) == EXT4_MODE_DIRECTORY &&
+		(inode->flags & EXT4_INODE_DIRSYNC))) {
+		transaction->synchronous = true;
+	}
+	/* No-journal mounts retain their explicitly admitted crash contract. Data
+	 * remains ordered there; a flag cannot manufacture a journal. */
+	if (!transaction->journal->direct && (inode->flags & EXT4_INODE_JOURNAL_DATA)) {
+		transaction->journal_data = true;
+	}
 }
 
 enum ext4_result

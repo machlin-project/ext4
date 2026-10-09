@@ -232,6 +232,9 @@ enum ext4_result ext4_transaction_read(
     struct ext4_transaction *transaction, uint64_t block, void *buffer);
 /* Commit-time inspection of the private snapshots, in enrollment order. */
 struct ext4_fs *ext4_transaction_fs(const struct ext4_transaction *transaction);
+/* Accumulate policy from each edited inode, including both sides of a flag change. */
+void ext4_transaction_inode_policy(
+    struct ext4_transaction *transaction, const struct ext4_inode *inode);
 uint32_t ext4_transaction_count(const struct ext4_transaction *transaction);
 void ext4_transaction_entry(const struct ext4_transaction *transaction, uint32_t index,
     uint64_t *block, const void **buffer);

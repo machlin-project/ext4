@@ -46,6 +46,9 @@ struct device {
 	size_t live;
 	size_t reads;
 	size_t writes;
+	size_t flushes;
+	size_t fail_flush;
+	uint8_t first_log_byte;
 	size_t largest_write;
 	size_t fail_write;
 	enum ext4_result write_error;
@@ -102,8 +105,20 @@ device_write(void *context, uint64_t offset, const void *buffer, size_t length)
 	if (++device->writes == device->fail_write) {
 		return device->write_error == EXT4_OK ? EXT4_IO : device->write_error;
 	}
+	/* The policy model places the first metadata payload after the descriptor. */
+	if (device->first_log_byte == 0 && offset == 34U * (device->size / DEVICE_BLOCKS)) {
+		device->first_log_byte = *(const uint8_t *)buffer;
+	}
 	memcpy(device->home + offset, buffer, length);
 	return EXT4_OK;
+}
+
+static enum ext4_result
+device_flush(void *context)
+{
+	struct device *device = context;
+
+	return ++device->flushes == device->fail_flush ? EXT4_IO : EXT4_OK;
 }
 
 static void *
@@ -491,6 +506,112 @@ check_preparation_cache(uint32_t block_size, bool quota, size_t fault, uint64_t 
 	free(device.home);
 }
 
+/* Model the journal's policy boundary with real log/home callbacks. This is
+ * not a filesystem image oracle; mounted inode/namespace enrollment is exercised
+ * by inode_flags.c on independently generated images. */
+struct policy_events {
+	size_t writes;
+	size_t flushes;
+};
+
+static struct policy_events
+check_inode_policy(uint32_t block_size, uint16_t mode, uint32_t before, uint32_t after,
+    bool lazy, size_t fail_write, size_t fail_flush)
+{
+	struct device device = { .size = (size_t)DEVICE_BLOCKS * block_size };
+	struct ext4_fs fs = { 0 };
+	struct ext4_journal_run run = { 32, 0, 32 };
+	struct ext4_journal journal = { .fs = &fs, .runs = &run, .run_count = 1,
+		.blocks = 32, .first = 1, .last = 32, .compound_blocks = COMPOUND_BLOCKS,
+		.ordered_data = true };
+	struct ext4_inode inode = { .mode = mode, .flags = before };
+	struct ext4_super_disk *super;
+	struct ext4_transaction *transaction;
+	uint8_t *source = malloc(block_size);
+	bool synchronous = ((before | after) & EXT4_INODE_SYNC) != 0 ||
+	    (mode == EXT4_MODE_DIRECTORY && ((before | after) & EXT4_INODE_DIRSYNC) != 0);
+	bool journal_data = ((before | after) & EXT4_INODE_JOURNAL_DATA) != 0;
+	struct policy_events events;
+	enum ext4_result error;
+
+	device.home = calloc(1, device.size);
+	journal.super_buffer = calloc(1, block_size);
+	journal.work = calloc(1, block_size);
+	journal.data = calloc(1, block_size);
+	CHECK(device.home != NULL && source != NULL && journal.super_buffer != NULL &&
+	    journal.work != NULL && journal.data != NULL);
+	memset(source, 0xc1U, block_size);
+	super = (struct ext4_super_disk *)(device.home + EXT4_SUPER_OFFSET);
+	ext4_encode16(&super->magic, EXT4_SUPER_MAGIC);
+	ext4_encode16(&super->state, EXT4_VALID_FS);
+	fs.info.block_size = block_size;
+	fs.info.blocks = DEVICE_BLOCKS;
+	fs.environment = (struct ext4_environment){ &device, device.size, device_read,
+		device_allocate, device_release };
+	fs.journal = &journal;
+	journal.writer.context = &device;
+	journal.writer.write = device_write;
+	journal.writer.flush = device_flush;
+	journal.checkpoint_blocks = lazy ? COMPOUND_BLOCKS : 0;
+	/* A prior operation must become durable before a synchronous successor,
+	 * including when both update the same metadata block. */
+	CHECK(ext4_transaction_begin(&journal, TRANSACTION_CREDITS, &transaction) == EXT4_OK);
+	stage(transaction, METADATA_FIRST, false, 0x41U);
+	stage(transaction, METADATA_SECOND, false, 0x81U);
+	CHECK(ext4_transaction_commit(transaction) == EXT4_OK);
+	CHECK(device.writes == 0 && device.flushes == 0);
+	CHECK(ext4_transaction_begin(&journal, TRANSACTION_CREDITS, &transaction) == EXT4_OK);
+	stage(transaction, METADATA_FIRST, false, 0x51U);
+	CHECK(ext4_transaction_data_source(transaction, DATA_FIRST, source, block_size) == EXT4_OK);
+	ext4_transaction_inode_policy(transaction, &inode);
+	inode.flags = after;
+	ext4_transaction_inode_policy(transaction, &inode);
+	device.fail_write = fail_write;
+	device.fail_flush = fail_flush;
+	error = ext4_transaction_commit(transaction);
+	CHECK(error == (fail_write == 0 && fail_flush == 0 ? EXT4_OK : EXT4_IO));
+	CHECK(journal.aborted == (fail_write != 0 || fail_flush != 0));
+	if (synchronous) {
+		CHECK(journal.compound == NULL && device.writes != 0);
+		if (fail_write == 0 && fail_flush == 0) {
+			CHECK(device.flushes != 0);
+			if (lazy) {
+				CHECK(journal.checkpoint != NULL);
+				check_bytes(ext4_transaction_peek(journal.checkpoint,
+					METADATA_FIRST), 0x51U, block_size);
+			} else {
+				check_bytes(device.home + METADATA_FIRST * block_size,
+				    0x51U, block_size);
+				check_bytes(device.home + METADATA_SECOND * block_size,
+				    0x81U, block_size);
+			}
+		}
+		/* A merged-current bug would log 0x51 in the preceding transaction.
+		 * Inspect the actual payload, even on cuts after that transaction commits. */
+		CHECK(device.first_log_byte == 0 || device.first_log_byte == 0x41U);
+		if (error == EXT4_OK) {
+			CHECK(device.first_log_byte == 0x41U);
+		}
+	} else {
+		CHECK(journal.compound != NULL && device.flushes == 0);
+		CHECK(device.writes == (journal_data ? 0U : 1U));
+		CHECK((ext4_transaction_peek(journal.compound, DATA_FIRST) != NULL) ==
+		    journal_data);
+		check_bytes(device.home + DATA_FIRST * block_size,
+		    journal_data ? 0 : 0xc1U, block_size);
+	}
+	events = (struct policy_events){ device.writes, device.flushes };
+	ext4_transaction_cancel(journal.compound);
+	ext4_transaction_cancel(journal.checkpoint);
+	CHECK(device.live == 0);
+	free(journal.data);
+	free(journal.work);
+	free(journal.super_buffer);
+	free(source);
+	free(device.home);
+	return events;
+}
+
 int
 main(void)
 {
@@ -499,8 +620,42 @@ main(void)
 	size_t fail_write;
 	enum source_case kind;
 	size_t fail_allocation;
+	struct policy_events events;
+	size_t cut;
+	unsigned int lazy;
 
 	for (index = 0; index < sizeof(block_sizes) / sizeof(block_sizes[0]); index++) {
+		check_inode_policy(block_sizes[index], EXT4_MODE_REGULAR, 0, 0, false, 0, 0);
+		check_inode_policy(block_sizes[index], EXT4_MODE_REGULAR,
+		    EXT4_INODE_JOURNAL_DATA, 0, false, 0, 0);
+		check_inode_policy(block_sizes[index], EXT4_MODE_REGULAR, 0,
+		    EXT4_INODE_JOURNAL_DATA, false, 0, 0);
+		check_inode_policy(block_sizes[index], EXT4_MODE_REGULAR,
+		    EXT4_INODE_DIRSYNC, 0, false, 0, 0);
+		check_inode_policy(block_sizes[index], EXT4_MODE_REGULAR, EXT4_INODE_SYNC,
+		    0, false, 0, 0);
+		check_inode_policy(block_sizes[index], EXT4_MODE_REGULAR, 0,
+		    EXT4_INODE_SYNC, true, 0, 0);
+		check_inode_policy(block_sizes[index], EXT4_MODE_DIRECTORY,
+		    EXT4_INODE_DIRSYNC, 0, false, 0, 0);
+		check_inode_policy(block_sizes[index], EXT4_MODE_DIRECTORY, 0,
+		    EXT4_INODE_DIRSYNC, true, 0, 0);
+		check_inode_policy(block_sizes[index], EXT4_MODE_REGULAR,
+		    EXT4_INODE_SYNC | EXT4_INODE_JOURNAL_DATA, 0, true, 0, 0);
+		check_inode_policy(block_sizes[index], EXT4_MODE_REGULAR, EXT4_INODE_SYNC,
+		    0, false, 1, 0);
+		for (lazy = 0; lazy < 2; lazy++) {
+			events = check_inode_policy(block_sizes[index], EXT4_MODE_REGULAR,
+			    EXT4_INODE_SYNC, 0, lazy != 0, 0, 0);
+			for (cut = 1; cut <= events.writes; cut++) {
+				check_inode_policy(block_sizes[index], EXT4_MODE_REGULAR,
+				    EXT4_INODE_SYNC, 0, lazy != 0, cut, 0);
+			}
+			for (cut = 1; cut <= events.flushes; cut++) {
+				check_inode_policy(block_sizes[index], EXT4_MODE_REGULAR,
+				    EXT4_INODE_SYNC, 0, lazy != 0, 0, cut);
+			}
+		}
 		check_transfer(block_sizes[index], false, 0);
 		for (fail_write = 0; fail_write <= 2; fail_write++) {
 			check_transfer(block_sizes[index], true, fail_write);

@@ -62,6 +62,9 @@ ext4_allocation_init(struct ext4_allocation *allocation, struct ext4_fs *fs,
 	ext4_zero(allocation, sizeof(*allocation));
 	allocation->fs = fs;
 	allocation->transaction = transaction;
+	/* Orphan cleanup and multi-step verity construction use validated records
+	 * directly instead of the ordinary live-inode edit entry point. */
+	ext4_transaction_inode_policy(transaction, inode);
 	allocation->free_blocks = fs->info.free_blocks;
 	allocation->free_inodes = fs->info.free_inodes;
 	/* A later context in the same transaction continues from its counters. */

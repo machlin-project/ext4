@@ -1066,9 +1066,25 @@ The adapter still owns credentials, descriptor append mode, explicit timestamp
 authorization, automatic atime policy, pending I/O and mapping revocation. An
 append write must be admitted as such before the core verifies its exact EOF.
 Append-only timestamp-only updates represent admitted automatic/touch behavior;
-the owner must reject unauthorized explicit timestamp changes. All portable commits
-already synchronously journal data, so SYNC/DIRSYNC/JOURNAL_DATA do not weaken the
-write ordering contract. NODUMP and TOPDIR remain platform/allocation hints.
+the owner must reject unauthorized explicit timestamp changes.
+
+Each private transaction accumulates the policy of its generation-checked edited
+inodes, including new inherited inodes and both old and new flag values during a
+transition. SYNC and directory DIRSYNC override deferred commits. DIRSYNC
+conservatively covers all edited directory metadata, including both rename
+parents. A synchronous operation first commits preceding deferred work, then
+commits its still-private snapshots; it never publishes them into the compound
+before a fallible forced commit. Lazy checkpointing remains valid because its
+log commit is durable before return.
+
+On journaled mounts, JOURNAL_DATA prevents ordered in-place writes for all data
+in the operation. The existing ownership preparation retains borrowed data before
+I/O, so deferred and lazy retained sets have the same immutable snapshots as
+ordinary data journaling. This transaction-wide strengthening also covers data
+zeroing and mixed namespace edits without a second per-block policy index.
+Without a journal, the explicitly selected non-atomic crash contract remains in
+force; flags cannot supply missing log storage. NODUMP and TOPDIR remain
+platform/allocation hints.
 The contract follows the Linux [flag operation](https://github.com/torvalds/linux/blob/v6.12/fs/ext4/ioctl.c),
 [namespace checks](https://github.com/torvalds/linux/blob/v6.12/fs/namei.c) and
 [range-operation checks](https://github.com/torvalds/linux/blob/v6.12/fs/open.c);

@@ -424,8 +424,11 @@ enum ext4_result ext4_set_volume_name(struct ext4_fs *fs, const uint8_t *name, s
  * and revokes incompatible mappings before calling. This operation can clear
  * IMMUTABLE/APPEND; changing other flags on an immutable inode must also clear
  * IMMUTABLE. Ordinary mutation APIs cannot bypass their restrictions.
- * JOURNAL_DATA is recorded but does not select a mode: the mount's write options
- * decide how data is committed. NOATIME governs automatic
+ * SYNC and directory DIRSYNC make edits durable even with deferred commits;
+ * directory DIRSYNC conservatively covers all edited directory metadata.
+ * JOURNAL_DATA keeps the operation's data in the journal even on ordered mounts.
+ * Without a journal, the explicit unjournaled write contract still applies.
+ * Both old and new policies apply to this flag transition. NOATIME governs automatic
  * platform updates, not an explicitly admitted timestamp change. mask may also
  * select CASEFOLD, which changes only on empty directories of casefold volumes:
  * other volumes return UNSUPPORTED, other types NOT_DIRECTORY and directories

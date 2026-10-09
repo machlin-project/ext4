@@ -275,6 +275,9 @@ ext4_namespace_new(struct ext4_allocation *allocation, const struct ext4_inode *
 		ext4_inode_checksum_set(fs, child->number, *disk);
 		error = ext4_inode_decode(fs, child->number, *disk, child);
 	}
+	if (error == EXT4_OK) {
+		ext4_transaction_inode_policy(allocation->transaction, child);
+	}
 	if (error == EXT4_OK && (attributes->fields & EXT4_ATTR_XATTRS)) {
 		error = ext4_xattr_apply(
 		    allocation, child, *disk, attributes->xattrs, attributes->xattr_count);

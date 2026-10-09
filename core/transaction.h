@@ -32,6 +32,9 @@ struct ext4_transaction {
 	bool quota_phase;
 	/* Recovery conversions commit durably even under deferred commit. */
 	bool recovery;
+	/* Inode policy can strengthen the mount's deferred/ordered defaults. */
+	bool synchronous;
+	bool journal_data;
 	/* A set the journal holds, the compound or the checkpoint set, rather than an
 	 * operation's transaction. */
 	bool held;

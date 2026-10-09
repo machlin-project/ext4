@@ -842,6 +842,7 @@ ext4_orphan_step(struct ext4_fs *fs, uint32_t number, uint32_t previous, bool re
 					error = EXT4_CORRUPT;
 				}
 				if (error == EXT4_OK) {
+					ext4_transaction_inode_policy(transaction, &previous_inode);
 					ext4_encode32(&previous_disk->deletion_time, next);
 					ext4_inode_checksum_set(fs, previous, previous_disk);
 				}
@@ -967,6 +968,7 @@ ext4_orphan_unlink(struct ext4_allocation *allocation, uint32_t number,
 		if (error != EXT4_OK) {
 			return error;
 		}
+		ext4_transaction_inode_policy(allocation->transaction, &inode);
 		ext4_encode32(&previous_disk->deletion_time, next);
 		ext4_inode_checksum_set(fs, previous, previous_disk);
 	}

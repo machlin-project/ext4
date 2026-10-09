@@ -411,6 +411,140 @@ faults(struct device *device, bool clear, const char *exports, const char *path)
 	    clear ? "clear" : "set", allocations, reads, cuts, recovered, cuts - recovered);
 }
 
+/* Persist policy before reopening with deferred/ordered options. A crash here
+ * deliberately discards volatile writes and every uncommitted in-memory set. */
+static struct ext4_fs *
+policy_recover(struct device *device)
+{
+	struct ext4_recovery_report report;
+	struct ext4_fs *fs;
+
+	device_reset(device, device->stable);
+	EXPECT(ext4_recover(&device->environment, &device->writer, &report), EXT4_OK);
+	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	return fs;
+}
+
+static void
+policy_file(struct device *device, bool lazy)
+{
+	struct ext4_write_options options = { .commit_blocks = 32,
+		.flags = EXT4_WRITE_ORDERED_DATA, .checkpoint_blocks = lazy ? 64U : 0 };
+	struct ext4_inode_update update = attributes(false);
+	struct ext4_inode file;
+	struct ext4_inode root;
+	struct ext4_fs *fs;
+	uint8_t byte;
+	size_t completed;
+	uint32_t writes;
+	unsigned int transition;
+
+	device_reset(device, device->base);
+	fs = mount_file(device, &file);
+	set_flags(fs, &file, EXT4_INODE_SYNC, EXT4_INODE_SYNC);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	EXPECT(ext4_mount_writable_with_options(
+		   &device->environment, &device->writer, NULL, &options, &fs), EXT4_OK);
+	EXPECT(ext4_write(fs, file.number, file.generation, 0, "S", 1, &update, &completed),
+	    EXT4_OK);
+	CHECK(completed == 1 && fs->journal->compound == NULL);
+	ext4_unmount(fs);
+	fs = policy_recover(device);
+	EXPECT(ext4_get_inode(fs, file.number, &file), EXT4_OK);
+	EXPECT(ext4_read(fs, &file, 0, &byte, 1, &completed), EXT4_OK);
+	CHECK(completed == 1 && byte == 'S' && (file.flags & EXT4_INODE_SYNC));
+	ext4_unmount(fs);
+	/* Both removing and adding SYNC make their own flag transaction durable. */
+	for (transition = 0; transition < 2; transition++) {
+		EXPECT(ext4_mount_writable_with_options(
+			   &device->environment, &device->writer, NULL, &options, &fs), EXT4_OK);
+		writes = device->writes;
+		set_flags(fs, &file, EXT4_INODE_SYNC, transition ? EXT4_INODE_SYNC : 0);
+		CHECK(device->writes > writes && fs->journal->compound == NULL);
+		ext4_unmount(fs);
+		fs = policy_recover(device);
+		EXPECT(ext4_get_inode(fs, file.number, &file), EXT4_OK);
+		CHECK(((file.flags & EXT4_INODE_SYNC) != 0) == (transition != 0));
+		ext4_unmount(fs);
+	}
+	device_reset(device, device->base);
+	fs = mount_file(device, &file);
+	set_flags(fs, &file, EXT4_INODE_JOURNAL_DATA, EXT4_INODE_JOURNAL_DATA);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	EXPECT(ext4_mount_writable_with_options(
+		   &device->environment, &device->writer, NULL, &options, &fs), EXT4_OK);
+	writes = device->writes;
+	EXPECT(ext4_write(fs, file.number, file.generation, 0, "J", 1, &update, &completed),
+	    EXT4_OK);
+	CHECK(completed == 1 && device->writes == writes && fs->journal->compound != NULL);
+	/* Deferred data is readable live, but never reaches home before its log. */
+	EXPECT(ext4_get_inode(fs, file.number, &file), EXT4_OK);
+	EXPECT(ext4_read(fs, &file, 0, &byte, 1, &completed), EXT4_OK);
+	CHECK(completed == 1 && byte == 'J');
+	EXPECT(ext4_commit(fs), EXT4_OK);
+	ext4_unmount(fs);
+	fs = policy_recover(device);
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(ext4_lookup(fs, &root, (const uint8_t *)"block", 5, &file), EXT4_OK);
+	EXPECT(ext4_read(fs, &file, 0, &byte, 1, &completed), EXT4_OK);
+	CHECK(completed == 1 && byte == 'J');
+	ext4_unmount(fs);
+}
+
+static void
+policy_namespace(struct device *device, bool destination_flagged, bool lazy)
+{
+	struct ext4_write_options options = { .commit_blocks = 32,
+		.flags = EXT4_WRITE_ORDERED_DATA, .checkpoint_blocks = lazy ? 64U : 0 };
+	struct ext4_inode_update create = attributes(true);
+	struct ext4_inode file;
+	struct ext4_inode root;
+	struct ext4_inode parents[2];
+	struct ext4_inode nested;
+	struct ext4_inode output;
+	struct ext4_rename_entry source;
+	struct ext4_rename_entry destination;
+	struct ext4_fs *fs;
+	uint32_t flagged = destination_flagged ? 1U : 0U;
+	uint32_t writes;
+
+	device_reset(device, device->base);
+	fs = mount_file(device, &file);
+	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(ext4_mkdir(fs, root.number, root.generation, (const uint8_t *)"policy-a", 8,
+		   &create, &flag_time, &parents[0]), EXT4_OK);
+	EXPECT(ext4_mkdir(fs, root.number, root.generation, (const uint8_t *)"policy-b", 8,
+		   &create, &flag_time, &parents[1]), EXT4_OK);
+	set_flags(fs, &parents[flagged], EXT4_INODE_DIRSYNC, EXT4_INODE_DIRSYNC);
+	EXPECT(ext4_sync(fs), EXT4_OK);
+	ext4_unmount(fs);
+	EXPECT(ext4_mount_writable_with_options(
+		   &device->environment, &device->writer, NULL, &options, &fs), EXT4_OK);
+	EXPECT(ext4_create(fs, parents[0].number, parents[0].generation,
+		   (const uint8_t *)"child", 5, &create, &flag_time, &file), EXT4_OK);
+	source = name_entry(&parents[0], "child", &file);
+	destination = name_entry(&parents[1], "moved", NULL);
+	writes = device->writes;
+	EXPECT(ext4_rename(fs, &source, &destination, 0, &flag_time, &output), EXT4_OK);
+	CHECK(device->writes > writes && fs->journal->compound == NULL);
+	EXPECT(ext4_mkdir(fs, parents[flagged].number, parents[flagged].generation,
+		   (const uint8_t *)"nested", 6, &create, &flag_time, &nested), EXT4_OK);
+	CHECK((nested.flags & EXT4_INODE_DIRSYNC) && fs->journal->compound == NULL);
+	ext4_unmount(fs);
+	fs = policy_recover(device);
+	EXPECT(ext4_get_inode(fs, parents[1].number, &parents[1]), EXT4_OK);
+	EXPECT(ext4_lookup(fs, &parents[1], (const uint8_t *)"moved", 5, &output), EXT4_OK);
+	CHECK(output.number == file.number && output.generation == file.generation);
+	EXPECT(ext4_get_inode(fs, parents[0].number, &parents[0]), EXT4_OK);
+	EXPECT(ext4_lookup(fs, &parents[0], (const uint8_t *)"child", 5, &output), EXT4_NOT_FOUND);
+	EXPECT(ext4_get_inode(fs, parents[flagged].number, &parents[flagged]), EXT4_OK);
+	EXPECT(ext4_lookup(fs, &parents[flagged], (const uint8_t *)"nested", 6, &output), EXT4_OK);
+	CHECK(output.flags & EXT4_INODE_DIRSYNC);
+	ext4_unmount(fs);
+}
+
 static void
 linux_read(struct device *device)
 {
@@ -473,6 +607,13 @@ main(int argc, char **argv)
 			continue;
 		}
 		if (!fault_mode) {
+			policy_file(&device, false);
+			policy_file(&device, true);
+			policy_namespace(&device, false, false);
+			policy_namespace(&device, true, false);
+			policy_namespace(&device, false, true);
+			policy_namespace(&device, true, true);
+			device_reset(&device, device.base);
 			operations(&device, exports, argv[index]);
 		}
 		if (fault_mode || exports != NULL) {

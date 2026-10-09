@@ -265,7 +265,11 @@ ext4_edit_inode_record(struct ext4_fs *fs, struct ext4_transaction *transaction,
 	if (ext4_le32(&(*disk)->deletion_time) != 0 && (hold == NULL || !hold->unlinked)) {
 		return EXT4_CORRUPT;
 	}
-	return ext4_inode_flags_writable(fs, inode);
+	error = ext4_inode_flags_writable(fs, inode);
+	if (error == EXT4_OK) {
+		ext4_transaction_inode_policy(transaction, inode);
+	}
+	return error;
 }
 
 enum ext4_result

@@ -94,6 +94,9 @@ ext4_set_inode_flags(struct ext4_fs *fs, uint32_t number, uint32_t generation, u
 	if (error != EXT4_OK) {
 		goto cancel;
 	}
+	/* Clearing a policy keeps the old requirement for this transition; setting
+	 * one applies the new requirement to the transition itself. */
+	ext4_transaction_inode_policy(transaction, &inode);
 	error = ext4_transaction_commit(transaction);
 	if (error != EXT4_OK) {
 		if (!ext4_commit_rejected(fs->journal, error)) {
