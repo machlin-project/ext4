@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "Ext4Crypto.h"
+#include "Ext4SipHash.h"
 #include <CommonCrypto/CommonCryptor.h>
 #include <CommonCrypto/CommonHMAC.h>
 #include <stdlib.h>
@@ -270,7 +271,8 @@ ext4_native_derive(void *context, void *master, uint8_t version, const uint8_t *
 	if (source == NULL || !source->master || result == NULL || info == NULL ||
 	    (version != 1 && version != 2) || info_size == 0 || info_size > EXT4_NATIVE_INFO_MAX ||
 	    (version == 1 && info_size != EXT4_NATIVE_AES_BLOCK) ||
-	    (key_size != kCCKeySizeAES256 && key_size != EXT4_NATIVE_MASTER_SIZE)) {
+	    (key_size != kCCKeySizeAES256 && key_size != EXT4_NATIVE_MASTER_SIZE &&
+		!(version == 2 && key_size == EXT4_NATIVE_SIPHASH_KEY_BYTES))) {
 		return EXT4_INVALID_ARGUMENT;
 	}
 	key = ext4_native_key_create();
@@ -290,7 +292,7 @@ ext4_native_derive(void *context, void *master, uint8_t version, const uint8_t *
 			return status == kCCMemoryFailure ? EXT4_NO_MEMORY : EXT4_IO;
 		}
 	}
-	error = ext4_native_key_prepare(key);
+	error = key_size == EXT4_NATIVE_SIPHASH_KEY_BYTES ? EXT4_OK : ext4_native_key_prepare(key);
 	if (error != EXT4_OK) {
 		ext4_native_key_release(NULL, key);
 		return error;
@@ -449,6 +451,24 @@ ext4_native_cipher(void *context, void *handle, uint8_t mode, bool encrypt, cons
 }
 
 static enum ext4_result
+ext4_native_siphash(void *context, void *handle, const uint8_t *bytes, size_t length,
+    uint64_t *result)
+{
+	struct ext4_native_key *key = handle;
+	uint64_t hash;
+	uintptr_t source = (uintptr_t)bytes;
+
+	(void)context;
+	if (key == NULL || key->master || key->size != EXT4_NATIVE_SIPHASH_KEY_BYTES ||
+	    result == NULL || (bytes == NULL && length != 0) || source > UINTPTR_MAX - length) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	hash = ext4_native_siphash_bytes(key->bytes, bytes, length);
+	*result = hash;
+	return EXT4_OK;
+}
+
+static enum ext4_result
 ext4_native_random(void *context, void *buffer, size_t length)
 {
 	(void)context;
@@ -470,5 +490,6 @@ ext4_native_crypto_environment(struct ext4_native_crypto *crypto)
 	environment.cipher = ext4_native_cipher;
 	environment.release_key = ext4_native_key_release;
 	environment.random_bytes = ext4_native_random;
+	environment.siphash = ext4_native_siphash;
 	return environment;
 }

@@ -99,6 +99,7 @@ programs += {'directory-hash': executable('ext4-directory-hash-test', 'tests/dir
   include_directories: internal_headers, dependencies: ext4_dependency)}
 programs += {'crypto-vectors': executable('ext4-crypto-vectors-test', 'tests/crypto_vectors.c',
   include_directories: internal_headers, dependencies: ext4_dependency)}
+programs += {'fskit-siphash': executable('ext4-fskit-siphash-test', 'tests/fskit_siphash.c')}
 executable('ext4-recover', 'tools/recover.c', dependencies: posix_dependency)
 executable('ext4-read-benchmark', ['tools/benchmark_read.c', 'adapters/posix/image.c'],
   include_directories: [public_headers, posix_headers], c_args: posix_arguments,

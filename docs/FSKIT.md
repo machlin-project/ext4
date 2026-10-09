@@ -522,6 +522,16 @@ reference AES implementation in the driver. Derived keys retain their cipher
 contexts across file reads. The core continues to own fscrypt context validation,
 nonce construction, name padding, sparse data and its bounded derived-key cache.
 
+The provider also supplies the existing optional SipHash-2-4 callback for v2
+encrypted-casefold names. A separate 16-byte context-5 HKDF handle uses the same
+locked-page ownership and release path without allocating AES cryptors. The
+private Foundation-free primitive decodes words explicitly little-endian, accepts
+empty and expanded folded inputs, returns the full numeric hash, and wipes its
+key-derived working state. Folding and directory-hash normalization remain in the
+core. V1 16-byte derivation is refused; hash handles cannot be used as AES keys.
+This uses the current crypto-environment layout; core and adapter must be rebuilt
+together, with no backward-binary-ABI claim for older layouts.
+
 Both fscrypt v1 and v2 derivation are implemented for 64-byte raw master keys.
 The provider checks v2 identifiers using fscrypt's HKDF-SHA512 identifier context;
 v1 descriptors are explicit identifiers supplied by the importer. Raw key storage
@@ -1285,6 +1295,20 @@ a new mount without the keys refuses encrypted contents. The key-store test
 replaces the three Security storage entry points, checks exact query scope and
 failure behavior, and never accesses the host Keychain. Real signed Keychain access
 is not established by this test. Logs are in `artifacts/checks/fskit-crypto/`.
+
+The new SipHash primitive has a portable test target with six published author
+vectors and 207 frozen independent HMAC-SHA512/OpenSSL EVP compositions across
+three master/nonce profiles. Inputs cover every length 0..63, 254/255/256/257 and
+4,080 bytes, including unaligned access, empty input, repeated calls and unchanged
+buffers. `generate_native_siphash.py` regenerates the test-only vectors after
+checking the provider's published known answers. Native component tests exercise
+the opaque 16-byte derivation, invalid handle/pointer/size refusals, cipher/hash
+separation and derived-handle lifetime after releasing the acquired master reference.
+The native component additions require actual hosted macOS execution; portable
+primitive checks do not establish CommonCrypto bindings or locked-page failure
+instrumentation. Installed combined-image reads, writes, key lifecycle and
+remounts still require dedicated disposable macOS acceptance. Prior ordinary
+encryption results are not combined encrypted-casefold acceptance.
 
 ## Installed evidence on macOS 26.5.2
 

@@ -365,6 +365,7 @@ endif
 
 test('directory-hash', programs['directory-hash'], suite: 'indexed')
 test('crypto-vectors', programs['crypto-vectors'], suite: 'core')
+test('fskit-siphash-primitive', programs['fskit-siphash'], suite: 'core')
 if paths['index_capacity'] != ''
   test('indexed-capacity', programs['index-write'], args: ['--capacity', paths['index_capacity']],
     timeout: 300, suite: 'indexed')
