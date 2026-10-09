@@ -1064,9 +1064,10 @@ both that handle and the ordinary CTS handle; partial derivation, eviction,
 provider replacement and unmount release each acquired handle exactly once.
 Visitor callbacks can evict a pair, so iteration reacquires it before subsequent
 decryption. A keyed combined read without this callback returns `EXT4_UNSUPPORTED`;
-ordinary encryption does not require it. The FSKit provider has not yet added this
-callback or 16-byte derivation, so its keyed combined-directory integration remains
-pending. Without a key, both linear and indexed iteration encode the stored hash
+ordinary encryption does not require it. The FSKit provider implements this callback
+and v2-only 16-byte derivation in a locked key allocation, separately from its AES
+handles. Hosted native component tests cover the provider; installed combined-volume
+integration remains pending. Without a key, both linear and indexed iteration encode the stored hash
 words in no-key names. Lookup uses the major word for index routing and ciphertext
 identity for matching; it neither folds the encoded name nor treats the minor word
 as an identity check. These envelope bytes target little-endian Linux systems.

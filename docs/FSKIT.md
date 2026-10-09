@@ -1304,9 +1304,13 @@ buffers. `generate_native_siphash.py` regenerates the test-only vectors after
 checking the provider's published known answers. Native component tests exercise
 the opaque 16-byte derivation, invalid handle/pointer/size refusals, cipher/hash
 separation and derived-handle lifetime after releasing the acquired master reference.
-The native component additions require actual hosted macOS execution; portable
-primitive checks do not establish CommonCrypto bindings or locked-page failure
-instrumentation. Installed combined-image reads, writes, key lifecycle and
+The native component additions passed hosted macOS ASan/UBSan execution at
+commit `121e0009654fe65bfe8ff5fdd5cdc472aa2f7dbb` in
+[FSKit CI run 37941608427](https://github.com/machlin-project/ext4/actions/runs/37941608427).
+This exercises the real Objective-C provider and CommonCrypto derivation alongside
+the frozen SipHash vectors, bounds and key-lifetime checks. Portable primitive
+checks alone do not establish those bindings, and instrumented locked-page failure
+and release-wiping acceptance remain open. Installed combined-image reads, writes, key lifecycle and
 remounts still require dedicated disposable macOS acceptance. Prior ordinary
 encryption results are not combined encrypted-casefold acceptance.
 

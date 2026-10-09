@@ -15,7 +15,7 @@ import run_casefold_capability as capability
 
 
 class Lifecycle(unittest.TestCase):
-    def exercise(self, failure=None, roundtrip=False):
+    def exercise(self, failure=None, roundtrip=False, indexed=False):
         with tempfile.TemporaryDirectory(prefix='casefold-capability-unit-') as temporary:
             root = Path(temporary)
             probe = root / 'probe'
@@ -29,6 +29,13 @@ class Lifecycle(unittest.TestCase):
             mounted = False
             injected = False
 
+            def copy_mock(source, target):
+                # Sparse, bounded mock bytes only; no filesystem image is mounted.
+                with Path(source).open('rb') as reader, Path(target).open('wb') as writer:
+                    writer.write(reader.read(64))
+                    writer.truncate(Path(source).stat().st_size)
+                return target
+
             def command(argv, **kwargs):
                 nonlocal owner, attached, mounted, injected
                 commands.append(argv)
@@ -37,6 +44,9 @@ class Lifecycle(unittest.TestCase):
                 name = argv[0]
                 if name == 'fake-mke2fs':
                     Path(argv[-2]).write_bytes(b'bounded mock media')
+                    if indexed:
+                        with Path(argv[-2]).open('ab') as stream:
+                            stream.truncate(32 * 1024 * 1024)
                 elif name == 'losetup':
                     if '--associated' in argv:
                         text = '/dev/loop999999' if attached else ''
@@ -97,10 +107,18 @@ class Lifecycle(unittest.TestCase):
                 elif name == str(core):
                     self.assertFalse(mounted)
                     self.assertFalse(attached)
-                    image, exports = Path(argv[-2]), Path(argv[-1])
-                    (exports / ('combined-' + image.name)).write_bytes(image.read_bytes())
+                    image, exports = Path(argv[2]), Path(argv[3])
+                    is_indexed = argv[1] == '--casefold-native-indexed'
+                    copy_mock(image, exports / (('indexed-' if is_indexed else 'combined-') + image.name))
                     if failure == 'core-input-change':
                         image.write_bytes(b'changed protected original')
+                    if is_indexed:
+                        if failure == 'indexed-input-change':
+                            image.write_bytes(b'changed indexed original')
+                        if failure == 'indexed-baseline-change':
+                            (image.parent / 'baseline.json').write_text('{"changed":true}')
+                        if failure == 'indexed-plan-change' and len(argv) == 5:
+                            Path(argv[4]).write_text('changed plan')
                 elif name == sys.executable:
                     if Path(argv[1]).name == 'check_encrypted_casefold_native.py':
                         self.assertFalse(mounted)
@@ -110,6 +128,29 @@ class Lifecycle(unittest.TestCase):
                         self.assertTrue(mounted)
                         self.assertTrue(attached)
                         code = 1 if failure == 'native' else 0
+                    elif Path(argv[1]).name == 'linux_casefold_indexed.py':
+                        self.assertTrue(mounted)
+                        self.assertTrue(attached)
+                        baseline = Path(argv[argv.index('--baseline') + 1])
+                        if argv[2] == 'create':
+                            baseline.write_text('{"identity":"mocked independent Linux baseline"}')
+                            if '--collision-plan' in argv:
+                                Path(argv[argv.index('--collision-plan') + 1]).write_text('mocked plan')
+                        else:
+                            code = 1 if failure == 'indexed-native' else 0
+                    elif Path(argv[1]).name == 'check_encrypted_casefold_indexed.py':
+                        self.assertFalse(mounted)
+                        self.assertFalse(attached)
+                        destination = Path(argv[argv.index('--output') + 1])
+                        original = Path(argv[argv.index('--original') + 1])
+                        destination.mkdir()
+                        expected = '{"identity":"mocked independent Linux baseline"}'
+                        if failure == 'indexed-baseline-disagree':
+                            expected = '{"identity":"different raw baseline"}'
+                        (destination / 'baseline.json').write_text(expected)
+                        self.assertEqual(original.stat().st_size, 32 * 1024 * 1024
+                            if failure != 'indexed-input-change' else len(b'changed indexed original'))
+                        code = 1 if failure == 'indexed-raw' else 0
                     else:
                         self.fail(f'unexpected Python command: {argv}')
                 elif name == 'fake-e2fsck':
@@ -133,6 +174,8 @@ class Lifecycle(unittest.TestCase):
                          '--outer-namespace', 'mnt:[outer]']
             if roundtrip:
                 arguments.extend(('--core-test', str(core)))
+            if indexed:
+                arguments.append('--indexed')
             with patch.object(sys, 'argv', arguments), \
                     patch.object(capability.os, 'geteuid', return_value=0), \
                     patch.object(capability.os, 'readlink', return_value='mnt:[inner]'), \
@@ -187,6 +230,23 @@ class Lifecycle(unittest.TestCase):
                 self.assertEqual(result, 1)
                 self.assertFalse(report['passed'])
                 self.assertIn('failure', report)
+
+    def test_indexed_keeps_linear_images_and_detached_checks(self):
+        result, report, commands = self.exercise(roundtrip=True, indexed=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(report['kind'], 'native-linear-indexed-core-roundtrip')
+        self.assertEqual(sum(item[0] == 'mount' for item in commands), 20)
+        self.assertEqual(sum('--detach' in item for item in commands), 20)
+        self.assertEqual(sum('--casefold-native-indexed' in item for item in commands), 2)
+        self.assertTrue(all(profile['indexed']['passed'] for profile in report['profiles']))
+
+    def test_indexed_failure_never_becomes_partial_success(self):
+        for failure in ('indexed-input-change', 'indexed-baseline-change', 'indexed-plan-change',
+                        'indexed-baseline-disagree', 'indexed-raw', 'indexed-native'):
+            with self.subTest(failure=failure):
+                result, report, _ = self.exercise(failure, roundtrip=True, indexed=True)
+                self.assertEqual(result, 1)
+                self.assertFalse(report['passed'])
 
     def test_same_namespace_refuses_before_commands(self):
         arguments = ['run_casefold_capability.py', '--probe', '/unused', '--tools-root',

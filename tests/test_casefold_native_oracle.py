@@ -3,12 +3,13 @@
 """Bounded decoder/oracle tests using independent filename vectors, not volumes."""
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from check_encrypted_casefold_native import context_keys, directory_entries, expected_entry, format_fields, nokey_lines
+from check_encrypted_casefold_native import context_keys, debugfs_success, directory_entries, expected_entry, extract_context, format_fields, nokey_lines
 from generate_encrypted_casefold import Provider, known_answers
 from verify_casefold_roundtrip_linux import listed_names
 
@@ -44,6 +45,29 @@ class Oracle(unittest.TestCase):
         cipher = (FIXTURES / (label + '.cipher')).read_bytes()
         metadata = [int(value) for value in (FIXTURES / (label + '.meta')).read_text().split()]
         return cipher, metadata[5], metadata[6]
+
+    def test_fscrypt_attribute_name_and_semantic_error(self):
+        banner = 'debugfs 1.47.3 (8-Jul-2025)\n'
+        debugfs_success(subprocess.CompletedProcess([], 0, '', banner))
+        for diagnostic in ('ea_get: Extended attribute key not found',
+                           'ea_get: Input/output error', 'Unexpected diagnostic'):
+            with self.subTest(diagnostic=diagnostic), self.assertRaises(RuntimeError):
+                debugfs_success(subprocess.CompletedProcess([], 0, '', banner + diagnostic))
+        with tempfile.TemporaryDirectory(prefix='casefold-context-') as directory:
+            target = Path(directory) / 'context.bin'
+            def run(command):
+                self.assertEqual(command[2], f'ea_get -r -f "{target}" <12> c')
+                target.write_bytes(self.context)
+                return ''
+            self.assertEqual(extract_context(run, 'debugfs', 'image', 12, target), self.context)
+            self.assertFalse(target.exists())
+            with self.assertRaises(RuntimeError):
+                extract_context(lambda command: '', 'debugfs', 'image', 12, target)
+            def empty(command):
+                target.write_bytes(b'')
+                return ''
+            with self.assertRaises(RuntimeError):
+                extract_context(empty, 'debugfs', 'image', 12, target)
 
     def test_expected_bytes_match_frozen_independent_vectors(self):
         for label in ('sharp-s', 'canonical-accent'):

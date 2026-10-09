@@ -1675,6 +1675,7 @@ restore:
 
 #include "crypto_failures.h"
 #include "encrypted_casefold_native.h"
+#include "encrypted_casefold_native_indexed.h"
 
 int
 main(int argc, char **argv)
@@ -1682,10 +1683,17 @@ main(int argc, char **argv)
 	static struct device device;
 	const char *image = NULL;
 	const char *exports = NULL;
+	const char *collision_plan = NULL;
+	const char *crash_operation = NULL;
+	const char *cut_text = NULL;
+	char *cut_end;
+	unsigned long cut;
 	bool synthetic = false;
 	bool key = false;
 	bool write = false;
 	bool native = false;
+	bool indexed = false;
+	bool crash = false;
 	uint8_t version = FSCRYPT_V2;
 	int argument;
 
@@ -1698,6 +1706,10 @@ main(int argc, char **argv)
 			write = true;
 		} else if (strcmp(argv[argument], "--casefold-native") == 0) {
 			native = true;
+		} else if (strcmp(argv[argument], "--casefold-native-indexed") == 0) {
+			indexed = true;
+		} else if (strcmp(argv[argument], "--casefold-native-crash") == 0) {
+			crash = true;
 		} else if (strcmp(argv[argument], "--write-v1") == 0) {
 			write = true;
 			version = FSCRYPT_V1;
@@ -1705,19 +1717,53 @@ main(int argc, char **argv)
 			image = argv[argument];
 		} else if (exports == NULL) {
 			exports = argv[argument];
+		} else if ((indexed || crash) && collision_plan == NULL) {
+			collision_plan = argv[argument];
+		} else if (crash && crash_operation == NULL) {
+			crash_operation = argv[argument];
+		} else if (crash && cut_text == NULL) {
+			cut_text = argv[argument];
 		} else {
 			image = NULL;
 			break;
 		}
 	}
-	if (image == NULL || (key + synthetic + write + native) > 1 || (native && exports == NULL)) {
+	if (image == NULL || (key + synthetic + write + native + indexed + crash) > 1 ||
+	    ((native || indexed || crash) && exports == NULL) ||
+	    (crash && (collision_plan == NULL || crash_operation == NULL || cut_text == NULL))) {
 		fprintf(stderr,
-		    "usage: %s [--synthetic | --key | --write | --write-v1 | --casefold-native] IMAGE "
-		    "[EXPORT_DIRECTORY]\n",
+		    "usage: %s [--synthetic | --key | --write | --write-v1 | --casefold-native | "
+		    "--casefold-native-indexed | --casefold-native-crash] IMAGE [EXPORT_DIRECTORY] "
+		    "[COLLISION_PLAN] [collision|rename CUT]\n",
 		    argv[0]);
 		return 2;
 	}
 	storage_open(&device, image);
+	if (crash) {
+		cut = strtoul(cut_text, &cut_end, 10);
+		if (cut_text[0] < '0' || cut_text[0] > '9' || *cut_end != 0 || cut > INDEXED_CUT_LIMIT ||
+		    (strcmp(crash_operation, "collision") != 0 && strcmp(crash_operation, "rename") != 0) ||
+		    (strcmp(crash_operation, "collision") == 0 && device.block_size != 1024U) ||
+		    ((device.block_size == 1024U) == (strcmp(collision_plan, "-") == 0))) {
+			fprintf(stderr, "invalid indexed crash operation, cut or block-size-specific plan\n");
+			storage_close(&device);
+			return 2;
+		}
+		indexed_crash(&device, exports, image,
+		    strcmp(collision_plan, "-") == 0 ? NULL : collision_plan, crash_operation, (unsigned int)cut);
+		storage_close(&device);
+		return 0;
+	}
+	if (indexed) {
+		if ((device.block_size == 1024U) != (collision_plan != NULL)) {
+			fprintf(stderr, "indexed 1 KiB input requires a collision plan; 4 KiB input does not\n");
+			storage_close(&device);
+			return 2;
+		}
+		indexed_roundtrip(&device, exports, image, collision_plan);
+		storage_close(&device);
+		return 0;
+	}
 	if (native) {
 		native_roundtrip(&device, exports, image);
 		storage_close(&device);

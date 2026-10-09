@@ -1237,7 +1237,7 @@ jobs:
             ImageVersion="${ImageVersion:-unknown}" \
             python3 tests/run_casefold_capability.py \
             --probe "$PWD/artifacts/native-casefold-probe/probe" \
-            --core-test "$PWD/.build/ext4-encrypt-test" \
+            --core-test "$PWD/.build/ext4-encrypt-test" --indexed \
             --tools-root "$PWD/vendor/e2fsprogs/build" \
             --output "$PWD/artifacts/native-casefold-capability" \
             2>&1 | tee artifacts/checks/native-casefold-capability.log
@@ -1263,6 +1263,10 @@ jobs:
             artifacts/native-casefold-capability/*/core/combined-capability.img
             artifacts/native-casefold-capability/*/core/combined.manifest
             artifacts/native-casefold-capability/*/core/combined.nokey
+            artifacts/native-casefold-capability/*/indexed/source.img
+            artifacts/native-casefold-capability/*/indexed/collision.plan
+            artifacts/native-casefold-capability/*/indexed/core/indexed-source.img
+            artifacts/native-casefold-capability/*/indexed/core/indexed.nokey
             artifacts/fixtures/features.txt
             artifacts/fixtures/tool-versions.txt
             .build/meson-logs/meson-log.txt

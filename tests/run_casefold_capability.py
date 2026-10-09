@@ -30,8 +30,11 @@ def main():
     parser.add_argument('--tools-root', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--core-test', type=Path, help='also verify the bounded linear core roundtrip')
+    parser.add_argument('--indexed', action='store_true', help='also verify bounded indexed native trees')
     parser.add_argument('--outer-namespace', help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.indexed and args.core_test is None:
+        parser.error('--indexed requires --core-test')
     if os.geteuid() != 0:
         parser.error('requires an explicitly authorized disposable root CI environment')
     namespace = os.readlink('/proc/self/ns/mnt')
@@ -58,6 +61,8 @@ def main():
               'profiles': []}
     if core_test is not None:
         report.update(kind='native-linear-core-roundtrip', core_sha256=digest(core_test))
+    if args.indexed:
+        report['kind'] = 'native-linear-indexed-core-roundtrip'
     report_path = output / 'report.json'
 
     def save():
@@ -193,6 +198,70 @@ def main():
                     mounted_probe(row, changed, mountpoint, command, True)
                 run(row, [tools['e2fsck'], '-fn', changed])
                 row['core_image_sha256'] = digest(changed)
+                if args.indexed:
+                    # Retain the linear evidence unchanged. Author a fresh input
+                    # whose entire root inventory is covered by the indexed model.
+                    indexed = profile / 'indexed'
+                    indexed.mkdir()
+                    indexed.chmod(0o755)
+                    indexed_image = indexed / 'source.img'
+                    run(row, [tools['mke2fs'], '-F', '-t', 'ext4', '-b', block_size,
+                              '-N', 512, '-I', 256, '-m', 0, '-O', 'none,' + ','.join(sorted(features)),
+                              '-U', UUID, '-E', encoding + ',lazy_itable_init=0,nodiscard',
+                              indexed_image, 32 * 1024 * 1024 // block_size])
+                    indexed_image.chmod(0o644)
+                    baseline = indexed / 'baseline.json'
+                    plan = indexed / 'collision.plan'
+                    driver = scripts / 'linux_casefold_indexed.py'
+                    create = [sys.executable, driver, 'create', '--mount', mountpoint,
+                              '--block-size', block_size, '--baseline', baseline,
+                              '--report', indexed / 'linux-create.json']
+                    if block_size == 1024:
+                        create.extend(['--collision-plan', plan])
+                    mounted_probe(row, indexed_image, mountpoint, create, False)
+                    baseline_hash = digest(baseline)
+                    plan_hash = digest(plan) if block_size == 1024 else None
+                    indexed_hash = digest(indexed_image)
+                    run(row, [tools['e2fsck'], '-fn', indexed_image])
+                    for phase in ('nokey', 'keyed'):
+                        mounted_probe(row, indexed_image, mountpoint,
+                            [sys.executable, driver, phase, '--mount', mountpoint,
+                             '--block-size', block_size, '--baseline', baseline,
+                             '--endpoint', 'old', '--report', indexed / ('linux-old-' + phase + '.json')], True)
+                    indexed_exports = indexed / 'core'
+                    indexed_exports.mkdir()
+                    indexed_exports.chmod(0o755)
+                    command = [core_test, '--casefold-native-indexed', indexed_image, indexed_exports]
+                    if plan_hash is not None:
+                        command.append(plan)
+                    run(row, command, timeout=600)
+                    indexed_changed = indexed_exports / ('indexed-' + indexed_image.name)
+                    if indexed_changed.stat().st_size != 32 * 1024 * 1024:
+                        raise RuntimeError('Indexed core export changed bounded volume size')
+                    indexed_changed.chmod(0o644)
+                    independent = indexed / 'independent'
+                    command = [sys.executable, scripts / 'check_encrypted_casefold_indexed.py',
+                               '--original', indexed_image, '--exports', indexed_exports,
+                               '--tools-root', args.tools_root.resolve(), '--output', independent]
+                    if plan_hash is not None:
+                        command.extend(['--collision-plan', plan, '--collision-plan-sha256', plan_hash])
+                    run(row, command, timeout=600)
+                    if json.loads(baseline.read_text()) != json.loads((independent / 'baseline.json').read_text()):
+                        raise RuntimeError('Independent raw and Linux baseline identities disagree')
+                    for phase in ('nokey', 'keyed'):
+                        mounted_probe(row, indexed_changed, mountpoint,
+                            [sys.executable, driver, phase, '--mount', mountpoint,
+                             '--block-size', block_size, '--baseline', baseline,
+                             '--report', indexed / ('linux-new-' + phase + '.json')], True)
+                    run(row, [tools['e2fsck'], '-fn', indexed_changed])
+                    if digest(indexed_image) != indexed_hash or digest(baseline) != baseline_hash or \
+                            (plan_hash is not None and digest(plan) != plan_hash):
+                        raise RuntimeError('Protected indexed input/baseline/plan changed')
+                    if digest(image) != row['image_sha256']:
+                        raise RuntimeError('Indexed phase changed protected linear input')
+                    row['indexed'] = dict(passed=True, original_sha256=indexed_hash,
+                        exported_sha256=digest(indexed_changed), baseline_sha256=baseline_hash,
+                        collision_plan_sha256=plan_hash)
             row['passed'] = True
             save()
         if digest(probe) != report['probe_sha256']:
@@ -200,7 +269,8 @@ def main():
         if core_test is not None and digest(core_test) != report['core_sha256']:
             raise RuntimeError('Core binary changed during execution')
         report['passed'] = True
-        print('PASS native encrypted-casefold linear core roundtrip: 2 images' if core_test is not None else
+        print('PASS native encrypted-casefold linear and indexed core roundtrip: 4 images' if args.indexed else
+              'PASS native encrypted-casefold linear core roundtrip: 2 images' if core_test is not None else
               'PASS native encrypted-casefold capability: 2 images, 8 policies; core untested')
         return 0
     except (OSError, RuntimeError, subprocess.SubprocessError, KeyboardInterrupt) as error:

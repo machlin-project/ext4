@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 from pathlib import Path
+import re
 import struct
 import subprocess
 
@@ -26,6 +27,26 @@ FOLDS = {b'Stra\xc3\x9fe': b'strasse', b'\xc3\x89': b'e\xcc\x81',
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
+
+
+def debugfs_success(result):
+    """debugfs can report command failure on stderr while returning status zero."""
+    result.check_returncode()
+    diagnostics = [line for line in result.stderr.splitlines() if line.strip() and
+                   re.fullmatch(r'debugfs [0-9][^\r\n]*', line) is None]
+    require(not diagnostics, 'Debugfs command diagnostic: ' + '\n'.join(diagnostics))
+
+
+def extract_context(run, debugfs, image, number, target):
+    # e2fsprogs names fscrypt's index-9/name-c attribute "c", not "encryption.c".
+    require(not target.exists(), 'Stale context temporary')
+    output = run([debugfs, '-R', f'ea_get -r -f "{target}" <{number}> c', image])
+    require(not output.strip(), 'Unexpected context extraction response')
+    require(target.is_file() and target.stat().st_size == 40,
+            f'Missing or invalid 40-byte fscrypt context: {image}, inode {number}')
+    value = target.read_bytes()
+    target.unlink()
+    return value
 
 
 def digest(path):
@@ -178,18 +199,15 @@ def main():
                                        status=done.returncode, stdout=done.stdout, stderr=done.stderr))
         save()
         done.check_returncode()
+        if str(command[0]) == str(tools['debugfs']):
+            debugfs_success(done)
         return done.stdout
 
     def inode(image, selector):
         return inode_fields(run([tools['debugfs'], '-R', f'stat {selector}', image]))
 
     def context(image, number):
-        target = output / 'context.bin'
-        require(not target.exists(), 'Stale context temporary')
-        run([tools['debugfs'], '-R', f'ea_get -r -f "{target}" <{number}> encryption.c', image])
-        value = target.read_bytes()
-        target.unlink()
-        return value
+        return extract_context(run, tools['debugfs'], image, number, output / 'context.bin')
 
     expected_nokey = []
     all_nonces = set()

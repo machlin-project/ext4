@@ -49,8 +49,8 @@ while preserving first-fold comparison. Paired cache eviction and derivation-fai
 tests cover 84 single/paired-key iterator cases; focused allocation/read failures
 preserve outputs and resource balance. These are synthetic wire models, not
 Linux-authored filesystem images. Native v2 PAD4/PAD32 linear/indexed roundtrips,
-independent fsck, broader HTree topology and the FSKit SipHash provider remain
-acceptance gates. Local ASan/UBSan checks disable LeakSanitizer because this executor
+independent fsck, broader HTree topology and installed FSKit combined-volume
+integration remain acceptance gates. Local ASan/UBSan checks disable LeakSanitizer because this executor
 cannot run its ptrace-dependent shutdown check; this is not leak-check acceptance.
 The strict portable build and 68 selected regressions pass, including two-leaf
 depth-0/depth-1 routing, odd collision continuation, malformed selected leaves,
@@ -3834,13 +3834,22 @@ Expected enable digests are generated independently with Python hashlib by
 `generate_verity_fixtures.py`. Encrypted export is intentionally not accepted by the
 plain-only export verifier.
 
-At preparation time, local e2fsprogs binaries and full-volume fixture images were
-unavailable. The new mounted-volume tests therefore remain unrun until actual CI
-results establish them. Linux-authored encrypted+verity volumes, enabled output
-mounted and measured by Linux, independent ciphertext-fork comparison after actual
-enabling, and post-crash e2fsck acceptance remain explicit open gates. Registration,
-compilation, synthetic tests, or historical separate encryption/verity acceptance
-do not close those gates.
+Local preparation lacked e2fsprogs and full-volume images. Hosted execution later
+passed all 16 encrypted enable image tests, including the default-policy fault
+cases, in the 49-test format suite at commit
+`fb6d80803c0a886d12da96c88f33269c21ee6e96`
+([Linux CI run 37929255279](https://github.com/machlin-project/ext4/actions/runs/37929255279)).
+That run also passed 81 sustained cases and retained encrypted+verity exports at
+1 KiB and 4 KiB. Each export contained two encrypted verity files; the independent
+checker decrypted their forks, verified expected contents and Merkle metadata, and
+required nonrepairing e2fsck success with unchanged media. These are actual
+e2fsprogs-authored/core-mutated image checks, not merely registered tests.
+
+Linux-authored encrypted+verity volumes, enabled output mounted and measured by
+Linux, alternate-mode crash/rollback/ENOSPC matrices, and broader post-crash
+independent acceptance remain open. The retained-export checker does not replace
+Linux kernel readback or installed FSKit acceptance. Historical separate
+encryption/verity results do not close those combined gates.
 
 
 ## Native encrypted-casefold reference capability
@@ -3870,8 +3879,8 @@ refusal and the four mocked lifecycle tests passed. No native mount was executed
 locally. Even a successful hosted capability result establishes only a usable
 Linux reference: the core does not participate in that standalone mode. Linux-authored/core-mutated/Linux
 verified combined trees, independent ciphertext and stored SipHash comparison,
-indexed growth, deeper trees, crash durability, 64 KiB native operation and FSKit's
-optional SipHash provider remain separate open gates.
+indexed growth, deeper trees, crash durability, 64 KiB native operation and installed
+FSKit combined-volume integration remain separate open gates.
 
 ### Bounded combined linear roundtrip
 
