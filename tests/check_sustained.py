@@ -3,8 +3,9 @@
 """Independently verify exported sustained-operation images with e2fsprogs.
 
 Objects are addressed by inode number, so encrypted directories need no plaintext
-names. Their raw ciphertext entries must be those the exported no-key names carry;
-encrypted contents and targets are not decrypted here and are counted instead.
+names. Their raw ciphertext entries must be those the exported no-key names carry.
+Encrypted verity contents and metadata are decrypted with the deterministic test
+key and verified; other encrypted contents and targets are counted without decryption.
 Encryption, casefold and verity flags must match, the fscrypt context must be
 present exactly on encrypted objects, and each verity file's digest, Merkle tree and
 descriptor are recomputed from its expected contents."""
@@ -111,14 +112,70 @@ def raw_entries(text):
     return result
 
 
-def check_verity(image, number, data, verity, block_size, tools, run):
+def sustained_contents_key(context):
+    """The sustained harness uses only v2 XTS/CTS, PAD32, filesystem-block IVs."""
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    if len(context) != CONTEXT_BYTES or context[:8] != bytes((2, 1, 4, 3, 0, 0, 0, 0)):
+        raise RuntimeError("Unsupported sustained fscrypt context")
+    master = bytes((i * 7 + 3) & 255 for i in range(64))
+    identifier = HKDF(algorithm=hashes.SHA512(), length=16, salt=bytes(64),
+                      info=b"fscrypt\0\x01").derive(master)
+    if context[8:24] != identifier:
+        raise RuntimeError("Sustained fscrypt master key identifier differs")
+    return HKDF(algorithm=hashes.SHA512(), length=64, salt=bytes(64),
+                info=b"fscrypt\0\x02" + context[24:40]).derive(master)
+
+
+def read_encrypted_file(image, mapping, block_size, offset, length, key, required):
+    """Decrypt complete filesystem blocks with absolute file-logical XTS IVs.
+
+    Unmapped/unwritten data reads as plaintext zeros. Metadata must be written;
+    treating missing ciphertext as a zero plaintext block would hide corruption.
+    """
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    result = bytearray()
+    with image.open("rb") as stream:
+        while length:
+            logical, within = divmod(offset, block_size)
+            count = min(length, block_size - within)
+            runs = [run for run in mapping if run[0] <= logical < run[0] + run[2]]
+            if len(runs) > 1:
+                raise RuntimeError("Overlapping encrypted file extents")
+            if not runs or runs[0][3]:
+                if required:
+                    raise RuntimeError("Missing or unwritten encrypted verity metadata")
+                plain = bytes(block_size)
+            else:
+                first, physical, _, _ = runs[0]
+                stream.seek((physical + logical - first) * block_size)
+                cipher = stream.read(block_size)
+                if len(cipher) != block_size:
+                    raise RuntimeError("Short encrypted filesystem block")
+                decoder = Cipher(algorithms.AES(key),
+                                 modes.XTS(logical.to_bytes(16, "little"))).decryptor()
+                plain = decoder.update(cipher) + decoder.finalize()
+            result.extend(plain[within:within + count])
+            offset += count
+            length -= count
+    return bytes(result)
+
+
+def check_verity(image, number, data, verity, block_size, tools, run, key=None):
     pieces, digest, _ = layout(data, block_size, verity["block"], verity["algorithm"],
                                verity["salt"])
     if digest != verity["digest"]:
         raise RuntimeError(f"Verity digest of inode {number} differs")
     mapping = extents(run([tools["debugfs"], "-R", f"dump_extents <{number}>", image]))
+    if key is not None and read_encrypted_file(image, mapping, block_size, 0, len(data),
+                                               key, False) != data:
+        raise RuntimeError(f"Encrypted contents of verity inode {number} differ")
     for offset, payload in pieces[1:]:
-        if read_file(image, mapping, block_size, offset, len(payload)) != bytes(payload):
+        actual = read_file(image, mapping, block_size, offset, len(payload)) if key is None else \
+            read_encrypted_file(image, mapping, block_size, offset, len(payload), key, True)
+        if actual != bytes(payload):
             raise RuntimeError(f"Verity metadata of inode {number} differs at {offset}")
 
 
@@ -183,7 +240,7 @@ def check_export(image, manifest, directory, output, tools, run):
             numbers[item["path"]] = item["number"]
     counts = dict(encrypted_names=check_listings(image, root, expected_children, numbers,
                                                  features, tools, run),
-                  encrypted_contents=0, verity=0, casefold=0)
+                  encrypted_contents=0, encrypted_verity=0, verity=0, casefold=0)
     checked = set()
     for item in objects:
         number = item["number"]
@@ -204,7 +261,19 @@ def check_export(image, manifest, directory, output, tools, run):
         checked.add(number)
         counts["casefold"] += number in features["casefold"]
         data = directory / f"object-{number}.data"
-        if item["kind"] in ("file", "symlink") and number in encrypted:
+        if item["kind"] == "file" and number in encrypted and number in features["verity"]:
+            dump = output / f"context-{number}"
+            run([tools["debugfs"], "-R", f'ea_get -r -f "{dump}" {where} "{CONTEXT_KEY}"', image])
+            key = sustained_contents_key(dump.read_bytes())
+            dump.unlink()
+            expected = data.read_bytes()
+            if inode["size"] != len(expected):
+                raise RuntimeError(f"Encrypted verity size differs for {item['path']}")
+            check_verity(image, number, expected, features["verity"][number], block_size,
+                         tools, run, key)
+            counts["verity"] += 1
+            counts["encrypted_verity"] += 1
+        elif item["kind"] in ("file", "symlink") and number in encrypted:
             counts["encrypted_contents"] += 1
         elif item["kind"] == "file":
             dump = output / f"file-{number}"
@@ -270,7 +339,8 @@ def main():
         print(f"PASS sustained export {directory.name}: strict e2fsck, {row['objects']} names, "
               f"{row['xattrs']} attributes, {row['encrypted_names']} encrypted names, "
               f"{row['encrypted_contents']} encrypted contents not decrypted, "
-              f"{row['verity']} verity files, {row['casefold']} casefolded directories",
+              f"{row['verity']} verity files ({row['encrypted_verity']} decrypted), "
+              f"{row['casefold']} casefolded directories",
               flush=True)
 
 

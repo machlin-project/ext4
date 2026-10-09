@@ -815,7 +815,7 @@ plan_operation(struct state *state, struct plan *plan)
 		}
 		return plan->object != NO_INDEX;
 	case OP_VERITY:
-		/* Enabling needs extent mapping; verity and encrypted files refuse it. */
+		/* Enabling needs extent mapping; already-verity files refuse it. */
 		plan->object = random_object(state, 1U << KIND_FILE, true);
 		if (plan->object == NO_INDEX || !state->extents ||
 		    (state->objects[plan->object].verity && pick(state, 4) != 0)) {
@@ -1375,16 +1375,12 @@ execute_verity(struct state *state, const struct plan *plan, bool apply)
 		EXPECT(error, EXT4_EXISTS);
 		return error;
 	}
-	/* Encrypted verity files keep a ciphertext tree, which the core does not write. */
-	if (object->encrypted) {
-		EXPECT(error, EXT4_ENCRYPTED);
-		return error;
-	}
 	if (error == EXT4_NO_SPACE) {
 		return error;
 	}
 	EXPECT(error, EXT4_OK);
-	CHECK((inode.flags & EXT4_INODE_VERITY) && inode.size == object->size);
+	CHECK((inode.flags & EXT4_INODE_VERITY) && inode.size == object->size &&
+	    ((inode.flags & EXT4_INODE_ENCRYPT) != 0) == object->encrypted);
 	EXPECT(ext4_measure_verity(state->fs, &inode, &algorithm, digest, sizeof(digest), &size),
 	    EXT4_OK);
 	CHECK(algorithm == plan->key &&
@@ -1643,6 +1639,9 @@ verify_keyless(struct state *state)
 	struct ext4_inode inode;
 	struct object *object;
 	uint64_t cookie;
+	uint8_t digest[VERITY_DIGEST_LIMIT];
+	uint32_t algorithm;
+	size_t size;
 	size_t completed;
 	uint32_t index;
 
@@ -1653,6 +1652,10 @@ verify_keyless(struct state *state)
 			continue;
 		}
 		EXPECT(ext4_get_inode(state->fs, object->number, &inode), EXT4_OK);
+		if (object->verity) {
+			EXPECT(ext4_measure_verity(state->fs, &inode, &algorithm, digest,
+			    sizeof(digest), &size), EXT4_ENCRYPTED);
+		}
 		if (object->kind == KIND_DIRECTORY) {
 			keyless = (struct keyless){ state, index, &inode, 0 };
 			cookie = 0;

@@ -173,7 +173,9 @@ read as no-key names. `--verity` adds an operation that enables verity on a file
 with either algorithm, the filesystem or a 1 KiB Merkle block and an optional salt;
 verity files must refuse writes, truncation and preallocation with
 `EXT4_PERMISSION_DENIED`, measure the same digest until removed and refuse enabling
-again, and encrypted files refuse it with `EXT4_ENCRYPTED`. Enabling spans several
+again. With the installed key, encrypted files follow the same enable, plaintext-read
+and stable-digest model; key removal still refuses contents and verity measurement
+with `EXT4_ENCRYPTED`. Enabling spans several
 transactions and does not take part in the power-cut byte comparison. `--casefold`
 adds a casefolded directory whose new subdirectories inherit the flag; the model
 matches names in it without regard to case, reuses names in other spellings, and
@@ -199,10 +201,16 @@ no-key names as a mount without the key presents them. `tests/check_sustained.py
 strict nonrepairing e2fsck and compares every directory, inode identity, type, link
 count, permission, file byte, symlink target and attribute value with debugfs,
 addressing objects by inode number. An encrypted directory's raw ciphertext names
-must be those its no-key names carry; encrypted contents and targets are counted
-rather than decrypted. Encryption, casefold and verity flags must match, the fscrypt
-context must exist exactly on encrypted objects, and each verity file's digest,
-Merkle tree and descriptor are recomputed from its expected contents.
+must be those its no-key names carry. Encrypted verity files are decrypted with
+the deterministic sustained v2 test key and their expected contents compared;
+other encrypted contents and targets are counted rather than decrypted. Encryption,
+casefold and verity flags must match, the fscrypt context must exist exactly on encrypted objects, and each verity file's digest,
+Merkle tree and descriptor are recomputed from its expected contents. Encrypted
+metadata uses complete filesystem-block XTS decryption at absolute file-logical
+indices; missing or unwritten metadata is rejected, while sparse data stays zero.
+The registered `sustained-encrypted-verity-oracle` test checks this verifier with
+21 synthetic file forks and deliberate corruption. These helper checks do not
+replace image-backed sustained runs or native Linux acceptance.
 `tests/run_linux_sustained.py --lab LAB --prepared PREPARED --runner RUNNER --export
 DIRECTORY --output NEW` runs from the lab and mounts an export read-only in the
 Linux reference guest. Without the key Linux must list exactly the exported no-key

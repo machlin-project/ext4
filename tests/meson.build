@@ -135,6 +135,9 @@ if paths['quota_fixtures'] != ''
 endif
 
 if paths['encrypted_verity_fixtures'] != ''
+  test('sustained-encrypted-verity-oracle', find_program('python3'),
+    args: [files('test_check_sustained.py'), paths['encrypted_verity_fixtures']],
+    timeout: 300, suite: 'core')
   foreach block : ['1024', '4096', '16384', '65536']
     foreach kind : ['empty', 'tiny', 'tail', 'aligned', 'sparse']
       profile = block + '-' + kind
