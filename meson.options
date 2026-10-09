@@ -93,3 +93,6 @@ option('format_fixtures', type: 'string', value: '',
   description: 'Path to e2fsprogs-authored format and geometry variants')
 option('unjournaled_fixtures', type: 'string', value: '',
   description: 'Directory of generate_unjournaled_fixtures.py volumes without a journal')
+
+option('verity_enable_vectors', type: 'string', value: '',
+  description: 'Independent expected digests for encrypted verity enable image tests')

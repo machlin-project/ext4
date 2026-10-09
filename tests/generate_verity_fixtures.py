@@ -19,6 +19,12 @@ INODE_FLAGS_EXTENTS_VERITY = 0x00080000 | 0x00100000
 DESCRIPTOR = struct.Struct("<BBBBIQ64s32s144s")
 SIZE_FIELD = struct.Struct("<I")
 PROFILES = (
+    dict(name="1k-encrypted", block_size=1024, algorithm=1, salt=b"", sizes=(1, 4097),
+         features={"encrypt"}),
+    dict(name="4k-encrypted", block_size=4096, algorithm=1, salt=b"", sizes=(1, 4097),
+         features={"encrypt"}),
+    dict(name="4k-encrypted-orphan", block_size=4096, algorithm=1, salt=b"",
+         sizes=(1, 4097), features={"encrypt", "orphan_file"}),
     dict(name="4k", block_size=4096, algorithm=1, salt=b"", sizes=(0, 100, 4096, 1536 * 1024 + 77)),
     dict(name="1k-salted", block_size=1024, algorithm=1, salt=bytes(range(16)),
          sizes=(1, 1024, 2560 * 1024 + 5)),

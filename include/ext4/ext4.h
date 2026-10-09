@@ -668,8 +668,9 @@ enum ext4_result ext4_set_encryption_policy(struct ext4_fs *fs, uint32_t number,
 
 /* Enable fs-verity on a linked regular file, as FS_IOC_ENABLE_VERITY does. The
  * volume must have the verity feature and the file extent mapping, which inline
- * data is converted to; encrypted, append-only and immutable files and verity files
- * are refused with ENCRYPTED, PERMISSION_DENIED and EXISTS. The owner authorizes
+ * data is converted to. Encrypted files require the supported fscrypt policy and
+ * its key before any transaction starts. Append-only and immutable files and
+ * existing verity files are refused with PERMISSION_DENIED and EXISTS. The owner authorizes
  * the caller and excludes writers of the file, as Linux's ETXTBSY check does.
  * Bounded transactions trim blocks past EOF and write the Merkle tree there while
  * the inode is on the orphan list; a final transaction writes the descriptor, sets

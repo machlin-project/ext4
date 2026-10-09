@@ -354,6 +354,13 @@ enum ext4_result ext4_map_block(
 enum ext4_result ext4_read_mapped(struct ext4_fs *fs, const struct ext4_inode *inode,
     uint64_t offset, void *buffer, size_t length, bool require_data, size_t *completed);
 struct ext4_map_reader;
+/* Change one file data snapshot, which is ciphertext for encrypted files. A fresh
+ * partial block starts as plaintext zeros; an existing partial block is decrypted
+ * before modification. source may be NULL for zeros and must not alias snapshot
+ * for encryption. The caller cancels the transaction if any callback fails. */
+enum ext4_result ext4_data_change(struct ext4_fs *fs, const struct ext4_inode *inode,
+    uint32_t logical, uint8_t *snapshot, bool fresh, size_t within,
+    const void *source, size_t length);
 /* Internal mapped plaintext, including past EOF, without verity recursion. An
  * encrypted regular file is decrypted at its file-relative logical block index.
  * Holes/unwritten mappings are zeros unless require_data demands stored metadata.

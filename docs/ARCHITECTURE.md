@@ -847,17 +847,22 @@ beyond EOF. Final deletion releases the complete map, including that metadata.
 Offline cleanup refuses a linked orphan with the flag instead of truncating its tree.
 
 `ext4_enable_verity` enables verity as Linux's FS_IOC_ENABLE_VERITY does. It hashes
-with the core's SHA-256 and SHA-512, which verification already uses; no key is
-involved, so no adapter callback is needed. The volume must have the feature, and the
-file must be linked, regular, not encrypted, append-only, immutable or already
-verity, and extent-mapped once inline data is converted. A first transaction converts
+with the core's SHA-256 and SHA-512 over plaintext. Encrypted files require the
+existing supported fscrypt policy and key before any transaction starts. The volume
+must have the feature, and the file must be linked, regular, neither append-only nor
+immutable nor already verity, and extent-mapped once inline data is converted. A first transaction converts
 inline data, trims blocks past EOF, because readers find the descriptor from the
-last mapped block, and puts the inode on the legacy orphan list. The tree is then
+last mapped block, and enrolls the inode through the neutral orphan-file/legacy-list interface. The tree is then
 streamed: each data block, zero-padded to the Merkle block, is hashed after the salt,
 and each level keeps one partial hash block, so memory is one block per level plus a
 128 KiB queue of completed blocks. Bounded transactions write queued blocks past EOF
 as file data at their final positions, without changing the size or times, halving
-a batch that exceeds the journal's capacity. A final transaction writes the
+a batch that exceeds the journal's capacity. Encrypted snapshots contain ciphertext:
+complete blocks encrypt from distinct plaintext buffers, and partial Merkle writes
+decrypt the latest snapshot before modifying it, preserving adjacent tree blocks.
+All XTS IVs use absolute file-relative filesystem-block indices, including metadata
+past EOF. Mapping cursors close before a queued tree write can change extents.
+A final transaction writes the
 descriptor and its size in the block after the tree, sets the flag and removes the
 inode from the list. On failure the core truncates the partial tree and leaves the
 list; after a power cut, recovery does the same, because cleanup of a linked orphan
@@ -901,8 +906,9 @@ it as stored for indexed directories. Directory validation accepts any byte in
 encrypted names. A symlink target is a little-endian 16-bit ciphertext length and the
 ciphertext, in the inode or its block. Native mappings of encrypted files stay
 refused, since they would expose ciphertext. Casefolded encrypted directories hash
-plaintext names with a derived key, and encrypted verity files keep a ciphertext
-tree over plaintext; both are unsupported with a key.
+plaintext names with a derived key and remain unsupported. Encrypted verity files
+are read, measured and enabled with the existing supported fscrypt policy and key;
+data, tree, descriptor and signature blocks are decrypted before interpretation.
 
 With the key the core also writes encrypted objects as Linux does. The adapter's
 `random_bytes` supplies nonces. `ext4_set_encryption_policy` encrypts an empty

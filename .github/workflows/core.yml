@@ -171,6 +171,11 @@ jobs:
             2>&1 | tee artifacts/checks/mmp-fixtures.log
           python3 tests/generate_verity_fixtures.py --output artifacts/verity-fixtures \
             2>&1 | tee artifacts/checks/verity-fixtures.log
+      - name: Generate independent enable digest vectors
+        if: matrix.suite == 'format'
+        run: |
+          python3 tests/generate_verity_enable_vectors.py --output artifacts/verity-enable-vectors \
+            2>&1 | tee artifacts/checks/verity-enable-vectors.log
       - name: Generate independent encrypted-verity file forks
         if: matrix.suite == 'core'
         run: |
@@ -225,6 +230,7 @@ jobs:
           if [[ '${{ matrix.suite }}' == format ]]; then
             format_options=(-Dmmp_fixtures="$PWD/artifacts/mmp-fixtures" \
               -Dverity_fixtures="$PWD/artifacts/verity-fixtures" \
+              -Dverity_enable_vectors="$PWD/artifacts/verity-enable-vectors" \
               -Dcasefold_vectors="$PWD/artifacts/casefold-vectors/vectors.txt" \
               -Dcasefold_fixtures="$PWD/artifacts/casefold-fixtures" \
               -Dquota_fixtures="$PWD/artifacts/quota-fixtures" \

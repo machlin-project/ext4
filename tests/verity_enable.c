@@ -2,6 +2,10 @@
 #include "sha.h"
 #include "storage.h"
 #include "verity.h"
+#include "keyring.h"
+#ifdef EXT4_TEST_OPENSSL
+#include <openssl/evp.h>
+#endif
 
 #include <inttypes.h>
 
@@ -83,6 +87,141 @@ static const struct enable_case cases[] = {
 static const struct ext4_timestamp verity_time = { VERITY_SECONDS, 0 };
 static uint8_t salt[SALT_BYTES];
 
+/* Optional encrypted runs reuse the complete enable, fault, ENOSPC and crash
+ * suite. Only the adapter and test parent change; the core paths are identical. */
+static struct keyring enable_keyring;
+static struct ext4_crypto_environment signature_adapter;
+static uint8_t policy_version;
+static struct ext4_write_options write_options;
+static uint32_t file_flags;
+static bool alternate_mode;
+static const char *expected_directory;
+static uint32_t cipher_calls;
+static uint32_t fail_cipher;
+static bool cipher_failed;
+
+static enum ext4_result
+adapter_verify(void *context, const uint8_t *message, size_t message_size,
+    const uint8_t *signature, size_t signature_size)
+{
+	(void)context;
+	return signature_adapter.verify_signature(signature_adapter.context, message, message_size,
+	    signature, signature_size);
+}
+
+static enum ext4_result
+adapter_cipher(void *context, void *handle, uint8_t mode, bool encrypt, const uint8_t *iv,
+    const void *input, void *output, size_t length)
+{
+#ifdef EXT4_TEST_OPENSSL
+	struct key *key = handle;
+	EVP_CIPHER_CTX *cipher;
+	int written = 0;
+	int final = 0;
+	int success;
+#endif
+
+	if (++cipher_calls == fail_cipher) {
+		cipher_failed = true;
+		memset(output, 0xe1, length);
+		return EXT4_IO;
+	}
+#ifdef EXT4_TEST_OPENSSL
+	if (mode == EXT4_FSCRYPT_MODE_AES_256_XTS) {
+		CHECK(input != output && key->size == 64U && length <= 65536U);
+		cipher = EVP_CIPHER_CTX_new();
+		CHECK(cipher != NULL);
+		success = EVP_CipherInit_ex(cipher, EVP_aes_256_xts(), NULL, key->bytes, iv, encrypt);
+		if (success == 1) {
+			success = EVP_CIPHER_CTX_set_padding(cipher, 0);
+		}
+		if (success == 1) {
+			success = EVP_CipherUpdate(cipher, output, &written, input, (int)length);
+		}
+		if (success == 1) {
+			success = EVP_CipherFinal_ex(cipher, (uint8_t *)output + written, &final);
+		}
+		CHECK(success != 1 || (size_t)(written + final) == length);
+		EVP_CIPHER_CTX_free(cipher);
+		return success == 1 ? EXT4_OK : EXT4_IO;
+	}
+#endif
+	return keyring_cipher(context, handle, mode, encrypt, iv, input, output, length);
+}
+
+static enum ext4_result
+test_crypto(struct ext4_fs *fs, const struct ext4_crypto_environment *requested)
+{
+	struct ext4_crypto_environment crypto;
+
+	if (policy_version == 0) {
+		return ext4_set_crypto(fs, requested);
+	}
+	crypto = keyring_environment(&enable_keyring);
+	crypto.cipher = adapter_cipher;
+	if (requested != NULL) {
+		signature_adapter = *requested;
+		crypto.verify_signature = requested->verify_signature == NULL ? NULL : adapter_verify;
+		crypto.require_signatures = requested->require_signatures;
+	}
+	return ext4_set_crypto(fs, &crypto);
+}
+
+static enum ext4_result
+test_mount(const struct ext4_environment *environment, struct ext4_fs **fs)
+{
+	enum ext4_result error = ext4_mount(environment, fs);
+
+	if (error == EXT4_OK && policy_version != 0) {
+		error = test_crypto(*fs, NULL);
+	}
+	return error;
+}
+
+static enum ext4_result
+test_mount_writable(const struct ext4_environment *environment,
+    const struct ext4_write_environment *writer, struct ext4_fs **fs)
+{
+	enum ext4_result error = ext4_mount_writable_with_options(environment, writer, NULL,
+	    &write_options, fs);
+
+	if (error == EXT4_OK && policy_version != 0) {
+		error = test_crypto(*fs, NULL);
+	}
+	return error;
+}
+
+static enum ext4_result
+test_parent(struct ext4_fs *fs, struct ext4_inode *parent)
+{
+	struct ext4_inode root = { 0 };
+	struct ext4_inode_update update = { 0 };
+	struct ext4_encryption_policy policy = { 0 };
+	enum ext4_result error = ext4_get_inode(fs, EXT4_ROOT_INODE, &root);
+
+	if (error != EXT4_OK || policy_version == 0) {
+		*parent = root;
+		return error;
+	}
+	error = ext4_lookup(fs, &root, (const uint8_t *)"encrypted", 9, parent);
+	if (error != EXT4_NOT_FOUND) {
+		return error;
+	}
+	update.fields = EXT4_ATTR_PERMISSIONS;
+	update.permissions = 0700;
+	error = ext4_mkdir(fs, root.number, root.generation, (const uint8_t *)"encrypted", 9,
+	    &update, &verity_time, parent);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	policy.version = policy_version;
+	policy.contents_mode = EXT4_FSCRYPT_MODE_AES_256_XTS;
+	policy.filenames_mode = EXT4_FSCRYPT_MODE_AES_256_CTS;
+	memcpy(policy.identifier, policy_version == 1 ? enable_keyring.descriptor :
+	    enable_keyring.identifier, policy_version == 1 ? 8U : 16U);
+	return ext4_set_encryption_policy(fs, parent->number, parent->generation, &policy, parent);
+}
+
 static struct ext4_inode_update
 creation(void)
 {
@@ -149,7 +288,7 @@ lookup(struct ext4_fs *fs, const char *name, struct ext4_inode *inode)
 {
 	struct ext4_inode root;
 
-	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(test_parent(fs, &root), EXT4_OK);
 	EXPECT(ext4_lookup(fs, &root, (const uint8_t *)name, strlen(name), inode), EXT4_OK);
 }
 
@@ -181,10 +320,14 @@ create_file(struct ext4_fs *fs, const char *name, const uint8_t *data, uint64_t 
 	uint64_t skip_to = (uint64_t)hole_end * block_size;
 
 	CHECK(skip_from <= skip_to && (skip_from == skip_to || skip_to < size));
-	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(test_parent(fs, &root), EXT4_OK);
 	EXPECT(ext4_create(fs, root.number, root.generation, (const uint8_t *)name, strlen(name),
 		   &update, &verity_time, inode),
 	    EXT4_OK);
+	if (file_flags != 0) {
+		EXPECT(ext4_set_inode_flags(fs, inode->number, inode->generation, file_flags,
+		    file_flags, &verity_time, inode), EXT4_OK);
+	}
 	write_range(fs, inode, data, 0, skip_from < size ? skip_from : size);
 	write_range(fs, inode, data, skip_to, size);
 	lookup(fs, name, inode);
@@ -257,6 +400,19 @@ enable_case(struct ext4_fs *fs, uint32_t index, uint32_t block_size, FILE *manif
 	EXPECT(ext4_measure_verity(fs, &result, &algorithm, digest, sizeof(digest), &digest_size),
 	    EXT4_OK);
 	CHECK(digest_size == (item->algorithm == EXT4_VERITY_HASH_SHA256 ? 32U : 64U));
+	if (expected_directory != NULL) {
+		char path[4096];
+		char expected[129];
+		FILE *input;
+
+		CHECK(snprintf(path, sizeof(path), "%s/enable-%u-%s.digest", expected_directory,
+		    block_size, item->name) < (int)sizeof(path));
+		input = fopen(path, "r");
+		CHECK(input != NULL && fscanf(input, "%128s", expected) == 1);
+		CHECK(fclose(input) == 0);
+		digest_text(digest, digest_size, text);
+		CHECK(strcmp(text, expected) == 0);
+	}
 	EXPECT(ext4_enable_verity(fs, result.number, result.generation, &parameters, &again),
 	    EXT4_EXISTS);
 	EXPECT(ext4_write(fs, result.number, result.generation, 0, "x", 1, &write, &completed),
@@ -279,6 +435,43 @@ enable_case(struct ext4_fs *fs, uint32_t index, uint32_t block_size, FILE *manif
 	free(data);
 }
 
+/* Refusal must not begin/drain a transaction, including deferred prior writes. */
+static void
+missing_keys(struct ext4_fs *fs, struct device *device)
+{
+	struct ext4_verity_parameters parameters = { EXT4_VERITY_HASH_SHA256, 1024, NULL, 0,
+		NULL, 0 };
+	struct ext4_inode inode;
+	struct ext4_inode result;
+	struct keyring wrong;
+	struct ext4_crypto_environment crypto;
+	uint32_t events;
+	uint64_t free_blocks;
+
+	if (policy_version == 0) {
+		return;
+	}
+	create_file(fs, "missing-key", (const uint8_t *)"secret", 6, 0, 0,
+	    device->block_size, &inode);
+	events = device->events;
+	free_blocks = fs->info.free_blocks;
+	EXPECT(ext4_set_crypto(fs, NULL), EXT4_OK);
+	EXPECT(ext4_enable_verity(fs, inode.number, inode.generation, &parameters, &result),
+	    EXT4_ENCRYPTED);
+	CHECK(device->events == events && fs->info.free_blocks == free_blocks);
+	keyring_init(&wrong, 4);
+	crypto = keyring_environment(&wrong);
+	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	EXPECT(ext4_enable_verity(fs, inode.number, inode.generation, &parameters, &result),
+	    EXT4_ENCRYPTED);
+	CHECK(device->events == events && fs->info.free_blocks == free_blocks);
+	EXPECT(test_crypto(fs, NULL), EXT4_OK);
+	CHECK(wrong.handles == 0);
+	EXPECT(ext4_get_inode(fs, inode.number, &result), EXT4_OK);
+	CHECK(result.flags == inode.flags && result.size == inode.size &&
+	    result.blocks_512 == inode.blocks_512);
+}
+
 /* Unsuitable files and parameters are refused without change. */
 static void
 refusals(struct ext4_fs *fs, uint32_t block_size)
@@ -293,7 +486,7 @@ refusals(struct ext4_fs *fs, uint32_t block_size)
 	struct ext4_inode result;
 	size_t completed;
 
-	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(test_parent(fs, &root), EXT4_OK);
 	EXPECT(ext4_mkdir(fs, root.number, root.generation, (const uint8_t *)"directory", 9,
 		   &update, &verity_time, &inode),
 	    EXT4_OK);
@@ -377,7 +570,8 @@ check_original(struct ext4_fs *fs, const char *name, const uint8_t *data, uint64
 	lookup(fs, name, &inode);
 	CHECK(!(inode.flags & EXT4_INODE_VERITY) && inode.size == size &&
 	    inode.blocks_512 == blocks_512 && fs->info.free_blocks == free_blocks &&
-	    fs->last_orphan == 0);
+	    fs->last_orphan == 0 &&
+	    (fs->orphan_file == NULL || fs->orphan_file->pending == 0));
 	EXPECT(ext4_read(fs, &inode, 0, read_back, (size_t)size, &completed), EXT4_OK);
 	CHECK(completed == size && memcmp(read_back, data, (size_t)size) == 0);
 	free(read_back);
@@ -399,6 +593,7 @@ faults(struct device *device)
 	uint64_t blocks_512;
 	uint32_t allocations;
 	uint32_t reads;
+	uint32_t ciphers;
 	uint32_t fault;
 	uint32_t original = 0;
 	uint32_t enabled = 0;
@@ -410,33 +605,42 @@ faults(struct device *device)
 	CHECK(data != NULL && before != NULL);
 	pattern(data, FAULT_BYTES, CASE_COUNT + 1U, 0, 0, device->block_size);
 	device_reset(device, device->base);
-	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(test_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
 	create_file(fs, "faults", data, FAULT_BYTES, 0, 0, device->block_size, &inode);
 	EXPECT(ext4_sync(fs), EXT4_OK);
 	free_blocks = fs->info.free_blocks;
 	blocks_512 = inode.blocks_512;
 	ext4_unmount(fs);
 	memcpy(before, device->stable, device->size);
-	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(test_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
 	allocations = device->allocations;
 	reads = device->reads;
+	ciphers = cipher_calls;
 	EXPECT(
 	    ext4_enable_verity(fs, inode.number, inode.generation, &parameters, &result), EXT4_OK);
 	allocations = device->allocations - allocations;
 	reads = device->reads - reads;
+	ciphers = cipher_calls - ciphers;
 	ext4_unmount(fs);
-	for (fault = 1; fault <= allocations + reads; fault++) {
+	for (fault = 1; fault <= allocations + reads + ciphers; fault++) {
 		device_reset(device, before);
-		EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+		EXPECT(test_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
 		if (fault <= allocations) {
 			device->fail_allocation = device->allocations + fault;
-		} else {
+		} else if (fault <= allocations + reads) {
 			device->fail_read = device->reads + fault - allocations;
+		} else {
+			fail_cipher = cipher_calls + fault - allocations - reads;
 		}
 		error =
 		    ext4_enable_verity(fs, inode.number, inode.generation, &parameters, &result);
 		device->fail_allocation = 0;
 		device->fail_read = 0;
+		fail_cipher = 0;
+		if (fault > allocations + reads) {
+			CHECK(cipher_failed && error == EXT4_IO);
+		}
+		cipher_failed = false;
 		if (error == EXT4_OK) {
 			CHECK(result.flags & EXT4_INODE_VERITY);
 			ext4_unmount(fs);
@@ -450,7 +654,7 @@ faults(struct device *device)
 			memcpy(device->stable, device->cache, device->size);
 			EXPECT(
 			    ext4_recover(&device->environment, &device->writer, &report), EXT4_OK);
-			EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+			EXPECT(test_mount(&device->environment, &fs), EXT4_OK);
 			lookup(fs, "faults", &result);
 			if (!(result.flags & EXT4_INODE_VERITY)) {
 				check_original(
@@ -462,16 +666,16 @@ faults(struct device *device)
 		}
 		EXPECT(ext4_sync(fs), EXT4_OK);
 		ext4_unmount(fs);
-		EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+		EXPECT(test_mount(&device->environment, &fs), EXT4_OK);
 		check_original(fs, "faults", data, FAULT_BYTES, blocks_512, free_blocks);
 		ext4_unmount(fs);
 		original++;
 	}
 	free(before);
 	free(data);
-	printf("PASS verity enable faults: %u allocations, %u reads, %u rolled back, %u "
+	printf("PASS verity enable faults: %u allocations, %u reads, %u ciphers, %u rolled back, %u "
 	       "recovered, %u enabled\n",
-	    allocations, reads, original, recovered, enabled);
+	    allocations, reads, ciphers, original, recovered, enabled);
 }
 
 /* Leave room for one write transaction of the tree but not all of it: the enable
@@ -501,10 +705,10 @@ no_space(struct device *device)
 	CHECK(data != NULL);
 	pattern(data, device->size, CASE_COUNT + 2U, 0, 0, device->block_size);
 	device_reset(device, device->base);
-	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(test_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
 	create_file(fs, "filler", data, (uint64_t)room * device->block_size, 0, 0,
 	    device->block_size, &filler);
-	EXPECT(ext4_get_inode(fs, EXT4_ROOT_INODE, &root), EXT4_OK);
+	EXPECT(test_parent(fs, &root), EXT4_OK);
 	EXPECT(ext4_create(fs, root.number, root.generation, (const uint8_t *)"full", 4, &update,
 		   &verity_time, &inode),
 	    EXT4_OK);
@@ -616,7 +820,7 @@ signatures(struct device *device)
 	pattern(data, SIGNED_BYTES, CASE_COUNT + 3U, 0, 0, device->block_size);
 	parameters.block_size = device->block_size;
 	device_reset(device, device->base);
-	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(test_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
 	/* The digest depends only on contents and parameters, so an unsigned copy
 	 * gives the formatted digest to sign. */
 	create_file(fs, "reference", data, SIGNED_BYTES, 0, 0, device->block_size, &inode);
@@ -633,8 +837,8 @@ signatures(struct device *device)
 	    (uint16_t)digest_size);
 	test_sign(message, EXT4_VERITY_FORMATTED_HEADER + digest_size, small, sizeof(small));
 	test_sign(message, EXT4_VERITY_FORMATTED_HEADER + digest_size, large, large_size);
-	EXPECT(ext4_set_crypto(fs, &invalid), EXT4_INVALID_ARGUMENT);
-	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	EXPECT(test_crypto(fs, &invalid), EXT4_INVALID_ARGUMENT);
+	EXPECT(test_crypto(fs, &crypto), EXT4_OK);
 	/* Enabling verifies once; reads then reuse the accepted digest. */
 	create_file(fs, "signed", data, SIGNED_BYTES, 0, 0, device->block_size, &inode);
 	parameters.signature = small;
@@ -659,20 +863,21 @@ signatures(struct device *device)
 	small[sizeof(small) - 1U] ^= 1U;
 	lookup(fs, "forged", &result);
 	CHECK(!(result.flags & EXT4_INODE_VERITY) && result.blocks_512 == inode.blocks_512 &&
-	    fs->last_orphan == 0);
+	    fs->last_orphan == 0 &&
+	    (fs->orphan_file == NULL || fs->orphan_file->pending == 0));
 	parameters.signature_size = EXT4_VERITY_MAX_SIGNATURE + 1U;
 	EXPECT(ext4_enable_verity(fs, inode.number, inode.generation, &parameters, &result),
 	    EXT4_INVALID_ARGUMENT);
 	/* Installing the environment again forgets accepted digests: reads verify the
 	 * signatures stored on disk. */
-	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	EXPECT(test_crypto(fs, &crypto), EXT4_OK);
 	calls = signer.calls;
 	read_file(fs, "signed", data, SIGNED_BYTES, EXT4_OK);
 	read_file(fs, "large", data, SIGNED_BYTES, EXT4_OK);
 	CHECK(signer.calls == calls + 2U);
 	/* Required signatures refuse unsigned verity files and unsigned enabling. */
 	crypto.require_signatures = true;
-	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	EXPECT(test_crypto(fs, &crypto), EXT4_OK);
 	read_file(fs, "reference", data, SIGNED_BYTES, EXT4_PERMISSION_DENIED);
 	lookup(fs, "reference", &result);
 	EXPECT(ext4_measure_verity(fs, &result, &algorithm, message, sizeof(message), &digest_size),
@@ -684,14 +889,14 @@ signatures(struct device *device)
 	EXPECT(ext4_enable_verity(fs, inode.number, inode.generation, &parameters, &result),
 	    EXT4_PERMISSION_DENIED);
 	CHECK(device->writes == writes);
-	EXPECT(ext4_set_crypto(fs, NULL), EXT4_OK);
+	EXPECT(test_crypto(fs, NULL), EXT4_OK);
 	read_file(fs, "reference", data, SIGNED_BYTES, EXT4_OK);
 	EXPECT(ext4_sync(fs), EXT4_OK);
 	ext4_unmount(fs);
 	/* A read-only mount verifies the stored signatures too. */
-	EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+	EXPECT(test_mount(&device->environment, &fs), EXT4_OK);
 	crypto.require_signatures = false;
-	EXPECT(ext4_set_crypto(fs, &crypto), EXT4_OK);
+	EXPECT(test_crypto(fs, &crypto), EXT4_OK);
 	calls = signer.calls;
 	read_file(fs, "signed", data, SIGNED_BYTES, EXT4_OK);
 	read_file(fs, "large", data, SIGNED_BYTES, EXT4_OK);
@@ -783,7 +988,7 @@ import(struct device *device, const char *directory, const char *exports, const 
 	input = fopen(path, "r");
 	CHECK(input != NULL);
 	device_reset(device, device->base);
-	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(test_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
 	export_manifest(exports, source, path, sizeof(path), &manifest);
 	fprintf(manifest, "algorithm %u block %u\n", EXT4_VERITY_HASH_SHA256, device->block_size);
 	while (fgets(line, sizeof(line), input) != NULL) {
@@ -858,14 +1063,14 @@ power_cuts(struct device *device)
 	CHECK(data != NULL && read_back != NULL && before != NULL);
 	pattern(data, CRASH_BYTES, CASE_COUNT, 0, 0, device->block_size);
 	device_reset(device, device->base);
-	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(test_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
 	create_file(fs, "crash", data, CRASH_BYTES, 0, 0, device->block_size, &inode);
 	EXPECT(ext4_sync(fs), EXT4_OK);
 	free_blocks = fs->info.free_blocks;
 	blocks_512 = inode.blocks_512;
 	ext4_unmount(fs);
 	memcpy(before, device->stable, device->size);
-	EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+	EXPECT(test_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
 	events = device->events;
 	EXPECT(
 	    ext4_enable_verity(fs, inode.number, inode.generation, &parameters, &result), EXT4_OK);
@@ -876,7 +1081,7 @@ power_cuts(struct device *device)
 	ext4_unmount(fs);
 	for (cut = 1; cut <= events; cut++) {
 		device_reset(device, before);
-		EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
+		EXPECT(test_mount_writable(&device->environment, &device->writer, &fs), EXT4_OK);
 		device->stop_at = device->events + cut;
 		device->survival = cut % 3U;
 		device->partial = cut % 2U != 0;
@@ -892,9 +1097,10 @@ power_cuts(struct device *device)
 			continue;
 		}
 		EXPECT(error, EXT4_OK);
-		EXPECT(ext4_mount(&device->environment, &fs), EXT4_OK);
+		EXPECT(test_mount(&device->environment, &fs), EXT4_OK);
 		lookup(fs, "crash", &result);
-		CHECK(result.size == CRASH_BYTES && fs->last_orphan == 0);
+		CHECK(result.size == CRASH_BYTES && fs->last_orphan == 0 &&
+	    (fs->orphan_file == NULL || fs->orphan_file->pending == 0));
 		EXPECT(ext4_read(fs, &result, 0, read_back, CRASH_BYTES, &completed), EXT4_OK);
 		CHECK(completed == CRASH_BYTES && memcmp(read_back, data, CRASH_BYTES) == 0);
 		if (result.flags & EXT4_INODE_VERITY) {
@@ -938,7 +1144,28 @@ main(int argc, char **argv)
 	int argument;
 
 	while (argc >= first + 2 && strncmp(argv[first], "--", 2) == 0) {
-		if (strcmp(argv[first], "--export") == 0) {
+		if (strcmp(argv[first], "--expected") == 0) {
+			expected_directory = argv[first + 1];
+		} else if (strcmp(argv[first], "--policy") == 0) {
+			CHECK(strcmp(argv[first + 1], "1") == 0 || strcmp(argv[first + 1], "2") == 0);
+			policy_version = (uint8_t)(argv[first + 1][0] - '0');
+		} else if (strcmp(argv[first], "--mode") == 0) {
+			alternate_mode = true;
+			if (strcmp(argv[first + 1], "ordered") == 0) {
+				write_options.flags = EXT4_WRITE_ORDERED_DATA;
+			} else if (strcmp(argv[first + 1], "deferred") == 0) {
+				write_options.commit_blocks = 64;
+			} else if (strcmp(argv[first + 1], "lazy") == 0) {
+				write_options.checkpoint_blocks = 64;
+			} else if (strcmp(argv[first + 1], "sync") == 0) {
+				write_options.commit_blocks = 64;
+				file_flags = EXT4_INODE_SYNC;
+			} else {
+				CHECK(strcmp(argv[first + 1], "journal") == 0);
+				write_options.flags = EXT4_WRITE_ORDERED_DATA;
+				file_flags = EXT4_INODE_JOURNAL_DATA;
+			}
+		} else if (strcmp(argv[first], "--export") == 0) {
 			exports = argv[first + 1];
 		} else if (strcmp(argv[first], "--import") == 0) {
 			imports = argv[first + 1];
@@ -949,11 +1176,14 @@ main(int argc, char **argv)
 	}
 	if (argc <= first || (imports != NULL && (exports == NULL || argc != first + 1))) {
 		fprintf(stderr,
-		    "usage: %s [--export DIRECTORY] IMAGE...\n"
+		    "usage: %s [--policy 1|2] [--mode ordered|deferred|lazy|sync|journal]\n"
+		    "       [--expected DIRECTORY] [--export DIRECTORY] IMAGE...\n"
 		    "       %s --import DIRECTORY --export DIRECTORY IMAGE\n",
 		    argv[0], argv[0]);
 		return 2;
 	}
+	CHECK(policy_version == 0 || (exports == NULL && imports == NULL));
+	keyring_init(&enable_keyring, 3);
 	if (imports != NULL) {
 		storage_open(&device, argv[first]);
 		import(&device, imports, exports, argv[first]);
@@ -966,7 +1196,7 @@ main(int argc, char **argv)
 	for (argument = first; argument < argc; argument++) {
 		storage_open(&device, argv[argument]);
 		device_reset(&device, device.base);
-		EXPECT(ext4_mount_writable(&device.environment, &device.writer, &fs), EXT4_OK);
+		EXPECT(test_mount_writable(&device.environment, &device.writer, &fs), EXT4_OK);
 		if (!(fs->info.feature_ro_compat & EXT4_FEATURE_RO_VERITY)) {
 			parameters = case_parameters(&cases[1], device.block_size);
 			create_file(fs, "plain", (const uint8_t *)"plain", 5, 0, 0,
@@ -987,13 +1217,14 @@ main(int argc, char **argv)
 		}
 		enabled = 0;
 		for (index = 0; index < CASE_COUNT; index++) {
-			if (cases[index].inline_data &&
-			    !(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_INLINE_DATA)) {
+			if (cases[index].inline_data && (policy_version != 0 ||
+			    !(fs->info.feature_incompat & EXT4_FEATURE_INCOMPAT_INLINE_DATA))) {
 				continue;
 			}
 			enable_case(fs, index, device.block_size, manifest);
 			enabled++;
 		}
+		missing_keys(fs, &device);
 		refusals(fs, device.block_size);
 		EXPECT(ext4_sync(fs), EXT4_OK);
 		ext4_unmount(fs);
@@ -1002,11 +1233,14 @@ main(int argc, char **argv)
 			manifest = NULL;
 			storage_export(&device, exports, argv[argument], "enable-");
 		}
-		power_cuts(&device);
-		faults(&device);
-		no_space(&device);
+		if (!alternate_mode) {
+			power_cuts(&device);
+			faults(&device);
+			no_space(&device);
+		}
 		signatures(&device);
 		storage_close(&device);
+		CHECK(enable_keyring.handles == 0);
 		printf("PASS verity enable: %s, %u files\n", argv[argument], enabled);
 	}
 	return 0;

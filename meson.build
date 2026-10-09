@@ -66,7 +66,7 @@ foreach name, source : {
   'file-range': 'file_range', 'large-file': 'large_file', 'large-volume': 'large_volume', 'inode-flags': 'inode_flags',
   'namespace': 'namespace', 'removal': 'removal', 'sustained': 'sustained', 'mmp': 'mmp',
   'deferred': 'deferred',
-  'verity': 'verity', 'verity-enable': 'verity_enable', 'encrypt': 'encrypt', 'casefold': 'casefold', 'casefold-fs': 'casefold_fs', 'quota': 'quota',
+  'verity': 'verity', 'encrypt': 'encrypt', 'casefold': 'casefold', 'casefold-fs': 'casefold_fs', 'quota': 'quota',
   'rename': 'rename', 'orphan': 'orphan', 'orphan-index': 'orphan_index', 'fscrypt-lifetime': 'fscrypt_lifetime',
 }
   programs += {name: executable('ext4-' + name + '-test', 'tests/' + source + '.c',
@@ -83,6 +83,9 @@ if test_openssl.found()
 endif
 programs += {'encrypted-verity': executable('ext4-encrypted-verity-test',
   'tests/encrypted_verity.c', include_directories: internal_headers,
+  dependencies: encrypted_verity_dependencies, c_args: encrypted_verity_arguments)}
+programs += {'verity-enable': executable('ext4-verity-enable-test',
+  'tests/verity_enable.c', include_directories: internal_headers,
   dependencies: encrypted_verity_dependencies, c_args: encrypted_verity_arguments)}
 # Test the scalar SHA fallback even when the host enables hardware SHA rounds.
 programs += {'hash-portable': executable('ext4-hash-portable-test',

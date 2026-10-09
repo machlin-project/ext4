@@ -3761,3 +3761,43 @@ observed. The failed run and diagnosis remain in the lab's
 adapter now reports admission errors through one asynchronous task completion,
 without child execution or media I/O. Native option refusal, actual formatting,
 mounted refusal, remount and independent checks remain required for that change.
+
+## Encrypted fs-verity combination: evidence boundary
+
+The combined core path reads, measures and enables fs-verity for the existing
+supported fscrypt v1/v2 AES-256-XTS contents policies. This does not widen fscrypt
+mode, IV, key-derivation or crypto-provider support. Enabling hashes plaintext and
+stores the data fork, Merkle tree, descriptor, optional signature and size trailer
+as ciphertext at their file-relative filesystem-block IVs. Missing matching keys
+are rejected before beginning a transaction. The ordinary unencrypted path remains
+covered by the existing enable suite.
+
+`encrypted-verity-*` registered core tests use 23 independently generated synthetic
+file forks at 1/4/16/64 KiB filesystem blocks. They compare complete and repeated
+partial writer snapshots against independently generated ciphertext, exercise
+metadata beyond EOF, and inject allocation/read/cipher faults. A synthetic held
+inode also checks no-key/stale-generation preflight without entering an enable
+transaction. These are unit/helper checks; they do not exercise mounted-volume
+allocation, orphan enrollment, journal commit or recovery. The Python generator
+and optional accelerated test callback share OpenSSL AES primitives, so they are
+not an independent AES-implementation correctness claim. Small-block fork cases
+retain the separate reference callback implementation.
+
+The format suite additionally registers 16 encrypted enable image tests: v1/v2
+policies on 1 KiB and 4 KiB legacy-orphan volumes and a 4 KiB orphan-file volume,
+plus ordered, deferred, lazy-checkpoint, SYNC and JOURNAL_DATA success/refusal and
+signature cases on both 4 KiB orphan formats. The default-policy runs reuse the
+full allocation/read/cipher-failure, write/barrier power-cut and ENOSPC suite.
+Alternate-mode runs do not yet cover their own crash/rollback/ENOSPC matrix.
+Expected enable digests are generated independently with Python hashlib by
+`generate_verity_enable_vectors.py`; image allocation comes from e2fsprogs through
+`generate_verity_fixtures.py`. Encrypted export is intentionally not accepted by the
+plain-only export verifier.
+
+At preparation time, local e2fsprogs binaries and full-volume fixture images were
+unavailable. The new mounted-volume tests therefore remain unrun until actual CI
+results establish them. Linux-authored encrypted+verity volumes, enabled output
+mounted and measured by Linux, independent ciphertext-fork comparison after actual
+enabling, and post-crash e2fsck acceptance remain explicit open gates. Registration,
+compilation, synthetic tests, or historical separate encryption/verity acceptance
+do not close those gates.

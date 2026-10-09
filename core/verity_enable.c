@@ -1,7 +1,10 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "allocate.h"
+#include "fscrypt.h"
 #include "inline.h"
 #include "journal.h"
+#include "map_read.h"
+#include "quota.h"
 #include "verity.h"
 
 /* Enabling fs-verity follows Linux's ext4 sequence. A first transaction converts
@@ -36,6 +39,8 @@ struct ext4_verity_builder {
 	uint32_t queued;
 	uint32_t batch;
 	uint8_t *data;
+	/* Descriptor/signature/trailer plaintext, distinct from ciphertext snapshots. */
+	uint8_t *block;
 	uint8_t digest[EXT4_VERITY_MAX_DIGEST];
 	/* The caller's built-in signature, stored after the descriptor. */
 	const uint8_t *signature;
@@ -163,9 +168,6 @@ ext4_verity_prepare(struct ext4_verity_builder *builder, bool *trimmed)
 	if (error == EXT4_OK && (inode->flags & EXT4_INODE_VERITY)) {
 		error = EXT4_EXISTS;
 	}
-	if (error == EXT4_OK && (inode->flags & EXT4_INODE_ENCRYPT)) {
-		error = EXT4_ENCRYPTED;
-	}
 	if (error == EXT4_OK && (inode->flags & EXT4_INODE_RESTRICTED_FLAGS)) {
 		error = EXT4_PERMISSION_DENIED;
 	}
@@ -291,7 +293,8 @@ ext4_verity_write_step(
 			    zero || builder->verity.block_size == fs->info.block_size, &snapshot);
 		}
 		if (error == EXT4_OK) {
-			ext4_copy((uint8_t *)snapshot + within,
+			error = ext4_data_change(fs, &builder->inode, (uint32_t)logical,
+			    snapshot, zero, within,
 			    builder->queue + (size_t)index * builder->verity.block_size,
 			    builder->verity.block_size);
 		}
@@ -391,6 +394,7 @@ static enum ext4_result
 ext4_verity_build(struct ext4_verity_builder *builder)
 {
 	struct ext4_verity *verity = &builder->verity;
+	struct ext4_map_reader reader = { 0 };
 	uint64_t offset;
 	size_t valid;
 	size_t read;
@@ -401,16 +405,19 @@ ext4_verity_build(struct ext4_verity_builder *builder)
 		valid = verity->data_size - offset < verity->block_size
 		    ? (size_t)(verity->data_size - offset)
 		    : verity->block_size;
-		error = ext4_read_mapped(
-		    builder->fs, &builder->inode, offset, builder->data, valid, false, &read);
+		error = ext4_read_plaintext(builder->fs, &builder->inode, &reader,
+		    offset, builder->data, valid, false, &read);
+		/* Pushing a completed hash can commit new extents and refresh inode.
+		 * Do not retain mapping pointers across those construction writes. */
+		ext4_map_reader_close(builder->fs, &reader);
 		if (error != EXT4_OK) {
-			return error;
+			goto out;
 		}
 		ext4_zero(builder->data + valid, verity->block_size - valid);
 		ext4_verity_hash(verity, builder->data, builder->digest);
 		error = ext4_verity_push(builder, 0);
 		if (error != EXT4_OK) {
-			return error;
+			goto out;
 		}
 	}
 	for (level = 0; level < verity->levels; level++) {
@@ -422,15 +429,19 @@ ext4_verity_build(struct ext4_verity_builder *builder)
 			error = ext4_verity_push(builder, level + 1U);
 		}
 		if (error != EXT4_OK) {
-			return error;
+			goto out;
 		}
 	}
 	for (level = 0; level < verity->levels; level++) {
 		if (builder->emitted[level] != builder->level_blocks[level]) {
-			return EXT4_CORRUPT;
+			error = EXT4_CORRUPT;
+			goto out;
 		}
 	}
-	return ext4_verity_flush(builder);
+	error = ext4_verity_flush(builder);
+out:
+	ext4_map_reader_close(builder->fs, &reader);
+	return error;
 }
 
 /* Blocks from the descriptor's block through the one whose last four bytes hold the
@@ -509,15 +520,17 @@ ext4_verity_finish(struct ext4_verity_builder *builder, struct ext4_inode *resul
 		if (error != EXT4_OK) {
 			break;
 		}
-		ext4_verity_descriptor_block(builder, index, fs->info.block_size, snapshot);
+		ext4_verity_descriptor_block(builder, index, fs->info.block_size, builder->block);
 		/* Linux records the size in the last four bytes of the block that holds the
 		 * end of the signature and room for the size. */
 		if (index + 1U == blocks) {
 			ext4_encode32(
 			    &size, (uint32_t)sizeof(builder->descriptor) + builder->signature_size);
-			ext4_copy((uint8_t *)snapshot + fs->info.block_size - sizeof(size), &size,
+			ext4_copy(builder->block + fs->info.block_size - sizeof(size), &size,
 			    sizeof(size));
 		}
+		error = ext4_data_change(fs, &builder->inode, (uint32_t)(position + index),
+		    snapshot, true, 0, builder->block, fs->info.block_size);
 	}
 	if (error == EXT4_OK) {
 		error = ext4_orphan_unlink(&allocation, builder->number, disk, &last_orphan);
@@ -600,8 +613,9 @@ ext4_verity_setup(struct ext4_verity_builder *builder,
 	builder->offsets = fs->environment.allocate(
 	    fs->environment.context, (size_t)builder->queue_capacity * sizeof(*builder->offsets));
 	builder->data = fs->environment.allocate(fs->environment.context, verity->block_size);
+	builder->block = fs->environment.allocate(fs->environment.context, fs->info.block_size);
 	if (builder->pending == NULL || builder->queue == NULL || builder->offsets == NULL ||
-	    builder->data == NULL) {
+	    builder->data == NULL || builder->block == NULL) {
 		return EXT4_NO_MEMORY;
 	}
 	return EXT4_OK;
@@ -650,7 +664,61 @@ ext4_verity_release(struct ext4_verity_builder *builder)
 	if (builder->data != NULL) {
 		fs->environment.release(fs->environment.context, builder->data, block_size);
 	}
+	if (builder->block != NULL) {
+		fs->environment.release(fs->environment.context, builder->block, fs->info.block_size);
+	}
 	fs->environment.release(fs->environment.context, builder, sizeof(*builder));
+}
+
+/* Resolve encryption before beginning any transaction, which might drain an
+ * earlier deferred operation. The serialized owner excludes inode/key changes
+ * until enabling finishes; prepare still performs the writable inode checks. */
+static enum ext4_result
+ext4_verity_key_preflight(struct ext4_fs *fs, uint32_t number, uint32_t generation)
+{
+	struct ext4_inode inode;
+	struct ext4_fscrypt_key key;
+	void *record;
+	uint64_t offset;
+	enum ext4_result error;
+
+	if (number == 0 || number > fs->info.inodes) {
+		return EXT4_INVALID_ARGUMENT;
+	}
+	if ((number < fs->first_inode && number != EXT4_ROOT_INODE) ||
+	    number == fs->journal_inode || number == fs->orphan_file_inode ||
+	    ext4_quota_system_inode(fs, number)) {
+		return EXT4_UNSUPPORTED;
+	}
+	error = ext4_inode_resolve_live(fs, number, &offset);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	record = fs->environment.allocate(fs->environment.context, fs->inode_size);
+	if (record == NULL) {
+		return EXT4_NO_MEMORY;
+	}
+	error = ext4_device_read(fs, offset, record, fs->inode_size);
+	if (error == EXT4_OK) {
+		/* A held unlinked inode must reach prepare's operation-specific refusal,
+		 * just as ext4_edit_inode does, rather than ordinary lookup's NOT_FOUND. */
+		error = ext4_inode_decode_live(fs, number, record, &inode);
+	}
+	fs->environment.release(fs->environment.context, record, fs->inode_size);
+	if (error != EXT4_OK) {
+		return error;
+	}
+	if (inode.generation != generation) {
+		return EXT4_STALE;
+	}
+	if (inode.links != 0 && (inode.flags & EXT4_INODE_ENCRYPT) &&
+	    (inode.mode & EXT4_MODE_TYPE) == EXT4_MODE_REGULAR) {
+		if (inode.flags & EXT4_INODE_INLINE_DATA) {
+			return EXT4_CORRUPT;
+		}
+		return ext4_fscrypt_key(fs, &inode, &key);
+	}
+	return EXT4_OK;
 }
 
 enum ext4_result
@@ -679,6 +747,10 @@ ext4_enable_verity(struct ext4_fs *fs, uint32_t number, uint32_t generation,
 	}
 	if (!(fs->info.feature_ro_compat & EXT4_FEATURE_RO_VERITY)) {
 		return EXT4_UNSUPPORTED;
+	}
+	error = ext4_verity_key_preflight(fs, number, generation);
+	if (error != EXT4_OK) {
+		return error;
 	}
 	builder = fs->environment.allocate(fs->environment.context, sizeof(*builder));
 	if (builder == NULL) {

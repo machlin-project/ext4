@@ -503,7 +503,7 @@ ext4_file_size_valid(struct ext4_fs *fs, const struct ext4_inode *inode, uint64_
  * to zeros when source is NULL. A fresh block has no earlier contents. An encrypted
  * file's snapshot holds ciphertext. A complete replacement encrypts the source
  * directly; a partial change preserves the other plaintext bytes in scratch. */
-static enum ext4_result
+enum ext4_result
 ext4_data_change(struct ext4_fs *fs, const struct ext4_inode *inode, uint32_t logical,
     uint8_t *snapshot, bool fresh, size_t within, const void *source, size_t length)
 {

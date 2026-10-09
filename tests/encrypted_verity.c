@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "fscrypt.h"
 #include "map_read.h"
+#include "journal.h"
 #include "keyring.h"
 
 #include <inttypes.h>
@@ -260,6 +261,130 @@ reset_faults(struct fixture *f)
 	f->fs.verified_signature_count = f->fs.verified_signature_next = 0;
 }
 
+/* Compare the writer's ciphertext to the independently generated complete fork,
+ * including metadata beyond EOF. Repeated partial changes intentionally reuse
+ * the latest snapshot, as small Merkle blocks sharing one filesystem block do. */
+static void
+check_data_change(struct fixture *f)
+{
+	uint32_t block = f->fs.info.block_size;
+	uint8_t *snapshot = malloc(block);
+	uint8_t *plain = malloc(block);
+	struct ext4_fscrypt_key key;
+	size_t offset;
+	size_t within;
+	uint32_t logical;
+	uint32_t failure;
+
+	CHECK(snapshot != NULL && plain != NULL);
+	reset_faults(f);
+	for (offset = 0; offset < f->stored_size; offset += block) {
+		logical = (uint32_t)(offset / block);
+		memset(snapshot, 0xa5, block);
+		EXPECT(ext4_data_change(&f->fs, &f->inode, logical, snapshot, true,
+		    0, f->stored + offset, block), EXT4_OK);
+		CHECK(memcmp(snapshot, f->cipher + offset, block) == 0);
+		if (block > 1024U) {
+			memset(snapshot, 0xa5, block);
+			for (within = 0; within < block; within += 1024U) {
+				EXPECT(ext4_data_change(&f->fs, &f->inode, logical, snapshot,
+				    within == 0, within, f->stored + offset + within, 1024U),
+				    EXT4_OK);
+			}
+			CHECK(memcmp(snapshot, f->cipher + offset, block) == 0);
+		}
+	}
+	EXPECT(ext4_fscrypt_key(&f->fs, &f->inode, &key), EXT4_OK);
+	memcpy(snapshot, f->cipher, block);
+	memcpy(plain, f->stored, block);
+	memset(plain + 13, 0, 19);
+	EXPECT(ext4_data_change(&f->fs, &f->inode, 0, snapshot, false, 13, NULL, 19), EXT4_OK);
+	/* The callback never permits input/output aliasing. */
+	EXPECT(ext4_fscrypt_block(&f->fs, &key, 0, false, snapshot, plain), EXT4_OK);
+	CHECK(memcmp(plain, f->stored, 13) == 0);
+	for (within = 13; within < 32; within++) {
+		CHECK(plain[within] == 0);
+	}
+	CHECK(memcmp(plain + 32, f->stored + 32, block - 32U) == 0);
+	for (failure = 1; failure <= 2; failure++) {
+		memcpy(snapshot, f->cipher, block);
+		reset_faults(f);
+		f->fail_cipher = failure;
+		EXPECT(ext4_data_change(&f->fs, &f->inode, 0, snapshot, false,
+		    13, f->stored + 13, 19), EXT4_IO);
+		CHECK(f->live == 0);
+		/* A failed encrypt may damage only the private snapshot; the owner
+		 * must cancel it. A failed decrypt cannot touch that snapshot. */
+		if (failure == 1) {
+			CHECK(memcmp(snapshot, f->cipher, block) == 0);
+		}
+	}
+	reset_faults(f);
+	f->fail_allocation = 1;
+	memcpy(snapshot, f->cipher, block);
+	EXPECT(ext4_data_change(&f->fs, &f->inode, 0, snapshot, false,
+	    13, f->stored + 13, 19), EXT4_NO_MEMORY);
+	CHECK(memcmp(snapshot, f->cipher, block) == 0 && f->live == 0);
+	reset_faults(f);
+	free(plain);
+	free(snapshot);
+}
+
+/* A checked synthetic held inode exercises the public preflight boundary. The
+ * inert journal is never entered: no key and stale generation must return first.
+ * This does not stand in for actual enable transactions on a mounted volume. */
+static void
+check_preflight(struct fixture *f)
+{
+	struct ext4_inode_disk *disk = (struct ext4_inode_disk *)f->device;
+	struct ext4_inode_hold hold = { 0 };
+	struct ext4_journal *journal = calloc(1, sizeof(*journal));
+	struct ext4_inode result;
+	struct ext4_verity_parameters parameters = { EXT4_VERITY_HASH_SHA256, 1024,
+		NULL, 0, NULL, 0 };
+
+	CHECK(journal != NULL);
+	EXPECT(ext4_set_crypto(&f->fs, NULL), EXT4_OK);
+	memset(disk, 0, EXT4_INODE_BASE_SIZE);
+	ext4_encode16(&disk->mode, EXT4_MODE_REGULAR | 0600);
+	ext4_encode16(&disk->links, 1);
+	ext4_encode32(&disk->flags, EXT4_INODE_EXTENTS | EXT4_INODE_ENCRYPT);
+	ext4_encode32(&disk->generation, f->inode.generation);
+	hold.fs = &f->fs;
+	hold.number = f->inode.number;
+	hold.generation = f->inode.generation;
+	hold.references = 1;
+	hold.location_valid = true;
+	f->fs.holds = &hold;
+	f->fs.journal = journal;
+	f->fs.inode_size = EXT4_INODE_BASE_SIZE;
+	f->fs.info.inodes = 100;
+	f->fs.first_inode = 11;
+	journal->fs = &f->fs;
+	reset_faults(f);
+	EXPECT(ext4_enable_verity(&f->fs, hold.number, hold.generation, &parameters, &result),
+	    EXT4_ENCRYPTED);
+	CHECK(f->live == 0 && f->ciphers == 0 && journal->compound == NULL);
+	hold.unlinked = true;
+	ext4_encode16(&disk->links, 0);
+	EXPECT(ext4_enable_verity(&f->fs, hold.number, hold.generation + 1U,
+	    &parameters, &result), EXT4_STALE);
+	/* Plain held-unlinked records must use the same live decoder. */
+	ext4_encode32(&disk->flags, EXT4_INODE_EXTENTS);
+	EXPECT(ext4_enable_verity(&f->fs, hold.number, hold.generation + 1U,
+	    &parameters, &result), EXT4_STALE);
+	CHECK(f->live == 0 && journal->compound == NULL);
+	f->fs.holds = NULL;
+	f->fs.journal = NULL;
+	f->fs.inode_size = 0;
+	f->fs.info.inodes = 0;
+	f->fs.first_inode = 0;
+	memset(disk, 0, EXT4_INODE_BASE_SIZE);
+	free(journal);
+	install_key(f, false);
+	reset_faults(f);
+}
+
 static void
 check_read(struct fixture *f)
 {
@@ -502,6 +627,8 @@ run(const char *stem)
 	mapping(f, UINT32_MAX, false);
 	keyring_init(&f->keyring, 3);
 	install_key(f, false);
+	check_data_change(f);
+	check_preflight(f);
 	check_read(f);
 	fault_reads(f);
 	fault_measure(f);

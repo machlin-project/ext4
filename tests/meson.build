@@ -15,7 +15,7 @@ foreach option : ['fixtures', 'allocation_fixtures', 'orphan_file_fixtures',
   'index_fixtures', 'index_collisions', 'index_capacity', 'group_checksum_fixtures', 'geometry_fixtures',
   'large_directory_fixtures', 'large_directory_edges', 'directory_links_fixture',
   'directory_index_64k_fixture', 'large_file_fixtures', 'large_volume_fixtures', 'external_journal_fixtures',
-  'fast_commit_fixtures', 'mmp_fixtures', 'verity_fixtures', 'encrypted_verity_fixtures', 'casefold_vectors',
+  'fast_commit_fixtures', 'mmp_fixtures', 'verity_fixtures', 'encrypted_verity_fixtures', 'verity_enable_vectors', 'casefold_vectors',
   'casefold_fixtures', 'quota_fixtures', 'format_fixtures', 'unjournaled_fixtures']
   value = get_option(option)
   paths += {option: value == '' ? '' : join_paths(meson.project_source_root(), value)}
@@ -160,6 +160,28 @@ if paths['verity_fixtures'] != ''
       paths['verity_fixtures'] / 'verity-sha512.img',
       paths['verity_fixtures'] / 'verity-4k-inline.img', paths['fixtures'] / 'ext4-4k.img'],
     timeout: 900, suite: 'format')
+endif
+
+if paths['verity_enable_vectors'] != ''
+  if paths['verity_fixtures'] == ''
+    error('verity_enable_vectors requires verity_fixtures')
+  endif
+  foreach profile : ['1k-encrypted', '4k-encrypted', '4k-encrypted-orphan']
+    foreach policy : ['1', '2']
+      test('verity-enable-' + profile + '-v' + policy, programs['verity-enable'],
+        args: ['--policy', policy, '--expected', paths['verity_enable_vectors'],
+          paths['verity_fixtures'] / ('verity-' + profile + '.img')],
+        timeout: 1800, suite: 'format')
+    endforeach
+  endforeach
+  foreach mode : ['ordered', 'deferred', 'lazy', 'sync', 'journal']
+    foreach profile : ['4k-encrypted', '4k-encrypted-orphan']
+      test('verity-enable-' + profile + '-' + mode, programs['verity-enable'],
+        args: ['--policy', '2', '--mode', mode, '--expected', paths['verity_enable_vectors'],
+          paths['verity_fixtures'] / ('verity-' + profile + '.img')],
+        timeout: 600, suite: 'format')
+    endforeach
+  endforeach
 endif
 
 if paths['external_journal_fixtures'] != ''
