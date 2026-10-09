@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "crypto.h"
+#include "siphash.h"
 
 #include <stdio.h>
 #include <stdlib.h>

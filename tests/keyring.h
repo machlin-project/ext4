@@ -3,6 +3,7 @@
 #define MACHLIN_EXT4_TEST_KEYRING_H
 
 #include "crypto.h"
+#include "siphash.h"
 #include "ext4/ext4.h"
 
 #include <stdlib.h>
