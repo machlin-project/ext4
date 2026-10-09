@@ -16,6 +16,86 @@ static const char *const child_names[] = { "child-file", "child-directory", "chi
 	"child-mapped" };
 static const char security_value[] = "system_u:object_r:tmp_t:s0";
 
+/* Identify the admission slot owner without depending on unrelated allocation
+ * order. The second mount faults exactly that allocation on the same image. */
+struct admission_probe {
+	struct device *device;
+	void *buffers[32];
+	uint32_t allocations[32];
+	size_t count;
+};
+
+static void *
+admission_allocate(void *context, size_t size)
+{
+	struct admission_probe *probe = context;
+	void *buffer = device_allocate(probe->device, size);
+
+	if (buffer != NULL && size == 16U * sizeof(struct ext4_orphan_slot)) {
+		CHECK(probe->count < sizeof(probe->buffers) / sizeof(probe->buffers[0]));
+		probe->buffers[probe->count] = buffer;
+		probe->allocations[probe->count++] = probe->device->allocations;
+	}
+	return buffer;
+}
+
+static void
+admission_release(void *context, void *buffer, size_t size)
+{
+	struct admission_probe *probe = context;
+
+	device_release(probe->device, buffer, size);
+}
+
+static enum ext4_result
+admission_read(void *context, uint64_t offset, void *buffer, size_t size)
+{
+	struct admission_probe *probe = context;
+
+	return device_read(probe->device, offset, buffer, size);
+}
+
+static void
+admission_owner(struct device *device)
+{
+	struct admission_probe probe = { .device = device };
+	struct ext4_environment environment = { &probe, device->size, admission_read,
+		admission_allocate, admission_release };
+	struct ext4_fs *fs = NULL;
+	uint32_t allocation = 0;
+	size_t index;
+
+	device_reset(device, device->base);
+	EXPECT(ext4_mount_writable(&environment, &device->writer, &fs), EXT4_OK);
+	if (fs->orphan_file_inode != 0) {
+		CHECK(fs->orphan_file != NULL && fs->orphan_file->pending == 0);
+		CHECK(fs->orphan_file->slots != NULL && fs->orphan_file->slot_capacity == 16);
+		for (index = 0; index < probe.count; index++) {
+			if (probe.buffers[index] == fs->orphan_file->slots) {
+				allocation = probe.allocations[index];
+			}
+		}
+		CHECK(allocation != 0);
+	} else {
+		CHECK(fs->orphan_file == NULL);
+	}
+	ext4_unmount(fs);
+	CHECK(device->live == 0 && device->events == 0);
+	CHECK(memcmp(device->cache, device->base, device->size) == 0);
+	CHECK(memcmp(device->stable, device->base, device->size) == 0);
+	device_reset(device, device->base);
+	if (allocation != 0) {
+		fs = NULL;
+		device->fail_allocation = allocation;
+		EXPECT(ext4_mount_writable(&device->environment, &device->writer, &fs),
+		    EXT4_NO_MEMORY);
+		CHECK(fs == NULL && device->live == 0 && device->events == 0);
+		CHECK(memcmp(device->cache, device->base, device->size) == 0);
+		CHECK(memcmp(device->stable, device->base, device->size) == 0);
+		device_reset(device, device->base);
+	}
+}
+
 static struct ext4_fs *
 mount_writer(struct device *device, struct ext4_inode *root)
 {
@@ -579,6 +659,7 @@ main(int argc, char **argv)
 	CHECK(argument < argc && !(release_only && enable_only));
 	for (; argument < argc; argument++) {
 		storage_open(&device, argv[argument]);
+		admission_owner(&device);
 		if (enable_only) {
 			enable_feature_guards(&device);
 			for (enable = ENABLE_CREATE_FILE; enable < ENABLE_OPERATION_COUNT;

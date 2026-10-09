@@ -141,7 +141,8 @@ lifetime_attempt(struct device *device, enum lifetime_operation operation, unsig
 		    strlen(name), inode.number, inode.generation, &update.change_time, &result);
 	}
 	if (error != EXT4_OK) {
-		CHECK(memcmp(&result, &untouched, sizeof(result)) == 0 && device->live == live);
+		CHECK(memcmp(&result, &untouched, sizeof(result)) == 0);
+		CHECK(device->live == live);
 		if (device->writes == 0) {
 			/* A journal read error can poison a commit before its first write.
 			 * Private snapshots and allocation totals must still be unchanged. */

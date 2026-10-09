@@ -746,6 +746,13 @@ Mount admission builds a bounded, inode-sorted slot index and per-block free cou
 and cursors. Lookup is logarithmic and removal reads only the selected slot block;
 index insertion/removal shifts a bounded array rather than rescanning disk. Private
 snapshot changes prepare index deltas and any required capacity before commit I/O.
+Even an empty admitted orphan file owns a small initial slot array. This keeps
+the number of persistent allocations stable when an accepted intent must survive
+a later operation failure; a filesystem without an orphan file has no such owner.
+Replacement capacity remains owned by the private transaction until logical
+publication; cancellation releases it without changing the live index pointer,
+capacity or allocation count. Accepted deferred operations transfer that ownership
+once, so a later durable failure retains their already-published live view.
 Successful logical publication applies those deltas without allocation, including
 when a deferred compound accepts an operation. Refusal discards deltas without
 changing membership. Retained durable commits do not publish the same delta twice.

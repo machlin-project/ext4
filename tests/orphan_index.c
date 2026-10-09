@@ -138,7 +138,11 @@ enum orphan_fault {
 	ORPHAN_DELTA_ALLOCATION,
 	ORPHAN_COMPOUND_ALLOCATION,
 	ORPHAN_SYNC_COMMIT,
-	ORPHAN_CAPACITY_COMMIT
+	ORPHAN_CAPACITY_COMMIT,
+	ORPHAN_GROWTH_INDEX_ALLOCATION,
+	ORPHAN_GROWTH_DELTA_ALLOCATION,
+	ORPHAN_PUBLISHED_DURABLE,
+	ORPHAN_ADMITTED_DURABLE
 };
 
 /* Admission/ownership model only: these are checksummed orphan blocks and real
@@ -184,6 +188,8 @@ check_index(uint32_t block_size, bool checksum, enum orphan_fault fault)
 	bool removed;
 	bool allocation_fault =
 	    fault >= ORPHAN_INDEX_ALLOCATION && fault <= ORPHAN_COMPOUND_ALLOCATION;
+	bool io_fault = fault == ORPHAN_SYNC_COMMIT || fault == ORPHAN_CAPACITY_COMMIT ||
+	    fault == ORPHAN_PUBLISHED_DURABLE || fault == ORPHAN_ADMITTED_DURABLE;
 	enum ext4_result error;
 
 	device.home = calloc(1, device.size);
@@ -203,6 +209,11 @@ check_index(uint32_t block_size, bool checksum, enum orphan_fault fault)
 	file.inode.number = fs.orphan_file_inode;
 	file.inode.generation = 1;
 	states[0].free = states[1].free = slots;
+	if (fault == ORPHAN_ADMITTED_DURABLE) {
+		file.slot_capacity = 16;
+		file.slots = device_allocate(&device, file.slot_capacity * sizeof(*file.slots));
+		CHECK(file.slots != NULL && device.live == 1);
+	}
 	if (fault == ORPHAN_CAPACITY_COMMIT) {
 		journal.compound_blocks = 3;
 	}
@@ -233,11 +244,68 @@ check_index(uint32_t block_size, bool checksum, enum orphan_fault fault)
 	CHECK(states[0].free == slots - file.pending);
 	if (allocation_fault) {
 		CHECK(journal.compound == NULL && !journal.aborted);
+		CHECK(file.slots == NULL && file.slot_capacity == 0 && device.live == 0);
 		goto out;
 	}
 	CHECK(file.slots[0].number == inode.number && file.slots[0].logical == 0 &&
 	    file.slots[0].slot == 0);
-	if (fault >= ORPHAN_SYNC_COMMIT) {
+	if (fault == ORPHAN_ADMITTED_DURABLE) {
+		struct ext4_orphan_slot *original_slots = file.slots;
+
+		/* The first accepted intent survives a later durable failure, without
+		 * adding a persistent allocation to the admission baseline. */
+		CHECK(file.slot_capacity == 16);
+		journal.data = calloc(1, block_size);
+		CHECK(journal.data != NULL);
+		device.fail_write = 1;
+		CHECK(ext4_journal_commit(&journal) == EXT4_IO);
+		CHECK(journal.aborted && journal.compound == NULL);
+		CHECK(file.slots == original_slots && file.slot_capacity == 16);
+		CHECK(file.pending == 1 && file.slots[0].number == 11 && device.live == 1);
+		goto out;
+	}
+	if (fault >= ORPHAN_GROWTH_INDEX_ALLOCATION) {
+		struct ext4_orphan_slot *original_slots = file.slots;
+		uint32_t original_capacity = file.slot_capacity;
+		uint32_t number;
+		size_t original_live = device.live;
+
+		CHECK(ext4_transaction_begin(&journal, TRANSACTION_CREDITS, &transaction) == EXT4_OK);
+		disk = stage(transaction, METADATA_FIRST, false, 0);
+		CHECK(ext4_allocation_init(&allocation, &fs, transaction, &inode) == EXT4_OK);
+		for (number = 12; number <= 27; number++) {
+			CHECK(ext4_orphan_link(&allocation, number, disk) == EXT4_OK);
+		}
+		ext4_allocation_destroy(&allocation);
+		if (fault != ORPHAN_PUBLISHED_DURABLE) {
+			device.fail_allocation = device.allocations +
+			    (fault == ORPHAN_GROWTH_INDEX_ALLOCATION ? 1U : 2U);
+			CHECK(ext4_transaction_commit(transaction) == EXT4_NO_MEMORY);
+			CHECK(file.slots == original_slots && file.slot_capacity == original_capacity);
+			CHECK(file.pending == 1 && file.slots[0].number == 11);
+			CHECK(states[0].free == slots - 1U && device.live == original_live);
+			CHECK(!journal.aborted && journal.compound != NULL);
+		} else {
+			CHECK(ext4_transaction_commit(transaction) == EXT4_OK);
+			CHECK(file.slots != original_slots && file.slot_capacity > original_capacity);
+			CHECK(file.pending == 17 && states[0].free == slots - 17U);
+			original_slots = file.slots;
+			original_capacity = file.slot_capacity;
+			journal.data = calloc(1, block_size);
+			CHECK(journal.data != NULL);
+			device.fail_write = 1;
+			CHECK(ext4_journal_commit(&journal) == EXT4_IO);
+			CHECK(journal.aborted && journal.compound == NULL);
+			CHECK(file.slots == original_slots && file.slot_capacity == original_capacity);
+			CHECK(file.pending == 17 && states[0].free == slots - 17U);
+		}
+		goto out;
+	}
+	if (io_fault) {
+		struct ext4_orphan_slot *original_slots = file.slots;
+		uint32_t original_capacity = file.slot_capacity;
+		uint32_t number;
+
 		/* Force a prior compound through either SYNC or capacity pressure. Its
 		 * first write fails after current deltas prepare but before publication. */
 		journal.data = calloc(1, block_size);
@@ -246,7 +314,10 @@ check_index(uint32_t block_size, bool checksum, enum orphan_fault fault)
 		    ext4_transaction_begin(&journal, TRANSACTION_CREDITS, &transaction) == EXT4_OK);
 		disk = stage(transaction, METADATA_FIRST, false, 0);
 		CHECK(ext4_allocation_init(&allocation, &fs, transaction, &inode) == EXT4_OK);
-		CHECK(ext4_orphan_link(&allocation, 12, disk) == EXT4_OK);
+		/* Exceed the live index capacity while this operation is still private. */
+		for (number = 12; number <= 27; number++) {
+			CHECK(ext4_orphan_link(&allocation, number, disk) == EXT4_OK);
+		}
 		if (fault == ORPHAN_SYNC_COMMIT) {
 			inode.flags = EXT4_INODE_SYNC;
 			ext4_transaction_inode_policy(transaction, &inode);
@@ -259,6 +330,7 @@ check_index(uint32_t block_size, bool checksum, enum orphan_fault fault)
 		CHECK(journal.aborted && journal.compound == NULL && device.writes == 1);
 		CHECK(file.pending == 1 && file.slots[0].number == 11 &&
 		    states[0].free == slots - 1U);
+		CHECK(file.slots == original_slots && file.slot_capacity == original_capacity);
 		goto out;
 	}
 	/* A private cancellation cannot change membership or reserve a live slot. */
@@ -320,7 +392,7 @@ check_index(uint32_t block_size, bool checksum, enum orphan_fault fault)
 	CHECK(fs.last_orphan == 13 && file.pending == slots * 2U);
 out:
 	check_bytes(device.home + METADATA_FIRST * block_size, 0, block_size);
-	CHECK(device.writes == (fault >= ORPHAN_SYNC_COMMIT ? 1U : 0U) && device.flushes == 0);
+	CHECK(device.writes == (io_fault ? 1U : 0U) && device.flushes == 0);
 	ext4_transaction_cancel(journal.compound);
 	if (file.slots != NULL) {
 		device_release(&device, file.slots, file.slot_capacity * sizeof(*file.slots));
@@ -340,7 +412,7 @@ main(void)
 
 	for (index = 0; index < sizeof(sizes) / sizeof(sizes[0]); index++) {
 		for (checksum = 0; checksum < 2; checksum++) {
-			for (fault = ORPHAN_NO_FAULT; fault <= ORPHAN_CAPACITY_COMMIT; fault++) {
+			for (fault = ORPHAN_NO_FAULT; fault <= ORPHAN_ADMITTED_DURABLE; fault++) {
 				check_index(sizes[index], checksum != 0, fault);
 			}
 		}

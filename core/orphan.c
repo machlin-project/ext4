@@ -137,12 +137,15 @@ ext4_orphan_sort(struct ext4_orphan_slot *slots, uint32_t count)
 }
 
 static enum ext4_result
-ext4_orphan_index_reserve(struct ext4_fs *fs, uint32_t count)
+ext4_orphan_index_allocate(struct ext4_fs *fs, uint32_t count,
+    struct ext4_orphan_slot **result, uint32_t *result_capacity)
 {
 	struct ext4_orphan_file *file = fs->orphan_file;
 	struct ext4_orphan_slot *slots;
 	uint32_t capacity = file->slot_capacity == 0 ? 16U : file->slot_capacity;
 
+	*result = NULL;
+	*result_capacity = 0;
 	if (count > EXT4_ORPHAN_FILE_MAX_ENTRIES) {
 		return EXT4_UNSUPPORTED;
 	}
@@ -158,16 +161,45 @@ ext4_orphan_index_reserve(struct ext4_fs *fs, uint32_t count)
 	}
 	if (file->slots != NULL) {
 		ext4_copy(slots, file->slots, file->pending * sizeof(*slots));
+	}
+	*result = slots;
+	*result_capacity = capacity;
+	return EXT4_OK;
+}
+
+static void
+ext4_orphan_index_replace(struct ext4_fs *fs, struct ext4_orphan_slot *slots, uint32_t capacity)
+{
+	struct ext4_orphan_file *file = fs->orphan_file;
+
+	if (slots == NULL) {
+		return;
+	}
+	if (file->slots != NULL) {
 		fs->environment.release(fs->environment.context, file->slots,
 		    file->slot_capacity * sizeof(*slots));
 	}
 	file->slots = slots;
 	file->slot_capacity = capacity;
-	return EXT4_OK;
 }
 
-/* Build an index delta from private snapshots. Reserving capacity can change only
- * storage, never membership; refusal leaves the live orphan set unchanged. */
+/* Mount admission has no published owner yet; live transactions stage capacity. */
+static enum ext4_result
+ext4_orphan_index_reserve(struct ext4_fs *fs, uint32_t count)
+{
+	struct ext4_orphan_slot *slots;
+	uint32_t capacity;
+	enum ext4_result error;
+
+	error = ext4_orphan_index_allocate(fs, count, &slots, &capacity);
+	if (error == EXT4_OK) {
+		ext4_orphan_index_replace(fs, slots, capacity);
+	}
+	return error;
+}
+
+/* Build a private index delta and any replacement capacity. Refusal preserves
+ * both the live orphan set and its allocation ownership. */
 enum ext4_result
 ext4_orphan_transaction_prepare(struct ext4_transaction *transaction)
 {
@@ -254,7 +286,8 @@ ext4_orphan_transaction_prepare(struct ext4_transaction *transaction)
 			if (removed == 0 && added == 0) {
 				return EXT4_OK;
 			}
-			error = ext4_orphan_index_reserve(fs, file->pending - removed + added);
+			error = ext4_orphan_index_allocate(fs, file->pending - removed + added,
+			    &transaction->orphan_slots, &transaction->orphan_slot_capacity);
 			if (error != EXT4_OK) {
 				return error;
 			}
@@ -283,6 +316,12 @@ ext4_orphan_transaction_cancel(struct ext4_transaction *transaction)
 {
 	struct ext4_fs *fs = transaction->journal->fs;
 
+	if (transaction->orphan_slots != NULL) {
+		fs->environment.release(fs->environment.context, transaction->orphan_slots,
+		    (size_t)transaction->orphan_slot_capacity * sizeof(*transaction->orphan_slots));
+		transaction->orphan_slots = NULL;
+		transaction->orphan_slot_capacity = 0;
+	}
 	if (transaction->orphan_changes != NULL) {
 		fs->environment.release(fs->environment.context, transaction->orphan_changes,
 		    (size_t)(transaction->orphan_removed + transaction->orphan_added) *
@@ -305,6 +344,10 @@ ext4_orphan_transaction_publish(struct ext4_transaction *transaction)
 	if (transaction->orphan_changes == NULL) {
 		return;
 	}
+	ext4_orphan_index_replace(transaction->journal->fs, transaction->orphan_slots,
+	    transaction->orphan_slot_capacity);
+	transaction->orphan_slots = NULL;
+	transaction->orphan_slot_capacity = 0;
 	for (index = 0; index < transaction->orphan_removed; index++) {
 		change = &transaction->orphan_changes[index];
 		position = ext4_orphan_find(file, change->number);
@@ -511,6 +554,10 @@ ext4_orphan_file_prepare(struct ext4_fs *fs)
 		error = EXT4_CORRUPT;
 	} else if (file->pending > EXT4_ORPHAN_FILE_MAX_ENTRIES) {
 		error = EXT4_UNSUPPORTED;
+	} else {
+		/* Keep one index owner throughout this writable mount, including an
+		 * empty file. Later accepted intent may outlive a failing operation. */
+		error = ext4_orphan_index_reserve(fs, 1);
 	}
 out:
 	if (ready) {

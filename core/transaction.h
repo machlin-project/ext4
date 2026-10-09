@@ -43,6 +43,9 @@ struct ext4_transaction {
 	uint32_t freed_count;
 	struct ext4_block_range *freed;
 	/* Prepared private index deltas: removals first, then additions. */
+	/* Replacement capacity stays private until logical publication. */
+	struct ext4_orphan_slot *orphan_slots;
+	uint32_t orphan_slot_capacity;
 	struct ext4_orphan_slot *orphan_changes;
 	uint32_t orphan_removed;
 	uint32_t orphan_added;
